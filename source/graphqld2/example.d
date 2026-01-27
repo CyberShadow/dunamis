@@ -51,39 +51,21 @@ class TestDatabase : Database {
 }
 
 // ------------------------------------------------------------------
-// Column expression - represents a database column fetch
+// Column helper - creates a useAll expression for database column fetch
 // ------------------------------------------------------------------
 
-/// Expression that fetches a column from a database table
-/// The context provides the row ID, evalBatch does SELECT ... WHERE id IN (...)
-class ColumnExpr(T, EntityId) : Expr!T {
-    private string _table;
-    private string _column;
-    private Database _db;
-
-    this(string table, string column, Database db) {
-        _table = table;
-        _column = column;
-        _db = db;
-    }
-
-    /// Phase 1: declare dependency on this column
-    override ColumnDep[] dependencies() => [ColumnDep(_table, _column)];
-
-    override T[] evalBatch(Context[] contexts) {
-        // Check if data is pre-fetched in cache
-        if (contexts.length > 0 && contexts[0].cache !is null) {
-            return contexts.map!(c => c.cache.get!T(_table, _column, c.entityId)).array;
-        }
-        // Fallback: fetch directly
-        auto ids = contexts.map!(c => c.entityId).array;
-        return _db.getColumn!T(_table, _column, ids);
-    }
+/// Helper to create a column expression using useAll
+/// This is just a useAll over context IDs -> column values
+Expr!T column(T, EntityId)(string table, string columnName, Database db) {
+    return useAll(
+        (long[] ids) => db.getColumn!T(table, columnName, ids),
+        contextIdLong()
+    );
 }
 
-/// Helper to create a column expression
-Expr!T column(T, EntityId)(string table, string columnName, Database db) {
-    return new ColumnExpr!(T, EntityId)(table, columnName, db);
+/// Get current context's entity ID as long
+Expr!long contextIdLong() {
+    return new ContextIdExprLong();
 }
 
 // ------------------------------------------------------------------
@@ -125,11 +107,9 @@ struct User {
                     [1L: 1L, 2L: 1L, 3L: 2L].get(pid, 0L) == uid  // post_id -> author_id
                 ).array
             ).array,
-            contextIdExpr()
+            contextIdLong()
         );
     }
-
-    private Expr!long contextIdExpr() => new ContextIdExprLong();
 }
 
 /// Post fields
@@ -145,8 +125,6 @@ struct Post {
 
 /// Simple context ID expression that returns entityId as long
 class ContextIdExprLong : Expr!long {
-    override ColumnDep[] dependencies() => [];  // No column dependencies
-
     override long[] evalBatch(Context[] contexts) {
         return contexts.map!(c => c.entityId).array;
     }
@@ -156,37 +134,7 @@ class ContextIdExprLong : Expr!long {
 // Helper to create contexts
 // ------------------------------------------------------------------
 
-Context[] contextsFor(long[] ids, ResolvedData cache = null) =>
-    ids.map!(id => Context(id, null, cache)).array;
-
-// ------------------------------------------------------------------
-// Executor - Phase 1 + Phase 2
-// ------------------------------------------------------------------
-
-/// Execute an expression with dependency pre-fetching
-T[] execute(T)(Expr!T expr, long[] ids, Database db) {
-    // Phase 1: collect dependencies
-    auto deps = expr.dependencies();
-
-    // Phase 2a: pre-fetch all needed columns
-    auto cache = new ResolvedData();
-    foreach (dep; deps) {
-        // Fetch column for all IDs
-        // Note: in reality, we'd dispatch based on column type
-        // For now, try string first, then long
-        try {
-            auto values = db.getColumnString(dep.table, dep.column, ids);
-            cache.storeAll(dep.table, dep.column, ids, values);
-        } catch (Error) {
-            auto values = db.getColumnLong(dep.table, dep.column, ids);
-            cache.storeAll(dep.table, dep.column, ids, values);
-        }
-    }
-
-    // Phase 2b: evaluate with pre-fetched data
-    auto contexts = ids.map!(id => Context(id, null, cache)).array;
-    return expr.evalBatch(contexts);
-}
+Context[] contextsFor(long[] ids) => ids.map!(id => Context(id, null)).array;
 
 // ------------------------------------------------------------------
 // Unit tests
@@ -243,118 +191,4 @@ unittest {
     auto postCtxs = contextsFor(postIds);
     auto titles = post.title().evalBatch(postCtxs);
     assert(titles == ["Hello World", "D Programming"]);
-}
-
-// ------------------------------------------------------------------
-// Dependency collection tests
-// ------------------------------------------------------------------
-
-unittest {
-    auto db = new TestDatabase();
-    auto user = User(db);
-
-    // Single field has one dependency
-    auto deps = user.firstName().dependencies();
-    assert(deps.length == 1);
-    assert(deps[0] == ColumnDep("users", "first_name"));
-}
-
-unittest {
-    auto db = new TestDatabase();
-    auto user = User(db);
-
-    // Computed field has dependencies from both inputs
-    auto deps = user.fullName().dependencies();
-    assert(deps.length == 2);
-    // Should have both first_name and last_name
-    assert(deps.canFind(ColumnDep("users", "first_name")));
-    assert(deps.canFind(ColumnDep("users", "last_name")));
-}
-
-unittest {
-    auto db = new TestDatabase();
-    auto user = User(db);
-
-    // postIds has no column dependencies (uses contextIdExpr)
-    auto deps = user.postIds().dependencies();
-    assert(deps.length == 0);
-}
-
-unittest {
-    auto db = new TestDatabase();
-    auto user = User(db);
-
-    // Test execute() with pre-fetching
-    auto result = execute(user.fullName(), [1, 2, 3], db);
-    assert(result == ["Alice Smith", "Bob Jones", "Carol White"]);
-}
-
-unittest {
-    auto db = new TestDatabase();
-    auto user = User(db);
-
-    // Test that execute() collects correct dependencies
-    auto expr = user.fullName();
-    auto deps = expr.dependencies();
-
-    // Should collect both first_name and last_name
-    assert(deps.length == 2);
-
-    // Execute should work with pre-fetched cache
-    auto result = execute(expr, [1], db);
-    assert(result == ["Alice Smith"]);
-}
-
-// ------------------------------------------------------------------
-// Query counting test - demonstrates the optimization
-// ------------------------------------------------------------------
-
-/// Database wrapper that counts queries
-class CountingDatabase : Database {
-    Database _inner;
-    int queryCount = 0;
-
-    this(Database inner) { _inner = inner; }
-
-    override string[] getColumnString(string table, string column, long[] ids) {
-        queryCount++;
-        return _inner.getColumnString(table, column, ids);
-    }
-
-    override long[] getColumnLong(string table, string column, long[] ids) {
-        queryCount++;
-        return _inner.getColumnLong(table, column, ids);
-    }
-}
-
-unittest {
-    // Without pre-fetching: each field access triggers a query
-    auto innerDb = new TestDatabase();
-    auto countingDb = new CountingDatabase(innerDb);
-    auto user = User(countingDb);
-
-    // Direct evaluation (no cache)
-    auto ctxs = contextsFor([1, 2, 3]);
-    auto _ = user.fullName().evalBatch(ctxs);
-
-    // fullName calls firstName and lastName, each does a query
-    assert(countingDb.queryCount == 2);
-}
-
-unittest {
-    // With pre-fetching via execute(): dependencies collected first
-    auto innerDb = new TestDatabase();
-    auto countingDb = new CountingDatabase(innerDb);
-    auto user = User(countingDb);
-
-    // Reset counter
-    countingDb.queryCount = 0;
-
-    // execute() pre-fetches based on dependencies
-    auto result = execute(user.fullName(), [1, 2, 3], countingDb);
-
-    // Still 2 queries, but they happen in the pre-fetch phase
-    // The key difference: if we had duplicate dependencies, they'd be deduped
-    assert(countingDb.queryCount == 2);
-    assert(result == ["Alice Smith", "Bob Jones", "Carol White"]);
 }

@@ -7,81 +7,11 @@ import std.algorithm;
 import std.array;
 import std.typecons : Tuple, tuple;
 import std.functional : toDelegate;
-import std.variant;
 
 /// Opaque ID type parameterized by entity
 struct Id(T) {
     long value;
     alias Entity = T;
-}
-
-// ------------------------------------------------------------------
-// Dependency collection (Phase 1)
-// ------------------------------------------------------------------
-
-/// Describes a column that needs to be fetched
-struct ColumnDep {
-    string table;
-    string column;
-
-    bool opEquals(const ColumnDep other) const {
-        return table == other.table && column == other.column;
-    }
-
-    size_t toHash() const nothrow @safe {
-        size_t h = 0;
-        foreach (c; table) h = h * 31 + c;
-        foreach (c; column) h = h * 31 + c;
-        return h;
-    }
-}
-
-/// Deduplicate dependencies
-ColumnDep[] dedupDeps(ColumnDep[] deps) {
-    bool[ColumnDep] seen;
-    ColumnDep[] result;
-    foreach (d; deps) {
-        if (d !in seen) {
-            seen[d] = true;
-            result ~= d;
-        }
-    }
-    return result;
-}
-
-/// Cache for resolved data, keyed by (table, column, id)
-class ResolvedData {
-    // Store as Variant to handle different types
-    // Key: table.column.id
-    private Variant[string] _cache;
-
-    void store(T)(string table, string column, long id, T value) {
-        auto key = table ~ "." ~ column ~ "." ~ id.stringof;
-        _cache[key] = Variant(value);
-    }
-
-    void storeAll(T)(string table, string column, long[] ids, T[] values) {
-        import std.conv : to;
-        foreach (i, id; ids) {
-            auto key = table ~ "." ~ column ~ "." ~ id.to!string;
-            _cache[key] = Variant(values[i]);
-        }
-    }
-
-    T get(T)(string table, string column, long id) {
-        import std.conv : to;
-        auto key = table ~ "." ~ column ~ "." ~ id.to!string;
-        if (auto p = key in _cache) {
-            return p.get!T;
-        }
-        assert(false, "Cache miss: " ~ key);
-    }
-
-    bool has(string table, string column, long id) {
-        import std.conv : to;
-        auto key = table ~ "." ~ column ~ "." ~ id.to!string;
-        return (key in _cache) !is null;
-    }
 }
 
 /// Context passed during evaluation
@@ -93,15 +23,11 @@ struct Context {
     /// Type tag for runtime checking
     TypeInfo entityType;
 
-    /// Shared cache for resolved data (Phase 2)
-    ResolvedData cache;
-
     /// Create a context for an entity
-    static Context forEntity(T)(Id!T id, ResolvedData cache = null) {
+    static Context forEntity(T)(Id!T id) {
         Context ctx;
         ctx.entityId = id.value;
         ctx.entityType = typeid(T);
-        ctx.cache = cache;
         return ctx;
     }
 
@@ -117,13 +43,14 @@ struct Context {
 abstract class Expr(T) {
     alias ResultType = T;
 
-    /// Phase 1: collect all column dependencies
-    /// Returns deduplicated list of (table, column) pairs needed
-    abstract ColumnDep[] dependencies();
-
     /// Phase 2: evaluate for a batch of parent contexts
     /// Returns one T per context
     abstract T[] evalBatch(Context[] contexts);
+
+    // TODO: Phase 1 dependency collection
+    // abstract Dependency[] dependencies();
+
+    // Operator overloads - defined via UFCS-style free functions below
 }
 
 /// Constant expression - same value for all contexts
@@ -133,8 +60,6 @@ class ConstExpr(T) : Expr!T {
     this(T value) {
         _value = value;
     }
-
-    override ColumnDep[] dependencies() => [];  // No dependencies
 
     override T[] evalBatch(Context[] contexts) {
         auto result = new T[contexts.length];
@@ -150,8 +75,6 @@ Expr!T constant(T)(T value) {
 
 /// Expression that reads the entity ID from context
 class ContextIdExpr(T) : Expr!(Id!T) {
-    override ColumnDep[] dependencies() => [];  // No dependencies, reads from context
-
     override Id!T[] evalBatch(Context[] contexts) {
         return contexts.map!(ctx => ctx.getId!T()).array;
     }
@@ -176,10 +99,6 @@ class BinaryOpExpr(string op, L, R) : Expr!(BinaryOpResult!(op, L, R)) {
     this(Expr!L left, Expr!R right) {
         _left = left;
         _right = right;
-    }
-
-    override ColumnDep[] dependencies() {
-        return dedupDeps(_left.dependencies() ~ _right.dependencies());
     }
 
     override ResultT[] evalBatch(Context[] contexts) {
@@ -291,14 +210,6 @@ class UseExpr(R, Exprs...) : Expr!R
         _fn = fn;
     }
 
-    override ColumnDep[] dependencies() {
-        ColumnDep[] deps;
-        static foreach (i; 0 .. Exprs.length) {
-            deps ~= _inputs[i].dependencies();
-        }
-        return dedupDeps(deps);
-    }
-
     override R[] evalBatch(Context[] contexts) {
         // Evaluate each input expression
         auto evaluated = evalInputs(contexts);
@@ -360,14 +271,6 @@ class UseAllExpr(R, Exprs...) : Expr!R
         static foreach (i; 0 .. Exprs.length)
             _inputs[i] = inputs[i];
         _fn = fn;
-    }
-
-    override ColumnDep[] dependencies() {
-        ColumnDep[] deps;
-        static foreach (i; 0 .. Exprs.length) {
-            deps ~= _inputs[i].dependencies();
-        }
-        return dedupDeps(deps);
     }
 
     override R[] evalBatch(Context[] contexts) {
