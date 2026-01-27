@@ -1,16 +1,15 @@
-module graphqld2.sql;
+module graphqld2.postgres.sql;
 
 import std.algorithm;
 import std.array;
 import std.conv;
 import std.format;
 import std.range;
-
 import std.typecons : nullable;
 
-import graphqld2.plan;
+import graphqld2.relational.types;
 
-/// Builds SQL queries from a query plan
+/// Builds PostgreSQL queries from a query plan
 class SqlBuilder {
     /// Generate a CTE-based query that fetches all layers in one query
     string buildQuery(Layer[] layers, long[] rootIds) {
@@ -24,6 +23,7 @@ class SqlBuilder {
 
         string[] ctes;
         foreach (layer; layers) {
+            if (layer == Layer.init) continue;
             ctes ~= buildLayerCte(layer, layers);
         }
         sql ~= ctes.join(",\n");
@@ -32,6 +32,7 @@ class SqlBuilder {
         sql ~= "\nSELECT json_build_object(\n";
         string[] jsonParts;
         foreach (layer; layers) {
+            if (layer == Layer.init) continue;
             jsonParts ~= format!"  'layer%d', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer%d t)"(
                 layer.id, layer.id);
         }

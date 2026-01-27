@@ -6,12 +6,11 @@ import std.algorithm;
 import std.array;
 
 import ae.utils.promise;
-import ae.net.asockets : socketManager, addIdleHandler, onNextTick;
+import ae.net.asockets : socketManager, onNextTick;
 
-import graphqld2.plan;
-import graphqld2.eval;
-import graphqld2.sql;
-import graphqld2.schema;
+import graphqld2.core;
+import graphqld2.relational;
+import graphqld2.postgres;
 
 // ============================================================================
 // Async Database Interface
@@ -101,16 +100,19 @@ class AsyncExecutor(RootEntity) {
     private {
         BatchingDataSource _dataSource;
         SqlBuilder _sqlBuilder;
+        string _sourceId;
     }
 
-    this(AsyncDatabase db) {
+    this(AsyncDatabase db, string sourceId = "default") {
         _dataSource = new BatchingDataSource(db);
         _sqlBuilder = new SqlBuilder();
+        _sourceId = sourceId;
     }
 
-    this(BatchingDataSource dataSource) {
+    this(BatchingDataSource dataSource, string sourceId = "default") {
         _dataSource = dataSource;
         _sqlBuilder = new SqlBuilder();
+        _sourceId = sourceId;
     }
 
     /// Execute an expression for a set of root entity IDs
@@ -120,22 +122,34 @@ class AsyncExecutor(RootEntity) {
 
         // Phase 1: Plan (synchronous)
         auto planCtx = new PlanContext();
-        planCtx.setRoot(RootEntity.stringof, RootEntity._table);
+        planCtx.currentSourceId = _sourceId;
+
+        auto relPlan = planCtx.source!RelationalPlanContext();
+        auto rootLayerId = relPlan.setRoot(RootEntity.stringof, RootEntity._table);
+        planCtx.currentLayerId = rootLayerId;
+
         expr.plan(planCtx);
 
         // Generate SQL
-        auto sql = _sqlBuilder.buildQuery(planCtx.layers, rootIds);
+        auto sql = _sqlBuilder.buildQuery(relPlan.layers, rootIds);
 
         // Create result promise
         auto resultPromise = new Promise!(T[]);
 
+        // Capture layers for the closure
+        auto layers = relPlan.layers;
+
         // Phase 2: Execute query (async) and evaluate
         _dataSource.request(sql, rootIds).then((JSONValue jsonResult) {
             // Evaluate with fetched data (synchronous)
-            auto evalCtx = new EvalContext(planCtx.layers);
-            evalCtx.loadData(jsonResult);
-            evalCtx.currentLayerId = 0;
+            auto evalCtx = new EvalContext();
+            evalCtx.currentSourceId = _sourceId;
+            evalCtx.currentLayerId = rootLayerId;
             evalCtx.currentIds = rootIds;
+
+            auto relEval = evalCtx.source!RelationalEvalContext();
+            relEval.setLayers(layers);
+            relEval.loadData(jsonResult);
 
             resultPromise.fulfill(expr.eval(evalCtx));
         }, (Exception e) {

@@ -5,9 +5,8 @@ import std.array;
 import std.conv;
 import std.json;
 
-import graphqld2.schema;
-import graphqld2.plan;
-import graphqld2.eval;
+import graphqld2.core;
+import graphqld2.relational;
 import graphqld2.executor;
 
 // ============================================================================
@@ -145,7 +144,11 @@ unittest {
 // Test planning the full Post.html expression
 unittest {
     auto ctx = new PlanContext();
-    ctx.setRoot("Post", "posts");
+    ctx.currentSourceId = "default";
+
+    auto relCtx = ctx.source!RelationalPlanContext();
+    auto rootId = relCtx.setRoot("Post", "posts");
+    ctx.currentLayerId = rootId;
 
     auto expr = Post.html();
     expr.plan(ctx);
@@ -155,26 +158,26 @@ unittest {
     // 1: User (post author via belongsTo)
     // 2: Comment (via hasMany)
     // 3: User (comment author via belongsTo from Comment)
-    assert(ctx.layers.length == 4, "Expected 4 layers, got " ~ ctx.layers.length.to!string);
+    assert(relCtx.layers.length == 4, "Expected 4 layers, got " ~ relCtx.layers.length.to!string);
 
-    assert(ctx.layers[0].table == "posts");
-    assert(ctx.layers[0].columns.canFind("title"));
-    assert(ctx.layers[0].columns.canFind("body"));
-    assert(ctx.layers[0].columns.canFind("author_id"));
+    assert(relCtx.layers[0].table == "posts");
+    assert(relCtx.layers[0].columns.canFind("title"));
+    assert(relCtx.layers[0].columns.canFind("body"));
+    assert(relCtx.layers[0].columns.canFind("author_id"));
 
-    assert(ctx.layers[1].table == "users");  // post authors
-    assert(ctx.layers[1].columns.canFind("first_name"));
-    assert(ctx.layers[1].columns.canFind("last_name"));
+    assert(relCtx.layers[1].table == "users");  // post authors
+    assert(relCtx.layers[1].columns.canFind("first_name"));
+    assert(relCtx.layers[1].columns.canFind("last_name"));
 
-    assert(ctx.layers[2].table == "comments");
-    assert(ctx.layers[2].columns.canFind("body"));
-    assert(ctx.layers[2].columns.canFind("author_id"));
-    assert(ctx.layers[2].columns.canFind("post_id"));  // FK for grouping
+    assert(relCtx.layers[2].table == "comments");
+    assert(relCtx.layers[2].columns.canFind("body"));
+    assert(relCtx.layers[2].columns.canFind("author_id"));
+    assert(relCtx.layers[2].columns.canFind("post_id"));  // FK for grouping
 
-    assert(ctx.layers[3].table == "users");  // comment authors
-    assert(ctx.layers[3].columns.canFind("first_name"));
-    assert(ctx.layers[3].columns.canFind("last_name"));
+    assert(relCtx.layers[3].table == "users");  // comment authors
+    assert(relCtx.layers[3].columns.canFind("first_name"));
+    assert(relCtx.layers[3].columns.canFind("last_name"));
 
     // Debug output
-    debug ctx.dump();
+    debug relCtx.dump();
 }
