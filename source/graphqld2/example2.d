@@ -5,8 +5,11 @@ import std.array;
 import std.conv;
 import std.json;
 
+import ae.net.asockets : socketManager;
+
 import graphqld2.core;
 import graphqld2.relational;
+import graphqld2.postgres;
 import graphqld2.executor;
 
 // ============================================================================
@@ -99,8 +102,8 @@ struct Post {
 // ============================================================================
 
 unittest {
-    // Create test database with sample data
-    auto db = new TestDatabase();
+    // Create mock database with sample data
+    auto db = new MockDatabaseConnection();
     db.setResponse("*", `{
         "layer0": [
             {"id": 1, "title": "Hello World", "body": "This is my first post!", "author_id": 1},
@@ -122,17 +125,22 @@ unittest {
         ]
     }`);
 
+    auto fetcher = new PostgresDataFetcher(db);
+
     // Test simple field
     {
-        auto executor = new Executor!Post(db);
-        auto titles = executor.execute(Post.title(), [1L, 2L]);
+        auto executor = new Executor!Post(fetcher);
+        auto titles = executor.executeSync(Post.title(), [1L, 2L]);
         assert(titles == ["Hello World", "D Programming"]);
     }
 
+    // Reset query count for next test
+    db.clearHistory();
+
     // Test computed field with belongsTo
     {
-        auto executor = new Executor!Post(db);
-        auto summaries = executor.execute(Post.summary(), [1L, 2L]);
+        auto executor = new Executor!Post(fetcher);
+        auto summaries = executor.executeSync(Post.summary(), [1L, 2L]);
 
         assert(summaries[0].canFind("Hello World"));
         assert(summaries[0].canFind("Alice Smith"));
@@ -143,7 +151,7 @@ unittest {
 
 // Test Post.html - full 4-layer query with nested relationships
 unittest {
-    auto db = new TestDatabase();
+    auto db = new MockDatabaseConnection();
     db.setResponse("*", `{
         "layer0": [
             {"id": 1, "title": "Hello World", "body": "First post", "author_id": 1}
@@ -159,8 +167,9 @@ unittest {
         ]
     }`);
 
-    auto executor = new Executor!Post(db);
-    auto htmls = executor.execute(Post.html(), [1L]);
+    auto fetcher = new PostgresDataFetcher(db);
+    auto executor = new Executor!Post(fetcher);
+    auto htmls = executor.executeSync(Post.html(), [1L]);
 
     assert(htmls.length == 1);
     assert(htmls[0].canFind("Hello World"));

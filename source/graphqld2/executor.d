@@ -1,35 +1,31 @@
 module graphqld2.executor;
 
 import std.json;
-import std.conv;
+import ae.utils.promise;
+import ae.net.asockets : socketManager;
 
 import graphqld2.core;
 import graphqld2.relational;
-import graphqld2.postgres;
 
-/// Abstract database interface
-interface Database {
-    /// Execute a SQL query and return JSON result
-    JSONValue query(string sql, long[] params);
-}
-
-/// Executes a planned query for relational data sources
+/// Executes expressions against a data source.
+/// Uses the two-phase model: plan -> fetch -> evaluate.
 class Executor(RootEntity) {
-    private Database _db;
-    private SqlBuilder _sqlBuilder;
-    private string _sourceId;
+    private {
+        DataFetcher _fetcher;
+        string _sourceId;
+    }
 
-    this(Database db, string sourceId = "default") {
-        _db = db;
-        _sqlBuilder = new SqlBuilder();
+    this(DataFetcher fetcher, string sourceId = "default") {
+        _fetcher = fetcher;
         _sourceId = sourceId;
     }
 
-    /// Execute an expression for a set of root entity IDs
-    auto execute(E)(E expr, long[] rootIds) {
+    /// Execute an expression for a set of root entity IDs.
+    /// Returns a promise that resolves to the computed values.
+    Promise!(E.ResultType[]) execute(E)(E expr, long[] rootIds) {
         alias T = E.ResultType;
 
-        // Phase 1: Plan
+        // Phase 1: Plan (synchronous)
         auto planCtx = new PlanContext();
         planCtx.currentSourceId = _sourceId;
 
@@ -42,70 +38,65 @@ class Executor(RootEntity) {
         // Debug: show the plan
         debug relPlan.dump();
 
-        // Generate SQL
-        auto sql = _sqlBuilder.buildQuery(relPlan.layers, rootIds);
-        debug {
-            import std.stdio : writeln;
-            writeln("Generated SQL:\n", sql);
-        }
+        // Create result promise
+        auto resultPromise = new Promise!(T[]);
 
-        // Execute query
-        auto jsonResult = _db.query(sql, rootIds);
+        // Capture for closure
+        auto layers = relPlan.layers;
 
-        // Phase 2: Evaluate
-        auto evalCtx = new EvalContext();
-        evalCtx.currentSourceId = _sourceId;
-        evalCtx.currentLayerId = rootLayerId;
-        evalCtx.currentIds = rootIds;
+        // Phase 2: Fetch data (async)
+        _fetcher.fetch(layers, rootIds).then((JSONValue jsonResult) {
+            // Phase 3: Evaluate with fetched data (synchronous)
+            auto evalCtx = new EvalContext();
+            evalCtx.currentSourceId = _sourceId;
+            evalCtx.currentLayerId = rootLayerId;
+            evalCtx.currentIds = rootIds;
 
-        auto relEval = evalCtx.source!RelationalEvalContext();
-        relEval.setLayers(relPlan.layers);
-        relEval.loadData(jsonResult);
+            auto relEval = evalCtx.source!RelationalEvalContext();
+            relEval.setLayers(layers);
+            relEval.loadData(jsonResult);
 
-        return expr.eval(evalCtx);
-    }
-}
+            resultPromise.fulfill(expr.eval(evalCtx));
+        }, (Exception e) {
+            resultPromise.reject(e);
+        });
 
-/// Convenience function to execute a query
-auto execute(RootEntity, E)(Database db, E expr, long[] rootIds) {
-    auto executor = new Executor!RootEntity(db);
-    return executor.execute(expr, rootIds);
-}
-
-// ============================================================================
-// Test Database Implementation
-// ============================================================================
-
-/// In-memory test database that returns canned responses
-class TestDatabase : Database {
-    private JSONValue[string] _responses;
-
-    /// Register a response for a query pattern
-    void setResponse(string pattern, JSONValue response) {
-        _responses[pattern] = response;
+        return resultPromise;
     }
 
-    /// Set response from JSON string
-    void setResponse(string pattern, string jsonStr) {
-        _responses[pattern] = parseJSON(jsonStr);
-    }
+    /// Execute synchronously by running the event loop until complete.
+    E.ResultType[] executeSync(E)(E expr, long[] rootIds) {
+        alias T = E.ResultType;
 
-    override JSONValue query(string sql, long[] params) {
-        // For testing, we'll just return a default response
-        // In a real implementation, this would execute the SQL
-        if ("*" in _responses)
-            return _responses["*"];
+        T[] result;
+        bool done = false;
+        Exception error;
 
-        // Return empty layers
-        return parseJSON(`{"layer0": [], "layer1": [], "layer2": []}`);
+        execute(expr, rootIds).then((T[] values) {
+            result = values;
+            done = true;
+        }, (Exception e) {
+            error = e;
+            done = true;
+        });
+
+        socketManager.loop();
+
+        if (error !is null)
+            throw error;
+
+        assert(done, "Query did not complete");
+        return result;
     }
 }
 
 // ============================================================================
-// Integration Tests
+// Tests
 // ============================================================================
 
 unittest {
+    import graphqld2.postgres;
+
     // Define test entities
     struct User {
         mixin Entity!"users";
@@ -120,8 +111,8 @@ unittest {
         );
     }
 
-    // Create test database with canned response
-    auto db = new TestDatabase();
+    // Create mock database and fetcher
+    auto db = new MockDatabaseConnection();
     db.setResponse("*", `{
         "layer0": [
             {"id": 1, "first_name": "Alice", "last_name": "Smith"},
@@ -129,9 +120,40 @@ unittest {
         ]
     }`);
 
-    // Execute query
-    auto executor = new Executor!User(db);
-    auto names = executor.execute(User.fullName(), [1L, 2L]);
+    auto fetcher = new PostgresDataFetcher(db);
+    auto executor = new Executor!User(fetcher);
 
-    assert(names == ["Alice Smith", "Bob Jones"]);
+    // Test async execution
+    string[] result;
+    executor.execute(User.fullName(), [1L, 2L]).then((string[] names) {
+        result = names;
+    });
+
+    socketManager.loop();
+
+    assert(result == ["Alice Smith", "Bob Jones"]);
+    assert(db.queryCount == 1);
+}
+
+unittest {
+    import graphqld2.postgres;
+
+    // Test executeSync
+    struct User {
+        mixin Entity!"users";
+        static Expr!string firstName() => column!string("first_name");
+    }
+
+    auto db = new MockDatabaseConnection();
+    db.setResponse("*", `{
+        "layer0": [
+            {"id": 1, "first_name": "Alice"}
+        ]
+    }`);
+
+    auto fetcher = new PostgresDataFetcher(db);
+    auto executor = new Executor!User(fetcher);
+
+    auto names = executor.executeSync(User.firstName(), [1L]);
+    assert(names == ["Alice"]);
 }
