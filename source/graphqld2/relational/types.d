@@ -18,6 +18,10 @@ struct Layer {
     /// How this layer connects to its parent (null for root)
     Nullable!JoinInfo join;
 
+    /// For root layers: how to filter entities
+    FilterType rootFilter = FilterType.none;
+    long[] rootFilterIds;
+
     /// Add a column requirement (deduplicates)
     void requireColumn(string col) {
         if (!columns.canFind(col))
@@ -36,4 +40,12 @@ struct JoinInfo {
 enum JoinType {
     hasMany,      // Parent has many children (1:N)
     belongsTo,    // Child belongs to parent (N:1)
+}
+
+/// How a root layer filters its entities
+enum FilterType {
+    none,         // Not a root layer (uses join instead)
+    all,          // No filter - fetch all entities
+    byId,         // Filter by single ID
+    byIds,        // Filter by multiple IDs
 }

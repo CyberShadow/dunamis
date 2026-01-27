@@ -21,15 +21,16 @@ class PostgresDataFetcher : DataFetcher {
         _sqlBuilder = new SqlBuilder();
     }
 
-    override Promise!JSONValue fetch(Layer[] layers, long[] rootIds) {
-        auto sql = _sqlBuilder.buildQuery(layers, rootIds);
+    override Promise!JSONValue fetch(Layer[] layers) {
+        auto sql = _sqlBuilder.buildQuery(layers);
 
         debug {
             import std.stdio : writeln;
             writeln("Generated SQL:\n", sql);
         }
 
-        return _db.query(sql, rootIds);
+        // IDs are now inlined in SQL, so no params needed
+        return _db.query(sql, []);
     }
 }
 
@@ -48,14 +49,14 @@ unittest {
     // Create fetcher
     auto fetcher = new PostgresDataFetcher(db);
 
-    // Create test layers
-    auto layers = [
-        Layer(0, "User", "users", ["id", "name"])
-    ];
+    // Create test layer with filter
+    auto rootLayer = Layer(0, "User", "users", ["id", "name"]);
+    rootLayer.rootFilter = FilterType.byIds;
+    rootLayer.rootFilterIds = [1L, 2L];
 
     // Fetch data
     JSONValue result;
-    fetcher.fetch(layers, [1L, 2L]).then((JSONValue r) {
+    fetcher.fetch([rootLayer]).then((JSONValue r) {
         result = r;
     });
 

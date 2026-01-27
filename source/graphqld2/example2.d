@@ -129,8 +129,8 @@ unittest {
 
     // Test simple field
     {
-        auto executor = new Executor!Post(fetcher);
-        auto titles = executor.executeSync(Post.title(), [1L, 2L]);
+        auto executor = new Executor(fetcher);
+        auto titles = executor.executeSync(rootAll!Post().title());
         assert(titles == ["Hello World", "D Programming"]);
     }
 
@@ -139,8 +139,8 @@ unittest {
 
     // Test computed field with belongsTo
     {
-        auto executor = new Executor!Post(fetcher);
-        auto summaries = executor.executeSync(Post.summary(), [1L, 2L]);
+        auto executor = new Executor(fetcher);
+        auto summaries = executor.executeSync(rootAll!Post().summary());
 
         assert(summaries[0].canFind("Hello World"));
         assert(summaries[0].canFind("Alice Smith"));
@@ -168,8 +168,8 @@ unittest {
     }`);
 
     auto fetcher = new PostgresDataFetcher(db);
-    auto executor = new Executor!Post(fetcher);
-    auto htmls = executor.executeSync(Post.html(), [1L]);
+    auto executor = new Executor(fetcher);
+    auto htmls = executor.executeSync(rootAll!Post().html());
 
     assert(htmls.length == 1);
     assert(htmls[0].canFind("Hello World"));

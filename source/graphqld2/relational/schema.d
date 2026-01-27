@@ -231,6 +231,97 @@ BelongsToExpr!(ParentEntity, foreignKey) belongsTo(ParentEntity, string foreignK
 }
 
 // ============================================================================
+// Root Expressions
+// ============================================================================
+
+/// Root expression that fetches all entities of a type
+class RootAllExpr(Entity) {
+    private int _layerId = -1;
+    private string _sourceId;
+
+    void plan(PlanContext ctx) {
+        _sourceId = ctx.currentSourceId;
+        auto relCtx = ctx.source!RelationalPlanContext();
+        _layerId = relCtx.setRoot(Entity.stringof, Entity._table, FilterType.all);
+        ctx.currentLayerId = _layerId;
+    }
+
+    /// Wrap an expression with this root
+    auto select(E)(E expr) {
+        return new RootSelectExpr!(typeof(this), E)(this, expr);
+    }
+
+    /// Convenience: access a field directly via opDispatch
+    auto opDispatch(string fieldName)() {
+        return select(__traits(getMember, Entity, fieldName)());
+    }
+
+    @property int layerId() { return _layerId; }
+    @property string sourceId() { return _sourceId; }
+}
+
+/// Root expression that fetches a single entity by ID
+class RootByIdExpr(Entity) {
+    private long _id;
+    private int _layerId = -1;
+    private string _sourceId;
+
+    this(long id) {
+        _id = id;
+    }
+
+    void plan(PlanContext ctx) {
+        _sourceId = ctx.currentSourceId;
+        auto relCtx = ctx.source!RelationalPlanContext();
+        _layerId = relCtx.setRoot(Entity.stringof, Entity._table, FilterType.byId, [_id]);
+        ctx.currentLayerId = _layerId;
+    }
+
+    /// Wrap an expression with this root
+    auto select(E)(E expr) {
+        return new RootSelectExpr!(typeof(this), E)(this, expr);
+    }
+
+    /// Convenience: access a field directly via opDispatch
+    auto opDispatch(string fieldName)() {
+        return select(__traits(getMember, Entity, fieldName)());
+    }
+
+    @property int layerId() { return _layerId; }
+    @property string sourceId() { return _sourceId; }
+}
+
+/// Combines a root expression with a field expression into a single evaluable expression
+class RootSelectExpr(Root, E) : Expr!(E.ResultType) {
+    private Root _root;
+    private E _expr;
+
+    this(Root root, E expr) {
+        _root = root;
+        _expr = expr;
+    }
+
+    override void plan(PlanContext ctx) {
+        _root.plan(ctx);   // Sets up root layer
+        _expr.plan(ctx);   // Plans expression in that context
+    }
+
+    override E.ResultType[] eval(EvalContext ctx) {
+        return _expr.eval(ctx);
+    }
+}
+
+/// Helper to create a root expression for all entities
+RootAllExpr!Entity rootAll(Entity)() {
+    return new RootAllExpr!Entity();
+}
+
+/// Helper to create a root expression for a single entity by ID
+RootByIdExpr!Entity rootById(Entity)(long id) {
+    return new RootByIdExpr!Entity(id);
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

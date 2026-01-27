@@ -1,5 +1,7 @@
 module graphqld2.executor;
 
+import std.algorithm;
+import std.array;
 import std.json;
 import ae.utils.promise;
 import ae.net.asockets : socketManager;
@@ -9,7 +11,10 @@ import graphqld2.relational;
 
 /// Executes expressions against a data source.
 /// Uses the two-phase model: plan -> fetch -> evaluate.
-class Executor(RootEntity) {
+///
+/// In the new model, the expression itself sets up the root layer
+/// (e.g., via rootAll!User() or rootById!User(5)).
+class Executor {
     private {
         DataFetcher _fetcher;
         string _sourceId;
@@ -20,20 +25,18 @@ class Executor(RootEntity) {
         _sourceId = sourceId;
     }
 
-    /// Execute an expression for a set of root entity IDs.
+    /// Execute an expression that includes its own root (e.g., rootAll!User().fullName()).
     /// Returns a promise that resolves to the computed values.
-    Promise!(E.ResultType[]) execute(E)(E expr, long[] rootIds) {
+    Promise!(E.ResultType[]) execute(E)(E expr) {
         alias T = E.ResultType;
 
         // Phase 1: Plan (synchronous)
+        // The expression plans itself, including setting up root layer
         auto planCtx = new PlanContext();
         planCtx.currentSourceId = _sourceId;
+        expr.plan(planCtx);
 
         auto relPlan = planCtx.source!RelationalPlanContext();
-        auto rootLayerId = relPlan.setRoot(RootEntity.stringof, RootEntity._table);
-        planCtx.currentLayerId = rootLayerId;
-
-        expr.plan(planCtx);
 
         // Debug: show the plan
         debug relPlan.dump();
@@ -45,11 +48,22 @@ class Executor(RootEntity) {
         auto layers = relPlan.layers;
 
         // Phase 2: Fetch data (async)
-        _fetcher.fetch(layers, rootIds).then((JSONValue jsonResult) {
-            // Phase 3: Evaluate with fetched data (synchronous)
+        _fetcher.fetch(layers).then((JSONValue jsonResult) {
+            // Phase 3: Extract root IDs from fetched data
+            long[] rootIds;
+            if ("layer0" in jsonResult) {
+                auto layer0Data = jsonResult["layer0"].array;
+                foreach (row; layer0Data) {
+                    if ("id" in row) {
+                        rootIds ~= row["id"].get!long;
+                    }
+                }
+            }
+
+            // Phase 4: Evaluate with fetched data (synchronous)
             auto evalCtx = new EvalContext();
             evalCtx.currentSourceId = _sourceId;
-            evalCtx.currentLayerId = rootLayerId;
+            evalCtx.currentLayerId = 0;  // Root layer
             evalCtx.currentIds = rootIds;
 
             auto relEval = evalCtx.source!RelationalEvalContext();
@@ -65,14 +79,14 @@ class Executor(RootEntity) {
     }
 
     /// Execute synchronously by running the event loop until complete.
-    E.ResultType[] executeSync(E)(E expr, long[] rootIds) {
+    E.ResultType[] executeSync(E)(E expr) {
         alias T = E.ResultType;
 
         T[] result;
         bool done = false;
         Exception error;
 
-        execute(expr, rootIds).then((T[] values) {
+        execute(expr).then((T[] values) {
             result = values;
             done = true;
         }, (Exception e) {
@@ -121,11 +135,11 @@ unittest {
     }`);
 
     auto fetcher = new PostgresDataFetcher(db);
-    auto executor = new Executor!User(fetcher);
+    auto executor = new Executor(fetcher);
 
-    // Test async execution
+    // Test with rootAll - fetches all users
     string[] result;
-    executor.execute(User.fullName(), [1L, 2L]).then((string[] names) {
+    executor.execute(rootAll!User().fullName()).then((string[] names) {
         result = names;
     });
 
@@ -138,7 +152,7 @@ unittest {
 unittest {
     import graphqld2.postgres;
 
-    // Test executeSync
+    // Test rootById
     struct User {
         mixin Entity!"users";
         static Expr!string firstName() => column!string("first_name");
@@ -147,13 +161,13 @@ unittest {
     auto db = new MockDatabaseConnection();
     db.setResponse("*", `{
         "layer0": [
-            {"id": 1, "first_name": "Alice"}
+            {"id": 5, "first_name": "Alice"}
         ]
     }`);
 
     auto fetcher = new PostgresDataFetcher(db);
-    auto executor = new Executor!User(fetcher);
+    auto executor = new Executor(fetcher);
 
-    auto names = executor.executeSync(User.firstName(), [1L]);
+    auto names = executor.executeSync(rootById!User(5).firstName());
     assert(names == ["Alice"]);
 }

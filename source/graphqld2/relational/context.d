@@ -32,11 +32,19 @@ class RelationalPlanContext : SourcePlanContext {
     @property string sourceId() { return _sourceId; }
 
     /// Create root layer for an entity
-    int setRoot(string entityName, string table) {
+    /// filter: how to filter root entities (default byIds for backward compat)
+    /// filterIds: IDs to filter by (for byId/byIds)
+    int setRoot(string entityName, string table,
+                FilterType filter = FilterType.byIds,
+                long[] filterIds = []) {
         auto layerId = _parent.allocateLayer(-1, _sourceId);
         if (layerId >= layers.length)
             layers.length = layerId + 1;
-        layers[layerId] = Layer(layerId, entityName, table);
+
+        auto layer = Layer(layerId, entityName, table);
+        layer.rootFilter = filter;
+        layer.rootFilterIds = filterIds;
+        layers[layerId] = layer;
         return layerId;
     }
 
@@ -121,6 +129,9 @@ class RelationalPlanContext : SourcePlanContext {
             if (layer == Layer.init) continue;
             writefln("  Layer %d: %s (%s)", layer.id, layer.entityName, layer.table);
             writefln("    Columns: %s", layer.columns);
+            if (layer.rootFilter != FilterType.none) {
+                writefln("    Root filter: %s %s", layer.rootFilter, layer.rootFilterIds);
+            }
             if (!layer.join.isNull) {
                 auto j = layer.join.get;
                 writefln("    Join: %s from layer %d via %s", j.type, j.parentLayerId, j.foreignKey);

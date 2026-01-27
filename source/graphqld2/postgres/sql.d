@@ -12,7 +12,8 @@ import graphqld2.relational.types;
 /// Builds PostgreSQL queries from a query plan
 class SqlBuilder {
     /// Generate a CTE-based query that fetches all layers in one query
-    string buildQuery(Layer[] layers, long[] rootIds) {
+    /// Root layer filter info (FilterType, IDs) comes from the layers themselves.
+    string buildQuery(Layer[] layers) {
         if (layers.length == 0)
             return "";
 
@@ -54,11 +55,30 @@ class SqlBuilder {
 
         sql ~= format!"\n    FROM %s\n"(layer.table);
 
-        // WHERE clause depends on join type
-        if (layer.join.isNull) {
-            // Root layer: filter by provided IDs
-            sql ~= format!"    WHERE %s.id = ANY($1)\n"(layer.table);
-        } else {
+        // WHERE clause depends on layer type
+        if (layer.rootFilter != FilterType.none) {
+            // Root layer: filter based on FilterType
+            final switch (layer.rootFilter) {
+                case FilterType.none:
+                    break;  // Shouldn't happen
+                case FilterType.all:
+                    // No WHERE clause - fetch all
+                    break;
+                case FilterType.byId:
+                    // Single ID from rootFilterIds
+                    if (layer.rootFilterIds.length > 0) {
+                        sql ~= format!"    WHERE %s.id = %d\n"(layer.table, layer.rootFilterIds[0]);
+                    }
+                    break;
+                case FilterType.byIds:
+                    // Multiple IDs - inline as array literal
+                    if (layer.rootFilterIds.length > 0) {
+                        sql ~= format!"    WHERE %s.id = ANY(%s)\n"(
+                            layer.table, formatIdArray(layer.rootFilterIds));
+                    }
+                    break;
+            }
+        } else if (!layer.join.isNull) {
             auto join = layer.join.get;
             auto parentLayer = allLayers[join.parentLayerId];
 
@@ -84,14 +104,19 @@ class SqlBuilder {
 }
 
 unittest {
+    // Create root layer with byIds filter
+    auto rootLayer = Layer(0, "User", "users", ["id", "first_name", "last_name"]);
+    rootLayer.rootFilter = FilterType.byIds;
+    rootLayer.rootFilterIds = [1, 2, 3];
+
     auto layers = [
-        Layer(0, "User", "users", ["id", "first_name", "last_name"]),
+        rootLayer,
         Layer(1, "Post", "posts", ["id", "author_id", "title"],
               nullable(JoinInfo(0, "author_id", "id", JoinType.hasMany)))
     ];
 
     auto builder = new SqlBuilder();
-    auto sql = builder.buildQuery(layers, [1, 2, 3]);
+    auto sql = builder.buildQuery(layers);
 
     // Should contain CTEs for both layers
     assert(sql.canFind("layer0 AS"));
@@ -104,21 +129,41 @@ unittest {
     // Should have proper join condition
     assert(sql.canFind("posts.author_id IN (SELECT id FROM layer0)"));
 
+    // Should have root filter with IDs
+    assert(sql.canFind("ARRAY[1,2,3]::bigint[]"));
+
     // Should aggregate to JSON
     assert(sql.canFind("json_build_object"));
 }
 
 unittest {
     // Test belongsTo relationship
+    auto rootLayer = Layer(0, "Post", "posts", ["id", "author_id", "title"]);
+    rootLayer.rootFilter = FilterType.byIds;
+    rootLayer.rootFilterIds = [1];
+
     auto layers = [
-        Layer(0, "Post", "posts", ["id", "author_id", "title"]),
+        rootLayer,
         Layer(1, "User", "users", ["id", "first_name"],
               nullable(JoinInfo(0, "author_id", "id", JoinType.belongsTo)))
     ];
 
     auto builder = new SqlBuilder();
-    auto sql = builder.buildQuery(layers, [1]);
+    auto sql = builder.buildQuery(layers);
 
     // belongsTo should look up by FK value from parent layer
     assert(sql.canFind("users.id IN (SELECT author_id FROM layer0)"));
+}
+
+unittest {
+    // Test FilterType.all (no WHERE clause)
+    auto rootLayer = Layer(0, "User", "users", ["id", "first_name"]);
+    rootLayer.rootFilter = FilterType.all;
+
+    auto builder = new SqlBuilder();
+    auto sql = builder.buildQuery([rootLayer]);
+
+    // Should NOT have WHERE clause for FilterType.all
+    assert(!sql.canFind("WHERE"));
+    assert(sql.canFind("FROM users"));
 }

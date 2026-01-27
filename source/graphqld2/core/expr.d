@@ -1,5 +1,6 @@
 module graphqld2.core.expr;
 
+import std.json;
 import std.meta;
 import std.traits;
 import std.typecons : Tuple;
@@ -99,6 +100,88 @@ auto use(Fn, Exprs...)(Fn fn, Exprs exprs)
 }
 
 // ============================================================================
+// jsonObject Combinator (JSON construction)
+// ============================================================================
+
+/// Convert a D value to JSONValue
+private JSONValue toJsonValue(T)(T value) {
+    static if (is(T == JSONValue)) {
+        return value;
+    } else static if (is(T == string)) {
+        return JSONValue(value);
+    } else static if (is(T == bool)) {
+        return JSONValue(value);
+    } else static if (isIntegral!T) {
+        return JSONValue(value);
+    } else static if (isFloatingPoint!T) {
+        return JSONValue(value);
+    } else static if (isArray!T && !is(T == string)) {
+        JSONValue arr = JSONValue.emptyArray;
+        foreach (elem; value) {
+            arr.array ~= toJsonValue(elem);
+        }
+        return arr;
+    } else {
+        static assert(false, "Cannot convert " ~ T.stringof ~ " to JSONValue");
+    }
+}
+
+/// Expression that constructs a JSON object from named expressions.
+/// Args should alternate: string, Expr, string, Expr, ...
+class JsonObjectExpr(Args...) : Expr!JSONValue
+    if (Args.length >= 2 && Args.length % 2 == 0)
+{
+    private Tuple!Args _args;
+
+    this(Args args) {
+        static foreach (i; 0 .. Args.length) {
+            _args[i] = args[i];
+        }
+    }
+
+    override void plan(PlanContext ctx) {
+        // Plan the expression elements (odd indices: 1, 3, 5, ...)
+        static foreach (i; 0 .. Args.length / 2) {{
+            enum exprIdx = i * 2 + 1;
+            _args[exprIdx].plan(ctx);
+        }}
+    }
+
+    override JSONValue[] eval(EvalContext ctx) {
+        auto count = ctx.currentIds.length;
+        JSONValue[] results = new JSONValue[count];
+
+        // Initialize empty objects
+        foreach (ref r; results) {
+            r = JSONValue.emptyObject;
+        }
+
+        // Process each name/expr pair
+        static foreach (i; 0 .. Args.length / 2) {{
+            enum nameIdx = i * 2;
+            enum exprIdx = i * 2 + 1;
+
+            string name = _args[nameIdx];
+            auto values = _args[exprIdx].eval(ctx);
+
+            foreach (idx; 0 .. count) {
+                results[idx][name] = toJsonValue(values[idx]);
+            }
+        }}
+
+        return results;
+    }
+}
+
+/// Create a JSON object expression from alternating name/expression pairs.
+/// Example: jsonObject("firstName", User.firstName(), "lastName", User.lastName())
+auto jsonObject(Args...)(Args args)
+    if (Args.length >= 2 && Args.length % 2 == 0)
+{
+    return new JsonObjectExpr!Args(args);
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -135,4 +218,42 @@ unittest {
 
     auto result = combined.eval(evalCtx);
     assert(result == ["Hello World", "Hello World", "Hello World"]);
+}
+
+unittest {
+    // Test jsonObject combinator
+    static class MockExpr(T) : Expr!T {
+        T _value;
+        this(T v) { _value = v; }
+
+        override void plan(PlanContext ctx) {}
+        override T[] eval(EvalContext ctx) {
+            T[] result;
+            foreach (_; ctx.currentIds) {
+                result ~= _value;
+            }
+            return result;
+        }
+    }
+
+    auto nameExpr = new MockExpr!string("Alice");
+    auto ageExpr = new MockExpr!int(30);
+
+    auto obj = jsonObject(
+        "name", nameExpr,
+        "age", ageExpr
+    );
+
+    auto ctx = new PlanContext();
+    obj.plan(ctx);
+
+    auto evalCtx = new EvalContext();
+    evalCtx.currentIds = [1, 2];
+
+    auto result = obj.eval(evalCtx);
+    assert(result.length == 2);
+    assert(result[0]["name"].str == "Alice");
+    assert(result[0]["age"].integer == 30);
+    assert(result[1]["name"].str == "Alice");
+    assert(result[1]["age"].integer == 30);
 }
