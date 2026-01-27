@@ -141,43 +141,30 @@ unittest {
     }
 }
 
-// Test planning the full Post.html expression
+// Test Post.html - full 4-layer query with nested relationships
 unittest {
-    auto ctx = new PlanContext();
-    ctx.currentSourceId = "default";
+    auto db = new TestDatabase();
+    db.setResponse("*", `{
+        "layer0": [
+            {"id": 1, "title": "Hello World", "body": "First post", "author_id": 1}
+        ],
+        "layer1": [
+            {"id": 1, "first_name": "Alice", "last_name": "Smith"}
+        ],
+        "layer2": [
+            {"id": 101, "post_id": 1, "body": "Great!", "author_id": 2}
+        ],
+        "layer3": [
+            {"id": 2, "first_name": "Bob", "last_name": "Jones"}
+        ]
+    }`);
 
-    auto relCtx = ctx.source!RelationalPlanContext();
-    auto rootId = relCtx.setRoot("Post", "posts");
-    ctx.currentLayerId = rootId;
+    auto executor = new Executor!Post(db);
+    auto htmls = executor.execute(Post.html(), [1L]);
 
-    auto expr = Post.html();
-    expr.plan(ctx);
-
-    // Should have 4 layers:
-    // 0: Post (root)
-    // 1: User (post author via belongsTo)
-    // 2: Comment (via hasMany)
-    // 3: User (comment author via belongsTo from Comment)
-    assert(relCtx.layers.length == 4, "Expected 4 layers, got " ~ relCtx.layers.length.to!string);
-
-    assert(relCtx.layers[0].table == "posts");
-    assert(relCtx.layers[0].columns.canFind("title"));
-    assert(relCtx.layers[0].columns.canFind("body"));
-    assert(relCtx.layers[0].columns.canFind("author_id"));
-
-    assert(relCtx.layers[1].table == "users");  // post authors
-    assert(relCtx.layers[1].columns.canFind("first_name"));
-    assert(relCtx.layers[1].columns.canFind("last_name"));
-
-    assert(relCtx.layers[2].table == "comments");
-    assert(relCtx.layers[2].columns.canFind("body"));
-    assert(relCtx.layers[2].columns.canFind("author_id"));
-    assert(relCtx.layers[2].columns.canFind("post_id"));  // FK for grouping
-
-    assert(relCtx.layers[3].table == "users");  // comment authors
-    assert(relCtx.layers[3].columns.canFind("first_name"));
-    assert(relCtx.layers[3].columns.canFind("last_name"));
-
-    // Debug output
-    debug relCtx.dump();
+    assert(htmls.length == 1);
+    assert(htmls[0].canFind("Hello World"));
+    assert(htmls[0].canFind("Alice Smith"));
+    assert(htmls[0].canFind("Great!"));
+    assert(htmls[0].canFind("Bob Jones"));
 }
