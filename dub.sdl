@@ -1,0 +1,9 @@
+name "graphqld2"
+description "GraphQL server with bulk data resolution"
+authors "Vladimir"
+license "MIT"
+
+targetType "library"
+targetPath "build"
+
+sourcePaths "source"
