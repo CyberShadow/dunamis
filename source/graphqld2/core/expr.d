@@ -34,6 +34,71 @@ abstract class Expr(T) {
     /// Evaluate for a batch of entity references.
     /// Returns T[] with one result per input ref.
     abstract T[] eval(EvalContext ctx, Ref[] refs);
+
+    // =========================================================================
+    // Operator Overloading
+    // =========================================================================
+
+    /// Check if binary operator `op` is valid between types L and R
+    private template isValidBinaryOp(L, string op, R) {
+        enum isValidBinaryOp = is(typeof(mixin("L.init " ~ op ~ " R.init")));
+    }
+
+    /// Binary operators: expr op expr (potentially different types)
+    auto opBinary(string op, R)(Expr!R rhs) if (isValidBinaryOp!(T, op, R)) {
+        return new BinaryOpExpr!(T, op, R)(this, rhs);
+    }
+
+    /// Binary operators: expr op literal
+    auto opBinary(string op, R)(R rhs) if (!is(R : Expr!U, U) && isValidBinaryOp!(T, op, R)) {
+        return new BinaryOpExpr!(T, op, R)(this, constant(rhs));
+    }
+
+    /// Binary operators: literal op expr
+    auto opBinaryRight(string op, L)(L lhs) if (!is(L : Expr!U, U) && isValidBinaryOp!(L, op, T)) {
+        return new BinaryOpExpr!(L, op, T)(constant(lhs), this);
+    }
+
+    /// Comparison methods that return Expr!bool
+    /// Note: Can't override opEquals/opCmp as they conflict with Object methods
+    auto eq(R)(Expr!R rhs) if (isValidBinaryOp!(T, "==", R)) {
+        return new BinaryOpExpr!(T, "==", R)(this, rhs);
+    }
+    auto ne(R)(Expr!R rhs) if (isValidBinaryOp!(T, "!=", R)) {
+        return new BinaryOpExpr!(T, "!=", R)(this, rhs);
+    }
+    auto eq(R)(R rhs) if (!is(R : Expr!U, U) && isValidBinaryOp!(T, "==", R)) {
+        return new BinaryOpExpr!(T, "==", R)(this, constant(rhs));
+    }
+    auto ne(R)(R rhs) if (!is(R : Expr!U, U) && isValidBinaryOp!(T, "!=", R)) {
+        return new BinaryOpExpr!(T, "!=", R)(this, constant(rhs));
+    }
+
+    auto lt(R)(Expr!R rhs) if (isValidBinaryOp!(T, "<", R)) {
+        return new BinaryOpExpr!(T, "<", R)(this, rhs);
+    }
+    auto gt(R)(Expr!R rhs) if (isValidBinaryOp!(T, ">", R)) {
+        return new BinaryOpExpr!(T, ">", R)(this, rhs);
+    }
+    auto le(R)(Expr!R rhs) if (isValidBinaryOp!(T, "<=", R)) {
+        return new BinaryOpExpr!(T, "<=", R)(this, rhs);
+    }
+    auto ge(R)(Expr!R rhs) if (isValidBinaryOp!(T, ">=", R)) {
+        return new BinaryOpExpr!(T, ">=", R)(this, rhs);
+    }
+
+    auto lt(R)(R rhs) if (!is(R : Expr!U, U) && isValidBinaryOp!(T, "<", R)) {
+        return new BinaryOpExpr!(T, "<", R)(this, constant(rhs));
+    }
+    auto gt(R)(R rhs) if (!is(R : Expr!U, U) && isValidBinaryOp!(T, ">", R)) {
+        return new BinaryOpExpr!(T, ">", R)(this, constant(rhs));
+    }
+    auto le(R)(R rhs) if (!is(R : Expr!U, U) && isValidBinaryOp!(T, "<=", R)) {
+        return new BinaryOpExpr!(T, "<=", R)(this, constant(rhs));
+    }
+    auto ge(R)(R rhs) if (!is(R : Expr!U, U) && isValidBinaryOp!(T, ">=", R)) {
+        return new BinaryOpExpr!(T, ">=", R)(this, constant(rhs));
+    }
 }
 
 // ============================================================================
@@ -94,6 +159,68 @@ class ConstExpr(T) : Expr!T {
 /// Create a constant expression
 auto constant(T)(T value) {
     return new ConstExpr!T(value);
+}
+
+// ============================================================================
+// Binary Operation Expression
+// ============================================================================
+
+// TODO: Move SQL-related code (toSqlOp, toSqlExpr) to relational/optimize.d
+//       when implementing SQL push-down for computed expressions.
+
+/// Maps D operators to SQL operators
+string toSqlOp(string op) {
+    switch (op) {
+        case "~": return "||";   // String concatenation
+        case "==": return "=";   // Equality
+        case "!=": return "<>";  // Inequality
+        case "&&": return "AND"; // Logical and
+        case "||": return "OR";  // Logical or (note: conflicts with concat in some DBs)
+        case "%": return "%";    // Modulo
+        default: return op;      // +, -, *, /, <, >, <=, >= are the same
+    }
+}
+
+/// Expression representing a binary operation (arithmetic, concatenation, comparison).
+/// Supports mixed types (e.g., int + float -> float).
+/// Can be evaluated in D or pushed down to SQL.
+class BinaryOpExpr(L, string op, R = L) : Expr!(typeof(mixin("L.init " ~ op ~ " R.init"))) {
+    alias ResultT = typeof(mixin("L.init " ~ op ~ " R.init"));
+
+    private Expr!L _left;
+    private Expr!R _right;
+
+    this(Expr!L left, Expr!R right) {
+        _left = left;
+        _right = right;
+    }
+
+    override Expr!ResultT optimize(OptimizeContext ctx) {
+        _left = _left.optimize(ctx);
+        _right = _right.optimize(ctx);
+        // Future: could return ProjectComputedExpr for SQL push-down
+        return this;
+    }
+
+    override ResultT[] eval(EvalContext ctx, Ref[] refs) {
+        auto lefts = _left.eval(ctx, refs);
+        auto rights = _right.eval(ctx, refs);
+
+        ResultT[] result = new ResultT[refs.length];
+        foreach (i; 0 .. refs.length) {
+            result[i] = mixin("lefts[i] " ~ op ~ " rights[i]");
+        }
+        return result;
+    }
+
+    /// Generate SQL expression for this operation
+    string toSqlExpr(string leftSql, string rightSql) const {
+        return "(" ~ leftSql ~ " " ~ toSqlOp(op) ~ " " ~ rightSql ~ ")";
+    }
+
+    @property Expr!L left() { return _left; }
+    @property Expr!R right() { return _right; }
+    @property string operator() { return op; }
 }
 
 // ============================================================================
@@ -564,4 +691,53 @@ unittest {
     auto result = mapExpr.eval(ctx, [queryRoot]);
     assert(result.length == 1);  // One result per parent
     assert(result[0] == ["Test:1", "Test:2"]);  // Array of node IDs
+}
+
+unittest {
+    // Test string concatenation operator
+    auto first = constant("Hello");
+    auto second = constant("World");
+
+    // expr ~ expr
+    auto combined = first ~ " " ~ second;
+
+    auto ctx = new EvalContext();
+    auto refs = [Ref("Test:1"), Ref("Test:2")];
+    auto result = combined.eval(ctx, refs);
+    assert(result == ["Hello World", "Hello World"]);
+}
+
+unittest {
+    // Test arithmetic operators
+    auto a = constant(10);
+    auto b = constant(3);
+
+    auto ctx = new EvalContext();
+    auto refs = [Ref("Test:1")];
+
+    assert((a + b).eval(ctx, refs) == [13]);
+    assert((a - b).eval(ctx, refs) == [7]);
+    assert((a * b).eval(ctx, refs) == [30]);
+    assert((a / b).eval(ctx, refs) == [3]);
+
+    // With literals
+    assert((a + 5).eval(ctx, refs) == [15]);
+    assert((5 + a).eval(ctx, refs) == [15]);
+}
+
+unittest {
+    // Test comparison operators
+    auto a = constant(10);
+    auto b = constant(3);
+
+    auto ctx = new EvalContext();
+    auto refs = [Ref("Test:1")];
+
+    assert(a.eq(10).eval(ctx, refs) == [true]);
+    assert(a.eq(5).eval(ctx, refs) == [false]);
+    assert(a.ne(5).eval(ctx, refs) == [true]);
+    assert(a.lt(b).eval(ctx, refs) == [false]);
+    assert(a.gt(b).eval(ctx, refs) == [true]);
+    assert(a.le(10).eval(ctx, refs) == [true]);
+    assert(a.ge(10).eval(ctx, refs) == [true]);
 }

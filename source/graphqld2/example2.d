@@ -21,13 +21,8 @@ struct User {
     mixin Col!("email", string);
     mixin HasMany!("posts", Post, "author_id");
 
-    static auto fullName(Expr!Ref u) {
-        return use(
-            (string first, string last) => first ~ " " ~ last,
-            firstName(u),
-            lastName(u)
-        );
-    }
+    /// Computed field using operator overloading
+    static auto fullName(Expr!Ref u) => firstName(u) ~ " " ~ lastName(u);
 }
 
 /// Post entity - belongs to a User (author) and has many Comments

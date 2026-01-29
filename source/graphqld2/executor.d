@@ -176,13 +176,8 @@ unittest {
         mixin Col!("firstName", string);
         mixin Col!("lastName", string);
 
-        static auto fullName(Expr!Ref u) {
-            return use(
-                (string first, string last) => first ~ " " ~ last,
-                firstName(u),
-                lastName(u)
-            );
-        }
+        /// Computed field using operator overloading
+        static auto fullName(Expr!Ref u) => firstName(u) ~ " " ~ lastName(u);
     }
 
     // Create mock fetcher with test data
