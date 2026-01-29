@@ -6,6 +6,39 @@ import std.conv;
 import std.string : indexOf;
 
 // ============================================================================
+// Source Context Registry Mixin
+// ============================================================================
+
+/// Mixin that provides a registry for source-specific contexts.
+/// Used by OptimizeContext and EvalContext to allow data sources
+/// to register their own context types (e.g., RelationalOptimizeContext).
+mixin template SourceContextRegistry() {
+    private struct SourceKey {
+        TypeInfo type;
+        string sourceId;
+    }
+
+    private Object[SourceKey] _sourceContexts;
+
+    /// Get or create a source-specific context.
+    /// Each data source type has its own context.
+    T getSourceContext(T)(string sourceId = "default") {
+        auto key = SourceKey(typeid(T), sourceId);
+        if (auto ctx = key in _sourceContexts) {
+            return cast(T) *ctx;
+        }
+        auto ctx = new T();
+        _sourceContexts[key] = ctx;
+        return ctx;
+    }
+
+    /// Get all source contexts (for iteration)
+    Object[SourceKey] allSourceContexts() {
+        return _sourceContexts;
+    }
+}
+
+// ============================================================================
 // Core Reference Type
 // ============================================================================
 
@@ -57,19 +90,6 @@ struct Ref {
 /// The query root reference (singleton)
 /// Used as the starting point for all queries
 enum Ref queryRoot = Ref("Query:");
-
-// ============================================================================
-// Filter Types (for root queries)
-// ============================================================================
-
-/// Filter type for root queries.
-/// Used to configure how root data is fetched.
-enum FilterType {
-    none,    // Not a root (child of another node)
-    all,     // Fetch all entities
-    byId,    // Fetch single entity by ID
-    byIds,   // Fetch multiple entities by IDs
-}
 
 // ============================================================================
 // Node ID Encoding/Decoding Utilities

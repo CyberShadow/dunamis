@@ -222,18 +222,26 @@ interface RootExprInfo {
 
     /// Entity table name for the root query
     string entityTable();
+
+    /// The data fetcher for this root (may be null for legacy usage)
+    DataFetcher dataFetcher();
 }
 
 /// Root expression that returns specific entities by their IDs
 class GetByIdsExpr(Entity) : Expr!(Ref[]), RootExprInfo {
-    private Ref[] _refs;
+    import graphqld2.core.optimize : ExprOptimizer;
 
-    this(long[] ids) {
+    private Ref[] _refs;
+    private DataFetcher _fetcher;
+
+    this(long[] ids, DataFetcher fetcher = null) {
         _refs = ids.map!(id => makeRef(Entity._typeName, id)).array;
+        _fetcher = fetcher;
     }
 
-    this(Ref[] refs) {
+    this(Ref[] refs, DataFetcher fetcher = null) {
         _refs = refs;
+        _fetcher = fetcher;
     }
 
     override ExprBase[] dependencies() {
@@ -244,7 +252,21 @@ class GetByIdsExpr(Entity) : Expr!(Ref[]), RootExprInfo {
         // No dependencies to replace
     }
 
+    override ExprOptimizer[] requestedOptimizers() {
+        if (_fetcher !is null) {
+            return _fetcher.requestedOptimizers();
+        }
+        return [];
+    }
+
     override Ref[][] eval(EvalContext ctx) {
+        // Set up RelationalEvalContext with fetcher if we have one
+        if (_fetcher !is null) {
+            auto relCtx = ctx.getSourceContext!RelationalEvalContext(Entity._sourceId);
+            if (relCtx.fetcher is null) {
+                relCtx.fetcher = _fetcher;
+            }
+        }
         // At root level, there's always exactly 1 parent (queryRoot)
         return [_refs];
     }
@@ -256,6 +278,7 @@ class GetByIdsExpr(Entity) : Expr!(Ref[]), RootExprInfo {
     Ref[] filterRefs() { return _refs; }
     string entityTypeName() { return Entity._typeName; }
     string entityTable() { return Entity._table; }
+    DataFetcher dataFetcher() { return _fetcher; }
 }
 
 /// Factory function to create GetByIdsExpr
@@ -263,8 +286,21 @@ auto getByIds(Entity)(long[] ids) {
     return new GetByIdsExpr!Entity(ids);
 }
 
+/// Factory function to create GetByIdsExpr with a data fetcher
+auto getByIds(Entity)(long[] ids, DataFetcher fetcher) {
+    return new GetByIdsExpr!Entity(ids, fetcher);
+}
+
 /// Root expression that fetches all entities of a type
 class GetAllExpr(Entity) : Expr!(Ref[]), RootExprInfo {
+    import graphqld2.core.optimize : ExprOptimizer;
+
+    private DataFetcher _fetcher;
+
+    this(DataFetcher fetcher = null) {
+        _fetcher = fetcher;
+    }
+
     override ExprBase[] dependencies() {
         return [];  // Root node
     }
@@ -273,7 +309,22 @@ class GetAllExpr(Entity) : Expr!(Ref[]), RootExprInfo {
         // No dependencies to replace
     }
 
+    override ExprOptimizer[] requestedOptimizers() {
+        if (_fetcher !is null) {
+            return _fetcher.requestedOptimizers();
+        }
+        return [];
+    }
+
     override Ref[][] eval(EvalContext ctx) {
+        // Set up RelationalEvalContext with fetcher if we have one
+        if (_fetcher !is null) {
+            auto relCtx = ctx.getSourceContext!RelationalEvalContext(Entity._sourceId);
+            if (relCtx.fetcher is null) {
+                relCtx.fetcher = _fetcher;
+            }
+        }
+
         // Fetch all IDs from data source, encode as refs
         auto relCtx = ctx.getSourceContext!RelationalEvalContext(Entity._sourceId);
         auto ids = relCtx.fetchAllIds(Entity._table);
@@ -287,11 +338,17 @@ class GetAllExpr(Entity) : Expr!(Ref[]), RootExprInfo {
     Ref[] filterRefs() { return []; }
     string entityTypeName() { return Entity._typeName; }
     string entityTable() { return Entity._table; }
+    DataFetcher dataFetcher() { return _fetcher; }
 }
 
 /// Factory function to create GetAllExpr
 auto getAll(Entity)() {
     return new GetAllExpr!Entity();
+}
+
+/// Factory function to create GetAllExpr with a data fetcher
+auto getAll(Entity)(DataFetcher fetcher) {
+    return new GetAllExpr!Entity(fetcher);
 }
 
 // ============================================================================
@@ -367,10 +424,13 @@ class ColumnAccessExpr(T, Entity) : Expr!T {
             }
         }
 
+        // Get the PrefetchExpr for this node
+        auto prefetch = relCtx.getPrefetchExpr(node);
+
         if (joinPath.length == 0) {
             // Direct column access - return projection expression
             node.addColumn(_column);
-            return new ProjectColumnExpr!T(node.id, _column, cast(Expr!Ref) _input);
+            return new ProjectColumnExpr!T(node.id, _column, cast(Expr!Ref) _input, prefetch);
         }
 
         // Access through belongsTo chain - add JOINs
@@ -389,7 +449,7 @@ class ColumnAccessExpr(T, Entity) : Expr!T {
         // Return projection that reads from the final joined table
         // Use baseInput (the expression that produces refs for the base table)
         // not _input (which may be a belongsTo that produces refs for a different table)
-        return new ProjectJoinedColumnExpr!T(node.id, lastAlias, _column, baseInput);
+        return new ProjectJoinedColumnExpr!T(node.id, lastAlias, _column, baseInput, prefetch);
     }
 
     override T[] eval(EvalContext ctx) {

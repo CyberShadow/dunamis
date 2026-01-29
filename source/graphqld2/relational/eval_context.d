@@ -6,17 +6,44 @@ import std.conv;
 import std.json;
 
 import graphqld2.core.types;
+import graphqld2.relational.query_node;
 
 // ============================================================================
 // Data Fetcher Base Class
 // ============================================================================
 
 /// Base class for fetching data from a relational data source.
-/// Implementations handle node ID encoding/decoding internally.
 ///
-/// Note: Template methods can't be virtual in D, so fetchColumn uses
-/// fetchColumnString/fetchColumnLong internally. Subclasses override these.
+/// The main method is executeQueryNode(), which executes a QueryNode as a
+/// single query and returns all results. SqlDataFetcher generates and executes
+/// SQL; MockDataFetcher filters in-memory data.
+///
+/// The individual fetch methods (fetchColumn, fetchChildren, etc.) are used
+/// by the naive (unoptimized) evaluation path and internally by MockDataFetcher.
 abstract class DataFetcher {
+    import graphqld2.core.optimize : ExprOptimizer;
+
+    /// Get the optimizers this data source needs.
+    /// Default: no additional optimizers.
+    /// SQL-backed fetchers would override to return [new SqlOptimizer()].
+    ExprOptimizer[] requestedOptimizers() {
+        return [];
+    }
+
+    /// Execute a QueryNode as a single query and return all results.
+    /// This is the main entry point for the optimized path.
+    ///
+    /// For root nodes, parentResult is null.
+    /// For child nodes, parentResult contains the parent's data (for FK lookups).
+    ///
+    /// SqlDataFetcher: generates SQL from QueryNode, executes, parses results.
+    /// MockDataFetcher: filters in-memory data based on QueryNode criteria.
+    abstract QueryResult executeQueryNode(QueryNode node, QueryResult parentResult);
+
+    // =========================================================================
+    // Individual fetch methods (for naive path and MockDataFetcher internals)
+    // =========================================================================
+
     /// Fetch column values for refs (template dispatcher)
     final T[] fetchColumn(T)(string table, string column, Ref[] refs) {
         static if (is(T == string)) {
@@ -56,13 +83,15 @@ abstract class DataFetcher {
     abstract Ref[] fetchBelongsTo(string childTable, string fk, string parentType, Ref[] childRefs);
 
     /// Fetch a column as JSONValue array (type-erased).
-    /// Used by executor for optimized path where column types aren't known at compile time.
     abstract JSONValue[] fetchColumnJson(string table, string column, Ref[] refs);
 }
 
 // ============================================================================
 // Query Result (for optimized path)
 // ============================================================================
+
+// TODO: Rename to better indicate this holds aggregated query results
+// (e.g., BatchResult, AggregatedResult)
 
 /// Results from executing a QueryNode.
 /// Column-oriented storage for efficient per-column access.
@@ -319,6 +348,78 @@ class MockDataFetcher : DataFetcher {
         _tableData[table] = parseJSON(jsonStr);
     }
 
+    /// Execute a QueryNode by filtering in-memory data
+    override QueryResult executeQueryNode(QueryNode node, QueryResult parentResult) {
+        auto result = new QueryResult();
+        Ref[] refs;
+
+        // Step 1: Determine refs based on root filter or parent relationship
+        if (node.isRoot) {
+            final switch (node.rootFilter) {
+                case FilterType.none:
+                    break;
+                case FilterType.all:
+                    auto ids = fetchAllIds(node.table);
+                    refs = ids.map!(id => makeRef(node.typeName, id)).array;
+                    result.initialize(node.typeName, refs);
+                    break;
+                case FilterType.byId:
+                case FilterType.byIds:
+                    refs = node.rootFilterRefs.dup;
+                    result.initialize(node.typeName, refs);
+                    break;
+            }
+        } else {
+            // Child node: get children via parent
+            if (parentResult !is null) {
+                auto parentRefs = parentResult.allRefs();
+                auto childGroups = fetchChildren(
+                    node.table, node.typeName, node.parentFk, parentRefs);
+
+                foreach (group; childGroups) {
+                    refs ~= group;
+                }
+
+                auto fkValues = fetchColumnJson(node.table, node.parentFk, refs);
+                result.initializeAsChild(node.typeName, refs, parentRefs, node.parentFk, fkValues);
+            }
+        }
+
+        // Step 2: Load all columns from base table
+        foreach (column; node.columns) {
+            auto values = fetchColumnJson(node.table, column, refs);
+            result.loadColumn(column, refs, values);
+        }
+
+        // Step 3: Load columns from JOINed tables
+        foreach (joinInfo; node.joins) {
+            auto joinAlias = joinInfo.alias_;
+            auto joinedCols = node.joinedColumns.get(joinAlias, null);
+            if (joinedCols is null) continue;
+
+            // Get FK values to determine joined refs
+            auto fkValues = fetchColumnJson(node.table, joinInfo.fk, refs);
+
+            Ref[] joinedRefs;
+            foreach (fkVal; fkValues) {
+                if (fkVal.type == JSONType.null_) {
+                    joinedRefs ~= Ref.init;
+                } else {
+                    long fkId = fkVal.type == JSONType.integer ? fkVal.integer : fkVal.str.to!long;
+                    joinedRefs ~= makeRef(joinInfo.targetType, fkId);
+                }
+            }
+
+            // Load each joined column
+            foreach (column; joinedCols) {
+                auto values = fetchColumnJson(joinInfo.targetTable, column, joinedRefs);
+                result.loadColumn(joinAlias ~ "." ~ column, refs, values);
+            }
+        }
+
+        return result;
+    }
+
     override string[] fetchColumnString(string table, string column, Ref[] refs) {
         return fetchColumnGeneric!string(table, column, refs);
     }
@@ -459,6 +560,75 @@ class MockDataFetcher : DataFetcher {
         } else {
             static assert(false, "Unsupported type: " ~ T.stringof);
         }
+    }
+}
+
+// ============================================================================
+// Debug SQL Fetcher - Prints SQL, Delegates to Mock
+// ============================================================================
+
+/// A DataFetcher wrapper that prints the SQL it would execute.
+/// Useful for debugging and understanding what queries are generated.
+/// Wraps another fetcher (typically MockDataFetcher) for actual data.
+///
+/// Call printSQL() after query execution to see the combined CTE query.
+class DebugSqlFetcher : DataFetcher {
+    import std.stdio : writeln;
+    import graphqld2.relational.sql_optimizer : toSQL;
+
+    private DataFetcher _delegate;
+    private QueryNode[] _executedNodes;
+
+    this(DataFetcher delegate_) {
+        _delegate = delegate_;
+    }
+
+    /// Get all executed nodes (for generating combined SQL)
+    @property QueryNode[] executedNodes() {
+        return _executedNodes;
+    }
+
+    /// Print the combined SQL for all executed nodes.
+    /// This shows what a real SQL executor would run as a single query.
+    void printSQL() {
+        if (_executedNodes.length > 0) {
+            writeln(toSQL(_executedNodes));
+        }
+    }
+
+    /// Reset collected nodes (call between queries)
+    void reset() {
+        _executedNodes = [];
+    }
+
+    override QueryResult executeQueryNode(QueryNode node, QueryResult parentResult) {
+        _executedNodes ~= node;
+        return _delegate.executeQueryNode(node, parentResult);
+    }
+
+    // Delegate all other methods to wrapped fetcher
+    override string[] fetchColumnString(string table, string column, Ref[] refs) {
+        return _delegate.fetchColumnString(table, column, refs);
+    }
+
+    override long[] fetchColumnLong(string table, string column, Ref[] refs) {
+        return _delegate.fetchColumnLong(table, column, refs);
+    }
+
+    override long[] fetchAllIds(string table) {
+        return _delegate.fetchAllIds(table);
+    }
+
+    override Ref[][] fetchChildren(string childTable, string childType, string fk, Ref[] parentRefs) {
+        return _delegate.fetchChildren(childTable, childType, fk, parentRefs);
+    }
+
+    override Ref[] fetchBelongsTo(string childTable, string fk, string parentType, Ref[] childRefs) {
+        return _delegate.fetchBelongsTo(childTable, fk, parentType, childRefs);
+    }
+
+    override JSONValue[] fetchColumnJson(string table, string column, Ref[] refs) {
+        return _delegate.fetchColumnJson(table, column, refs);
     }
 }
 

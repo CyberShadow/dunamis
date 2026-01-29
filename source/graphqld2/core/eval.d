@@ -6,12 +6,6 @@ import graphqld2.core.types;
 // Eval Context - Data Source Agnostic
 // ============================================================================
 
-/// Key for looking up source-specific contexts
-private struct SourceKey {
-    TypeInfo type;
-    string sourceId;
-}
-
 /// Top-level evaluation context that holds per-source contexts.
 /// Each data source (relational, REST, etc.) registers its own context type.
 ///
@@ -23,9 +17,7 @@ private struct SourceKey {
 ///   auto relCtx = evalCtx.getSourceContext!RelationalEvalContext();
 ///   auto values = relCtx.getColumnValues!string(nodeId, "name", refs);
 class EvalContext {
-    private {
-        Object[SourceKey] _sourceContexts;
-    }
+    mixin SourceContextRegistry;
 
     /// The refs currently being iterated over within a MapExpr.
     ///
@@ -37,23 +29,6 @@ class EvalContext {
     /// Other expressions should NOT use this for batch size - they should derive
     /// length from their inputs instead.
     Ref[] currentRefs;
-
-    /// Get or create a source-specific evaluation context.
-    /// Each data source type has its own context for storing fetched data.
-    T getSourceContext(T)(string sourceId = "default") {
-        auto key = SourceKey(typeid(T), sourceId);
-        if (auto ctx = key in _sourceContexts) {
-            return cast(T) *ctx;
-        }
-        auto ctx = new T();
-        _sourceContexts[key] = ctx;
-        return ctx;
-    }
-
-    /// Get all source contexts (for iteration)
-    Object[SourceKey] allSourceContexts() {
-        return _sourceContexts;
-    }
 }
 
 // ============================================================================

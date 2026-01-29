@@ -19,6 +19,8 @@ import graphqld2.core.optimize;
 /// Type-erased base class for all expressions.
 /// Enables external tree traversal and optimization as a separate step.
 abstract class ExprBase {
+    import graphqld2.core.optimize : ExprOptimizer;
+
     /// Get all child expressions (for tree traversal).
     /// Returns empty array for leaf expressions.
     abstract ExprBase[] dependencies();
@@ -33,6 +35,13 @@ abstract class ExprBase {
     /// Evaluate and return result length (type-erased).
     /// Used by ConstExpr to derive batch size from another expression.
     abstract size_t evalResultLength(EvalContext ctx);
+
+    /// Get optimizers this expression needs.
+    /// Override in expressions tied to specific data sources.
+    /// Executor walks the tree and collects these.
+    ExprOptimizer[] requestedOptimizers() {
+        return [];
+    }
 }
 
 /// Helper to evaluate an ExprBase with a known type.

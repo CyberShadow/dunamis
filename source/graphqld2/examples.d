@@ -1,4 +1,4 @@
-module graphqld2.example2;
+module graphqld2.examples;
 
 import std.algorithm;
 import std.array;
@@ -7,7 +7,6 @@ import std.json;
 
 import graphqld2.core;
 import graphqld2.relational;
-import graphqld2.executor;
 
 // ============================================================================
 // Domain Model - Demonstrates business logic with relationships
@@ -20,6 +19,7 @@ struct User {
     mixin Col!("lastName", string);
     mixin Col!("email", string);
     mixin HasMany!("posts", Post, "author_id");
+    mixin HasMany!("comments", Comment, "author_id");
 
     /// Computed field using operator overloading
     static auto fullName(Expr!Ref u) => firstName(u) ~ " " ~ lastName(u);
@@ -99,101 +99,104 @@ struct Comment {
 // Test with mock database
 // ============================================================================
 
-unittest {
-    // Create mock fetcher with sample data
-    auto fetcher = new MockDataFetcher();
+/// Helper to create a mock database with sample data.
+/// Returns a DebugSqlFetcher that prints SQL when run with -d=sql
+private DebugSqlFetcher createMockDB() {
+    auto mock = new MockDataFetcher();
 
-    fetcher.setTableData("posts", `[
+    mock.setTableData("users", `[
+        {"id": 1, "first_name": "Alice", "last_name": "Smith", "email": "alice@example.com"},
+        {"id": 2, "first_name": "Bob", "last_name": "Jones", "email": "bob@example.com"},
+        {"id": 3, "first_name": "Carol", "last_name": "White", "email": "carol@example.com"}
+    ]`);
+
+    mock.setTableData("posts", `[
         {"id": 1, "title": "Hello World", "body": "This is my first post!", "author_id": 1},
-        {"id": 2, "title": "D Programming", "body": "D is a great language for systems programming.", "author_id": 2}
+        {"id": 2, "title": "D Programming", "body": "D is a great language for systems programming.", "author_id": 2},
+        {"id": 3, "title": "GraphQL Tips", "body": "Here are some tips for GraphQL.", "author_id": 1}
     ]`);
 
-    fetcher.setTableData("users", `[
-        {"id": 1, "first_name": "Alice", "last_name": "Smith"},
-        {"id": 2, "first_name": "Bob", "last_name": "Jones"},
-        {"id": 3, "first_name": "Carol", "last_name": "White"}
-    ]`);
-
-    fetcher.setTableData("comments", `[
+    mock.setTableData("comments", `[
         {"id": 101, "post_id": 1, "body": "Great post!", "author_id": 2},
         {"id": 102, "post_id": 1, "body": "Thanks for sharing!", "author_id": 3},
         {"id": 103, "post_id": 2, "body": "I agree!", "author_id": 1}
     ]`);
 
-    auto executor = new Executor(fetcher);
+    return new DebugSqlFetcher(mock);
+}
 
-    // Test simple field
-    {
-        auto query = map!(
-            (Expr!Ref p) => Post.title(p)
-        )(getByIds!Post([1, 2]));
+unittest {
+    import std.stdio : writeln;
 
-        auto titles = executor.execute(query);
-        assert(titles == ["Hello World", "D Programming"]);
+    auto db = createMockDB();
+    auto executor = new Executor();
+
+    auto query = map!(
+        (Expr!Ref p) => Post.title(p)
+    )(getByIds!Post([1, 2], db));
+
+    auto titles = executor.execute(query);
+    assert(titles == ["Hello World", "D Programming"]);
+
+    debug(sql) {
+        writeln("\n=== Test: Simple field (Post.title) ===");
+        db.printSQL();
     }
+}
 
-    // Test computed field with belongsTo
-    {
-        auto query = map!(
-            (Expr!Ref p) => Post.summary(p)
-        )(getByIds!Post([1, 2]));
+unittest {
+    import std.stdio : writeln;
 
-        auto summaries = executor.execute(query);
-        assert(summaries[0].canFind("Hello World"));
-        assert(summaries[0].canFind("Alice Smith"));
-        assert(summaries[1].canFind("D Programming"));
-        assert(summaries[1].canFind("Bob Jones"));
+    auto db = createMockDB();
+    auto executor = new Executor();
+
+    auto query = map!(
+        (Expr!Ref p) => Post.summary(p)
+    )(getByIds!Post([1, 2], db));
+
+    auto summaries = executor.execute(query);
+    assert(summaries[0].canFind("Hello World"));
+    assert(summaries[0].canFind("Alice Smith"));
+    assert(summaries[1].canFind("D Programming"));
+    assert(summaries[1].canFind("Bob Jones"));
+
+    debug(sql) {
+        writeln("\n=== Test: Computed field with belongsTo (Post.summary) ===");
+        db.printSQL();
     }
 }
 
 // Test Post.html - full 4-layer query with nested relationships
 unittest {
-    auto fetcher = new MockDataFetcher();
+    import std.stdio : writeln;
 
-    fetcher.setTableData("posts", `[
-        {"id": 1, "title": "Hello World", "body": "First post", "author_id": 1}
-    ]`);
-
-    fetcher.setTableData("users", `[
-        {"id": 1, "first_name": "Alice", "last_name": "Smith"},
-        {"id": 2, "first_name": "Bob", "last_name": "Jones"}
-    ]`);
-
-    fetcher.setTableData("comments", `[
-        {"id": 101, "post_id": 1, "body": "Great!", "author_id": 2}
-    ]`);
-
-    auto executor = new Executor(fetcher);
+    auto db = createMockDB();
+    auto executor = new Executor();
 
     auto query = map!(
         (Expr!Ref p) => Post.html(p)
-    )(getByIds!Post([1]));
+    )(getByIds!Post([1], db));
 
     auto htmls = executor.execute(query);
 
     assert(htmls.length == 1);
     assert(htmls[0].canFind("Hello World"));
     assert(htmls[0].canFind("Alice Smith"));
-    assert(htmls[0].canFind("Great!"));
+    assert(htmls[0].canFind("Great post!"));
     assert(htmls[0].canFind("Bob Jones"));
+
+    debug(sql) {
+        writeln("\n=== Test: Full 4-layer query (Post.html with comments) ===");
+        db.printSQL();
+    }
 }
 
 // Test nested map with hasMany
 unittest {
-    auto fetcher = new MockDataFetcher();
+    import std.stdio : writeln;
 
-    fetcher.setTableData("users", `[
-        {"id": 1, "first_name": "Alice", "last_name": "Smith"},
-        {"id": 2, "first_name": "Bob", "last_name": "Jones"}
-    ]`);
-
-    fetcher.setTableData("posts", `[
-        {"id": 1, "author_id": 1, "title": "Post 1"},
-        {"id": 2, "author_id": 1, "title": "Post 2"},
-        {"id": 3, "author_id": 2, "title": "Post 3"}
-    ]`);
-
-    auto executor = new Executor(fetcher);
+    auto db = createMockDB();
+    auto executor = new Executor();
 
     // Query: { users { firstName, posts { title } } }
     auto query = map!(
@@ -205,31 +208,75 @@ unittest {
                 )
             )(User.posts(user))
         )
-    )(getByIds!User([1, 2]));
+    )(getByIds!User([1, 2], db));
 
     auto result = executor.execute(query);
 
     assert(result.length == 2);
 
-    // Alice has 2 posts
+    // Alice has 2 posts (Hello World and GraphQL Tips)
     assert(result[0]["firstName"].str == "Alice");
     assert(result[0]["posts"].array.length == 2);
 
     // Bob has 1 post
     assert(result[1]["firstName"].str == "Bob");
     assert(result[1]["posts"].array.length == 1);
+
+    debug(sql) {
+        writeln("\n=== Test: Nested hasMany (users -> posts) ===");
+        db.printSQL();
+    }
+}
+
+// Test forking hasMany - user has both posts and comments
+unittest {
+    import std.stdio : writeln;
+
+    auto db = createMockDB();
+    auto executor = new Executor();
+
+    // Query: { users { firstName, posts { title }, comments { body } } }
+    auto query = map!(
+        (Expr!Ref user) => jsonObject(
+            "firstName", User.firstName(user),
+            "posts", map!(
+                (Expr!Ref post) => jsonObject(
+                    "title", Post.title(post)
+                )
+            )(User.posts(user)),
+            "comments", map!(
+                (Expr!Ref comment) => jsonObject(
+                    "body", Comment.body_(comment)
+                )
+            )(User.comments(user))
+        )
+    )(getByIds!User([1, 2], db));
+
+    auto result = executor.execute(query);
+
+    assert(result.length == 2);
+
+    // Alice: 2 posts, 1 comment (on post 2)
+    assert(result[0]["firstName"].str == "Alice");
+    assert(result[0]["posts"].array.length == 2);
+    assert(result[0]["comments"].array.length == 1);
+
+    // Bob: 1 post, 1 comment (on post 1)
+    assert(result[1]["firstName"].str == "Bob");
+    assert(result[1]["posts"].array.length == 1);
+    assert(result[1]["comments"].array.length == 1);
+
+    debug(sql) {
+        writeln("\n=== Test: Forking hasMany (users -> posts, users -> comments) ===");
+        db.printSQL();
+    }
 }
 
 // Test SQL push-down for computed fullName field
 unittest {
     import std.stdio : writeln;
 
-    auto fetcher = new MockDataFetcher();
-
-    fetcher.setTableData("users", `[
-        {"id": 1, "first_name": "Alice", "last_name": "Smith"},
-        {"id": 2, "first_name": "Bob", "last_name": "Jones"}
-    ]`);
+    debug(sql) writeln("\n=== Test: SQL push-down for computed fullName ===");
 
     // Query: { users { fullName } }
     // fullName = firstName ~ " " ~ lastName
@@ -250,9 +297,7 @@ unittest {
 
     // Show the full SQL query with computed columns
     debug(sql) {
-        writeln("\n=== SQL Push-Down for fullName ===");
         writeln(toSQL(relCtx.nodesInOrder(), sqlOpt));
-        writeln("=== Push-down complete ===\n");
     }
 
     // Verify computed column was created

@@ -4,7 +4,20 @@ import std.algorithm;
 import std.array;
 import std.conv;
 
-import graphqld2.core.types;
+import graphqld2.core.types : Ref;
+
+// ============================================================================
+// Filter Types (for root queries)
+// ============================================================================
+
+/// Filter type for root queries.
+/// Used to configure how root data is fetched.
+enum FilterType {
+    none,    // Not a root (child of another node)
+    all,     // Fetch all entities
+    byId,    // Fetch single entity by ID
+    byIds,   // Fetch multiple entities by IDs
+}
 
 // ============================================================================
 // Query Node - Represents a SQL query scope
@@ -12,6 +25,13 @@ import graphqld2.core.types;
 
 /// Represents a query scope (one per MapExpr).
 /// Accumulates columns to fetch and tracks relationships to other nodes.
+///
+/// QueryNodes form a forest (multiple trees). Each root node represents
+/// an independent query (e.g., getByIds!User, getAll!Post). Child nodes
+/// represent hasMany relationships and depend on their parent's results.
+///
+/// JOINs are used for belongsTo relationships within the same node,
+/// avoiding separate queries for 1:1 traversals.
 class QueryNode {
     /// Unique ID for this query node
     int id;
@@ -120,8 +140,6 @@ struct JoinInfo {
     string fk;            // Foreign key column in source table
     string alias_;        // SQL alias (e.g., "j0")
 }
-
-// FilterType is imported from graphqld2.core.types
 
 // ============================================================================
 // Tests

@@ -9,8 +9,8 @@ import std.typecons : Nullable;
 import graphqld2.core.types;
 import graphqld2.core.eval;
 import graphqld2.core.expr;
-import graphqld2.core.optimize;
-import graphqld2.relational.eval_context;
+import graphqld2.core.optimize : OptimizeContext, ExprOptimizer;
+import graphqld2.relational.eval_context : RelationalEvalContext;
 import graphqld2.relational.query_node;
 import graphqld2.relational.schema;
 import graphqld2.relational.project;
@@ -83,7 +83,10 @@ struct ComputedColumn {
 ///   2. Then run SqlOptimizer to find BinaryOpExprs over projections
 ///   3. SqlOptimizer replaces them with ProjectComputedExprs
 ///   4. Computed columns are added to QueryNode SQL generation
-class SqlOptimizer {
+///
+/// Data sources that support SQL computed columns should return an instance
+/// of this class from their requestedOptimizers() method.
+class SqlOptimizer : ExprOptimizer {
     /// Track computed columns per QueryNode ID
     private ComputedColumn[][int] _computedColumns;
 
@@ -92,7 +95,7 @@ class SqlOptimizer {
 
     /// Optimize an expression tree, applying SQL push-down where possible.
     /// This should be called AFTER the standard optimizer has run.
-    void optimize(ExprBase expr, OptimizeContext ctx) {
+    override void optimize(ExprBase expr, OptimizeContext ctx) {
         optimizeRecursive(expr, ctx);
     }
 
@@ -135,13 +138,22 @@ class SqlOptimizer {
             return null;
         }
 
-        // Extract the input from one of the projection expressions
+        // Extract the input and prefetch from one of the projection expressions
         auto input = extractInputFromExpr(binOp.left);
         if (input is null) {
             input = extractInputFromExpr(binOp.right);
         }
         if (input is null) {
             // Can't find input - shouldn't happen if we have valid projections
+            return null;
+        }
+
+        auto prefetch = extractPrefetchFromExpr(binOp.left);
+        if (prefetch is null) {
+            prefetch = extractPrefetchFromExpr(binOp.right);
+        }
+        if (prefetch is null) {
+            // Can't find prefetch - shouldn't happen if we have valid projections
             return null;
         }
 
@@ -159,7 +171,7 @@ class SqlOptimizer {
         _computedColumns[queryNodeId] ~= ComputedColumn(alias_, sqlExpr, expr.resultType);
 
         // Create and return projection for computed column
-        return createProjectComputedExpr(queryNodeId, alias_, expr.resultType, input);
+        return createProjectComputedExpr(queryNodeId, alias_, expr.resultType, input, prefetch);
     }
 
     /// Extract the input expression from a projection or binary op
@@ -176,6 +188,24 @@ class SqlOptimizer {
             auto left = extractInputFromExpr(binOp.left);
             if (left !is null) return left;
             return extractInputFromExpr(binOp.right);
+        }
+        return null;
+    }
+
+    /// Extract the PrefetchExpr from a projection or binary op
+    private PrefetchExpr extractPrefetchFromExpr(ExprBase expr) {
+        // Check dependencies - projection expressions have prefetch as second dependency
+        auto deps = expr.dependencies();
+        if (deps.length > 1) {
+            if (auto prefetch = cast(PrefetchExpr) deps[1]) {
+                return prefetch;
+            }
+        }
+        // Recurse into binary ops
+        if (auto binOp = cast(BinaryOpInfo) expr) {
+            auto left = extractPrefetchFromExpr(binOp.left);
+            if (left !is null) return left;
+            return extractPrefetchFromExpr(binOp.right);
         }
         return null;
     }
@@ -227,25 +257,25 @@ class SqlOptimizer {
     /// Create a ProjectComputedExpr for the given result type.
     /// Since we need to create a typed expression but only have TypeInfo at runtime,
     /// we use a factory approach with common types.
-    private ExprBase createProjectComputedExpr(int queryNodeId, string alias_, TypeInfo type, Expr!Ref input) {
+    private ExprBase createProjectComputedExpr(int queryNodeId, string alias_, TypeInfo type, Expr!Ref input, PrefetchExpr prefetch) {
         // Handle common types
         if (type == typeid(string)) {
-            return new ProjectComputedExpr!string(queryNodeId, alias_, input);
+            return new ProjectComputedExpr!string(queryNodeId, alias_, input, prefetch);
         }
         if (type == typeid(int)) {
-            return new ProjectComputedExpr!int(queryNodeId, alias_, input);
+            return new ProjectComputedExpr!int(queryNodeId, alias_, input, prefetch);
         }
         if (type == typeid(long)) {
-            return new ProjectComputedExpr!long(queryNodeId, alias_, input);
+            return new ProjectComputedExpr!long(queryNodeId, alias_, input, prefetch);
         }
         if (type == typeid(float)) {
-            return new ProjectComputedExpr!float(queryNodeId, alias_, input);
+            return new ProjectComputedExpr!float(queryNodeId, alias_, input, prefetch);
         }
         if (type == typeid(double)) {
-            return new ProjectComputedExpr!double(queryNodeId, alias_, input);
+            return new ProjectComputedExpr!double(queryNodeId, alias_, input, prefetch);
         }
         if (type == typeid(bool)) {
-            return new ProjectComputedExpr!bool(queryNodeId, alias_, input);
+            return new ProjectComputedExpr!bool(queryNodeId, alias_, input, prefetch);
         }
 
         // Unsupported type - return null (caller should keep original expression)
@@ -277,24 +307,31 @@ class SqlOptimizer {
 class ProjectComputedExpr(T) : Expr!T {
     private int _queryNodeId;
     private string _alias;
-    private ExprBase _input;  // The input chain (for deriving refs)
+    private ExprBase _input;     // The input chain (for deriving refs)
+    private ExprBase _prefetch;  // PrefetchExpr - ensures data is loaded
 
-    this(int queryNodeId, string alias_, Expr!Ref input) {
+    this(int queryNodeId, string alias_, Expr!Ref input, PrefetchExpr prefetch) {
         _queryNodeId = queryNodeId;
         _alias = alias_;
         _input = input;
+        _prefetch = prefetch;
     }
 
     override ExprBase[] dependencies() {
-        return [_input];
+        return [_input, _prefetch];
     }
 
     override void replaceDependency(size_t index, ExprBase newDep) {
         if (index == 0)
             _input = newDep;
+        else if (index == 1)
+            _prefetch = newDep;
     }
 
     override T[] eval(EvalContext ctx) {
+        // Ensure data is prefetched
+        evalAs!(Ref[])(_prefetch, ctx);
+
         // Derive refs from input chain
         Ref[] refs = evalAs!Ref(_input, ctx);
         // Read computed column from pre-fetched data via relational context
@@ -442,12 +479,16 @@ unittest {
     // Test computed column detection
     // Create a mock expression tree: ProjectColumn + " " + ProjectColumn
 
+    // Create mock QueryNode and PrefetchExpr
+    auto node = new QueryNode(0, "User", "users");
+    auto prefetch = new PrefetchExpr(node);
+
     // Create a mock input (EveryItemOfExpr)
     auto item = new EveryItemOfExpr();
 
-    // First, set up mock projections with input
-    auto proj1 = new ProjectColumnExpr!string(0, "first_name", item);
-    auto proj2 = new ProjectColumnExpr!string(0, "last_name", item);
+    // First, set up mock projections with input and prefetch
+    auto proj1 = new ProjectColumnExpr!string(0, "first_name", item, prefetch);
+    auto proj2 = new ProjectColumnExpr!string(0, "last_name", item, prefetch);
 
     // Create binary op: proj1 ~ " " ~ proj2
     auto space = constant(" ", proj1);  // Derive length from proj1
@@ -470,9 +511,11 @@ unittest {
 
 unittest {
     // Test ProjectComputedExpr
+    auto node = new QueryNode(0, "User", "users");
+    auto prefetch = new PrefetchExpr(node);
     auto item = new EveryItemOfExpr();
-    auto proj = new ProjectComputedExpr!string(0, "computed_0", item);
+    auto proj = new ProjectComputedExpr!string(0, "computed_0", item, prefetch);
     assert(proj.queryNodeId == 0);
     assert(proj.columnAlias == "computed_0");
-    assert(proj.dependencies().length == 1);  // Now has input as dependency
+    assert(proj.dependencies().length == 2);  // input and prefetch
 }

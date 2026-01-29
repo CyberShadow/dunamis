@@ -1,13 +1,18 @@
 module graphqld2.core.optimize;
 
+import graphqld2.core.expr : ExprBase;
+import graphqld2.core.types : SourceContextRegistry;
+
 // ============================================================================
 // Optimize Context - Data Source Agnostic
 // ============================================================================
 
-/// Key for looking up source-specific contexts
-private struct SourceKey {
-    TypeInfo type;
-    string sourceId;
+/// Interface for optimizers that run after standard optimization.
+/// Implementations transform the expression tree for their specific data source.
+/// Data fetchers declare which optimizers they need via requestedOptimizers().
+interface ExprOptimizer {
+    /// Run this optimizer on the expression tree.
+    void optimize(ExprBase expr, OptimizeContext ctx);
 }
 
 /// Top-level optimization context that holds per-source contexts.
@@ -17,26 +22,7 @@ private struct SourceKey {
 ///   auto relCtx = optCtx.getSourceContext!RelationalOptimizeContext();
 ///   auto node = relCtx.getOrCreateNode(mapExpr, typeName, table);
 class OptimizeContext {
-    private {
-        Object[SourceKey] _sourceContexts;
-    }
-
-    /// Get or create a source-specific optimization context.
-    /// Each data source type has its own context for tracking optimization state.
-    T getSourceContext(T)(string sourceId = "default") {
-        auto key = SourceKey(typeid(T), sourceId);
-        if (auto ctx = key in _sourceContexts) {
-            return cast(T) *ctx;
-        }
-        auto ctx = new T();
-        _sourceContexts[key] = ctx;
-        return ctx;
-    }
-
-    /// Get all source contexts (for iteration after optimization)
-    Object[SourceKey] allSourceContexts() {
-        return _sourceContexts;
-    }
+    mixin SourceContextRegistry;
 }
 
 // ============================================================================
