@@ -7,7 +7,25 @@ import graphqld2.core.types;
 import graphqld2.core.eval;
 import graphqld2.core.expr;
 import graphqld2.core.optimize;
+import graphqld2.relational.eval_context;
 import graphqld2.relational.schema : IdentityExpr;
+
+// ============================================================================
+// Interfaces for Optimizer Pattern Matching
+// ============================================================================
+
+/// Interface for ProjectColumnExpr pattern matching by external optimizers
+interface ProjectColumnInfo {
+    @property int queryNodeId();
+    @property string column();
+}
+
+/// Interface for ProjectJoinedColumnExpr pattern matching by external optimizers
+interface ProjectJoinedColumnInfo {
+    @property int queryNodeId();
+    @property string joinAlias();
+    @property string column();
+}
 
 // ============================================================================
 // Projection Expressions
@@ -15,7 +33,7 @@ import graphqld2.relational.schema : IdentityExpr;
 
 /// Reads a column from pre-fetched QueryResults.
 /// Created by optimizer when transforming ColumnAccessExpr.
-class ProjectColumnExpr(T) : Expr!T {
+class ProjectColumnExpr(T) : Expr!T, ProjectColumnInfo {
     private {
         int _queryNodeId;
         string _column;
@@ -26,9 +44,18 @@ class ProjectColumnExpr(T) : Expr!T {
         _column = column;
     }
 
+    override ExprBase[] dependencies() {
+        return [];  // Reads from QueryResult, no expression dependencies
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        // No dependencies
+    }
+
     override T[] eval(EvalContext ctx, Ref[] refs) {
-        // Read from pre-fetched data
-        return ctx.getColumnValues!T(_queryNodeId, _column, refs);
+        // Read from pre-fetched data via relational context
+        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+        return relCtx.getColumnValues!T(_queryNodeId, _column, refs);
     }
 
     @property int queryNodeId() { return _queryNodeId; }
@@ -37,7 +64,7 @@ class ProjectColumnExpr(T) : Expr!T {
 
 /// Reads a column from a JOINed table in pre-fetched QueryResults.
 /// Created by optimizer for belongsTo chain access.
-class ProjectJoinedColumnExpr(T) : Expr!T {
+class ProjectJoinedColumnExpr(T) : Expr!T, ProjectJoinedColumnInfo {
     private {
         int _queryNodeId;
         string _joinAlias;
@@ -50,9 +77,18 @@ class ProjectJoinedColumnExpr(T) : Expr!T {
         _column = column;
     }
 
+    override ExprBase[] dependencies() {
+        return [];  // Reads from QueryResult, no expression dependencies
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        // No dependencies
+    }
+
     override T[] eval(EvalContext ctx, Ref[] refs) {
-        // Read from JOINed data
-        return ctx.getJoinedColumnValues!T(_queryNodeId, _joinAlias, _column, refs);
+        // Read from JOINed data via relational context
+        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+        return relCtx.getJoinedColumnValues!T(_queryNodeId, _joinAlias, _column, refs);
     }
 
     @property int queryNodeId() { return _queryNodeId; }
@@ -71,9 +107,18 @@ class ProjectRefsExpr : Expr!(Ref[]) {
         _queryNodeId = queryNodeId;
     }
 
+    override ExprBase[] dependencies() {
+        return [];  // Reads from QueryResult
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        // No dependencies
+    }
+
     override Ref[][] eval(EvalContext ctx, Ref[] parentRefs) {
-        // Get all refs from the pre-fetched QueryResult
-        auto result = ctx.getQueryResult(_queryNodeId);
+        // Get all refs from the pre-fetched QueryResult via relational context
+        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+        auto result = relCtx.getQueryResult(_queryNodeId);
         if (result is null) {
             return parentRefs.map!(_ => cast(Ref[])[]).array;
         }
@@ -90,7 +135,7 @@ class ProjectRefsExpr : Expr!(Ref[]) {
 class ProjectChildRefsExpr : Expr!(Ref[]) {
     private {
         int _queryNodeId;
-        Expr!Ref _parentInput;  // Expression that yields parent refs
+        ExprBase _parentInput;  // Expression that yields parent refs
     }
 
     this(int queryNodeId, Expr!Ref parentInput) {
@@ -98,12 +143,22 @@ class ProjectChildRefsExpr : Expr!(Ref[]) {
         _parentInput = parentInput;
     }
 
+    override ExprBase[] dependencies() {
+        return [_parentInput];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0)
+            _parentInput = newDep;
+    }
+
     override Ref[][] eval(EvalContext ctx, Ref[] refs) {
         // Get parent refs
-        Ref[] parentRefs = _parentInput.eval(ctx, refs);
+        Ref[] parentRefs = evalAs!Ref(_parentInput, ctx, refs);
 
-        // Get children grouped by parent from QueryResult
-        auto result = ctx.getQueryResult(_queryNodeId);
+        // Get children grouped by parent from QueryResult via relational context
+        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+        auto result = relCtx.getQueryResult(_queryNodeId);
         if (result is null) {
             return parentRefs.map!(_ => cast(Ref[])[]).array;
         }
@@ -128,9 +183,18 @@ class ProjectBelongsToExpr : Expr!Ref {
         _parentTypeName = parentTypeName;
     }
 
+    override ExprBase[] dependencies() {
+        return [];  // Reads from QueryResult
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        // No dependencies
+    }
+
     override Ref[] eval(EvalContext ctx, Ref[] refs) {
-        // Read FK values and encode as parent refs
-        auto fkValues = ctx.getColumnValues!long(_queryNodeId, _fkColumn, refs);
+        // Read FK values and encode as parent refs via relational context
+        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+        auto fkValues = relCtx.getColumnValues!long(_queryNodeId, _fkColumn, refs);
         return fkValues.map!(fk => fk == 0 ? Ref.init : makeRef(_parentTypeName, fk)).array;
     }
 
@@ -148,6 +212,7 @@ unittest {
 
     // Test ProjectColumnExpr
     auto ctx = new EvalContext();
+    auto relCtx = ctx.getSourceContext!RelationalEvalContext();
 
     // Set up mock QueryResult
     auto result = new QueryResult();
@@ -156,7 +221,7 @@ unittest {
         parseJSON(`{"id": 2, "first_name": "Bob"}`)
     ];
     result.loadFromRows(rows, "User");
-    ctx.storeQueryResult(0, result);
+    relCtx.storeQueryResult(0, result);
 
     // Create projection
     auto proj = new ProjectColumnExpr!string(0, "first_name");
@@ -172,6 +237,7 @@ unittest {
 
     // Test ProjectRefsExpr
     auto ctx = new EvalContext();
+    auto relCtx = ctx.getSourceContext!RelationalEvalContext();
 
     auto result = new QueryResult();
     auto rows = [
@@ -180,7 +246,7 @@ unittest {
         parseJSON(`{"id": 3}`)
     ];
     result.loadFromRows(rows, "User");
-    ctx.storeQueryResult(0, result);
+    relCtx.storeQueryResult(0, result);
 
     auto proj = new ProjectRefsExpr(0);
     auto refArrays = proj.eval(ctx, [queryRoot]);
@@ -194,6 +260,7 @@ unittest {
 
     // Test ProjectChildRefsExpr
     auto ctx = new EvalContext();
+    auto relCtx = ctx.getSourceContext!RelationalEvalContext();
 
     // Child result with FK grouping
     auto result = new QueryResult();
@@ -203,7 +270,7 @@ unittest {
         parseJSON(`{"id": 3, "author_id": 20}`)
     ];
     result.loadFromRows(rows, "Post", "id", "author_id", "User");
-    ctx.storeQueryResult(0, result);
+    relCtx.storeQueryResult(0, result);
 
     // Parent input that returns refs unchanged
     auto parentInput = new IdentityExpr();
@@ -224,6 +291,7 @@ unittest {
 
     // Test ProjectBelongsToExpr
     auto ctx = new EvalContext();
+    auto relCtx = ctx.getSourceContext!RelationalEvalContext();
 
     auto result = new QueryResult();
     auto rows = [
@@ -231,7 +299,7 @@ unittest {
         parseJSON(`{"id": 2, "author_id": 20}`)
     ];
     result.loadFromRows(rows, "Post");
-    ctx.storeQueryResult(0, result);
+    relCtx.storeQueryResult(0, result);
 
     auto proj = new ProjectBelongsToExpr(0, "author_id", "User");
     auto refs = [Ref("Post:1"), Ref("Post:2")];

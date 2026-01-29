@@ -13,17 +13,49 @@ import graphqld2.core.eval;
 import graphqld2.core.optimize;
 
 // ============================================================================
-// Core Expression Type
+// Type-Erased Base Class
 // ============================================================================
 
-/// Base class for all expressions in the declarative model.
+/// Type-erased base class for all expressions.
+/// Enables external tree traversal and optimization as a separate step.
+abstract class ExprBase {
+    /// Get all child expressions (for tree traversal).
+    /// Returns empty array for leaf expressions.
+    abstract ExprBase[] dependencies();
+
+    /// Replace a child expression at the given index.
+    /// Used by external optimizers to transform the tree.
+    abstract void replaceDependency(size_t index, ExprBase newDep);
+
+    /// Get the result type of this expression.
+    abstract TypeInfo resultType();
+}
+
+/// Helper to evaluate an ExprBase with a known type.
+/// Asserts if the runtime type doesn't match.
+T[] evalAs(T)(ExprBase expr, EvalContext ctx, Ref[] refs) {
+    auto typed = cast(Expr!T) expr;
+    assert(typed !is null, "Type mismatch in evalAs: expected " ~ T.stringof);
+    return typed.eval(ctx, refs);
+}
+
+// ============================================================================
+// Typed Expression Class
+// ============================================================================
+
+/// Typed expression base - adds typed evaluation to ExprBase.
+/// User-facing code works with Expr!T for compile-time type safety.
 ///
 /// Expressions are written with per-element semantics — as if operating on
 /// a single entity. Batching happens automatically during evaluation.
 ///
 /// Batch semantics: eval() always returns T[] — one result per input ref.
-abstract class Expr(T) {
+abstract class Expr(T) : ExprBase {
     alias ResultType = T;
+
+    override TypeInfo resultType() {
+        return typeid(T);
+    }
 
     /// Optimize this expression and its children.
     /// Returns: optimized expression (may be this or a replacement).
@@ -142,17 +174,50 @@ private template toArray(T) {
 // Constant Expression
 // ============================================================================
 
+/// Interface for constant expressions - allows optimizer to extract values
+/// without knowing the compile-time type.
+interface ConstantInfo {
+    /// Get the constant value type
+    TypeInfo valueType();
+
+    /// Get the value as a string representation (for SQL literals, debugging, etc.)
+    string valueAsString();
+}
+
 /// Expression that returns a constant value for all inputs
-class ConstExpr(T) : Expr!T {
+class ConstExpr(T) : Expr!T, ConstantInfo {
     private T _value;
 
     this(T value) {
         _value = value;
     }
 
+    override ExprBase[] dependencies() {
+        return [];  // Leaf node
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        // No dependencies to replace
+    }
+
     override T[] eval(EvalContext ctx, Ref[] refs) {
         // Return same value for each ref
         return std.algorithm.map!(_ => _value)(refs).array;
+    }
+
+    /// Get the constant value (for optimizer inspection)
+    @property T value() { return _value; }
+
+    // ConstantInfo implementation
+    override TypeInfo valueType() { return typeid(T); }
+
+    override string valueAsString() {
+        import std.conv : to;
+        static if (is(T == string)) {
+            return _value;
+        } else {
+            return _value.to!string;
+        }
     }
 }
 
@@ -164,9 +229,6 @@ auto constant(T)(T value) {
 // ============================================================================
 // Binary Operation Expression
 // ============================================================================
-
-// TODO: Move SQL-related code (toSqlOp, toSqlExpr) to relational/optimize.d
-//       when implementing SQL push-down for computed expressions.
 
 /// Maps D operators to SQL operators
 string toSqlOp(string op) {
@@ -181,30 +243,53 @@ string toSqlOp(string op) {
     }
 }
 
+/// Interface for binary operation expressions - allows optimizer to inspect and transform
+interface BinaryOpInfo {
+    /// The operator ("+", "~", "==", etc.)
+    string operator();
+
+    /// Left operand (type-erased)
+    ExprBase left();
+
+    /// Right operand (type-erased)
+    ExprBase right();
+}
+
 /// Expression representing a binary operation (arithmetic, concatenation, comparison).
 /// Supports mixed types (e.g., int + float -> float).
 /// Can be evaluated in D or pushed down to SQL.
-class BinaryOpExpr(L, string op, R = L) : Expr!(typeof(mixin("L.init " ~ op ~ " R.init"))) {
+class BinaryOpExpr(L, string op, R = L) : Expr!(typeof(mixin("L.init " ~ op ~ " R.init"))), BinaryOpInfo {
     alias ResultT = typeof(mixin("L.init " ~ op ~ " R.init"));
 
-    private Expr!L _left;
-    private Expr!R _right;
+    private ExprBase _left;
+    private ExprBase _right;
 
     this(Expr!L left, Expr!R right) {
         _left = left;
         _right = right;
     }
 
+    override ExprBase[] dependencies() {
+        return [_left, _right];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0)
+            _left = newDep;
+        else if (index == 1)
+            _right = newDep;
+    }
+
     override Expr!ResultT optimize(OptimizeContext ctx) {
-        _left = _left.optimize(ctx);
-        _right = _right.optimize(ctx);
+        _left = cast(ExprBase) (cast(Expr!L) _left).optimize(ctx);
+        _right = cast(ExprBase) (cast(Expr!R) _right).optimize(ctx);
         // Future: could return ProjectComputedExpr for SQL push-down
         return this;
     }
 
     override ResultT[] eval(EvalContext ctx, Ref[] refs) {
-        auto lefts = _left.eval(ctx, refs);
-        auto rights = _right.eval(ctx, refs);
+        auto lefts = evalAs!L(_left, ctx, refs);
+        auto rights = evalAs!R(_right, ctx, refs);
 
         ResultT[] result = new ResultT[refs.length];
         foreach (i; 0 .. refs.length) {
@@ -218,9 +303,10 @@ class BinaryOpExpr(L, string op, R = L) : Expr!(typeof(mixin("L.init " ~ op ~ " 
         return "(" ~ leftSql ~ " " ~ toSqlOp(op) ~ " " ~ rightSql ~ ")";
     }
 
-    @property Expr!L left() { return _left; }
-    @property Expr!R right() { return _right; }
-    @property string operator() { return op; }
+    // BinaryOpInfo implementation
+    override string operator() { return op; }
+    override ExprBase left() { return _left; }
+    override ExprBase right() { return _right; }
 }
 
 // ============================================================================
@@ -236,31 +322,39 @@ class UseExpr(Fn, Exprs...) : Expr!(ReturnType!Fn)
     alias InputTypes = staticMap!(ExprResultType, Exprs);
     alias EvaluatedArrays = Tuple!(staticMap!(toArray, InputTypes));
 
-    // Store as base Expr!T types to allow optimize() to return different concrete types
-    alias GeneralizedExprs = GeneralizeExprs!Exprs;
-    private Tuple!GeneralizedExprs _inputs;
+    // Store as ExprBase for type-erased traversal
+    private ExprBase[Exprs.length] _inputs;
     private Fn _fn;
 
     this(Exprs inputs, Fn fn) {
         static foreach (i; 0 .. Exprs.length) {
-            _inputs[i] = inputs[i];  // Implicit upcast to Expr!T
+            _inputs[i] = inputs[i];  // Implicit upcast to ExprBase
         }
         _fn = fn;
     }
 
+    override ExprBase[] dependencies() {
+        return _inputs[];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index < _inputs.length)
+            _inputs[index] = newDep;
+    }
+
     override Expr!R optimize(OptimizeContext ctx) {
-        // Optimize all children - no cast needed since slots are base Expr!T
+        // Optimize all children
         static foreach (i; 0 .. Exprs.length) {
-            _inputs[i] = _inputs[i].optimize(ctx);
+            _inputs[i] = (cast(Expr!(InputTypes[i])) _inputs[i]).optimize(ctx);
         }
         return this;
     }
 
     override R[] eval(EvalContext ctx, Ref[] refs) {
-        // Evaluate all inputs with same refs
+        // Evaluate all inputs with known types
         EvaluatedArrays evaluated;
         static foreach (i; 0 .. Exprs.length) {
-            evaluated[i] = _inputs[i].eval(ctx, refs);
+            evaluated[i] = evalAs!(InputTypes[i])(_inputs[i], ctx, refs);
         }
 
         // Apply function per-element
@@ -296,6 +390,14 @@ class EveryItemOfExpr : Expr!Ref {
     /// Back-reference to owning MapExpr (set at construction)
     Object _parentMap;  // Use Object to avoid template instantiation issues
 
+    override ExprBase[] dependencies() {
+        return [];  // Leaf node (back-reference to parent is not a dependency)
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        // No dependencies to replace
+    }
+
     override Ref[] eval(EvalContext ctx, Ref[] refs) {
         // Pass through the refs unchanged - these are the items being iterated
         return refs;
@@ -303,37 +405,12 @@ class EveryItemOfExpr : Expr!Ref {
 }
 
 /// Interface to query collection type from MapExpr without knowing the template params.
-/// Used by OptimizeContext to configure QueryNodes correctly.
+/// Used by data-source-specific optimizers to configure query nodes.
 interface MapExprInfo {
-    /// Get the collection expression
+    /// Get the collection expression (type-erased).
+    /// Optimizer can cast this to data-source-specific interfaces
+    /// (e.g., HasManyInfo, RootExprInfo) to extract metadata.
     Object collection();
-
-    /// Check if collection is a root expression with specific IDs
-    bool isRootByIds(out Ref[] refs);
-
-    /// Check if collection is a "get all" root expression
-    bool isRootAll(out string typeName, out string table);
-
-    /// Check if collection is a hasMany relationship.
-    /// If true, returns the parent's input expression (to find parent MapExpr),
-    /// the FK column, and child type name.
-    bool isHasMany(out Expr!Ref parentInput, out string fk, out string childTypeName);
-}
-
-/// Interface for hasMany expressions to expose their metadata.
-/// Implemented by HasManyAccessExpr in relational module.
-interface HasManyInfo {
-    /// The input expression (points to parent entity)
-    Expr!Ref inputExpr();
-
-    /// Foreign key column in child table
-    string fkColumn();
-
-    /// Child entity type name
-    string childTypeName();
-
-    /// Parent entity type name (for ref encoding)
-    string parentTypeName();
 }
 
 /// Iteration over a collection. This IS the layer boundary.
@@ -343,21 +420,31 @@ class MapExpr(Body) : Expr!(Body.ResultType[]), MapExprInfo
 {
     alias R = Body.ResultType;
 
-    Expr!(Ref[]) _collection;  // what we're iterating over
-    EveryItemOfExpr _item;     // mutable placeholder for "current item"
-    Expr!R _body;              // expression built using _item (stored as base type)
+    private ExprBase _collection;  // what we're iterating over (type-erased)
+    EveryItemOfExpr _item;         // mutable placeholder for "current item"
+    private ExprBase _body;        // expression built using _item (type-erased)
 
     this(Expr!(Ref[]) collection, EveryItemOfExpr item, Body body_) {
         _collection = collection;
         _item = item;
-        _body = body_;  // Implicit upcast to Expr!R
+        _body = body_;  // Implicit upcast to ExprBase
+    }
+
+    override ExprBase[] dependencies() {
+        return [_collection, _body];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0)
+            _collection = newDep;
+        else if (index == 1)
+            _body = newDep;
     }
 
     override Expr!(R[]) optimize(OptimizeContext ctx) {
         // Optimize children, but MapExpr itself stays unchanged
-        // No casts needed - slots are base types
-        _collection = _collection.optimize(ctx);
-        _body = _body.optimize(ctx);
+        _collection = (cast(Expr!(Ref[])) _collection).optimize(ctx);
+        _body = (cast(Expr!R) _body).optimize(ctx);
         return this;
     }
 
@@ -365,7 +452,7 @@ class MapExpr(Body) : Expr!(Body.ResultType[]), MapExprInfo
     /// Works correctly for both naive and optimized paths.
     override R[][] eval(EvalContext ctx, Ref[] parentRefs) {
         // 1. Evaluate collection for each parent ref
-        Ref[][] collectionResults = _collection.eval(ctx, parentRefs);
+        Ref[][] collectionResults = evalAs!(Ref[])(_collection, ctx, parentRefs);
 
         // 2. Flatten for batch evaluation
         Ref[] flatRefs;
@@ -381,7 +468,7 @@ class MapExpr(Body) : Expr!(Body.ResultType[]), MapExprInfo
         }
 
         // 3. Evaluate body with ALL refs at once
-        R[] flatResults = _body.eval(ctx, flatRefs);
+        R[] flatResults = evalAs!R(_body, ctx, flatRefs);
 
         // 4. Regroup to match input structure
         R[][] result;
@@ -395,37 +482,6 @@ class MapExpr(Body) : Expr!(Body.ResultType[]), MapExprInfo
 
     // MapExprInfo implementation
     Object collection() { return _collection; }
-
-    bool isRootByIds(out Ref[] refs) {
-        if (auto rootExpr = cast(RootExprInfo) _collection) {
-            if (rootExpr.filterType == FilterType.byIds) {
-                refs = rootExpr.filterRefs;
-                return true;
-            }
-        }
-        return false;
-    }
-
-    bool isRootAll(out string typeName, out string table) {
-        if (auto rootExpr = cast(RootExprInfo) _collection) {
-            if (rootExpr.filterType == FilterType.all) {
-                typeName = rootExpr.entityTypeName;
-                table = rootExpr.entityTable;
-                return true;
-            }
-        }
-        return false;
-    }
-
-    bool isHasMany(out Expr!Ref parentInput, out string fk, out string childTypeName) {
-        if (auto hasManyExpr = cast(HasManyInfo) _collection) {
-            parentInput = hasManyExpr.inputExpr;
-            fk = hasManyExpr.fkColumn;
-            childTypeName = hasManyExpr.childTypeName;
-            return true;
-        }
-        return false;
-    }
 }
 
 /// Factory function wires up the MapExpr <-> EveryItemOfExpr linkage
@@ -447,77 +503,6 @@ auto map(alias fn, Coll)(Coll collection)
     return mapExpr;
 }
 
-// ============================================================================
-// Root Expressions
-// ============================================================================
-
-/// Interface for root expressions (GetByIds, GetAll) to expose filter info.
-/// Used by MapExpr to configure QueryNodes correctly.
-interface RootExprInfo {
-    /// The filter type (all, byIds)
-    FilterType filterType();
-
-    /// For byIds: the refs to filter by
-    Ref[] filterRefs();
-
-    /// Entity type name for the root query
-    string entityTypeName();
-
-    /// Entity table name for the root query
-    string entityTable();
-}
-
-/// Root expression that returns specific entities by their IDs
-class GetByIdsExpr(Entity) : Expr!(Ref[]), RootExprInfo {
-    private Ref[] _refs;
-
-    this(long[] ids) {
-        _refs = std.algorithm.map!(id => makeRef(Entity._typeName, id))(ids).array;
-    }
-
-    this(Ref[] refs) {
-        _refs = refs;
-    }
-
-    override Ref[][] eval(EvalContext ctx, Ref[] parentRefs) {
-        // One result (the same ref array) per parent ref
-        return std.algorithm.map!(_ => _refs)(parentRefs).array;
-    }
-
-    @property Ref[] refs() { return _refs; }
-
-    // RootExprInfo implementation
-    FilterType filterType() { return FilterType.byIds; }
-    Ref[] filterRefs() { return _refs; }
-    string entityTypeName() { return Entity._typeName; }
-    string entityTable() { return Entity._table; }
-}
-
-/// Factory function to create GetByIdsExpr
-auto getByIds(Entity)(long[] ids) {
-    return new GetByIdsExpr!Entity(ids);
-}
-
-/// Root expression that fetches all entities of a type
-class GetAllExpr(Entity) : Expr!(Ref[]), RootExprInfo {
-    override Ref[][] eval(EvalContext ctx, Ref[] parentRefs) {
-        // Fetch all IDs from data source, encode as refs
-        auto ids = ctx.fetchAllIds(Entity._table);
-        auto refs = std.algorithm.map!(id => makeRef(Entity._typeName, id))(ids).array;
-        return std.algorithm.map!(_ => refs)(parentRefs).array;
-    }
-
-    // RootExprInfo implementation
-    FilterType filterType() { return FilterType.all; }
-    Ref[] filterRefs() { return []; }
-    string entityTypeName() { return Entity._typeName; }
-    string entityTable() { return Entity._table; }
-}
-
-/// Factory function to create GetAllExpr
-auto getAll(Entity)() {
-    return new GetAllExpr!Entity();
-}
 
 // ============================================================================
 // jsonObject Combinator (JSON construction)
@@ -553,23 +538,37 @@ private JSONValue toJsonValue(T)(T value) {
 class JsonObjectExpr(Args...) : Expr!JSONValue
     if (Args.length >= 2 && Args.length % 2 == 0)
 {
-    // Store as base Expr!T types to allow optimize() to return different concrete types
-    // String field names stay as strings, expressions become Expr!T
-    alias GeneralizedArgs = GeneralizeExprs!Args;
-    private Tuple!GeneralizedArgs _args;
+    // Extract expression types at even positions (1, 3, 5, ...)
+    private template ExprTypeAt(size_t i) {
+        alias ExprTypeAt = ExprResultType!(Args[i * 2 + 1]);
+    }
+
+    // String names at even indices (0, 2, 4, ...)
+    private string[Args.length / 2] _names;
+    // Expression values at odd indices, stored as ExprBase
+    private ExprBase[Args.length / 2] _exprs;
 
     this(Args args) {
-        static foreach (i; 0 .. Args.length) {
-            _args[i] = args[i];  // Implicit upcast for expressions
-        }
+        static foreach (i; 0 .. Args.length / 2) {{
+            _names[i] = args[i * 2];
+            _exprs[i] = args[i * 2 + 1];
+        }}
+    }
+
+    override ExprBase[] dependencies() {
+        return _exprs[];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index < _exprs.length)
+            _exprs[index] = newDep;
     }
 
     override Expr!JSONValue optimize(OptimizeContext ctx) {
-        // Optimize the expression elements (odd indices: 1, 3, 5, ...)
-        // No cast needed since slots are base Expr!T
+        // Optimize the expression elements
         static foreach (i; 0 .. Args.length / 2) {{
-            enum exprIdx = i * 2 + 1;
-            _args[exprIdx] = _args[exprIdx].optimize(ctx);
+            alias ET = ExprTypeAt!i;
+            _exprs[i] = (cast(Expr!ET) _exprs[i]).optimize(ctx);
         }}
         return this;
     }
@@ -585,11 +584,9 @@ class JsonObjectExpr(Args...) : Expr!JSONValue
 
         // Process each name/expr pair
         static foreach (i; 0 .. Args.length / 2) {{
-            enum nameIdx = i * 2;
-            enum exprIdx = i * 2 + 1;
-
-            string name = _args[nameIdx];
-            auto values = _args[exprIdx].eval(ctx, refs);
+            alias ET = ExprTypeAt!i;
+            string name = _names[i];
+            auto values = evalAs!ET(_exprs[i], ctx, refs);
 
             foreach (idx; 0 .. count) {
                 results[idx][name] = toJsonValue(values[idx]);
@@ -664,6 +661,10 @@ unittest {
     class ConstRefArrayExpr : Expr!(Ref[]) {
         Ref[] _refs;
         this(Ref[] refs) { _refs = refs; }
+
+        override ExprBase[] dependencies() { return []; }
+        override void replaceDependency(size_t index, ExprBase newDep) {}
+
         override Ref[][] eval(EvalContext ctx, Ref[] parentRefs) {
             return std.algorithm.map!(_ => _refs)(parentRefs).array;
         }

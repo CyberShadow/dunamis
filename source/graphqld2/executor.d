@@ -10,7 +10,7 @@ import graphqld2.relational;
 
 /// Executes expressions against a data source.
 ///
-/// The new architecture uses a simple Ref-based system:
+/// The architecture uses a simple Ref-based system:
 /// - Expressions take Ref[] and return T[]
 /// - Access expressions fetch data directly (naive path)
 /// - Optimization replaces access expressions with projections
@@ -18,150 +18,52 @@ import graphqld2.relational;
 class Executor {
     private {
         DataFetcher _fetcher;
+        RelationalQueryExecutor _queryExecutor;
     }
 
     this(DataFetcher fetcher) {
         _fetcher = fetcher;
+        _queryExecutor = new RelationalQueryExecutor(fetcher);
     }
 
     /// Execute an expression starting from the query root (naive path).
     /// Access expressions fetch data directly, potentially causing N+1 queries.
     T execute(E, T = E.ResultType)(E expr) {
-        // Create evaluation context
         auto ctx = new EvalContext();
-        ctx.fetcher = _fetcher;
+        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+        relCtx.fetcher = _fetcher;
 
-        // Execute with query root as the single input
         auto results = expr.eval(ctx, [queryRoot]);
-
-        // Return the single result
         return results[0];
     }
 
     /// Execute with optimization (optimized path).
     /// 1. Optimize: Transform access expressions into projections
-    /// 2. Fetch: Execute all QueryNodes and store results in EvalContext
-    /// 3. Evaluate: Run the optimized expression (reads from pre-fetched data)
+    /// 2. SQL Push-down: Push computed expressions to SQL
+    /// 3. Fetch: Execute all QueryNodes and store results
+    /// 4. Evaluate: Run the optimized expression
     T executeOptimized(E, T = E.ResultType)(E expr) {
-        // Phase 1: Optimize
-        auto optCtx = new OptimizeContext(_fetcher);
+        // Phase 1: Standard optimization (creates QueryNodes and ProjectColumnExprs)
+        auto optCtx = new OptimizeContext();
         auto optimized = cast(E) expr.optimize(optCtx);
 
-        // Phase 2: Fetch all data
+        // Phase 2: SQL push-down (replaces BinaryOpExprs with ProjectComputedExprs)
+        auto sqlOpt = new SqlOptimizer();
+        sqlOpt.optimize(optimized, optCtx);
+
+        // Phase 3: Fetch all data
         auto evalCtx = new EvalContext();
-        evalCtx.fetcher = _fetcher;
+        auto relEvalCtx = evalCtx.getSourceContext!RelationalEvalContext();
+        relEvalCtx.fetcher = _fetcher;
 
-        // Execute QueryNodes in topological order (parents before children)
-        auto nodes = optCtx.nodesInOrder();
+        // Get the relational optimization context to access QueryNodes
+        auto relOptCtx = optCtx.getSourceContext!RelationalOptimizeContext();
+        auto nodes = relOptCtx.nodesInOrder();
+        _queryExecutor.executeAll(nodes, evalCtx, sqlOpt);
 
-        debug(sql) {
-            import std.stdio : writeln, writefln;
-            writefln("=== Executing %d QueryNode(s) ===\n", nodes.length);
-            writeln(toSQL(nodes));
-            writeln();
-        }
-
-        foreach (node; nodes) {
-            auto result = executeQueryNode(node, evalCtx);
-            evalCtx.storeQueryResult(node.id, result);
-        }
-
-        debug(sql) {
-            import std.stdio : writeln;
-            writeln("=== Query execution complete ===\n");
-        }
-
-        // Phase 3: Evaluate the optimized expression
+        // Phase 4: Evaluate the optimized expression
         auto results = optimized.eval(evalCtx, [queryRoot]);
-
         return results[0];
-    }
-
-    /// Execute a QueryNode and return its QueryResult.
-    private QueryResult executeQueryNode(QueryNode node, EvalContext evalCtx) {
-        import std.conv : to;
-        import std.json : JSONValue;
-
-        auto result = new QueryResult();
-        Ref[] refs;
-
-        // Step 1: Determine the refs for this node
-        if (node.isRoot) {
-            final switch (node.rootFilter) {
-                case FilterType.none:
-                    // Not configured as root - shouldn't happen
-                    break;
-
-                case FilterType.all:
-                    // Fetch all IDs from table
-                    auto ids = _fetcher.fetchAllIds(node.table);
-                    refs = ids.map!(id => makeRef(node.typeName, id)).array;
-                    result.initialize(node.typeName, refs);
-                    break;
-
-                case FilterType.byId:
-                case FilterType.byIds:
-                    refs = node.rootFilterRefs.dup;
-                    result.initialize(node.typeName, refs);
-                    break;
-            }
-        } else {
-            // Child node: get children via fetchChildren
-            auto parentResult = evalCtx.getQueryResult(node.parent.id);
-            if (parentResult !is null) {
-                auto parentRefs = parentResult.allRefs();
-
-                // fetchChildren returns Ref[][] grouped by parent
-                auto childGroups = _fetcher.fetchChildren(
-                    node.table, node.typeName, node.parentFk, parentRefs);
-
-                // Flatten to get all child refs
-                foreach (group; childGroups) {
-                    refs ~= group;
-                }
-
-                // Initialize with parent grouping info
-                // We need to fetch the FK column to build the grouping
-                auto fkValues = _fetcher.fetchColumnJson(node.table, node.parentFk, refs);
-                result.initializeAsChild(node.typeName, refs, parentRefs, node.parentFk, fkValues);
-            }
-        }
-
-        // Step 2: Fetch each column from base table
-        foreach (column; node.columns) {
-            auto values = _fetcher.fetchColumnJson(node.table, column, refs);
-            result.loadColumn(column, refs, values);
-        }
-
-        // Step 3: Fetch columns from JOINed tables
-        foreach (joinInfo; node.joins) {
-            auto joinAlias = joinInfo.alias_;
-            auto joinedCols = node.joinedColumns.get(joinAlias, null);
-            if (joinedCols is null) continue;
-
-            // Get FK values to determine which joined rows we need
-            auto fkValues = _fetcher.fetchColumnJson(node.table, joinInfo.fk, refs);
-
-            // Convert FK values to refs for the joined table
-            Ref[] joinedRefs;
-            foreach (fkVal; fkValues) {
-                if (fkVal.type == JSONType.null_) {
-                    joinedRefs ~= Ref.init;
-                } else {
-                    long fkId = fkVal.type == JSONType.integer ? fkVal.integer : fkVal.str.to!long;
-                    joinedRefs ~= makeRef(joinInfo.targetType, fkId);
-                }
-            }
-
-            // Fetch each column from the joined table
-            foreach (column; joinedCols) {
-                auto values = _fetcher.fetchColumnJson(joinInfo.targetTable, column, joinedRefs);
-                // Store with alias prefix
-                result.loadColumn(joinAlias ~ "." ~ column, refs, values);
-            }
-        }
-
-        return result;
     }
 }
 
@@ -372,10 +274,11 @@ unittest {
     )(getByIds!User([1, 2]));
 
     // Manually optimize to inspect the QueryNodes
-    auto optCtx = new OptimizeContext(fetcher);
+    auto optCtx = new OptimizeContext();
     query.optimize(optCtx);
 
-    auto nodes = optCtx.allNodes();
+    auto relCtx = optCtx.getSourceContext!RelationalOptimizeContext();
+    auto nodes = relCtx.allNodes();
     assert(nodes.length == 1, "Should have exactly 1 QueryNode");
 
     auto node = nodes[0];
@@ -419,10 +322,11 @@ unittest {
     )(getByIds!User([1, 2]));
 
     // Optimize and inspect QueryNodes
-    auto optCtx = new OptimizeContext(fetcher);
+    auto optCtx = new OptimizeContext();
     query.optimize(optCtx);
 
-    auto nodes = optCtx.nodesInOrder();
+    auto relCtx = optCtx.getSourceContext!RelationalOptimizeContext();
+    auto nodes = relCtx.nodesInOrder();
     assert(nodes.length == 2, "Should have 2 QueryNodes (User and Post)");
 
     // First node should be User (parent)
@@ -557,10 +461,11 @@ unittest {
 
     // Verify optimization creates JOINs (use a fresh query for inspection)
     auto queryForInspection = makeQuery();
-    auto optCtx = new OptimizeContext(fetcher);
+    auto optCtx = new OptimizeContext();
     queryForInspection.optimize(optCtx);
 
-    auto nodes = optCtx.allNodes();
+    auto relCtx = optCtx.getSourceContext!RelationalOptimizeContext();
+    auto nodes = relCtx.allNodes();
     assert(nodes.length == 1, "Should have 1 QueryNode (with JOINs, not separate nodes)");
 
     auto node = nodes[0];

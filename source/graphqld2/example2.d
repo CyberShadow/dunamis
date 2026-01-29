@@ -219,3 +219,54 @@ unittest {
     assert(result[1]["firstName"].str == "Bob");
     assert(result[1]["posts"].array.length == 1);
 }
+
+// Test SQL push-down for computed fullName field
+unittest {
+    import std.stdio : writeln;
+
+    auto fetcher = new MockDataFetcher();
+
+    fetcher.setTableData("users", `[
+        {"id": 1, "first_name": "Alice", "last_name": "Smith"},
+        {"id": 2, "first_name": "Bob", "last_name": "Jones"}
+    ]`);
+
+    // Query: { users { fullName } }
+    // fullName = firstName ~ " " ~ lastName
+    auto query = map!(
+        (Expr!Ref user) => User.fullName(user)
+    )(getByIds!User([1, 2]));
+
+    // Phase 1: Standard optimization (creates QueryNodes and ProjectColumnExprs)
+    auto optCtx = new OptimizeContext();
+    auto optimized = query.optimize(optCtx);
+
+    // Phase 2: SQL push-down (replaces BinaryOpExprs with ProjectComputedExprs)
+    auto sqlOpt = new SqlOptimizer();
+    sqlOpt.optimize(optimized, optCtx);
+
+    // Get the relational optimization context
+    auto relCtx = optCtx.getSourceContext!RelationalOptimizeContext();
+
+    // Show the full SQL query with computed columns
+    debug(sql) {
+        writeln("\n=== SQL Push-Down for fullName ===");
+        writeln(toSQL(relCtx.nodesInOrder(), sqlOpt));
+        writeln("=== Push-down complete ===\n");
+    }
+
+    // Verify computed column was created
+    auto nodes = relCtx.allNodes();
+    assert(nodes.length == 1);
+
+    auto computed = sqlOpt.getComputedColumns(nodes[0].id);
+    assert(computed.length >= 1, "Should have at least 1 computed column for fullName");
+
+    // The SQL expression should be string concatenation
+    assert(computed[0].sqlExpr.canFind("||"),
+        "SQL should use || for concatenation, got: " ~ computed[0].sqlExpr);
+    assert(computed[0].sqlExpr.canFind("first_name"),
+        "SQL should reference first_name");
+    assert(computed[0].sqlExpr.canFind("last_name"),
+        "SQL should reference last_name");
+}

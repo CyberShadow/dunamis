@@ -59,6 +59,19 @@ struct Ref {
 enum Ref queryRoot = Ref("Query:");
 
 // ============================================================================
+// Filter Types (for root queries)
+// ============================================================================
+
+/// Filter type for root queries.
+/// Used to configure how root data is fetched.
+enum FilterType {
+    none,    // Not a root (child of another node)
+    all,     // Fetch all entities
+    byId,    // Fetch single entity by ID
+    byIds,   // Fetch multiple entities by IDs
+}
+
+// ============================================================================
 // Node ID Encoding/Decoding Utilities
 // ============================================================================
 

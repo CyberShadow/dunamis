@@ -8,7 +8,10 @@ import std.traits;
 import std.typecons : Nullable;
 
 import graphqld2.core;
+import graphqld2.relational.eval_context;
+import graphqld2.relational.optimize_context;
 import graphqld2.relational.project;
+import graphqld2.relational.query_node;
 
 // ============================================================================
 // Entity Mixin
@@ -173,8 +176,112 @@ interface BelongsToInfo {
     @property string fkColumn();
 }
 
-/// Interface for hasMany expressions (for chain walking)
-/// Note: HasManyInfo is defined in core.expr
+/// Interface for hasMany expressions to expose their metadata.
+interface HasManyInfo {
+    /// The input expression (points to parent entity)
+    @property Expr!Ref inputExpr();
+
+    /// Foreign key column in child table
+    @property string fkColumn();
+
+    /// Child entity type name
+    @property string childTypeName();
+
+    /// Child table name
+    @property string childTable();
+
+    /// Parent entity type name (for ref encoding)
+    @property string parentTypeName();
+}
+
+// ============================================================================
+// Root Expressions
+// ============================================================================
+
+/// Interface for root expressions (GetByIds, GetAll) to expose filter info.
+/// Used by optimizer to configure QueryNodes correctly.
+interface RootExprInfo {
+    /// The filter type (all, byIds)
+    FilterType filterType();
+
+    /// For byIds: the refs to filter by
+    Ref[] filterRefs();
+
+    /// Entity type name for the root query
+    string entityTypeName();
+
+    /// Entity table name for the root query
+    string entityTable();
+}
+
+/// Root expression that returns specific entities by their IDs
+class GetByIdsExpr(Entity) : Expr!(Ref[]), RootExprInfo {
+    private Ref[] _refs;
+
+    this(long[] ids) {
+        _refs = ids.map!(id => makeRef(Entity._typeName, id)).array;
+    }
+
+    this(Ref[] refs) {
+        _refs = refs;
+    }
+
+    override ExprBase[] dependencies() {
+        return [];  // Root node
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        // No dependencies to replace
+    }
+
+    override Ref[][] eval(EvalContext ctx, Ref[] parentRefs) {
+        // One result (the same ref array) per parent ref
+        return parentRefs.map!(_ => _refs).array;
+    }
+
+    @property Ref[] refs() { return _refs; }
+
+    // RootExprInfo implementation
+    FilterType filterType() { return FilterType.byIds; }
+    Ref[] filterRefs() { return _refs; }
+    string entityTypeName() { return Entity._typeName; }
+    string entityTable() { return Entity._table; }
+}
+
+/// Factory function to create GetByIdsExpr
+auto getByIds(Entity)(long[] ids) {
+    return new GetByIdsExpr!Entity(ids);
+}
+
+/// Root expression that fetches all entities of a type
+class GetAllExpr(Entity) : Expr!(Ref[]), RootExprInfo {
+    override ExprBase[] dependencies() {
+        return [];  // Root node
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        // No dependencies to replace
+    }
+
+    override Ref[][] eval(EvalContext ctx, Ref[] parentRefs) {
+        // Fetch all IDs from data source, encode as refs
+        auto relCtx = ctx.getSourceContext!RelationalEvalContext(Entity._sourceId);
+        auto ids = relCtx.fetchAllIds(Entity._table);
+        auto refs = ids.map!(id => makeRef(Entity._typeName, id)).array;
+        return parentRefs.map!(_ => refs).array;
+    }
+
+    // RootExprInfo implementation
+    FilterType filterType() { return FilterType.all; }
+    Ref[] filterRefs() { return []; }
+    string entityTypeName() { return Entity._typeName; }
+    string entityTable() { return Entity._table; }
+}
+
+/// Factory function to create GetAllExpr
+auto getAll(Entity)() {
+    return new GetAllExpr!Entity();
+}
 
 // ============================================================================
 // Column Access Expression
@@ -182,7 +289,7 @@ interface BelongsToInfo {
 
 /// Expression that reads a column from entities
 class ColumnAccessExpr(T, Entity) : Expr!T {
-    Expr!Ref _input;  // the entity ref we're reading from
+    private ExprBase _input;  // the entity ref we're reading from (type-erased)
     string _column;
 
     this(Expr!Ref input, string column) {
@@ -190,49 +297,57 @@ class ColumnAccessExpr(T, Entity) : Expr!T {
         _column = column;
     }
 
+    override ExprBase[] dependencies() {
+        return [_input];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0)
+            _input = newDep;
+    }
+
     override Expr!T optimize(OptimizeContext ctx) {
         // First optimize input
-        _input = _input.optimize(ctx);
+        _input = (cast(Expr!Ref) _input).optimize(ctx);
 
         // Find the MapExpr this column belongs to
         JoinHop[] joinPath;
-        auto mapExpr = findMapExprFromChain(_input, joinPath);
+        auto mapExpr = findMapExprFromChain(cast(Expr!Ref) _input, joinPath);
 
         if (mapExpr is null) {
             // Can't optimize, use naive path
             return this;
         }
 
+        // Get the relational optimization context for this data source
+        auto relCtx = ctx.getSourceContext!RelationalOptimizeContext(Entity._sourceId);
+
         // Get or create QueryNode for this MapExpr
-        auto node = ctx.getOrCreateNode(mapExpr, Entity._typeName, Entity._table);
+        auto node = relCtx.getOrCreateNode(mapExpr, Entity._typeName, Entity._table);
 
         // Configure the node based on collection type (if not already configured)
         if (node.rootFilter == FilterType.none && node.parent is null) {
             if (auto mapInfo = cast(MapExprInfo) mapExpr) {
-                Ref[] rootRefs;
-                string typeName, table;
-                Expr!Ref parentInput;
-                string fk, childTypeName;
+                auto coll = mapInfo.collection;
 
-                if (mapInfo.isRootByIds(rootRefs)) {
-                    // Root query with specific IDs
-                    node.setRootFilter(FilterType.byIds, rootRefs);
-                } else if (mapInfo.isRootAll(typeName, table)) {
-                    // Root query fetching all
-                    node.setRootFilter(FilterType.all);
-                } else if (mapInfo.isHasMany(parentInput, fk, childTypeName)) {
+                // Check if collection is a root expression
+                if (auto rootExpr = cast(RootExprInfo) coll) {
+                    if (rootExpr.filterType == FilterType.byIds) {
+                        node.setRootFilter(FilterType.byIds, rootExpr.filterRefs);
+                    } else if (rootExpr.filterType == FilterType.all) {
+                        node.setRootFilter(FilterType.all);
+                    }
+                }
+                // Check if collection is a hasMany relationship
+                else if (auto hasManyExpr = cast(HasManyInfo) coll) {
                     // Child of a hasMany relationship
                     // Find the parent MapExpr by following parentInput
                     JoinHop[] parentJoinPath;
-                    auto parentMapExpr = findMapExprFromChain(parentInput, parentJoinPath);
+                    auto parentMapExpr = findMapExprFromChain(hasManyExpr.inputExpr, parentJoinPath);
                     if (parentMapExpr !is null) {
-                        // Get the parent's QueryNode
-                        // We need to determine the parent's entity type from the hasMany
-                        if (auto hasManyInfo = cast(HasManyInfo) mapInfo.collection) {
-                            auto parentNode = ctx.getNode(parentMapExpr);
-                            if (parentNode !is null) {
-                                node.setParent(parentNode, fk, hasManyInfo.parentTypeName);
-                            }
+                        auto parentNode = relCtx.getNode(parentMapExpr);
+                        if (parentNode !is null) {
+                            node.setParent(parentNode, hasManyExpr.fkColumn, hasManyExpr.parentTypeName);
                         }
                     }
                 }
@@ -264,10 +379,11 @@ class ColumnAccessExpr(T, Entity) : Expr!T {
 
     override T[] eval(EvalContext ctx, Ref[] refs) {
         // Naive path: fetch column values directly
-        Ref[] entityRefs = _input.eval(ctx, refs);
+        Ref[] entityRefs = evalAs!Ref(_input, ctx, refs);
 
-        if (ctx.fetcher !is null) {
-            return ctx.fetcher.fetchColumn!T(Entity._table, _column, entityRefs);
+        auto relCtx = ctx.getSourceContext!RelationalEvalContext(Entity._sourceId);
+        if (relCtx.fetcher !is null) {
+            return relCtx.fetcher.fetchColumn!T(Entity._table, _column, entityRefs);
         }
 
         // Fallback to empty results
@@ -275,7 +391,7 @@ class ColumnAccessExpr(T, Entity) : Expr!T {
     }
 
     @property string column() { return _column; }
-    @property Expr!Ref input() { return _input; }
+    @property ExprBase input() { return _input; }
 }
 
 // ============================================================================
@@ -285,14 +401,23 @@ class ColumnAccessExpr(T, Entity) : Expr!T {
 /// Expression representing a one-to-many relationship
 /// Returns Ref[] for each input ref (the child entities)
 class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Ref[]), HasManyInfo {
-    Expr!Ref _input;
+    private ExprBase _input;
 
     this(Expr!Ref input) {
         _input = input;
     }
 
+    override ExprBase[] dependencies() {
+        return [_input];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0)
+            _input = newDep;
+    }
+
     override Expr!(Ref[]) optimize(OptimizeContext ctx) {
-        _input = _input.optimize(ctx);
+        _input = (cast(Expr!Ref) _input).optimize(ctx);
         // HasMany doesn't transform itself - the inner MapExpr's
         // access expressions will create a child QueryNode
         return this;
@@ -300,21 +425,22 @@ class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Ref[]), HasManyInfo {
 
     override Ref[][] eval(EvalContext ctx, Ref[] refs) {
         // Get the parent refs
-        Ref[] parentRefs = _input.eval(ctx, refs);
+        Ref[] parentRefs = evalAs!Ref(_input, ctx, refs);
 
         // Naive path: fetch children directly
-        if (ctx.fetcher !is null) {
-            return ctx.fetcher.fetchChildren(Child._table, Child._typeName, fk, parentRefs);
+        auto relCtx = ctx.getSourceContext!RelationalEvalContext(Child._sourceId);
+        if (relCtx.fetcher !is null) {
+            return relCtx.fetcher.fetchChildren(Child._table, Child._typeName, fk, parentRefs);
         }
 
         // Fallback to empty results
         return parentRefs.map!(_ => cast(Ref[])[]).array;
     }
 
-    @property Expr!Ref input() { return _input; }
+    @property ExprBase input() { return _input; }
 
     // HasManyInfo implementation
-    @property Expr!Ref inputExpr() { return _input; }
+    @property Expr!Ref inputExpr() { return cast(Expr!Ref) _input; }
     @property string childTable() { return Child._table; }
     @property string childTypeName() { return Child._typeName; }
     @property string fkColumn() { return fk; }
@@ -332,29 +458,39 @@ class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Ref[]), HasManyInfo {
 /// Expression representing a many-to-one relationship
 /// Returns parent Ref for each child ref
 class BelongsToAccessExpr(Child, Parent, RefType, string fk) : Expr!RefType, BelongsToInfo {
-    Expr!Ref _input;
+    private ExprBase _input;
 
     this(Expr!Ref input) {
         _input = input;
     }
 
+    override ExprBase[] dependencies() {
+        return [_input];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0)
+            _input = newDep;
+    }
+
     override Expr!RefType optimize(OptimizeContext ctx) {
-        _input = _input.optimize(ctx);
+        _input = (cast(Expr!Ref) _input).optimize(ctx);
         // BelongsTo stays as-is; column access through it uses JOINs
         return this;
     }
 
     override RefType[] eval(EvalContext ctx, Ref[] refs) {
         // Get the child refs
-        Ref[] childRefs = _input.eval(ctx, refs);
+        Ref[] childRefs = evalAs!Ref(_input, ctx, refs);
 
         static if (is(Child == void)) {
             // Can't fetch without knowing child entity type
             return childRefs.map!(_ => RefType.init).array;
         } else {
             // Naive path: fetch parent refs directly
-            if (ctx.fetcher !is null) {
-                auto parentRefs = ctx.fetcher.fetchBelongsTo(Child._table, fk, Parent._typeName, childRefs);
+            auto relCtx = ctx.getSourceContext!RelationalEvalContext(Child._sourceId);
+            if (relCtx.fetcher !is null) {
+                auto parentRefs = relCtx.fetcher.fetchBelongsTo(Child._table, fk, Parent._typeName, childRefs);
 
                 static if (is(RefType == Ref)) {
                     return parentRefs;
@@ -370,10 +506,10 @@ class BelongsToAccessExpr(Child, Parent, RefType, string fk) : Expr!RefType, Bel
         }
     }
 
-    @property Expr!Ref input() { return _input; }
+    @property ExprBase input() { return _input; }
 
     // For base class interface (runtime type checking)
-    @property Expr!Ref inputExpr() { return _input; }
+    @property Expr!Ref inputExpr() { return cast(Expr!Ref) _input; }
     static if (!is(Child == void)) {
         @property string childTable() { return Child._table; }
     } else {
@@ -391,6 +527,14 @@ class BelongsToAccessExpr(Child, Parent, RefType, string fk) : Expr!RefType, Bel
 /// Expression that returns its input ref unchanged
 /// Used when accessing fields directly from the iteration item
 class IdentityExpr : Expr!Ref {
+    override ExprBase[] dependencies() {
+        return [];  // Leaf node
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        // No dependencies
+    }
+
     override Ref[] eval(EvalContext ctx, Ref[] refs) {
         return refs;
     }
@@ -435,7 +579,8 @@ unittest {
     ]`);
 
     auto ctx = new EvalContext();
-    ctx.fetcher = fetcher;
+    auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+    relCtx.fetcher = fetcher;
 
     // Create an identity expression as input
     auto userExpr = identity();
@@ -465,7 +610,8 @@ unittest {
     ]`);
 
     auto ctx = new EvalContext();
-    ctx.fetcher = fetcher;
+    auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+    relCtx.fetcher = fetcher;
 
     auto userExpr = identity();
     auto postsExpr = User.posts(userExpr);
@@ -496,7 +642,8 @@ unittest {
     ]`);
 
     auto ctx = new EvalContext();
-    ctx.fetcher = fetcher;
+    auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+    relCtx.fetcher = fetcher;
 
     auto postExpr = identity();
     auto authorExpr = Post.author(postExpr);
@@ -535,7 +682,8 @@ unittest {
     ]`);
 
     auto ctx = new EvalContext();
-    ctx.fetcher = fetcher;
+    auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+    relCtx.fetcher = fetcher;
 
     auto postExpr = identity();
     auto authorNameExpr = Post.authorName(postExpr);
@@ -571,7 +719,8 @@ unittest {
     auto optimized = query.optimize(optCtx);
 
     // Check that a QueryNode was created
-    auto nodes = optCtx.allNodes();
+    auto relCtx = optCtx.getSourceContext!RelationalOptimizeContext();
+    auto nodes = relCtx.allNodes();
     assert(nodes.length == 1);
     assert(nodes[0].typeName == "User");
     assert(nodes[0].table == "users");
