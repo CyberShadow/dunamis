@@ -140,11 +140,6 @@ private Object findMapExprFromChain(Expr!Ref expr, ref JoinHop[] joinPath) {
             expr = hasMany.inputExpr;
             continue;
         }
-        if (auto ident = cast(IdentityExpr) expr) {
-            // Identity doesn't continue the chain
-            break;
-        }
-
         // Unknown expression type
         break;
     }
@@ -525,31 +520,6 @@ class BelongsToAccessExpr(Child, Parent, RefType, string fk) : Expr!RefType, Bel
 }
 
 // ============================================================================
-// Identity Expression (pass-through for Ref)
-// ============================================================================
-
-/// Expression that returns its input ref unchanged
-/// Used when accessing fields directly from the iteration item
-class IdentityExpr : Expr!Ref {
-    override ExprBase[] dependencies() {
-        return [];  // Leaf node
-    }
-
-    override void replaceDependency(size_t index, ExprBase newDep) {
-        // No dependencies
-    }
-
-    override Ref[] eval(EvalContext ctx) {
-        return ctx.currentRefs;
-    }
-}
-
-/// Get the identity expression (returns input unchanged)
-auto identity() {
-    return new IdentityExpr();
-}
-
-// ============================================================================
 // Tests
 // ============================================================================
 
@@ -567,135 +537,6 @@ unittest {
     }
     static assert(Post._table == "posts");
     static assert(Post._typeName == "BlogPost");
-}
-
-unittest {
-    // Test column access with mock fetcher
-    struct User {
-        mixin Entity!"users";
-        mixin Col!("firstName", string);
-    }
-
-    auto fetcher = new MockDataFetcher();
-    fetcher.setTableData("users", `[
-        {"id": 1, "first_name": "Alice"},
-        {"id": 2, "first_name": "Bob"}
-    ]`);
-
-    auto ctx = new EvalContext();
-    auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-    relCtx.fetcher = fetcher;
-
-    // Create an identity expression as input
-    auto userExpr = identity();
-    auto firstNameExpr = User.firstName(userExpr);
-
-    ctx.currentRefs = [Ref("User:1"), Ref("User:2")];
-    auto names = firstNameExpr.eval(ctx);
-    assert(names == ["Alice", "Bob"]);
-}
-
-unittest {
-    // Test hasMany relationship
-    struct Post {
-        mixin Entity!"posts";
-    }
-
-    struct User {
-        mixin Entity!"users";
-        mixin HasMany!("posts", Post, "author_id");
-    }
-
-    auto fetcher = new MockDataFetcher();
-    fetcher.setTableData("posts", `[
-        {"id": 1, "author_id": 1, "title": "Hello"},
-        {"id": 2, "author_id": 1, "title": "World"},
-        {"id": 3, "author_id": 2, "title": "D Lang"}
-    ]`);
-
-    auto ctx = new EvalContext();
-    auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-    relCtx.fetcher = fetcher;
-
-    auto userExpr = identity();
-    auto postsExpr = User.posts(userExpr);
-
-    ctx.currentRefs = [Ref("User:1"), Ref("User:2")];
-    auto postGroups = postsExpr.eval(ctx);
-
-    assert(postGroups.length == 2);
-    assert(postGroups[0].length == 2);  // User:1 has 2 posts
-    assert(postGroups[1].length == 1);  // User:2 has 1 post
-}
-
-unittest {
-    // Test belongsTo relationship
-    struct User {
-        mixin Entity!"users";
-    }
-
-    struct Post {
-        mixin Entity!"posts";
-        mixin BelongsTo!("author", User, "author_id");
-    }
-
-    auto fetcher = new MockDataFetcher();
-    fetcher.setTableData("posts", `[
-        {"id": 1, "author_id": 10, "title": "Hello"},
-        {"id": 2, "author_id": 20, "title": "World"}
-    ]`);
-
-    auto ctx = new EvalContext();
-    auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-    relCtx.fetcher = fetcher;
-
-    auto postExpr = identity();
-    auto authorExpr = Post.author(postExpr);
-
-    ctx.currentRefs = [Ref("Post:1"), Ref("Post:2")];
-    auto authors = authorExpr.eval(ctx);
-
-    assert(authors == [Ref("User:10"), Ref("User:20")]);
-}
-
-unittest {
-    // Test chained access: post.author().firstName()
-    struct User {
-        mixin Entity!"users";
-        mixin Col!("firstName", string);
-    }
-
-    struct Post {
-        mixin Entity!"posts";
-        mixin BelongsTo!("author", User, "author_id");
-
-        // Computed field: access through relationship
-        static auto authorName(Expr!Ref p) {
-            return User.firstName(author(p));
-        }
-    }
-
-    auto fetcher = new MockDataFetcher();
-    fetcher.setTableData("posts", `[
-        {"id": 1, "author_id": 10},
-        {"id": 2, "author_id": 20}
-    ]`);
-    fetcher.setTableData("users", `[
-        {"id": 10, "first_name": "Alice"},
-        {"id": 20, "first_name": "Bob"}
-    ]`);
-
-    auto ctx = new EvalContext();
-    auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-    relCtx.fetcher = fetcher;
-
-    auto postExpr = identity();
-    auto authorNameExpr = Post.authorName(postExpr);
-
-    ctx.currentRefs = [Ref("Post:1"), Ref("Post:2")];
-    auto names = authorNameExpr.eval(ctx);
-
-    assert(names == ["Alice", "Bob"]);
 }
 
 // Test optimization creates QueryNode

@@ -9,7 +9,6 @@ import graphqld2.core.eval;
 import graphqld2.core.expr;
 import graphqld2.core.optimize;
 import graphqld2.relational.eval_context;
-import graphqld2.relational.schema : IdentityExpr;
 
 // ============================================================================
 // Interfaces for Optimizer Pattern Matching
@@ -261,36 +260,7 @@ unittest {
     assert(refArrays[0] == [Ref("User:1"), Ref("User:2"), Ref("User:3")]);
 }
 
-unittest {
-    import std.json : parseJSON;
-
-    // Test ProjectChildRefsExpr
-    auto ctx = new EvalContext();
-    auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-
-    // Child result with FK grouping
-    auto result = new QueryResult();
-    auto rows = [
-        parseJSON(`{"id": 1, "author_id": 10}`),
-        parseJSON(`{"id": 2, "author_id": 10}`),
-        parseJSON(`{"id": 3, "author_id": 20}`)
-    ];
-    result.loadFromRows(rows, "Post", "id", "author_id", "User");
-    relCtx.storeQueryResult(0, result);
-
-    // Parent input that returns refs unchanged
-    auto parentInput = new IdentityExpr();
-    auto proj = new ProjectChildRefsExpr(0, parentInput);
-
-    // Query for children of User:10 and User:20
-    ctx.currentRefs = [Ref("User:10"), Ref("User:20"), Ref("User:30")];
-    auto childRefArrays = proj.eval(ctx);
-
-    assert(childRefArrays.length == 3);
-    assert(childRefArrays[0].length == 2);  // User:10 has 2 posts
-    assert(childRefArrays[1].length == 1);  // User:20 has 1 post
-    assert(childRefArrays[2].length == 0);  // User:30 has no posts
-}
+// ProjectChildRefsExpr is tested via executor.d hasMany tests
 
 unittest {
     import std.json : parseJSON;

@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dub build:*)",
+      "Bash(dub test:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
