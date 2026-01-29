@@ -445,3 +445,92 @@ unittest {
     assert(computed[0].sqlExpr.canFind("last_name"),
         "SQL should reference last_name");
 }
+
+// ============================================================================
+// GraphQL Schema Generation Tests
+// ============================================================================
+
+unittest {
+    import std.stdio : writeln;
+    import graphqld2.graphql;
+
+    // Generate complete schema SDL
+    enum schema = generateSchemaSDL!(Query, User, Post, Comment);
+
+    debug(graphql) {
+        writeln("\n=== Generated GraphQL Schema ===");
+        writeln(schema);
+    }
+
+    // Verify Query type
+    assert(schema.canFind("type Query {"));
+    assert(schema.canFind("users: [User!]!"));
+    assert(schema.canFind("posts: [Post!]!"));
+    assert(schema.canFind("comments: [Comment!]!"));
+
+    // Verify User type
+    assert(schema.canFind("type User {"));
+    assert(schema.canFind("id: ID!"));
+    assert(schema.canFind("firstName: String!"));
+    assert(schema.canFind("lastName: String!"));
+    assert(schema.canFind("email: String!"));
+    assert(schema.canFind("posts: [Post!]"));
+    assert(schema.canFind("comments: [Comment!]"));
+
+    // Verify Post type
+    assert(schema.canFind("type Post {"));
+    assert(schema.canFind("title: String!"));
+    assert(schema.canFind("author: User!"));
+
+    // Verify Comment type
+    assert(schema.canFind("type Comment {"));
+    assert(schema.canFind("author: User!"));
+}
+
+// Test individual type generation
+unittest {
+    import graphqld2.graphql;
+
+    // Test User type fields
+    enum userFields = getEntityFields!User;
+
+    // Should have: id, firstName, lastName, email, posts, comments
+    assert(userFields.length >= 6);
+
+    // Check specific fields exist
+    bool hasFirstName = false;
+    bool hasPosts = false;
+    foreach (f; userFields) {
+        if (f.name == "firstName") {
+            hasFirstName = true;
+            assert(f.graphqlType == "String");
+            assert(f.kind == FieldKind.column);
+        }
+        if (f.name == "posts") {
+            hasPosts = true;
+            assert(f.graphqlType == "[Post!]");
+            assert(f.kind == FieldKind.hasMany);
+        }
+    }
+    assert(hasFirstName, "User should have firstName field");
+    assert(hasPosts, "User should have posts field");
+}
+
+// Test Query type introspection
+unittest {
+    import graphqld2.graphql;
+
+    enum queryFields = getQueryFields!Query;
+
+    // Should have: users, posts, comments
+    assert(queryFields.length == 3);
+
+    bool hasUsers = false;
+    foreach (f; queryFields) {
+        if (f.name == "users") {
+            hasUsers = true;
+            assert(f.graphqlType == "[User!]");
+        }
+    }
+    assert(hasUsers, "Query should have users field");
+}

@@ -31,6 +31,12 @@ import graphqld2.relational.query_node;
 /// auto query = map!(u => User.firstName(u))(Query.users(db));
 /// ---
 mixin template Table(Entity, string fieldName) {
+    // Metadata for schema introspection (unique struct name per field)
+    mixin("struct _tableField_" ~ fieldName ~ " {
+        enum name = \"" ~ fieldName ~ "\";
+        alias entityType = Entity;
+    }");
+
     mixin("static auto " ~ fieldName ~ "(DataFetcher db) {
         return getAll!Entity(db);
     }");
@@ -72,6 +78,13 @@ private string toSnakeCase(string input) {
 /// Example: mixin Col!("firstName", string);  // generates firstName() method, maps to "first_name" column
 /// Example: mixin Col!("createdAt", string, "created_at");  // explicit column name
 mixin template Col(string fieldName, T, string columnName = toSnakeCase(fieldName)) {
+    // Metadata for schema introspection (unique struct name per field)
+    mixin("struct _colField_" ~ fieldName ~ " {
+        enum name = \"" ~ fieldName ~ "\";
+        enum column = \"" ~ columnName ~ "\";
+        alias type = T;
+    }");
+
     mixin("static auto " ~ fieldName ~ "(Expr!Ref e) {
         return e.column!(T, typeof(this))(\"" ~ columnName ~ "\");
     }");
@@ -80,6 +93,13 @@ mixin template Col(string fieldName, T, string columnName = toSnakeCase(fieldNam
 /// Mixin to define a hasMany relationship.
 /// Example: mixin HasMany!("posts", Post, "author_id");
 mixin template HasMany(string fieldName, Child, string fk) {
+    // Metadata for schema introspection (unique struct name per field)
+    mixin("struct _hasManyField_" ~ fieldName ~ " {
+        enum name = \"" ~ fieldName ~ "\";
+        enum foreignKey = \"" ~ fk ~ "\";
+        alias childType = Child;
+    }");
+
     mixin("static auto " ~ fieldName ~ "(Expr!Ref e) {
         return e.hasMany!(Child, fk, typeof(this))();
     }");
@@ -88,6 +108,14 @@ mixin template HasMany(string fieldName, Child, string fk) {
 /// Mixin to define a required belongsTo relationship.
 /// Example: mixin BelongsTo!("author", User, "author_id");
 mixin template BelongsTo(string fieldName, Parent, string fk) {
+    // Metadata for schema introspection (unique struct name per field)
+    mixin("struct _belongsToField_" ~ fieldName ~ " {
+        enum name = \"" ~ fieldName ~ "\";
+        enum foreignKey = \"" ~ fk ~ "\";
+        enum nullable = false;
+        alias parentType = Parent;
+    }");
+
     mixin("static auto " ~ fieldName ~ "(Expr!Ref e) {
         return e.belongsTo!(Parent, Ref, fk, typeof(this))();
     }");
@@ -96,6 +124,14 @@ mixin template BelongsTo(string fieldName, Parent, string fk) {
 /// Mixin to define an optional belongsTo relationship (nullable FK).
 /// Example: mixin BelongsToOptional!("manager", User, "manager_id");
 mixin template BelongsToOptional(string fieldName, Parent, string fk) {
+    // Metadata for schema introspection (unique struct name per field)
+    mixin("struct _belongsToField_" ~ fieldName ~ " {
+        enum name = \"" ~ fieldName ~ "\";
+        enum foreignKey = \"" ~ fk ~ "\";
+        enum nullable = true;
+        alias parentType = Parent;
+    }");
+
     mixin("static auto " ~ fieldName ~ "(Expr!Ref e) {
         return e.belongsTo!(Parent, Nullable!Ref, fk, typeof(this))();
     }");
