@@ -55,6 +55,44 @@ mixin template Entity(string tableName, string typeName = "", string sourceId = 
 }
 
 // ============================================================================
+// Foreign Key Type
+// ============================================================================
+
+/// Foreign key reference to another entity.
+/// Use with Col to define FK columns that reference another entity's primary key.
+/// Example: mixin Col!("authorId", ForeignKey!User);
+///
+/// Benefits:
+/// - PK type is derived from the referenced entity (no need to repeat `long`)
+/// - DDL generation automatically creates FOREIGN KEY constraints
+/// - Single source of truth for the relationship
+struct ForeignKey(Entity) {
+    /// The referenced entity type
+    alias referencedEntity = Entity;
+
+    /// The underlying storage type (same as entity's PK type, assumed BIGINT/long)
+    alias StorageType = long;
+}
+
+/// Check if a type is a ForeignKey
+template isForeignKey(T) {
+    static if (is(T == ForeignKey!E, E)) {
+        enum isForeignKey = true;
+    } else {
+        enum isForeignKey = false;
+    }
+}
+
+/// Get the referenced entity from a ForeignKey type
+template getForeignKeyEntity(T) {
+    static if (is(T == ForeignKey!E, E)) {
+        alias getForeignKeyEntity = E;
+    } else {
+        static assert(false, "Not a ForeignKey type");
+    }
+}
+
+// ============================================================================
 // Field Definition Mixins
 // ============================================================================
 
@@ -76,18 +114,36 @@ private string toSnakeCase(string input) {
 
 /// Mixin to define a column accessor.
 /// Example: mixin Col!("firstName", string);  // generates firstName() method, maps to "first_name" column
+/// Example: mixin Col!("authorId", ForeignKey!User);  // FK column referencing User
 /// Example: mixin Col!("createdAt", string, "created_at");  // explicit column name
 mixin template Col(string fieldName, T, string columnName = toSnakeCase(fieldName)) {
     // Metadata for schema introspection (unique struct name per field)
-    mixin("struct _colField_" ~ fieldName ~ " {
-        enum name = \"" ~ fieldName ~ "\";
-        enum column = \"" ~ columnName ~ "\";
-        alias type = T;
-    }");
+    static if (isForeignKey!T) {
+        // Foreign key column - store reference info
+        mixin("struct _colField_" ~ fieldName ~ " {
+            enum name = \"" ~ fieldName ~ "\";
+            enum column = \"" ~ columnName ~ "\";
+            alias type = T.StorageType;
+            enum isForeignKey = true;
+            alias referencedEntity = getForeignKeyEntity!T;
+        }");
 
-    mixin("static auto " ~ fieldName ~ "(Expr!Ref e) {
-        return e.column!(T, typeof(this))(\"" ~ columnName ~ "\");
-    }");
+        mixin("static auto " ~ fieldName ~ "(Expr!Ref e) {
+            return e.column!(T.StorageType, typeof(this))(\"" ~ columnName ~ "\");
+        }");
+    } else {
+        // Regular column
+        mixin("struct _colField_" ~ fieldName ~ " {
+            enum name = \"" ~ fieldName ~ "\";
+            enum column = \"" ~ columnName ~ "\";
+            alias type = T;
+            enum isForeignKey = false;
+        }");
+
+        mixin("static auto " ~ fieldName ~ "(Expr!Ref e) {
+            return e.column!(T, typeof(this))(\"" ~ columnName ~ "\");
+        }");
+    }
 }
 
 /// Mixin to define a hasMany relationship.

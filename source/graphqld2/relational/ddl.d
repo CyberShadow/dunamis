@@ -56,7 +56,39 @@ template getColumnDefs(Entity) {
         columns ~= ColumnDef("id", "BIGINT", false, true, "", "");
         seenColumns["id"] = true;
 
-        // First pass: collect BelongsTo FK columns (they have FK constraints)
+        // Collect all columns from Col mixins (including ForeignKey columns)
+        static foreach (member; __traits(allMembers, Entity)) {{
+            static if (member.length > 10 && member[0..10] == "_colField_") {
+                alias FieldMeta = __traits(getMember, Entity, member);
+                if (FieldMeta.column !in seenColumns) {
+                    static if (FieldMeta.isForeignKey) {
+                        // ForeignKey column - include FK constraint
+                        columns ~= ColumnDef(
+                            FieldMeta.column,
+                            sqlTypeName!(FieldMeta.type),
+                            false,
+                            false,
+                            FieldMeta.referencedEntity._table,
+                            "id"
+                        );
+                    } else {
+                        // Regular column
+                        columns ~= ColumnDef(
+                            FieldMeta.column,
+                            sqlTypeName!(FieldMeta.type),
+                            false,
+                            false,
+                            "",
+                            ""
+                        );
+                    }
+                    seenColumns[FieldMeta.column] = true;
+                }
+            }
+        }}
+
+        // Also check BelongsTo for FK columns not defined via Col
+        // (for backward compatibility with schemas that don't use ForeignKey)
         static foreach (member; __traits(allMembers, Entity)) {{
             static if (member.length > 16 && member[0..16] == "_belongsToField_") {
                 alias FieldMeta = __traits(getMember, Entity, member);
@@ -70,24 +102,6 @@ template getColumnDefs(Entity) {
                         "id"
                     );
                     seenColumns[FieldMeta.foreignKey] = true;
-                }
-            }
-        }}
-
-        // Second pass: collect regular columns (skip if already seen as FK)
-        static foreach (member; __traits(allMembers, Entity)) {{
-            static if (member.length > 10 && member[0..10] == "_colField_") {
-                alias FieldMeta = __traits(getMember, Entity, member);
-                if (FieldMeta.column !in seenColumns) {
-                    columns ~= ColumnDef(
-                        FieldMeta.column,
-                        sqlTypeName!(FieldMeta.type),
-                        false,
-                        false,
-                        "",
-                        ""
-                    );
-                    seenColumns[FieldMeta.column] = true;
                 }
             }
         }}

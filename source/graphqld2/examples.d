@@ -42,8 +42,8 @@ struct Post {
     mixin Entity!"posts";
     mixin Col!("title", string);
     mixin Col!("body_", string, "body");  // D keyword, explicit column name
-    mixin Col!("authorId", long);
-    mixin BelongsTo!("author", User, "author_id");
+    mixin Col!("authorId", ForeignKey!User);  // FK column - type derived from User
+    mixin BelongsTo!("author", User, "author_id");  // Relationship accessor
     mixin HasMany!("comments", Comment, "post_id");
 
     /// Computed: render full post as HTML with author and comments
@@ -90,8 +90,10 @@ struct Post {
 struct Comment {
     mixin Entity!"comments";
     mixin Col!("body_", string, "body");  // D keyword, explicit column name
-    mixin BelongsTo!("post", Post, "post_id");
-    mixin BelongsTo!("author", User, "author_id");
+    mixin Col!("postId", ForeignKey!Post);  // FK to Post
+    mixin Col!("authorId", ForeignKey!User);  // FK to User
+    mixin BelongsTo!("post", Post, "post_id");  // Relationship accessor
+    mixin BelongsTo!("author", User, "author_id");  // Relationship accessor
 
     /// Computed: render comment as HTML with author name
     static auto html(Expr!Ref c) {
