@@ -90,7 +90,7 @@ struct Post {
 struct Comment {
     mixin Entity!"comments";
     mixin Col!("body_", string, "body");  // D keyword, explicit column name
-    mixin Col!("authorId", long);
+    mixin BelongsTo!("post", Post, "post_id");
     mixin BelongsTo!("author", User, "author_id");
 
     /// Computed: render comment as HTML with author name
@@ -533,4 +533,72 @@ unittest {
         }
     }
     assert(hasUsers, "Query should have users field");
+}
+
+// ============================================================================
+// SQL DDL Generation Tests
+// ============================================================================
+
+unittest {
+    import std.stdio : writeln;
+
+    // Generate DDL for all tables
+    enum ddl = generateDDL!Query;
+
+    debug(ddl) {
+        writeln("\n=== Generated SQL DDL ===");
+        writeln(ddl);
+    }
+
+    // Verify users table
+    assert(ddl.canFind("CREATE TABLE users"));
+    assert(ddl.canFind("id BIGINT PRIMARY KEY"));
+    assert(ddl.canFind("first_name TEXT NOT NULL"));
+    assert(ddl.canFind("last_name TEXT NOT NULL"));
+    assert(ddl.canFind("email TEXT NOT NULL"));
+
+    // Verify posts table with foreign key
+    assert(ddl.canFind("CREATE TABLE posts"));
+    assert(ddl.canFind("title TEXT NOT NULL"));
+    assert(ddl.canFind("author_id BIGINT NOT NULL"));
+    assert(ddl.canFind("FOREIGN KEY (author_id) REFERENCES users(id)"));
+
+    // Verify comments table with foreign keys
+    assert(ddl.canFind("CREATE TABLE comments"));
+    assert(ddl.canFind("FOREIGN KEY (author_id) REFERENCES users(id)"));
+}
+
+// Test individual table DDL
+unittest {
+    enum usersDDL = generateCreateTable!User;
+
+    assert(usersDDL.canFind("CREATE TABLE users"));
+    assert(usersDDL.canFind("id BIGINT PRIMARY KEY"));
+    assert(usersDDL.canFind("first_name TEXT"));
+    assert(usersDDL.canFind("last_name TEXT"));
+}
+
+// Test column extraction
+unittest {
+    enum userCols = getColumnDefs!User;
+
+    // Should have: id, first_name, last_name, email
+    assert(userCols.length >= 4);
+
+    bool hasId = false;
+    bool hasFirstName = false;
+    foreach (col; userCols) {
+        if (col.name == "id") {
+            hasId = true;
+            assert(col.isPrimaryKey);
+            assert(col.sqlType == "BIGINT");
+        }
+        if (col.name == "first_name") {
+            hasFirstName = true;
+            assert(col.sqlType == "TEXT");
+            assert(!col.nullable);
+        }
+    }
+    assert(hasId, "Should have id column");
+    assert(hasFirstName, "Should have first_name column");
 }
