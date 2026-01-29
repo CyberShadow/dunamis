@@ -454,8 +454,8 @@ unittest {
     import std.stdio : writeln;
     import graphqld2.graphql;
 
-    // Generate complete schema SDL
-    enum schema = generateSchemaSDL!(Query, User, Post, Comment);
+    // Generate complete schema SDL - automatically discovers all types from Query
+    enum schema = generateSchemaSDL!Query;
 
     debug(graphql) {
         writeln("\n=== Generated GraphQL Schema ===");

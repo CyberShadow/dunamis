@@ -117,6 +117,110 @@ template getQueryFields(Query) {
 }
 
 // ============================================================================
+// Type Discovery
+// ============================================================================
+
+/// Check if a type is already in an AliasSeq
+template staticContains(T, Types...) {
+    static if (Types.length == 0) {
+        enum staticContains = false;
+    } else static if (is(T == Types[0])) {
+        enum staticContains = true;
+    } else {
+        enum staticContains = staticContains!(T, Types[1..$]);
+    }
+}
+
+/// Helper to get related types from an entity by iterating over members
+template getRelatedTypesImpl(Entity, size_t idx, Members...) {
+    static if (idx >= Members.length) {
+        alias getRelatedTypesImpl = AliasSeq!();
+    } else {
+        enum member = Members[idx];
+        alias Rest = getRelatedTypesImpl!(Entity, idx + 1, Members);
+
+        // HasMany relationships
+        static if (member.length > 14 && member[0..14] == "_hasManyField_") {
+            alias FieldMeta = __traits(getMember, Entity, member);
+            alias getRelatedTypesImpl = AliasSeq!(FieldMeta.childType, Rest);
+        }
+        // BelongsTo relationships
+        else static if (member.length > 16 && member[0..16] == "_belongsToField_") {
+            alias FieldMeta = __traits(getMember, Entity, member);
+            alias getRelatedTypesImpl = AliasSeq!(FieldMeta.parentType, Rest);
+        }
+        else {
+            alias getRelatedTypesImpl = Rest;
+        }
+    }
+}
+
+/// Get all entity types directly referenced by an entity (via relationships)
+template getRelatedTypes(Entity) {
+    alias getRelatedTypes = getRelatedTypesImpl!(Entity, 0, __traits(allMembers, Entity));
+}
+
+/// Helper to get root types from Query by iterating over members
+template getRootTypesImpl(Query, size_t idx, Members...) {
+    static if (idx >= Members.length) {
+        alias getRootTypesImpl = AliasSeq!();
+    } else {
+        enum member = Members[idx];
+        alias Rest = getRootTypesImpl!(Query, idx + 1, Members);
+
+        static if (member.length > 12 && member[0..12] == "_tableField_") {
+            alias FieldMeta = __traits(getMember, Query, member);
+            alias getRootTypesImpl = AliasSeq!(FieldMeta.entityType, Rest);
+        }
+        else {
+            alias getRootTypesImpl = Rest;
+        }
+    }
+}
+
+/// Get root entity types from Query
+template getRootTypes(Query) {
+    alias getRootTypes = getRootTypesImpl!(Query, 0, __traits(allMembers, Query));
+}
+
+/// Remove duplicates from a type list
+template uniqueTypes(Types...) {
+    static if (Types.length == 0) {
+        alias uniqueTypes = AliasSeq!();
+    } else static if (staticContains!(Types[0], Types[1..$])) {
+        alias uniqueTypes = uniqueTypes!(Types[1..$]);
+    } else {
+        alias uniqueTypes = AliasSeq!(Types[0], uniqueTypes!(Types[1..$]));
+    }
+}
+
+/// Expand one level: get all related types from a set of types
+template expandOneLevel(Types...) {
+    static if (Types.length == 0) {
+        alias expandOneLevel = AliasSeq!();
+    } else {
+        alias First = getRelatedTypes!(Types[0]);
+        alias Rest = expandOneLevel!(Types[1..$]);
+        alias expandOneLevel = AliasSeq!(First, Rest);
+    }
+}
+
+/// Fixed-depth type discovery (sufficient for most schemas)
+/// Expands relationships up to 4 levels deep
+template getAllEntityTypes(Query) {
+    // Start with root types
+    alias Level0 = getRootTypes!Query;
+
+    // Expand level by level, deduping at each step
+    alias Level1 = uniqueTypes!(Level0, expandOneLevel!Level0);
+    alias Level2 = uniqueTypes!(Level1, expandOneLevel!Level1);
+    alias Level3 = uniqueTypes!(Level2, expandOneLevel!Level2);
+    alias Level4 = uniqueTypes!(Level3, expandOneLevel!Level3);
+
+    alias getAllEntityTypes = Level4;
+}
+
+// ============================================================================
 // SDL Generation
 // ============================================================================
 
@@ -148,9 +252,10 @@ string generateQuerySDL(Query)() {
     return result;
 }
 
-/// Generate complete GraphQL schema SDL
-/// Takes a Query type and a tuple of Entity types
-template generateSchemaSDL(Query, Entities...) {
+/// Generate complete GraphQL schema SDL by discovering all types from Query
+template generateSchemaSDL(Query) {
+    alias AllTypes = getAllEntityTypes!Query;
+
     enum generateSchemaSDL = () {
         string result;
 
@@ -158,8 +263,8 @@ template generateSchemaSDL(Query, Entities...) {
         result ~= generateQuerySDL!Query();
         result ~= "\n";
 
-        // Generate each entity type
-        static foreach (Entity; Entities) {
+        // Generate each discovered entity type
+        static foreach (Entity; AllTypes) {
             result ~= generateTypeSDL!Entity();
             result ~= "\n";
         }
