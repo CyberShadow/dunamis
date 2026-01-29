@@ -4,6 +4,7 @@ import std.algorithm;
 import std.array;
 import std.conv;
 import std.meta;
+import std.range : iota;
 import std.traits;
 import std.typecons : Nullable;
 
@@ -234,9 +235,10 @@ class GetByIdsExpr(Entity) : Expr!(Ref[]), RootExprInfo {
         // No dependencies to replace
     }
 
-    override Ref[][] eval(EvalContext ctx, Ref[] parentRefs) {
-        // One result (the same ref array) per parent ref
-        return parentRefs.map!(_ => _refs).array;
+    override Ref[][] eval(EvalContext ctx) {
+        // One result (the same ref array) per parent in currentRefs
+        auto parentCount = ctx.currentRefs.length;
+        return iota(parentCount).map!(_ => _refs).array;
     }
 
     @property Ref[] refs() { return _refs; }
@@ -263,12 +265,14 @@ class GetAllExpr(Entity) : Expr!(Ref[]), RootExprInfo {
         // No dependencies to replace
     }
 
-    override Ref[][] eval(EvalContext ctx, Ref[] parentRefs) {
+    override Ref[][] eval(EvalContext ctx) {
         // Fetch all IDs from data source, encode as refs
         auto relCtx = ctx.getSourceContext!RelationalEvalContext(Entity._sourceId);
         auto ids = relCtx.fetchAllIds(Entity._table);
         auto refs = ids.map!(id => makeRef(Entity._typeName, id)).array;
-        return parentRefs.map!(_ => refs).array;
+        // Return same refs for each parent in currentRefs
+        auto parentCount = ctx.currentRefs.length;
+        return iota(parentCount).map!(_ => refs).array;
     }
 
     // RootExprInfo implementation
@@ -377,9 +381,9 @@ class ColumnAccessExpr(T, Entity) : Expr!T {
         return new ProjectJoinedColumnExpr!T(node.id, lastAlias, _column);
     }
 
-    override T[] eval(EvalContext ctx, Ref[] refs) {
-        // Naive path: fetch column values directly
-        Ref[] entityRefs = evalAs!Ref(_input, ctx, refs);
+    override T[] eval(EvalContext ctx) {
+        // Get the entity refs from the input chain
+        Ref[] entityRefs = evalAs!Ref(_input, ctx);
 
         auto relCtx = ctx.getSourceContext!RelationalEvalContext(Entity._sourceId);
         if (relCtx.fetcher !is null) {
@@ -423,9 +427,9 @@ class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Ref[]), HasManyInfo {
         return this;
     }
 
-    override Ref[][] eval(EvalContext ctx, Ref[] refs) {
-        // Get the parent refs
-        Ref[] parentRefs = evalAs!Ref(_input, ctx, refs);
+    override Ref[][] eval(EvalContext ctx) {
+        // Get the parent refs from the input chain
+        Ref[] parentRefs = evalAs!Ref(_input, ctx);
 
         // Naive path: fetch children directly
         auto relCtx = ctx.getSourceContext!RelationalEvalContext(Child._sourceId);
@@ -479,9 +483,9 @@ class BelongsToAccessExpr(Child, Parent, RefType, string fk) : Expr!RefType, Bel
         return this;
     }
 
-    override RefType[] eval(EvalContext ctx, Ref[] refs) {
-        // Get the child refs
-        Ref[] childRefs = evalAs!Ref(_input, ctx, refs);
+    override RefType[] eval(EvalContext ctx) {
+        // Get the child refs from the input chain
+        Ref[] childRefs = evalAs!Ref(_input, ctx);
 
         static if (is(Child == void)) {
             // Can't fetch without knowing child entity type
@@ -535,8 +539,8 @@ class IdentityExpr : Expr!Ref {
         // No dependencies
     }
 
-    override Ref[] eval(EvalContext ctx, Ref[] refs) {
-        return refs;
+    override Ref[] eval(EvalContext ctx) {
+        return ctx.currentRefs;
     }
 }
 
@@ -586,8 +590,8 @@ unittest {
     auto userExpr = identity();
     auto firstNameExpr = User.firstName(userExpr);
 
-    auto refs = [Ref("User:1"), Ref("User:2")];
-    auto names = firstNameExpr.eval(ctx, refs);
+    ctx.currentRefs = [Ref("User:1"), Ref("User:2")];
+    auto names = firstNameExpr.eval(ctx);
     assert(names == ["Alice", "Bob"]);
 }
 
@@ -616,8 +620,8 @@ unittest {
     auto userExpr = identity();
     auto postsExpr = User.posts(userExpr);
 
-    auto refs = [Ref("User:1"), Ref("User:2")];
-    auto postGroups = postsExpr.eval(ctx, refs);
+    ctx.currentRefs = [Ref("User:1"), Ref("User:2")];
+    auto postGroups = postsExpr.eval(ctx);
 
     assert(postGroups.length == 2);
     assert(postGroups[0].length == 2);  // User:1 has 2 posts
@@ -648,8 +652,8 @@ unittest {
     auto postExpr = identity();
     auto authorExpr = Post.author(postExpr);
 
-    auto refs = [Ref("Post:1"), Ref("Post:2")];
-    auto authors = authorExpr.eval(ctx, refs);
+    ctx.currentRefs = [Ref("Post:1"), Ref("Post:2")];
+    auto authors = authorExpr.eval(ctx);
 
     assert(authors == [Ref("User:10"), Ref("User:20")]);
 }
@@ -688,8 +692,8 @@ unittest {
     auto postExpr = identity();
     auto authorNameExpr = Post.authorName(postExpr);
 
-    auto refs = [Ref("Post:1"), Ref("Post:2")];
-    auto names = authorNameExpr.eval(ctx, refs);
+    ctx.currentRefs = [Ref("Post:1"), Ref("Post:2")];
+    auto names = authorNameExpr.eval(ctx);
 
     assert(names == ["Alice", "Bob"]);
 }

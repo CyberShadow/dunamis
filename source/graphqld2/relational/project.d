@@ -2,6 +2,7 @@ module graphqld2.relational.project;
 
 import std.algorithm;
 import std.array;
+import std.range : iota;
 
 import graphqld2.core.types;
 import graphqld2.core.eval;
@@ -52,10 +53,11 @@ class ProjectColumnExpr(T) : Expr!T, ProjectColumnInfo {
         // No dependencies
     }
 
-    override T[] eval(EvalContext ctx, Ref[] refs) {
+    override T[] eval(EvalContext ctx) {
         // Read from pre-fetched data via relational context
+        // Use ctx.currentRefs as the lookup keys
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-        return relCtx.getColumnValues!T(_queryNodeId, _column, refs);
+        return relCtx.getColumnValues!T(_queryNodeId, _column, ctx.currentRefs);
     }
 
     @property int queryNodeId() { return _queryNodeId; }
@@ -85,10 +87,11 @@ class ProjectJoinedColumnExpr(T) : Expr!T, ProjectJoinedColumnInfo {
         // No dependencies
     }
 
-    override T[] eval(EvalContext ctx, Ref[] refs) {
+    override T[] eval(EvalContext ctx) {
         // Read from JOINed data via relational context
+        // Use ctx.currentRefs as the lookup keys
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-        return relCtx.getJoinedColumnValues!T(_queryNodeId, _joinAlias, _column, refs);
+        return relCtx.getJoinedColumnValues!T(_queryNodeId, _joinAlias, _column, ctx.currentRefs);
     }
 
     @property int queryNodeId() { return _queryNodeId; }
@@ -115,16 +118,17 @@ class ProjectRefsExpr : Expr!(Ref[]) {
         // No dependencies
     }
 
-    override Ref[][] eval(EvalContext ctx, Ref[] parentRefs) {
+    override Ref[][] eval(EvalContext ctx) {
         // Get all refs from the pre-fetched QueryResult via relational context
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
         auto result = relCtx.getQueryResult(_queryNodeId);
+        auto parentCount = ctx.currentRefs.length;
         if (result is null) {
-            return parentRefs.map!(_ => cast(Ref[])[]).array;
+            return iota(parentCount).map!(_ => cast(Ref[])[]).array;
         }
         auto refs = result.allRefs();
         // Return same refs for each parent
-        return parentRefs.map!(_ => refs).array;
+        return iota(parentCount).map!(_ => refs).array;
     }
 
     @property int queryNodeId() { return _queryNodeId; }
@@ -152,9 +156,9 @@ class ProjectChildRefsExpr : Expr!(Ref[]) {
             _parentInput = newDep;
     }
 
-    override Ref[][] eval(EvalContext ctx, Ref[] refs) {
-        // Get parent refs
-        Ref[] parentRefs = evalAs!Ref(_parentInput, ctx, refs);
+    override Ref[][] eval(EvalContext ctx) {
+        // Get parent refs from the input chain
+        Ref[] parentRefs = evalAs!Ref(_parentInput, ctx);
 
         // Get children grouped by parent from QueryResult via relational context
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
@@ -191,10 +195,11 @@ class ProjectBelongsToExpr : Expr!Ref {
         // No dependencies
     }
 
-    override Ref[] eval(EvalContext ctx, Ref[] refs) {
+    override Ref[] eval(EvalContext ctx) {
         // Read FK values and encode as parent refs via relational context
+        // Use ctx.currentRefs as the lookup keys
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-        auto fkValues = relCtx.getColumnValues!long(_queryNodeId, _fkColumn, refs);
+        auto fkValues = relCtx.getColumnValues!long(_queryNodeId, _fkColumn, ctx.currentRefs);
         return fkValues.map!(fk => fk == 0 ? Ref.init : makeRef(_parentTypeName, fk)).array;
     }
 
@@ -227,8 +232,8 @@ unittest {
     auto proj = new ProjectColumnExpr!string(0, "first_name");
 
     // Evaluate
-    auto refs = [Ref("User:1"), Ref("User:2")];
-    auto names = proj.eval(ctx, refs);
+    ctx.currentRefs = [Ref("User:1"), Ref("User:2")];
+    auto names = proj.eval(ctx);
     assert(names == ["Alice", "Bob"]);
 }
 
@@ -249,7 +254,8 @@ unittest {
     relCtx.storeQueryResult(0, result);
 
     auto proj = new ProjectRefsExpr(0);
-    auto refArrays = proj.eval(ctx, [queryRoot]);
+    ctx.currentRefs = [queryRoot];
+    auto refArrays = proj.eval(ctx);
 
     assert(refArrays.length == 1);
     assert(refArrays[0] == [Ref("User:1"), Ref("User:2"), Ref("User:3")]);
@@ -277,8 +283,8 @@ unittest {
     auto proj = new ProjectChildRefsExpr(0, parentInput);
 
     // Query for children of User:10 and User:20
-    auto parentRefs = [Ref("User:10"), Ref("User:20"), Ref("User:30")];
-    auto childRefArrays = proj.eval(ctx, parentRefs);
+    ctx.currentRefs = [Ref("User:10"), Ref("User:20"), Ref("User:30")];
+    auto childRefArrays = proj.eval(ctx);
 
     assert(childRefArrays.length == 3);
     assert(childRefArrays[0].length == 2);  // User:10 has 2 posts
@@ -302,8 +308,8 @@ unittest {
     relCtx.storeQueryResult(0, result);
 
     auto proj = new ProjectBelongsToExpr(0, "author_id", "User");
-    auto refs = [Ref("Post:1"), Ref("Post:2")];
-    auto parentRefs = proj.eval(ctx, refs);
+    ctx.currentRefs = [Ref("Post:1"), Ref("Post:2")];
+    auto parentRefs = proj.eval(ctx);
 
     assert(parentRefs == [Ref("User:10"), Ref("User:20")]);
 }

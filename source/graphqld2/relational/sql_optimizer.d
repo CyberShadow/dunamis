@@ -263,10 +263,11 @@ class ProjectComputedExpr(T) : Expr!T {
         // No dependencies
     }
 
-    override T[] eval(EvalContext ctx, Ref[] refs) {
+    override T[] eval(EvalContext ctx) {
         // Read computed column from pre-fetched data via relational context
+        // Use ctx.currentRefs as the lookup keys
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-        return relCtx.getColumnValues!T(_queryNodeId, _alias, refs);
+        return relCtx.getColumnValues!T(_queryNodeId, _alias, ctx.currentRefs);
     }
 
     @property int queryNodeId() { return _queryNodeId; }

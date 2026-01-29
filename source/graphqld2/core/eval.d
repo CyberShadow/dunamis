@@ -15,6 +15,10 @@ private struct SourceKey {
 /// Top-level evaluation context that holds per-source contexts.
 /// Each data source (relational, REST, etc.) registers its own context type.
 ///
+/// The context also carries the current batch refs being evaluated.
+/// This is set by MapExpr before evaluating its body, allowing expressions
+/// to access the refs without explicit parameter passing.
+///
 /// Usage:
 ///   auto relCtx = evalCtx.getSourceContext!RelationalEvalContext();
 ///   auto values = relCtx.getColumnValues!string(nodeId, "name", refs);
@@ -22,6 +26,10 @@ class EvalContext {
     private {
         Object[SourceKey] _sourceContexts;
     }
+
+    /// The refs currently being evaluated (set by MapExpr before body eval).
+    /// Expressions can read this to know the current batch.
+    Ref[] currentRefs;
 
     /// Get or create a source-specific evaluation context.
     /// Each data source type has its own context for storing fetched data.

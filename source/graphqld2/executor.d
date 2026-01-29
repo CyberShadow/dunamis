@@ -33,7 +33,9 @@ class Executor {
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
         relCtx.fetcher = _fetcher;
 
-        auto results = expr.eval(ctx, [queryRoot]);
+        // Set the root context - a single query root ref
+        ctx.currentRefs = [queryRoot];
+        auto results = expr.eval(ctx);
         return results[0];
     }
 
@@ -62,7 +64,8 @@ class Executor {
         _queryExecutor.executeAll(nodes, evalCtx, sqlOpt);
 
         // Phase 4: Evaluate the optimized expression
-        auto results = optimized.eval(evalCtx, [queryRoot]);
+        evalCtx.currentRefs = [queryRoot];
+        auto results = optimized.eval(evalCtx);
         return results[0];
     }
 }

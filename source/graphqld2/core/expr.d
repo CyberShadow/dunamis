@@ -33,10 +33,10 @@ abstract class ExprBase {
 
 /// Helper to evaluate an ExprBase with a known type.
 /// Asserts if the runtime type doesn't match.
-T[] evalAs(T)(ExprBase expr, EvalContext ctx, Ref[] refs) {
+T[] evalAs(T)(ExprBase expr, EvalContext ctx) {
     auto typed = cast(Expr!T) expr;
     assert(typed !is null, "Type mismatch in evalAs: expected " ~ T.stringof);
-    return typed.eval(ctx, refs);
+    return typed.eval(ctx);
 }
 
 // ============================================================================
@@ -63,9 +63,10 @@ abstract class Expr(T) : ExprBase {
         return this;  // Default: no optimization
     }
 
-    /// Evaluate for a batch of entity references.
-    /// Returns T[] with one result per input ref.
-    abstract T[] eval(EvalContext ctx, Ref[] refs);
+    /// Evaluate for the current batch of entity references.
+    /// Returns T[] with one result per ref in ctx.currentRefs.
+    /// The batch refs are set by MapExpr before evaluating its body.
+    abstract T[] eval(EvalContext ctx);
 
     // =========================================================================
     // Operator Overloading
@@ -200,9 +201,10 @@ class ConstExpr(T) : Expr!T, ConstantInfo {
         // No dependencies to replace
     }
 
-    override T[] eval(EvalContext ctx, Ref[] refs) {
-        // Return same value for each ref
-        return std.algorithm.map!(_ => _value)(refs).array;
+    override T[] eval(EvalContext ctx) {
+        // Return same value for each ref in the current batch
+        auto count = ctx.currentRefs.length;
+        return std.algorithm.map!(_ => _value)(iota(count)).array;
     }
 
     /// Get the constant value (for optimizer inspection)
@@ -287,12 +289,13 @@ class BinaryOpExpr(L, string op, R = L) : Expr!(typeof(mixin("L.init " ~ op ~ " 
         return this;
     }
 
-    override ResultT[] eval(EvalContext ctx, Ref[] refs) {
-        auto lefts = evalAs!L(_left, ctx, refs);
-        auto rights = evalAs!R(_right, ctx, refs);
+    override ResultT[] eval(EvalContext ctx) {
+        auto lefts = evalAs!L(_left, ctx);
+        auto rights = evalAs!R(_right, ctx);
 
-        ResultT[] result = new ResultT[refs.length];
-        foreach (i; 0 .. refs.length) {
+        auto count = ctx.currentRefs.length;
+        ResultT[] result = new ResultT[count];
+        foreach (i; 0 .. count) {
             result[i] = mixin("lefts[i] " ~ op ~ " rights[i]");
         }
         return result;
@@ -350,16 +353,17 @@ class UseExpr(Fn, Exprs...) : Expr!(ReturnType!Fn)
         return this;
     }
 
-    override R[] eval(EvalContext ctx, Ref[] refs) {
+    override R[] eval(EvalContext ctx) {
         // Evaluate all inputs with known types
         EvaluatedArrays evaluated;
         static foreach (i; 0 .. Exprs.length) {
-            evaluated[i] = evalAs!(InputTypes[i])(_inputs[i], ctx, refs);
+            evaluated[i] = evalAs!(InputTypes[i])(_inputs[i], ctx);
         }
 
         // Apply function per-element
-        R[] result = new R[refs.length];
-        foreach (idx; 0 .. refs.length) {
+        auto count = ctx.currentRefs.length;
+        R[] result = new R[count];
+        foreach (idx; 0 .. count) {
             // Build args tuple for this index
             Tuple!InputTypes args;
             static foreach (i; 0 .. Exprs.length) {
@@ -398,9 +402,9 @@ class EveryItemOfExpr : Expr!Ref {
         // No dependencies to replace
     }
 
-    override Ref[] eval(EvalContext ctx, Ref[] refs) {
-        // Pass through the refs unchanged - these are the items being iterated
-        return refs;
+    override Ref[] eval(EvalContext ctx) {
+        // Return the current batch refs set by MapExpr
+        return ctx.currentRefs;
     }
 }
 
@@ -450,9 +454,9 @@ class MapExpr(Body) : Expr!(Body.ResultType[]), MapExprInfo
 
     /// Batched eval: evaluates all items at once.
     /// Works correctly for both naive and optimized paths.
-    override R[][] eval(EvalContext ctx, Ref[] parentRefs) {
+    override R[][] eval(EvalContext ctx) {
         // 1. Evaluate collection for each parent ref
-        Ref[][] collectionResults = evalAs!(Ref[])(_collection, ctx, parentRefs);
+        Ref[][] collectionResults = evalAs!(Ref[])(_collection, ctx);
 
         // 2. Flatten for batch evaluation
         Ref[] flatRefs;
@@ -463,14 +467,22 @@ class MapExpr(Body) : Expr!(Body.ResultType[]), MapExprInfo
         }
 
         if (flatRefs.length == 0) {
-            // No items to process
-            return std.algorithm.map!(_ => cast(R[])[])(parentRefs).array;
+            // No items to process - return empty array for each parent
+            auto parentCount = ctx.currentRefs.length;
+            return std.algorithm.map!(_ => cast(R[])[])(iota(parentCount)).array;
         }
 
-        // 3. Evaluate body with ALL refs at once
-        R[] flatResults = evalAs!R(_body, ctx, flatRefs);
+        // 3. Save parent refs and set current refs to the flattened collection
+        auto savedRefs = ctx.currentRefs;
+        ctx.currentRefs = flatRefs;
 
-        // 4. Regroup to match input structure
+        // 4. Evaluate body with ALL refs at once
+        R[] flatResults = evalAs!R(_body, ctx);
+
+        // 5. Restore parent refs
+        ctx.currentRefs = savedRefs;
+
+        // 6. Regroup to match input structure
         R[][] result;
         size_t offset = 0;
         foreach (len; lengths) {
@@ -573,8 +585,8 @@ class JsonObjectExpr(Args...) : Expr!JSONValue
         return this;
     }
 
-    override JSONValue[] eval(EvalContext ctx, Ref[] refs) {
-        auto count = refs.length;
+    override JSONValue[] eval(EvalContext ctx) {
+        auto count = ctx.currentRefs.length;
         JSONValue[] results = new JSONValue[count];
 
         // Initialize empty objects
@@ -586,7 +598,7 @@ class JsonObjectExpr(Args...) : Expr!JSONValue
         static foreach (i; 0 .. Args.length / 2) {{
             alias ET = ExprTypeAt!i;
             string name = _names[i];
-            auto values = evalAs!ET(_exprs[i], ctx, refs);
+            auto values = evalAs!ET(_exprs[i], ctx);
 
             foreach (idx; 0 .. count) {
                 results[idx][name] = toJsonValue(values[idx]);
@@ -613,8 +625,8 @@ unittest {
     // Test ConstExpr
     auto constExpr = constant(42);
     auto ctx = new EvalContext();
-    auto refs = [Ref("Test:1"), Ref("Test:2")];
-    auto result = constExpr.eval(ctx, refs);
+    ctx.currentRefs = [Ref("Test:1"), Ref("Test:2")];
+    auto result = constExpr.eval(ctx);
     assert(result == [42, 42]);
 }
 
@@ -630,8 +642,8 @@ unittest {
     );
 
     auto ctx = new EvalContext();
-    auto refs = [Ref("Test:1"), Ref("Test:2"), Ref("Test:3")];
-    auto result = combined.eval(ctx, refs);
+    ctx.currentRefs = [Ref("Test:1"), Ref("Test:2"), Ref("Test:3")];
+    auto result = combined.eval(ctx);
     assert(result == ["Hello World", "Hello World", "Hello World"]);
 }
 
@@ -646,8 +658,8 @@ unittest {
     );
 
     auto ctx = new EvalContext();
-    auto refs = [Ref("Test:1"), Ref("Test:2")];
-    auto result = obj.eval(ctx, refs);
+    ctx.currentRefs = [Ref("Test:1"), Ref("Test:2")];
+    auto result = obj.eval(ctx);
 
     assert(result.length == 2);
     assert(result[0]["name"].str == "Alice");
@@ -665,8 +677,10 @@ unittest {
         override ExprBase[] dependencies() { return []; }
         override void replaceDependency(size_t index, ExprBase newDep) {}
 
-        override Ref[][] eval(EvalContext ctx, Ref[] parentRefs) {
-            return std.algorithm.map!(_ => _refs)(parentRefs).array;
+        override Ref[][] eval(EvalContext ctx) {
+            // Return the same refs for each parent in currentRefs
+            auto parentCount = ctx.currentRefs.length;
+            return std.algorithm.map!(_ => _refs)(iota(parentCount)).array;
         }
     }
 
@@ -687,9 +701,10 @@ unittest {
     )(collection);
 
     auto ctx = new EvalContext();
+    ctx.currentRefs = [queryRoot];  // Set the parent context
 
     // Evaluate for one parent
-    auto result = mapExpr.eval(ctx, [queryRoot]);
+    auto result = mapExpr.eval(ctx);
     assert(result.length == 1);  // One result per parent
     assert(result[0] == ["Test:1", "Test:2"]);  // Array of node IDs
 }
@@ -703,8 +718,8 @@ unittest {
     auto combined = first ~ " " ~ second;
 
     auto ctx = new EvalContext();
-    auto refs = [Ref("Test:1"), Ref("Test:2")];
-    auto result = combined.eval(ctx, refs);
+    ctx.currentRefs = [Ref("Test:1"), Ref("Test:2")];
+    auto result = combined.eval(ctx);
     assert(result == ["Hello World", "Hello World"]);
 }
 
@@ -714,16 +729,16 @@ unittest {
     auto b = constant(3);
 
     auto ctx = new EvalContext();
-    auto refs = [Ref("Test:1")];
+    ctx.currentRefs = [Ref("Test:1")];
 
-    assert((a + b).eval(ctx, refs) == [13]);
-    assert((a - b).eval(ctx, refs) == [7]);
-    assert((a * b).eval(ctx, refs) == [30]);
-    assert((a / b).eval(ctx, refs) == [3]);
+    assert((a + b).eval(ctx) == [13]);
+    assert((a - b).eval(ctx) == [7]);
+    assert((a * b).eval(ctx) == [30]);
+    assert((a / b).eval(ctx) == [3]);
 
     // With literals
-    assert((a + 5).eval(ctx, refs) == [15]);
-    assert((5 + a).eval(ctx, refs) == [15]);
+    assert((a + 5).eval(ctx) == [15]);
+    assert((5 + a).eval(ctx) == [15]);
 }
 
 unittest {
@@ -732,13 +747,13 @@ unittest {
     auto b = constant(3);
 
     auto ctx = new EvalContext();
-    auto refs = [Ref("Test:1")];
+    ctx.currentRefs = [Ref("Test:1")];
 
-    assert(a.eq(10).eval(ctx, refs) == [true]);
-    assert(a.eq(5).eval(ctx, refs) == [false]);
-    assert(a.ne(5).eval(ctx, refs) == [true]);
-    assert(a.lt(b).eval(ctx, refs) == [false]);
-    assert(a.gt(b).eval(ctx, refs) == [true]);
-    assert(a.le(10).eval(ctx, refs) == [true]);
-    assert(a.ge(10).eval(ctx, refs) == [true]);
+    assert(a.eq(10).eval(ctx) == [true]);
+    assert(a.eq(5).eval(ctx) == [false]);
+    assert(a.ne(5).eval(ctx) == [true]);
+    assert(a.lt(b).eval(ctx) == [false]);
+    assert(a.gt(b).eval(ctx) == [true]);
+    assert(a.le(10).eval(ctx) == [true]);
+    assert(a.ge(10).eval(ctx) == [true]);
 }
