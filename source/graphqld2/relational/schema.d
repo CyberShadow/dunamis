@@ -15,6 +15,28 @@ import graphqld2.relational.project;
 import graphqld2.relational.query_node;
 
 // ============================================================================
+// Query Root Mixin
+// ============================================================================
+
+/// Mixin to define a root query field that returns all entities of a type.
+/// Used in a Query struct to define the schema's entry points.
+///
+/// Example:
+/// ---
+/// struct Query {
+///     mixin Table!(User, "users");   // generates: static auto users(db) => getAll!User(db)
+///     mixin Table!(Post, "posts");
+/// }
+///
+/// auto query = map!(u => User.firstName(u))(Query.users(db));
+/// ---
+mixin template Table(Entity, string fieldName) {
+    mixin("static auto " ~ fieldName ~ "(DataFetcher db) {
+        return getAll!Entity(db);
+    }");
+}
+
+// ============================================================================
 // Entity Mixin
 // ============================================================================
 

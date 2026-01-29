@@ -9,6 +9,18 @@ import graphqld2.core;
 import graphqld2.relational;
 
 // ============================================================================
+// Schema Definition - Query root with all entry points
+// ============================================================================
+
+/// The Query root - defines all entry points into the schema.
+/// This mirrors what a GraphQL schema's Query type would look like.
+struct Query {
+    mixin Table!(User, "users");
+    mixin Table!(Post, "posts");
+    mixin Table!(Comment, "comments");
+}
+
+// ============================================================================
 // Domain Model - Demonstrates business logic with relationships
 // ============================================================================
 
@@ -268,6 +280,124 @@ unittest {
 
     debug(sql) {
         writeln("\n=== Test: Forking hasMany (users -> posts, users -> comments) ===");
+        db.printSQL();
+    }
+}
+
+// ============================================================================
+// Query Root Pattern Tests
+// ============================================================================
+
+// Test using Query root - mirrors GraphQL query structure
+unittest {
+    import std.stdio : writeln;
+
+    auto db = createMockDB();
+    auto executor = new Executor();
+
+    // GraphQL equivalent:
+    // query {
+    //   users {
+    //     firstName
+    //     lastName
+    //     email
+    //   }
+    // }
+    auto query = map!(
+        (Expr!Ref user) => jsonObject(
+            "firstName", User.firstName(user),
+            "lastName", User.lastName(user),
+            "email", User.email(user)
+        )
+    )(Query.users(db));
+
+    auto result = executor.execute(query);
+
+    assert(result.length == 3);  // All users
+    assert(result[0]["firstName"].str == "Alice");
+    assert(result[0]["email"].str == "alice@example.com");
+    assert(result[1]["firstName"].str == "Bob");
+    assert(result[2]["firstName"].str == "Carol");
+
+    debug(sql) {
+        writeln("\n=== Test: Query.users (getAll) ===");
+        db.printSQL();
+    }
+}
+
+// Test nested query from Query root - simpler version first
+unittest {
+    import std.stdio : writeln;
+
+    auto db = createMockDB();
+    auto executor = new Executor();
+
+    // Simpler: users -> posts (2 levels)
+    auto query = map!(
+        (Expr!Ref user) => jsonObject(
+            "fullName", User.fullName(user),
+            "posts", map!(
+                (Expr!Ref post) => jsonObject(
+                    "title", Post.title(post)
+                )
+            )(User.posts(user))
+        )
+    )(Query.users(db));
+
+    auto result = executor.execute(query);
+
+    assert(result.length == 3);
+    assert(result[0]["fullName"].str == "Alice Smith");
+    assert(result[0]["posts"].array.length == 2);  // Alice has posts 1 and 3
+    assert(result[1]["fullName"].str == "Bob Jones");
+    assert(result[1]["posts"].array.length == 1);  // Bob has post 2
+    assert(result[2]["fullName"].str == "Carol White");
+    assert(result[2]["posts"].array.length == 0);  // Carol has no posts
+
+    debug(sql) {
+        writeln("\n=== Test: Query.users -> posts (2 levels) ===");
+        db.printSQL();
+    }
+}
+
+// Test 3-level nesting: users -> posts -> comments
+unittest {
+    import std.stdio : writeln;
+
+    auto db = createMockDB();
+    auto executor = new Executor();
+
+    auto query = map!(
+        (Expr!Ref user) => jsonObject(
+            "fullName", User.fullName(user),
+            "posts", map!(
+                (Expr!Ref post) => jsonObject(
+                    "title", Post.title(post),
+                    "comments", map!(
+                        (Expr!Ref comment) => jsonObject(
+                            "body", Comment.body_(comment)
+                        )
+                    )(Post.comments(post))
+                )
+            )(User.posts(user))
+        )
+    )(Query.users(db));
+
+    auto result = executor.execute(query);
+
+    assert(result.length == 3);
+
+    // Alice has 2 posts
+    assert(result[0]["fullName"].str == "Alice Smith");
+    assert(result[0]["posts"].array.length == 2);
+
+    // Alice's first post (Hello World) has 2 comments
+    auto aliceFirstPost = result[0]["posts"].array[0];
+    assert(aliceFirstPost["title"].str == "Hello World");
+    assert(aliceFirstPost["comments"].array.length == 2);
+
+    debug(sql) {
+        writeln("\n=== Test: Query.users -> posts -> comments (3 levels) ===");
         db.printSQL();
     }
 }

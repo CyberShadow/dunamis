@@ -647,6 +647,13 @@ class JsonObjectExpr(Args...) : Expr!JSONValue
             string name = _names[i];
             auto values = evalAs!ET(_exprs[i], ctx);
 
+            // Debug: verify all expressions return same number of results
+            import std.conv : to;
+            assert(values.length == count,
+                "JsonObjectExpr field '" ~ name ~ "' returned " ~
+                values.length.to!string ~ " values but expected " ~ count.to!string ~
+                " (first field '" ~ _names[0] ~ "' had " ~ count.to!string ~ ")");
+
             foreach (idx; 0 .. count) {
                 results[idx][name] = toJsonValue(values[idx]);
             }

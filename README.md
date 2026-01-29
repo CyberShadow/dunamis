@@ -29,19 +29,18 @@ Solutions like DataLoader help but require manual batching logic and don't funda
 
 ## Approach: Two-Phase Execution
 
-### Phase 1: Build the computation graph
+### Phase 1: Optimization
 
-Walk the GraphQL query and construct an expression tree that describes:
-- What data needs to be fetched
-- What computations need to happen
-- Dependencies between fields
+Walk the expression tree and:
+- Collect QueryNodes (one per MapExpr scope)
+- Track columns needed from each table
+- Build JOINs for belongsTo relationships
+- Create child QueryNodes for hasMany relationships
 
-At this point, we know *what* to fetch but don't have the data yet.
+### Phase 2: Evaluation
 
-### Phase 2: Execute and resolve
-
-- Batch-fetch all required data (grouped by type/table)
-- Evaluate the expression tree with resolved data
+- Execute prefetch queries (CTE-based SQL for all layers)
+- Evaluate expressions against fetched data
 - Assemble the response
 
 ### Key Constraint
@@ -55,161 +54,162 @@ All relationships must be declared in the schema, not computed at runtime. This 
 
 This is an acceptable trade-off for most CRUD applications.
 
-## Design: Expression Trees
-
-Fields are defined as `Expr!T` - expression trees that can be:
-1. Analyzed for dependencies (Phase 1)
-2. Evaluated in batches (Phase 2)
-
-```d
-abstract class Expr(T) {
-    /// Phase 2: evaluate for a batch of parent contexts
-    abstract T[] evalBatch(Context[] contexts);
-
-    // TODO: Phase 1
-    // abstract Dependency[] dependencies();
-}
-```
-
-### Core Expression Types
-
-| Type | Description |
-|------|-------------|
-| `ConstExpr!T` | Constant value, same for all contexts |
-| `ContextIdExpr!T` | Reads entity ID from context (like `this`) |
-| `BinaryOpExpr` | Binary operations (+, ~, ==, etc.) |
-| `UseExpr` | Per-element computation: `(A, B) => R` |
-| `UseAllExpr` | Batch computation: `(A[], B[]) => R[]` |
-
-### The Context
-
-Each `Context` represents one "row" being processed - typically one entity. It carries:
-- The entity ID for this row
-- (Future: resolved data stores, root query access)
-
-```d
-struct Context {
-    long entityId;
-    TypeInfo entityType;
-
-    static Context forEntity(T)(Id!T id);
-    Id!T getId(T)() const;
-}
-```
-
-### Combinators
-
-**`use(fn, expr1, expr2, ...)`** - Per-element computation
-
-```d
-Expr!string fullName() => use(
-    (string first, string last) => first ~ " " ~ last,
-    firstName(),
-    lastName()
-);
-```
-
-**`useAll(fn, expr1, expr2, ...)`** - Batch computation (key for DB access)
-
-```d
-Expr!string firstName() => useAll(
-    (Id!User[] ids) => db.query("SELECT first_name FROM users WHERE id IN (?)", ids),
-    contextId!User()
-);
-```
-
-**`contextId!T()`** - Get current entity's ID (like `this`/`self`)
-
-## Architecture Layers
+## Architecture
 
 ```
 ┌─────────────────────────────────────┐
-│         GraphQL API Layer           │
-│  - Schema generation from types     │
-│  - Query parsing                    │
-│  - Response serialization           │
+│           Core Layer                │
+│  - Expr!T expression trees          │
+│  - Data-source agnostic Executor    │
+│  - OptimizeContext / EvalContext    │
 └─────────────────────────────────────┘
                  │
                  ▼
 ┌─────────────────────────────────────┐
-│      Expression / Computation       │
-│  - Expr!T tree building             │
-│  - Dependency analysis              │
-│  - Batch evaluation                 │
+│        Relational Layer             │
+│  - Entity mixins (Col, BelongsTo)   │
+│  - QueryNode SQL planning           │
+│  - CTE-based query generation       │
+│  - DataFetcher abstraction          │
 └─────────────────────────────────────┘
                  │
                  ▼
 ┌─────────────────────────────────────┐
-│           ORM / Data Layer          │
-│  - Entity definitions               │
-│  - Relationship declarations        │
-│  - Batch data fetching              │
+│         GraphQL Layer               │
+│  - Schema generation (planned)      │
+│  - Query parsing (planned)          │
 └─────────────────────────────────────┘
 ```
 
-Note: Entity IDs (`Id!T`) live in the ORM layer, not GraphQL. GraphQL sees opaque object references.
-
-## Current Status
-
-**Working:**
-- `Expr!T` base class and evaluation
-- `ConstExpr`, `ContextIdExpr`, `BinaryOpExpr`
-- `use` and `useAll` combinators (variadic)
-- Basic operator overloads
-- Batched field resolution
-- Simple relationship traversal
-
-**Not yet implemented:**
-- Phase 1 dependency collection
-- Array operations (`filter`, `map`, `flatMap` on `Expr!(T[])`)
-- Conditional expressions (`when`)
-- Root query access (for cross-cutting data needs)
-- GraphQL schema generation
-- Query parsing and execution
-- Response serialization
+The Executor is data-source agnostic. Data sources travel with expressions - root expressions (like `getByIds!User`) carry their DataFetcher. The executor walks the expression tree to collect optimizers needed for each data source.
 
 ## Example
 
 ```d
-// ORM layer - entity field definitions
+import graphqld2.core;
+import graphqld2.relational;
+
+// Entity definitions with mixins
 struct User {
-    static Expr!string firstName() => useAll(
-        (Id!User[] ids) => fetchUserField!"firstName"(ids),
-        contextId!User()
-    );
+    mixin Entity!"users";
+    mixin Col!("firstName", string);
+    mixin Col!("lastName", string);
+    mixin Col!("email", string);
+    mixin HasMany!("posts", Post, "author_id");
+    mixin HasMany!("comments", Comment, "author_id");
 
-    static Expr!string lastName() => useAll(
-        (Id!User[] ids) => fetchUserField!"lastName"(ids),
-        contextId!User()
-    );
-
-    static Expr!string fullName() => use(
-        (string first, string last) => first ~ " " ~ last,
-        firstName(),
-        lastName()
-    );
-
-    static Expr!(Id!Post[]) postIds() => useAll(
-        (Id!User[] ids) => fetchPostIdsForUsers(ids),
-        contextId!User()
-    );
+    // Computed field
+    static auto fullName(Expr!Ref u) => firstName(u) ~ " " ~ lastName(u);
 }
 
-// Usage - batched evaluation
-auto contexts = [1, 2, 3].map!(id => Context.forEntity(Id!User(id))).array;
+struct Post {
+    mixin Entity!"posts";
+    mixin Col!("title", string);
+    mixin Col!("body_", string, "body");
+    mixin BelongsTo!("author", User, "author_id");
+    mixin HasMany!("comments", Comment, "post_id");
+}
 
-// ONE "database query" for all three users:
-auto names = User.fullName().evalBatch(contexts);
-// => ["Alice Smith", "Bob Jones", "Carol White"]
+struct Comment {
+    mixin Entity!"comments";
+    mixin Col!("body_", string, "body");
+    mixin BelongsTo!("author", User, "author_id");
+}
+
+// Usage
+auto db = new MockDataFetcher();
+auto executor = new Executor();
+
+// Query: { posts { title, author { fullName } } }
+auto query = map!(
+    (Expr!Ref p) => jsonObject(
+        "title", Post.title(p),
+        "author", User.fullName(Post.author(p))
+    )
+)(getByIds!Post([1, 2], db));
+
+auto result = executor.execute(query);
+```
+
+The above generates a single SQL query with JOINs:
+
+```sql
+SELECT posts.id, posts.title, j0.first_name, j0.last_name
+FROM posts
+LEFT JOIN users AS j0 ON posts.author_id = j0.id
+WHERE posts.id IN (1, 2)
+```
+
+### Nested Relationships (HasMany)
+
+```d
+// Query: { users { firstName, posts { title } } }
+auto query = map!(
+    (Expr!Ref user) => jsonObject(
+        "firstName", User.firstName(user),
+        "posts", map!(
+            (Expr!Ref post) => jsonObject(
+                "title", Post.title(post)
+            )
+        )(User.posts(user))
+    )
+)(getByIds!User([1, 2], db));
+```
+
+Generates CTE-based SQL:
+
+```sql
+WITH layer0 AS (
+    SELECT users.id, users.first_name
+    FROM users WHERE users.id IN (1, 2)
+),
+layer1 AS (
+    SELECT posts.id, posts.title, posts.author_id
+    FROM posts WHERE posts.author_id IN (SELECT id FROM layer0)
+)
+SELECT * FROM layer0;
+SELECT * FROM layer1;
+```
+
+## Current Status
+
+**Working:**
+- Expression tree with batched evaluation (`Expr!T`)
+- `use()` combinator for per-element computation
+- Operator overloading (`~`, `==`, etc.)
+- Entity definition mixins (`Entity`, `Col`, `BelongsTo`, `HasMany`)
+- QueryNode-based SQL planning
+- JOINs for belongsTo relationships
+- Child queries (CTEs) for hasMany relationships
+- Computed fields with SQL push-down (concatenation becomes `||` in SQL)
+- Data-source agnostic Executor
+- MockDataFetcher for testing
+- DebugSqlFetcher for SQL inspection
+
+**Not yet implemented:**
+- GraphQL schema generation from types
+- GraphQL query parsing
+- Response serialization
+- Real database DataFetcher (PostgreSQL, etc.)
+- Filtering/pagination (WHERE, LIMIT, OFFSET)
+- Polymorphism (GraphQL union/interface types)
+
+## Running Tests
+
+```bash
+dub test
+
+# With SQL debug output
+dub test -d=sql
 ```
 
 ## Future Directions
 
-- **Generic ORM abstraction** for batch data fetching
-- **Mixin-based field exposure** to reduce boilerplate
-- **Push-down optimizations** (push filters to SQL)
-- **Async/parallel execution** for independent fetches
-- **Caching and deduplication** of identical sub-expressions
+- **Expression deduplication** - Grafast-style peer analysis
+- **Plan caching** - Reuse optimized plans for repeated queries
+- **Pagination** - LIMIT/OFFSET/cursor support
+- **Async/parallel execution** - For independent fetches
+- **Real database adapters** - PostgreSQL, MySQL, SQLite
 
 ## Related Work
 

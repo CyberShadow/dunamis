@@ -479,7 +479,7 @@ class MockDataFetcher : DataFetcher {
             if (auto children = parentId in childrenByParentId) {
                 result ~= *children;
             } else {
-                result ~= [];
+                result ~= cast(Ref[])[];  // Explicit cast to avoid ambiguity
             }
         }
         return result;
