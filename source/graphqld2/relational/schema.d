@@ -2,323 +2,403 @@ module graphqld2.relational.schema;
 
 import std.algorithm;
 import std.array;
+import std.conv;
 import std.meta;
 import std.traits;
+import std.typecons : Nullable;
 
 import graphqld2.core;
-import graphqld2.relational.types;
-import graphqld2.relational.context;
+import graphqld2.relational.project;
 
 // ============================================================================
 // Entity Mixin
 // ============================================================================
 
 /// Mixin to define an entity (table mapping)
-mixin template Entity(string tableName, string sourceId = "default") {
+/// Adds _typeName (for node ID encoding) and _table (for SQL generation)
+mixin template Entity(string tableName, string typeName = "", string sourceId = "default") {
     static immutable string _table = tableName;
+    static immutable string _typeName = (typeName.length > 0) ? typeName : __traits(identifier, typeof(this));
     static immutable string _sourceId = sourceId;
 }
 
 // ============================================================================
-// Column Expression
+// Field Definition Mixins
 // ============================================================================
 
-/// Expression that reads a column from the current layer
-class ColumnExpr(T) : Expr!T {
-    private string _column;
-    private int _layerId;
-    private string _sourceId;
+/// Convert camelCase to snake_case at compile time
+private string toSnakeCase(string input) {
+    if (input.length == 0) return "";
 
-    this(string column) {
+    string result;
+    foreach (i, c; input) {
+        if (c >= 'A' && c <= 'Z') {
+            if (i > 0) result ~= '_';
+            result ~= cast(char)(c + 32);  // toLowerCase
+        } else {
+            result ~= c;
+        }
+    }
+    return result;
+}
+
+/// Mixin to define a column accessor.
+/// Example: mixin Col!("firstName", string);  // generates firstName() method, maps to "first_name" column
+/// Example: mixin Col!("createdAt", string, "created_at");  // explicit column name
+mixin template Col(string fieldName, T, string columnName = toSnakeCase(fieldName)) {
+    mixin("static auto " ~ fieldName ~ "(Expr!Ref e) {
+        return e.column!(T, typeof(this))(\"" ~ columnName ~ "\");
+    }");
+}
+
+/// Mixin to define a hasMany relationship.
+/// Example: mixin HasMany!("posts", Post, "author_id");
+mixin template HasMany(string fieldName, Child, string fk) {
+    mixin("static auto " ~ fieldName ~ "(Expr!Ref e) {
+        return e.hasMany!(Child, fk, typeof(this))();
+    }");
+}
+
+/// Mixin to define a required belongsTo relationship.
+/// Example: mixin BelongsTo!("author", User, "author_id");
+mixin template BelongsTo(string fieldName, Parent, string fk) {
+    mixin("static auto " ~ fieldName ~ "(Expr!Ref e) {
+        return e.belongsTo!(Parent, Ref, fk, typeof(this))();
+    }");
+}
+
+/// Mixin to define an optional belongsTo relationship (nullable FK).
+/// Example: mixin BelongsToOptional!("manager", User, "manager_id");
+mixin template BelongsToOptional(string fieldName, Parent, string fk) {
+    mixin("static auto " ~ fieldName ~ "(Expr!Ref e) {
+        return e.belongsTo!(Parent, Nullable!Ref, fk, typeof(this))();
+    }");
+}
+
+// ============================================================================
+// UFCS Access Functions
+// ============================================================================
+
+/// Column access - reads a column value for each input ref
+auto column(T, Entity = void)(Expr!Ref input, string name) {
+    static if (is(Entity == void)) {
+        static assert(false, "Entity type must be specified for column access");
+    } else {
+        return new ColumnAccessExpr!(T, Entity)(input, name);
+    }
+}
+
+/// HasMany relationship - returns collection of child refs for each parent ref
+auto hasMany(Child, string fk, Parent = void)(Expr!Ref input) {
+    static if (is(Parent == void)) {
+        return new HasManyAccessExpr!(void, Child, fk)(input);
+    } else {
+        return new HasManyAccessExpr!(Parent, Child, fk)(input);
+    }
+}
+
+/// BelongsTo relationship - returns parent ref for each child ref
+/// RefType can be Ref (required FK) or Nullable!Ref (optional FK)
+auto belongsTo(Parent, RefType = Ref, string fk, Child = void)(Expr!Ref input) {
+    return new BelongsToAccessExpr!(Child, Parent, RefType, fk)(input);
+}
+
+// ============================================================================
+// Helper: Find MapExpr from _input chain
+// ============================================================================
+
+/// Walk _input chain to find the owning MapExpr and collect join info.
+/// Returns the MapExpr (as Object) or null if not found.
+private Object findMapExprFromChain(Expr!Ref expr, ref JoinHop[] joinPath) {
+    while (expr !is null) {
+        // Check if we've reached EveryItemOfExpr
+        if (auto every = cast(EveryItemOfExpr) expr) {
+            return every._parentMap;
+        }
+
+        // Walk through access expressions using interfaces
+        if (auto col = cast(ColumnAccessInfo) expr) {
+            expr = col.inputExpr;
+            continue;
+        }
+        if (auto belongs = cast(BelongsToInfo) expr) {
+            // Collect join info for belongsTo hops
+            joinPath = [JoinHop(
+                belongs.childTable,
+                belongs.parentTable,
+                belongs.parentTypeName,
+                belongs.fkColumn
+            )] ~ joinPath;
+            expr = belongs.inputExpr;
+            continue;
+        }
+        if (auto hasMany = cast(HasManyInfo) expr) {
+            expr = hasMany.inputExpr;
+            continue;
+        }
+        if (auto ident = cast(IdentityExpr) expr) {
+            // Identity doesn't continue the chain
+            break;
+        }
+
+        // Unknown expression type
+        break;
+    }
+    return null;
+}
+
+/// A single hop in a belongsTo chain (for JOIN generation)
+struct JoinHop {
+    string sourceTable;   // e.g., "posts"
+    string targetTable;   // e.g., "users"
+    string targetType;    // e.g., "User"
+    string fk;            // e.g., "author_id"
+}
+
+// ============================================================================
+// Base classes for runtime type checking
+// ============================================================================
+
+/// Interface for column access expressions (for chain walking)
+interface ColumnAccessInfo {
+    @property Expr!Ref inputExpr();
+}
+
+/// Interface for belongsTo expressions (for chain walking)
+interface BelongsToInfo {
+    @property Expr!Ref inputExpr();
+    @property string childTable();
+    @property string parentTable();
+    @property string parentTypeName();
+    @property string fkColumn();
+}
+
+/// Interface for hasMany expressions (for chain walking)
+/// Note: HasManyInfo is defined in core.expr
+
+// ============================================================================
+// Column Access Expression
+// ============================================================================
+
+/// Expression that reads a column from entities
+class ColumnAccessExpr(T, Entity) : Expr!T {
+    Expr!Ref _input;  // the entity ref we're reading from
+    string _column;
+
+    this(Expr!Ref input, string column) {
+        _input = input;
         _column = column;
     }
 
-    override void plan(PlanContext ctx) {
-        _layerId = ctx.currentLayerId;
-        _sourceId = ctx.currentSourceId;
-        ctx.source!RelationalPlanContext().requireColumn(_layerId, _column);
+    override Expr!T optimize(OptimizeContext ctx) {
+        // First optimize input
+        _input = _input.optimize(ctx);
+
+        // Find the MapExpr this column belongs to
+        JoinHop[] joinPath;
+        auto mapExpr = findMapExprFromChain(_input, joinPath);
+
+        if (mapExpr is null) {
+            // Can't optimize, use naive path
+            return this;
+        }
+
+        // Get or create QueryNode for this MapExpr
+        auto node = ctx.getOrCreateNode(mapExpr, Entity._typeName, Entity._table);
+
+        // Configure the node based on collection type (if not already configured)
+        if (node.rootFilter == FilterType.none && node.parent is null) {
+            if (auto mapInfo = cast(MapExprInfo) mapExpr) {
+                Ref[] rootRefs;
+                string typeName, table;
+                Expr!Ref parentInput;
+                string fk, childTypeName;
+
+                if (mapInfo.isRootByIds(rootRefs)) {
+                    // Root query with specific IDs
+                    node.setRootFilter(FilterType.byIds, rootRefs);
+                } else if (mapInfo.isRootAll(typeName, table)) {
+                    // Root query fetching all
+                    node.setRootFilter(FilterType.all);
+                } else if (mapInfo.isHasMany(parentInput, fk, childTypeName)) {
+                    // Child of a hasMany relationship
+                    // Find the parent MapExpr by following parentInput
+                    JoinHop[] parentJoinPath;
+                    auto parentMapExpr = findMapExprFromChain(parentInput, parentJoinPath);
+                    if (parentMapExpr !is null) {
+                        // Get the parent's QueryNode
+                        // We need to determine the parent's entity type from the hasMany
+                        if (auto hasManyInfo = cast(HasManyInfo) mapInfo.collection) {
+                            auto parentNode = ctx.getNode(parentMapExpr);
+                            if (parentNode !is null) {
+                                node.setParent(parentNode, fk, hasManyInfo.parentTypeName);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (joinPath.length == 0) {
+            // Direct column access - return projection expression
+            node.addColumn(_column);
+            return new ProjectColumnExpr!T(node.id, _column);
+        }
+
+        // Access through belongsTo chain - add JOINs
+        // Each hop: source table -> target table via FK
+        string lastAlias;
+        foreach (hop; joinPath) {
+            // Add the FK column to ensure it's fetched (needed for JOIN)
+            node.addColumn(hop.fk);
+            // Add JOIN and get alias
+            lastAlias = node.addJoin(hop.targetTable, hop.targetType, hop.fk);
+        }
+
+        // Track the column needed from the final joined table
+        node.addJoinedColumn(lastAlias, _column);
+
+        // Return projection that reads from the final joined table
+        return new ProjectJoinedColumnExpr!T(node.id, lastAlias, _column);
     }
 
-    override T[] eval(EvalContext ctx) {
-        auto relCtx = ctx.source!RelationalEvalContext(_sourceId);
-        return relCtx.getColumn!T(_layerId, _column, ctx.currentIds);
-    }
-}
+    override T[] eval(EvalContext ctx, Ref[] refs) {
+        // Naive path: fetch column values directly
+        Ref[] entityRefs = _input.eval(ctx, refs);
 
-/// Helper to create a column expression
-Expr!T column(T)(string columnName) {
-    return new ColumnExpr!T(columnName);
+        if (ctx.fetcher !is null) {
+            return ctx.fetcher.fetchColumn!T(Entity._table, _column, entityRefs);
+        }
+
+        // Fallback to empty results
+        return entityRefs.map!(_ => T.init).array;
+    }
+
+    @property string column() { return _column; }
+    @property Expr!Ref input() { return _input; }
 }
 
 // ============================================================================
-// HasMany Relationship Expression
+// HasMany Access Expression
 // ============================================================================
 
 /// Expression representing a one-to-many relationship
-/// Provides field access to child entity fields via opDispatch
-class HasManyExpr(ChildEntity, string foreignKey) {
-    private int _childLayerId;
-    private string _sourceId;
+/// Returns Ref[] for each input ref (the child entities)
+class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Ref[]), HasManyInfo {
+    Expr!Ref _input;
 
-    /// Forward field access to child entity's fields
-    /// Returns an expression that evaluates to T[] per parent
-    auto opDispatch(string field)() {
-        alias FieldType = typeof(__traits(getMember, ChildEntity, field)());
-        static if (is(FieldType : Expr!U, U)) {
-            return new HasManyFieldExpr!(ChildEntity, foreignKey, field, U)();
-        } else {
-            // It's another relationship expression, wrap it
-            return new HasManyRelExpr!(ChildEntity, foreignKey, field, FieldType)();
-        }
-    }
-}
-
-/// Expression for accessing a scalar field through a hasMany relationship
-class HasManyFieldExpr(ChildEntity, string foreignKey, string field, T) : Expr!(T[]) {
-    private int _parentLayerId;
-    private int _childLayerId;
-    private string _sourceId;
-    private Expr!T _childExpr;
-
-    override void plan(PlanContext ctx) {
-        _parentLayerId = ctx.currentLayerId;
-        _sourceId = ctx.currentSourceId;
-
-        auto relCtx = ctx.source!RelationalPlanContext();
-        _childLayerId = relCtx.enterHasMany(
-            _parentLayerId,
-            ChildEntity.stringof,
-            ChildEntity._table,
-            foreignKey
-        );
-
-        ctx.withLayer(_childLayerId, {
-            _childExpr = __traits(getMember, ChildEntity, field)();
-            _childExpr.plan(ctx);
-        });
+    this(Expr!Ref input) {
+        _input = input;
     }
 
-    override T[][] eval(EvalContext ctx) {
-        auto relCtx = ctx.source!RelationalEvalContext(_sourceId);
+    override Expr!(Ref[]) optimize(OptimizeContext ctx) {
+        _input = _input.optimize(ctx);
+        // HasMany doesn't transform itself - the inner MapExpr's
+        // access expressions will create a child QueryNode
+        return this;
+    }
 
-        // Get child IDs grouped by parent
-        auto childIdGroups = relCtx.getHasManyIds(_childLayerId, foreignKey, ctx.currentIds);
+    override Ref[][] eval(EvalContext ctx, Ref[] refs) {
+        // Get the parent refs
+        Ref[] parentRefs = _input.eval(ctx, refs);
 
-        // Evaluate child expression for all children at once
-        long[] allChildIds = childIdGroups.joiner.array;
-
-        T[] allChildValues;
-        if (allChildIds.length > 0) {
-            ctx.withState(_childLayerId, allChildIds, {
-                allChildValues = _childExpr.eval(ctx);
-            });
+        // Naive path: fetch children directly
+        if (ctx.fetcher !is null) {
+            return ctx.fetcher.fetchChildren(Child._table, Child._typeName, fk, parentRefs);
         }
 
-        // Re-group results by parent
-        T[][] result;
-        size_t offset = 0;
-        foreach (group; childIdGroups) {
-            result ~= allChildValues[offset .. offset + group.length];
-            offset += group.length;
-        }
-        return result;
-    }
-}
-
-/// Expression for accessing a relationship through a hasMany relationship
-/// e.g., posts().comments() where posts is hasMany and comments is also hasMany
-class HasManyRelExpr(ChildEntity, string foreignKey, string field, RelType) : Expr!(RelType[]) {
-    // TODO: Implement nested relationship traversal
-    override void plan(PlanContext ctx) {
-        assert(false, "Nested relationship traversal not yet implemented");
+        // Fallback to empty results
+        return parentRefs.map!(_ => cast(Ref[])[]).array;
     }
 
-    override RelType[][] eval(EvalContext ctx) {
-        assert(false, "Nested relationship traversal not yet implemented");
-    }
-}
+    @property Expr!Ref input() { return _input; }
 
-/// Helper to create a hasMany expression
-HasManyExpr!(ChildEntity, foreignKey) hasMany(ChildEntity, string foreignKey)() {
-    return new HasManyExpr!(ChildEntity, foreignKey)();
+    // HasManyInfo implementation
+    @property Expr!Ref inputExpr() { return _input; }
+    @property string childTable() { return Child._table; }
+    @property string childTypeName() { return Child._typeName; }
+    @property string fkColumn() { return fk; }
+    static if (!is(Parent == void)) {
+        @property string parentTypeName() { return Parent._typeName; }
+    } else {
+        @property string parentTypeName() { return ""; }
+    }
 }
 
 // ============================================================================
-// BelongsTo Relationship Expression
+// BelongsTo Access Expression
 // ============================================================================
 
 /// Expression representing a many-to-one relationship
-class BelongsToExpr(ParentEntity, string foreignKey) {
-    private int _parentLayerId;
-    private string _sourceId;
+/// Returns parent Ref for each child ref
+class BelongsToAccessExpr(Child, Parent, RefType, string fk) : Expr!RefType, BelongsToInfo {
+    Expr!Ref _input;
 
-    /// Forward field access to parent entity's fields
-    auto opDispatch(string field)() {
-        alias FieldType = typeof(__traits(getMember, ParentEntity, field)());
-        static if (is(FieldType : Expr!U, U)) {
-            return new BelongsToFieldExpr!(ParentEntity, foreignKey, field, U)();
+    this(Expr!Ref input) {
+        _input = input;
+    }
+
+    override Expr!RefType optimize(OptimizeContext ctx) {
+        _input = _input.optimize(ctx);
+        // BelongsTo stays as-is; column access through it uses JOINs
+        return this;
+    }
+
+    override RefType[] eval(EvalContext ctx, Ref[] refs) {
+        // Get the child refs
+        Ref[] childRefs = _input.eval(ctx, refs);
+
+        static if (is(Child == void)) {
+            // Can't fetch without knowing child entity type
+            return childRefs.map!(_ => RefType.init).array;
         } else {
-            static assert(false, "Nested relationships through belongsTo not yet supported");
-        }
-    }
-}
+            // Naive path: fetch parent refs directly
+            if (ctx.fetcher !is null) {
+                auto parentRefs = ctx.fetcher.fetchBelongsTo(Child._table, fk, Parent._typeName, childRefs);
 
-/// Expression for accessing a scalar field through a belongsTo relationship
-class BelongsToFieldExpr(ParentEntity, string foreignKey, string field, T) : Expr!T {
-    private int _childLayerId;
-    private int _parentLayerId;
-    private string _sourceId;
-    private Expr!T _parentExpr;
-
-    override void plan(PlanContext ctx) {
-        _childLayerId = ctx.currentLayerId;
-        _sourceId = ctx.currentSourceId;
-
-        auto relCtx = ctx.source!RelationalPlanContext();
-        _parentLayerId = relCtx.enterBelongsTo(
-            _childLayerId,
-            ParentEntity.stringof,
-            ParentEntity._table,
-            foreignKey
-        );
-
-        ctx.withLayer(_parentLayerId, {
-            _parentExpr = __traits(getMember, ParentEntity, field)();
-            _parentExpr.plan(ctx);
-        });
-    }
-
-    override T[] eval(EvalContext ctx) {
-        auto relCtx = ctx.source!RelationalEvalContext(_sourceId);
-
-        // Get FK values from current layer's rows
-        auto parentIds = relCtx.getBelongsToIds(_childLayerId, foreignKey, ctx.currentIds);
-
-        // Get unique parent IDs (preserve order for result mapping)
-        long[] uniqueParentIds;
-        size_t[long] parentIdIndex;
-        foreach (pid; parentIds) {
-            if (pid != 0 && pid !in parentIdIndex) {
-                parentIdIndex[pid] = uniqueParentIds.length;
-                uniqueParentIds ~= pid;
+                static if (is(RefType == Ref)) {
+                    return parentRefs;
+                } else static if (is(RefType == Nullable!Ref)) {
+                    // Wrap in Nullable
+                    return parentRefs.map!(r => r.isValid ? Nullable!Ref(r) : Nullable!Ref.init).array;
+                } else {
+                    static assert(false, "RefType must be Ref or Nullable!Ref");
+                }
             }
-        }
 
-        // Evaluate parent expression for all unique parents
-        T[] parentValues;
-        if (uniqueParentIds.length > 0) {
-            ctx.withState(_parentLayerId, uniqueParentIds, {
-                parentValues = _parentExpr.eval(ctx);
-            });
+            return childRefs.map!(_ => RefType.init).array;
         }
-
-        // Map back to original order
-        T[] result;
-        foreach (pid; parentIds) {
-            if (pid == 0) {
-                result ~= T.init;  // Null FK
-            } else {
-                result ~= parentValues[parentIdIndex[pid]];
-            }
-        }
-        return result;
     }
-}
 
-/// Helper to create a belongsTo expression
-BelongsToExpr!(ParentEntity, foreignKey) belongsTo(ParentEntity, string foreignKey)() {
-    return new BelongsToExpr!(ParentEntity, foreignKey)();
+    @property Expr!Ref input() { return _input; }
+
+    // For base class interface (runtime type checking)
+    @property Expr!Ref inputExpr() { return _input; }
+    static if (!is(Child == void)) {
+        @property string childTable() { return Child._table; }
+    } else {
+        @property string childTable() { return ""; }
+    }
+    @property string parentTable() { return Parent._table; }
+    @property string parentTypeName() { return Parent._typeName; }
+    @property string fkColumn() { return fk; }
 }
 
 // ============================================================================
-// Root Expressions
+// Identity Expression (pass-through for Ref)
 // ============================================================================
 
-/// Root expression that fetches all entities of a type
-class RootAllExpr(Entity) {
-    private int _layerId = -1;
-    private string _sourceId;
-
-    void plan(PlanContext ctx) {
-        _sourceId = ctx.currentSourceId;
-        auto relCtx = ctx.source!RelationalPlanContext();
-        _layerId = relCtx.setRoot(Entity.stringof, Entity._table, FilterType.all);
-        ctx.currentLayerId = _layerId;
-    }
-
-    /// Wrap an expression with this root
-    auto select(E)(E expr) {
-        return new RootSelectExpr!(typeof(this), E)(this, expr);
-    }
-
-    /// Convenience: access a field directly via opDispatch
-    auto opDispatch(string fieldName)() {
-        return select(__traits(getMember, Entity, fieldName)());
-    }
-
-    @property int layerId() { return _layerId; }
-    @property string sourceId() { return _sourceId; }
-}
-
-/// Root expression that fetches a single entity by ID
-class RootByIdExpr(Entity) {
-    private long _id;
-    private int _layerId = -1;
-    private string _sourceId;
-
-    this(long id) {
-        _id = id;
-    }
-
-    void plan(PlanContext ctx) {
-        _sourceId = ctx.currentSourceId;
-        auto relCtx = ctx.source!RelationalPlanContext();
-        _layerId = relCtx.setRoot(Entity.stringof, Entity._table, FilterType.byId, [_id]);
-        ctx.currentLayerId = _layerId;
-    }
-
-    /// Wrap an expression with this root
-    auto select(E)(E expr) {
-        return new RootSelectExpr!(typeof(this), E)(this, expr);
-    }
-
-    /// Convenience: access a field directly via opDispatch
-    auto opDispatch(string fieldName)() {
-        return select(__traits(getMember, Entity, fieldName)());
-    }
-
-    @property int layerId() { return _layerId; }
-    @property string sourceId() { return _sourceId; }
-}
-
-/// Combines a root expression with a field expression into a single evaluable expression
-class RootSelectExpr(Root, E) : Expr!(E.ResultType) {
-    private Root _root;
-    private E _expr;
-
-    this(Root root, E expr) {
-        _root = root;
-        _expr = expr;
-    }
-
-    override void plan(PlanContext ctx) {
-        _root.plan(ctx);   // Sets up root layer
-        _expr.plan(ctx);   // Plans expression in that context
-    }
-
-    override E.ResultType[] eval(EvalContext ctx) {
-        return _expr.eval(ctx);
+/// Expression that returns its input ref unchanged
+/// Used when accessing fields directly from the iteration item
+class IdentityExpr : Expr!Ref {
+    override Ref[] eval(EvalContext ctx, Ref[] refs) {
+        return refs;
     }
 }
 
-/// Helper to create a root expression for all entities
-RootAllExpr!Entity rootAll(Entity)() {
-    return new RootAllExpr!Entity();
-}
-
-/// Helper to create a root expression for a single entity by ID
-RootByIdExpr!Entity rootById(Entity)(long id) {
-    return new RootByIdExpr!Entity(id);
+/// Get the identity expression (returns input unchanged)
+auto identity() {
+    return new IdentityExpr();
 }
 
 // ============================================================================
@@ -326,97 +406,175 @@ RootByIdExpr!Entity rootById(Entity)(long id) {
 // ============================================================================
 
 unittest {
-    // Test planning with RelationalPlanContext
-    auto ctx = new PlanContext();
-
+    // Test Entity mixin
     struct User {
         mixin Entity!"users";
-        static Expr!string firstName() => column!string("first_name");
+    }
+    static assert(User._table == "users");
+    static assert(User._typeName == "User");
+    static assert(User._sourceId == "default");
+
+    struct Post {
+        mixin Entity!("posts", "BlogPost");
+    }
+    static assert(Post._table == "posts");
+    static assert(Post._typeName == "BlogPost");
+}
+
+unittest {
+    // Test column access with mock fetcher
+    struct User {
+        mixin Entity!"users";
+        mixin Col!("firstName", string);
     }
 
-    // Set up root
-    ctx.currentSourceId = "default";
-    auto relCtx = ctx.source!RelationalPlanContext();
-    auto rootId = relCtx.setRoot("User", "users");
-    ctx.currentLayerId = rootId;
+    auto fetcher = new MockDataFetcher();
+    fetcher.setTableData("users", `[
+        {"id": 1, "first_name": "Alice"},
+        {"id": 2, "first_name": "Bob"}
+    ]`);
 
-    // Plan a column expression
-    auto expr = User.firstName();
-    expr.plan(ctx);
+    auto ctx = new EvalContext();
+    ctx.fetcher = fetcher;
 
-    assert(relCtx.layers.length >= 1);
-    assert(relCtx.layers[0].columns.canFind("first_name"));
+    // Create an identity expression as input
+    auto userExpr = identity();
+    auto firstNameExpr = User.firstName(userExpr);
+
+    auto refs = [Ref("User:1"), Ref("User:2")];
+    auto names = firstNameExpr.eval(ctx, refs);
+    assert(names == ["Alice", "Bob"]);
 }
 
 unittest {
     // Test hasMany relationship
     struct Post {
         mixin Entity!"posts";
-        static Expr!string title() => column!string("title");
     }
 
     struct User {
         mixin Entity!"users";
-        static Expr!string firstName() => column!string("first_name");
-        static auto posts() => hasMany!(Post, "author_id");
+        mixin HasMany!("posts", Post, "author_id");
     }
 
-    auto ctx = new PlanContext();
-    ctx.currentSourceId = "default";
+    auto fetcher = new MockDataFetcher();
+    fetcher.setTableData("posts", `[
+        {"id": 1, "author_id": 1, "title": "Hello"},
+        {"id": 2, "author_id": 1, "title": "World"},
+        {"id": 3, "author_id": 2, "title": "D Lang"}
+    ]`);
 
-    auto relCtx = ctx.source!RelationalPlanContext();
-    auto rootId = relCtx.setRoot("User", "users");
-    ctx.currentLayerId = rootId;
+    auto ctx = new EvalContext();
+    ctx.fetcher = fetcher;
 
-    auto expr = User.posts().title();
-    expr.plan(ctx);
+    auto userExpr = identity();
+    auto postsExpr = User.posts(userExpr);
 
-    assert(relCtx.layers.length >= 2);
-    assert(relCtx.layers[0].table == "users");
-    assert(relCtx.layers[1].table == "posts");
-    assert(relCtx.layers[1].columns.canFind("title"));
-    assert(relCtx.layers[1].columns.canFind("author_id"));
+    auto refs = [Ref("User:1"), Ref("User:2")];
+    auto postGroups = postsExpr.eval(ctx, refs);
+
+    assert(postGroups.length == 2);
+    assert(postGroups[0].length == 2);  // User:1 has 2 posts
+    assert(postGroups[1].length == 1);  // User:2 has 1 post
 }
 
 unittest {
     // Test belongsTo relationship
     struct User {
         mixin Entity!"users";
-        static Expr!string firstName() => column!string("first_name");
-        static Expr!string lastName() => column!string("last_name");
-        static auto fullName() => use(
-            (string first, string last) => first ~ " " ~ last,
-            firstName(),
-            lastName()
-        );
     }
 
     struct Post {
         mixin Entity!"posts";
-        static Expr!string title() => column!string("title");
-        static auto author() => belongsTo!(User, "author_id");
-        static auto titleWithAuthor() => use(
-            (string title, string authorName) => title ~ " by " ~ authorName,
-            title(),
-            author().fullName()
-        );
+        mixin BelongsTo!("author", User, "author_id");
     }
 
-    auto ctx = new PlanContext();
-    ctx.currentSourceId = "default";
+    auto fetcher = new MockDataFetcher();
+    fetcher.setTableData("posts", `[
+        {"id": 1, "author_id": 10, "title": "Hello"},
+        {"id": 2, "author_id": 20, "title": "World"}
+    ]`);
 
-    auto relCtx = ctx.source!RelationalPlanContext();
-    auto rootId = relCtx.setRoot("Post", "posts");
-    ctx.currentLayerId = rootId;
+    auto ctx = new EvalContext();
+    ctx.fetcher = fetcher;
 
-    auto expr = Post.titleWithAuthor();
-    expr.plan(ctx);
+    auto postExpr = identity();
+    auto authorExpr = Post.author(postExpr);
 
-    assert(relCtx.layers.length >= 2);
-    assert(relCtx.layers[0].table == "posts");
-    assert(relCtx.layers[0].columns.canFind("title"));
-    assert(relCtx.layers[0].columns.canFind("author_id"));
-    assert(relCtx.layers[1].table == "users");
-    assert(relCtx.layers[1].columns.canFind("first_name"));
-    assert(relCtx.layers[1].columns.canFind("last_name"));
+    auto refs = [Ref("Post:1"), Ref("Post:2")];
+    auto authors = authorExpr.eval(ctx, refs);
+
+    assert(authors == [Ref("User:10"), Ref("User:20")]);
+}
+
+unittest {
+    // Test chained access: post.author().firstName()
+    struct User {
+        mixin Entity!"users";
+        mixin Col!("firstName", string);
+    }
+
+    struct Post {
+        mixin Entity!"posts";
+        mixin BelongsTo!("author", User, "author_id");
+
+        // Computed field: access through relationship
+        static auto authorName(Expr!Ref p) {
+            return User.firstName(author(p));
+        }
+    }
+
+    auto fetcher = new MockDataFetcher();
+    fetcher.setTableData("posts", `[
+        {"id": 1, "author_id": 10},
+        {"id": 2, "author_id": 20}
+    ]`);
+    fetcher.setTableData("users", `[
+        {"id": 10, "first_name": "Alice"},
+        {"id": 20, "first_name": "Bob"}
+    ]`);
+
+    auto ctx = new EvalContext();
+    ctx.fetcher = fetcher;
+
+    auto postExpr = identity();
+    auto authorNameExpr = Post.authorName(postExpr);
+
+    auto refs = [Ref("Post:1"), Ref("Post:2")];
+    auto names = authorNameExpr.eval(ctx, refs);
+
+    assert(names == ["Alice", "Bob"]);
+}
+
+// Test optimization creates QueryNode
+unittest {
+    import std.json : parseJSON;
+
+    struct User {
+        mixin Entity!"users";
+        mixin Col!("firstName", string);
+        mixin Col!("lastName", string);
+    }
+
+    // Build a simple query: map over users, get first + last name
+    auto userRefs = getByIds!User([1, 2]);
+    auto query = map!(
+        (Expr!Ref user) => use(
+            (string first, string last) => first ~ " " ~ last,
+            User.firstName(user),
+            User.lastName(user)
+        )
+    )(userRefs);
+
+    // Optimize
+    auto optCtx = new OptimizeContext();
+    auto optimized = query.optimize(optCtx);
+
+    // Check that a QueryNode was created
+    auto nodes = optCtx.allNodes();
+    assert(nodes.length == 1);
+    assert(nodes[0].typeName == "User");
+    assert(nodes[0].table == "users");
+    assert(nodes[0].columns.canFind("first_name"));
+    assert(nodes[0].columns.canFind("last_name"));
 }
