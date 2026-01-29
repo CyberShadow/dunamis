@@ -323,7 +323,7 @@ class BinaryOpExpr(L, string op, R = L) : Expr!(typeof(mixin("L.init " ~ op ~ " 
         auto lefts = evalAs!L(_left, ctx);
         auto rights = evalAs!R(_right, ctx);
 
-        auto count = ctx.currentRefs.length;
+        auto count = lefts.length;
         ResultT[] result = new ResultT[count];
         foreach (i; 0 .. count) {
             result[i] = mixin("lefts[i] " ~ op ~ " rights[i]");
@@ -390,8 +390,8 @@ class UseExpr(Fn, Exprs...) : Expr!(ReturnType!Fn)
             evaluated[i] = evalAs!(InputTypes[i])(_inputs[i], ctx);
         }
 
-        // Apply function per-element
-        auto count = ctx.currentRefs.length;
+        // Apply function per-element (derive count from first input)
+        auto count = evaluated[0].length;
         R[] result = new R[count];
         foreach (idx; 0 .. count) {
             // Build args tuple for this index
@@ -498,8 +498,7 @@ class MapExpr(Body) : Expr!(Body.ResultType[]), MapExprInfo
 
         if (flatRefs.length == 0) {
             // No items to process - return empty array for each parent
-            auto parentCount = ctx.currentRefs.length;
-            return std.algorithm.map!(_ => cast(R[])[])(iota(parentCount)).array;
+            return std.algorithm.map!(_ => cast(R[])[])(iota(collectionResults.length)).array;
         }
 
         // 3. Save parent refs and set current refs to the flattened collection
@@ -616,7 +615,11 @@ class JsonObjectExpr(Args...) : Expr!JSONValue
     }
 
     override JSONValue[] eval(EvalContext ctx) {
-        auto count = ctx.currentRefs.length;
+        // Evaluate all expressions first
+        alias FirstET = ExprTypeAt!0;
+        auto firstValues = evalAs!FirstET(_exprs[0], ctx);
+        auto count = firstValues.length;
+
         JSONValue[] results = new JSONValue[count];
 
         // Initialize empty objects
@@ -624,8 +627,13 @@ class JsonObjectExpr(Args...) : Expr!JSONValue
             r = JSONValue.emptyObject;
         }
 
-        // Process each name/expr pair
-        static foreach (i; 0 .. Args.length / 2) {{
+        // Populate first field
+        foreach (idx; 0 .. count) {
+            results[idx][_names[0]] = toJsonValue(firstValues[idx]);
+        }
+
+        // Process remaining name/expr pairs
+        static foreach (i; 1 .. Args.length / 2) {{
             alias ET = ExprTypeAt!i;
             string name = _names[i];
             auto values = evalAs!ET(_exprs[i], ctx);
@@ -708,9 +716,8 @@ unittest {
         override void replaceDependency(size_t index, ExprBase newDep) {}
 
         override Ref[][] eval(EvalContext ctx) {
-            // Return the same refs for each parent in currentRefs
-            auto parentCount = ctx.currentRefs.length;
-            return std.algorithm.map!(_ => _refs)(iota(parentCount)).array;
+            // Root-level collection: return single result for queryRoot
+            return [_refs];
         }
     }
 

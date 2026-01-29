@@ -27,8 +27,15 @@ class EvalContext {
         Object[SourceKey] _sourceContexts;
     }
 
-    /// The refs currently being evaluated (set by MapExpr before body eval).
-    /// Expressions can read this to know the current batch.
+    /// The refs currently being iterated over within a MapExpr.
+    ///
+    /// This is the communication channel between MapExpr and EveryItemOfExpr:
+    /// - MapExpr sets this to the flattened collection items before evaluating its body
+    /// - EveryItemOfExpr returns this value (representing "the current items")
+    /// - MapExpr restores the previous value after body evaluation
+    ///
+    /// Other expressions should NOT use this for batch size - they should derive
+    /// length from their inputs instead.
     Ref[] currentRefs;
 
     /// Get or create a source-specific evaluation context.
