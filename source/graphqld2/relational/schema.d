@@ -113,10 +113,18 @@ auto belongsTo(Parent, RefType = Ref, string fk, Child = void)(Expr!Ref input) {
 
 /// Walk _input chain to find the owning MapExpr and collect join info.
 /// Returns the MapExpr (as Object) or null if not found.
-private Object findMapExprFromChain(Expr!Ref expr, ref JoinHop[] joinPath) {
+/// Also returns the base input expression (the one that produces refs for the
+/// query node's base table) via the baseInput out parameter.
+private Object findMapExprFromChain(Expr!Ref expr, ref JoinHop[] joinPath, out Expr!Ref baseInput) {
+    // Track the first expression before any belongsTo chain starts
+    // This produces refs for the query node's base table
+    Expr!Ref lastBeforeBelongsTo = expr;
+    bool inBelongsToChain = false;
+
     while (expr !is null) {
         // Check if we've reached EveryItemOfExpr
         if (auto every = cast(EveryItemOfExpr) expr) {
+            baseInput = inBelongsToChain ? lastBeforeBelongsTo : every;
             return every._parentMap;
         }
 
@@ -126,6 +134,11 @@ private Object findMapExprFromChain(Expr!Ref expr, ref JoinHop[] joinPath) {
             continue;
         }
         if (auto belongs = cast(BelongsToInfo) expr) {
+            // When entering a belongsTo chain, save the input that produces base entity refs
+            if (!inBelongsToChain) {
+                lastBeforeBelongsTo = belongs.inputExpr;
+                inBelongsToChain = true;
+            }
             // Collect join info for belongsTo hops
             joinPath = [JoinHop(
                 belongs.childTable,
@@ -143,6 +156,7 @@ private Object findMapExprFromChain(Expr!Ref expr, ref JoinHop[] joinPath) {
         // Unknown expression type
         break;
     }
+    baseInput = null;
     return null;
 }
 
@@ -231,9 +245,8 @@ class GetByIdsExpr(Entity) : Expr!(Ref[]), RootExprInfo {
     }
 
     override Ref[][] eval(EvalContext ctx) {
-        // One result (the same ref array) per parent in currentRefs
-        auto parentCount = ctx.currentRefs.length;
-        return iota(parentCount).map!(_ => _refs).array;
+        // At root level, there's always exactly 1 parent (queryRoot)
+        return [_refs];
     }
 
     @property Ref[] refs() { return _refs; }
@@ -265,9 +278,8 @@ class GetAllExpr(Entity) : Expr!(Ref[]), RootExprInfo {
         auto relCtx = ctx.getSourceContext!RelationalEvalContext(Entity._sourceId);
         auto ids = relCtx.fetchAllIds(Entity._table);
         auto refs = ids.map!(id => makeRef(Entity._typeName, id)).array;
-        // Return same refs for each parent in currentRefs
-        auto parentCount = ctx.currentRefs.length;
-        return iota(parentCount).map!(_ => refs).array;
+        // At root level, there's always exactly 1 parent (queryRoot)
+        return [refs];
     }
 
     // RootExprInfo implementation
@@ -311,7 +323,8 @@ class ColumnAccessExpr(T, Entity) : Expr!T {
 
         // Find the MapExpr this column belongs to
         JoinHop[] joinPath;
-        auto mapExpr = findMapExprFromChain(cast(Expr!Ref) _input, joinPath);
+        Expr!Ref baseInput;
+        auto mapExpr = findMapExprFromChain(cast(Expr!Ref) _input, joinPath, baseInput);
 
         if (mapExpr is null) {
             // Can't optimize, use naive path
@@ -342,7 +355,8 @@ class ColumnAccessExpr(T, Entity) : Expr!T {
                     // Child of a hasMany relationship
                     // Find the parent MapExpr by following parentInput
                     JoinHop[] parentJoinPath;
-                    auto parentMapExpr = findMapExprFromChain(hasManyExpr.inputExpr, parentJoinPath);
+                    Expr!Ref parentBaseInput;
+                    auto parentMapExpr = findMapExprFromChain(hasManyExpr.inputExpr, parentJoinPath, parentBaseInput);
                     if (parentMapExpr !is null) {
                         auto parentNode = relCtx.getNode(parentMapExpr);
                         if (parentNode !is null) {
@@ -356,7 +370,7 @@ class ColumnAccessExpr(T, Entity) : Expr!T {
         if (joinPath.length == 0) {
             // Direct column access - return projection expression
             node.addColumn(_column);
-            return new ProjectColumnExpr!T(node.id, _column);
+            return new ProjectColumnExpr!T(node.id, _column, cast(Expr!Ref) _input);
         }
 
         // Access through belongsTo chain - add JOINs
@@ -373,7 +387,9 @@ class ColumnAccessExpr(T, Entity) : Expr!T {
         node.addJoinedColumn(lastAlias, _column);
 
         // Return projection that reads from the final joined table
-        return new ProjectJoinedColumnExpr!T(node.id, lastAlias, _column);
+        // Use baseInput (the expression that produces refs for the base table)
+        // not _input (which may be a belongsTo that produces refs for a different table)
+        return new ProjectJoinedColumnExpr!T(node.id, lastAlias, _column, baseInput);
     }
 
     override T[] eval(EvalContext ctx) {

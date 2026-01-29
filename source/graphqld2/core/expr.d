@@ -29,6 +29,10 @@ abstract class ExprBase {
 
     /// Get the result type of this expression.
     abstract TypeInfo resultType();
+
+    /// Evaluate and return result length (type-erased).
+    /// Used by ConstExpr to derive batch size from another expression.
+    abstract size_t evalResultLength(EvalContext ctx);
 }
 
 /// Helper to evaluate an ExprBase with a known type.
@@ -57,6 +61,10 @@ abstract class Expr(T) : ExprBase {
         return typeid(T);
     }
 
+    override size_t evalResultLength(EvalContext ctx) {
+        return eval(ctx).length;
+    }
+
     /// Optimize this expression and its children.
     /// Returns: optimized expression (may be this or a replacement).
     Expr!T optimize(OptimizeContext ctx) {
@@ -83,13 +91,15 @@ abstract class Expr(T) : ExprBase {
     }
 
     /// Binary operators: expr op literal
+    /// The literal is wrapped in a ConstExpr that derives its batch size from this expression.
     auto opBinary(string op, R)(R rhs) if (!is(R : Expr!U, U) && isValidBinaryOp!(T, op, R)) {
-        return new BinaryOpExpr!(T, op, R)(this, constant(rhs));
+        return new BinaryOpExpr!(T, op, R)(this, constant(rhs, this));
     }
 
     /// Binary operators: literal op expr
+    /// The literal is wrapped in a ConstExpr that derives its batch size from this expression.
     auto opBinaryRight(string op, L)(L lhs) if (!is(L : Expr!U, U) && isValidBinaryOp!(L, op, T)) {
-        return new BinaryOpExpr!(L, op, T)(constant(lhs), this);
+        return new BinaryOpExpr!(L, op, T)(constant(lhs, this), this);
     }
 
     /// Comparison methods that return Expr!bool
@@ -101,10 +111,10 @@ abstract class Expr(T) : ExprBase {
         return new BinaryOpExpr!(T, "!=", R)(this, rhs);
     }
     auto eq(R)(R rhs) if (!is(R : Expr!U, U) && isValidBinaryOp!(T, "==", R)) {
-        return new BinaryOpExpr!(T, "==", R)(this, constant(rhs));
+        return new BinaryOpExpr!(T, "==", R)(this, constant(rhs, this));
     }
     auto ne(R)(R rhs) if (!is(R : Expr!U, U) && isValidBinaryOp!(T, "!=", R)) {
-        return new BinaryOpExpr!(T, "!=", R)(this, constant(rhs));
+        return new BinaryOpExpr!(T, "!=", R)(this, constant(rhs, this));
     }
 
     auto lt(R)(Expr!R rhs) if (isValidBinaryOp!(T, "<", R)) {
@@ -121,16 +131,16 @@ abstract class Expr(T) : ExprBase {
     }
 
     auto lt(R)(R rhs) if (!is(R : Expr!U, U) && isValidBinaryOp!(T, "<", R)) {
-        return new BinaryOpExpr!(T, "<", R)(this, constant(rhs));
+        return new BinaryOpExpr!(T, "<", R)(this, constant(rhs, this));
     }
     auto gt(R)(R rhs) if (!is(R : Expr!U, U) && isValidBinaryOp!(T, ">", R)) {
-        return new BinaryOpExpr!(T, ">", R)(this, constant(rhs));
+        return new BinaryOpExpr!(T, ">", R)(this, constant(rhs, this));
     }
     auto le(R)(R rhs) if (!is(R : Expr!U, U) && isValidBinaryOp!(T, "<=", R)) {
-        return new BinaryOpExpr!(T, "<=", R)(this, constant(rhs));
+        return new BinaryOpExpr!(T, "<=", R)(this, constant(rhs, this));
     }
     auto ge(R)(R rhs) if (!is(R : Expr!U, U) && isValidBinaryOp!(T, ">=", R)) {
-        return new BinaryOpExpr!(T, ">=", R)(this, constant(rhs));
+        return new BinaryOpExpr!(T, ">=", R)(this, constant(rhs, this));
     }
 }
 
@@ -185,25 +195,40 @@ interface ConstantInfo {
     string valueAsString();
 }
 
-/// Expression that returns a constant value for all inputs
+/// Expression that returns a constant value for all inputs.
+/// When used with a length source (e.g., from opBinary), derives batch size
+/// from that expression. Otherwise falls back to ctx.currentRefs.length.
 class ConstExpr(T) : Expr!T, ConstantInfo {
     private T _value;
+    private ExprBase _lengthSource;  // Expression to derive batch size from
 
     this(T value) {
         _value = value;
     }
 
+    this(T value, ExprBase lengthSource) {
+        _value = value;
+        _lengthSource = lengthSource;
+    }
+
     override ExprBase[] dependencies() {
-        return [];  // Leaf node
+        // Length source is a dependency for tree traversal
+        return _lengthSource !is null ? [_lengthSource] : [];
     }
 
     override void replaceDependency(size_t index, ExprBase newDep) {
-        // No dependencies to replace
+        if (index == 0 && _lengthSource !is null)
+            _lengthSource = newDep;
     }
 
     override T[] eval(EvalContext ctx) {
-        // Return same value for each ref in the current batch
-        auto count = ctx.currentRefs.length;
+        // Derive batch size from length source if available
+        size_t count;
+        if (_lengthSource !is null) {
+            count = _lengthSource.evalResultLength(ctx);
+        } else {
+            count = ctx.currentRefs.length;
+        }
         return std.algorithm.map!(_ => _value)(iota(count)).array;
     }
 
@@ -226,6 +251,11 @@ class ConstExpr(T) : Expr!T, ConstantInfo {
 /// Create a constant expression
 auto constant(T)(T value) {
     return new ConstExpr!T(value);
+}
+
+/// Create a constant expression that derives its batch size from another expression
+auto constant(T)(T value, ExprBase lengthSource) {
+    return new ConstExpr!T(value, lengthSource);
 }
 
 // ============================================================================

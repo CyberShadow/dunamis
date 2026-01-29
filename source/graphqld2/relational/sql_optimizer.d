@@ -135,6 +135,16 @@ class SqlOptimizer {
             return null;
         }
 
+        // Extract the input from one of the projection expressions
+        auto input = extractInputFromExpr(binOp.left);
+        if (input is null) {
+            input = extractInputFromExpr(binOp.right);
+        }
+        if (input is null) {
+            // Can't find input - shouldn't happen if we have valid projections
+            return null;
+        }
+
         // Build the SQL expression
         auto sqlOp = toSqlOp(binOp.operator);
         auto sqlExpr = "(" ~ leftSql.get ~ " " ~ sqlOp ~ " " ~ rightSql.get ~ ")";
@@ -149,7 +159,25 @@ class SqlOptimizer {
         _computedColumns[queryNodeId] ~= ComputedColumn(alias_, sqlExpr, expr.resultType);
 
         // Create and return projection for computed column
-        return createProjectComputedExpr(queryNodeId, alias_, expr.resultType);
+        return createProjectComputedExpr(queryNodeId, alias_, expr.resultType, input);
+    }
+
+    /// Extract the input expression from a projection or binary op
+    private Expr!Ref extractInputFromExpr(ExprBase expr) {
+        // Check dependencies - projection expressions have their input as first dependency
+        auto deps = expr.dependencies();
+        if (deps.length > 0) {
+            if (auto refExpr = cast(Expr!Ref) deps[0]) {
+                return refExpr;
+            }
+        }
+        // Recurse into binary ops
+        if (auto binOp = cast(BinaryOpInfo) expr) {
+            auto left = extractInputFromExpr(binOp.left);
+            if (left !is null) return left;
+            return extractInputFromExpr(binOp.right);
+        }
+        return null;
     }
 
     /// Try to get SQL expression for an operand.
@@ -199,25 +227,25 @@ class SqlOptimizer {
     /// Create a ProjectComputedExpr for the given result type.
     /// Since we need to create a typed expression but only have TypeInfo at runtime,
     /// we use a factory approach with common types.
-    private ExprBase createProjectComputedExpr(int queryNodeId, string alias_, TypeInfo type) {
+    private ExprBase createProjectComputedExpr(int queryNodeId, string alias_, TypeInfo type, Expr!Ref input) {
         // Handle common types
         if (type == typeid(string)) {
-            return new ProjectComputedExpr!string(queryNodeId, alias_);
+            return new ProjectComputedExpr!string(queryNodeId, alias_, input);
         }
         if (type == typeid(int)) {
-            return new ProjectComputedExpr!int(queryNodeId, alias_);
+            return new ProjectComputedExpr!int(queryNodeId, alias_, input);
         }
         if (type == typeid(long)) {
-            return new ProjectComputedExpr!long(queryNodeId, alias_);
+            return new ProjectComputedExpr!long(queryNodeId, alias_, input);
         }
         if (type == typeid(float)) {
-            return new ProjectComputedExpr!float(queryNodeId, alias_);
+            return new ProjectComputedExpr!float(queryNodeId, alias_, input);
         }
         if (type == typeid(double)) {
-            return new ProjectComputedExpr!double(queryNodeId, alias_);
+            return new ProjectComputedExpr!double(queryNodeId, alias_, input);
         }
         if (type == typeid(bool)) {
-            return new ProjectComputedExpr!bool(queryNodeId, alias_);
+            return new ProjectComputedExpr!bool(queryNodeId, alias_, input);
         }
 
         // Unsupported type - return null (caller should keep original expression)
@@ -249,25 +277,29 @@ class SqlOptimizer {
 class ProjectComputedExpr(T) : Expr!T {
     private int _queryNodeId;
     private string _alias;
+    private ExprBase _input;  // The input chain (for deriving refs)
 
-    this(int queryNodeId, string alias_) {
+    this(int queryNodeId, string alias_, Expr!Ref input) {
         _queryNodeId = queryNodeId;
         _alias = alias_;
+        _input = input;
     }
 
     override ExprBase[] dependencies() {
-        return [];  // Reads from QueryResult, no expression dependencies
+        return [_input];
     }
 
     override void replaceDependency(size_t index, ExprBase newDep) {
-        // No dependencies
+        if (index == 0)
+            _input = newDep;
     }
 
     override T[] eval(EvalContext ctx) {
+        // Derive refs from input chain
+        Ref[] refs = evalAs!Ref(_input, ctx);
         // Read computed column from pre-fetched data via relational context
-        // Use ctx.currentRefs as the lookup keys
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-        return relCtx.getColumnValues!T(_queryNodeId, _alias, ctx.currentRefs);
+        return relCtx.getColumnValues!T(_queryNodeId, _alias, refs);
     }
 
     @property int queryNodeId() { return _queryNodeId; }
@@ -410,12 +442,15 @@ unittest {
     // Test computed column detection
     // Create a mock expression tree: ProjectColumn + " " + ProjectColumn
 
-    // First, set up mock projections
-    auto proj1 = new ProjectColumnExpr!string(0, "first_name");
-    auto proj2 = new ProjectColumnExpr!string(0, "last_name");
+    // Create a mock input (EveryItemOfExpr)
+    auto item = new EveryItemOfExpr();
+
+    // First, set up mock projections with input
+    auto proj1 = new ProjectColumnExpr!string(0, "first_name", item);
+    auto proj2 = new ProjectColumnExpr!string(0, "last_name", item);
 
     // Create binary op: proj1 ~ " " ~ proj2
-    auto space = constant(" ");
+    auto space = constant(" ", proj1);  // Derive length from proj1
     auto concat1 = new BinaryOpExpr!(string, "~", string)(proj1, space);
     auto concat2 = new BinaryOpExpr!(string, "~", string)(concat1, proj2);
 
@@ -435,8 +470,9 @@ unittest {
 
 unittest {
     // Test ProjectComputedExpr
-    auto proj = new ProjectComputedExpr!string(0, "computed_0");
+    auto item = new EveryItemOfExpr();
+    auto proj = new ProjectComputedExpr!string(0, "computed_0", item);
     assert(proj.queryNodeId == 0);
     assert(proj.columnAlias == "computed_0");
-    assert(proj.dependencies().length == 0);
+    assert(proj.dependencies().length == 1);  // Now has input as dependency
 }

@@ -37,26 +37,30 @@ class ProjectColumnExpr(T) : Expr!T, ProjectColumnInfo {
     private {
         int _queryNodeId;
         string _column;
+        ExprBase _input;  // The input chain (for deriving refs)
     }
 
-    this(int queryNodeId, string column) {
+    this(int queryNodeId, string column, Expr!Ref input) {
         _queryNodeId = queryNodeId;
         _column = column;
+        _input = input;
     }
 
     override ExprBase[] dependencies() {
-        return [];  // Reads from QueryResult, no expression dependencies
+        return [_input];
     }
 
     override void replaceDependency(size_t index, ExprBase newDep) {
-        // No dependencies
+        if (index == 0)
+            _input = newDep;
     }
 
     override T[] eval(EvalContext ctx) {
+        // Derive refs from input chain
+        Ref[] refs = evalAs!Ref(_input, ctx);
         // Read from pre-fetched data via relational context
-        // Use ctx.currentRefs as the lookup keys
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-        return relCtx.getColumnValues!T(_queryNodeId, _column, ctx.currentRefs);
+        return relCtx.getColumnValues!T(_queryNodeId, _column, refs);
     }
 
     @property int queryNodeId() { return _queryNodeId; }
@@ -70,27 +74,31 @@ class ProjectJoinedColumnExpr(T) : Expr!T, ProjectJoinedColumnInfo {
         int _queryNodeId;
         string _joinAlias;
         string _column;
+        ExprBase _input;  // The input chain (for deriving refs)
     }
 
-    this(int queryNodeId, string joinAlias, string column) {
+    this(int queryNodeId, string joinAlias, string column, Expr!Ref input) {
         _queryNodeId = queryNodeId;
         _joinAlias = joinAlias;
         _column = column;
+        _input = input;
     }
 
     override ExprBase[] dependencies() {
-        return [];  // Reads from QueryResult, no expression dependencies
+        return [_input];
     }
 
     override void replaceDependency(size_t index, ExprBase newDep) {
-        // No dependencies
+        if (index == 0)
+            _input = newDep;
     }
 
     override T[] eval(EvalContext ctx) {
+        // Derive refs from input chain
+        Ref[] refs = evalAs!Ref(_input, ctx);
         // Read from JOINed data via relational context
-        // Use ctx.currentRefs as the lookup keys
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-        return relCtx.getJoinedColumnValues!T(_queryNodeId, _joinAlias, _column, ctx.currentRefs);
+        return relCtx.getJoinedColumnValues!T(_queryNodeId, _joinAlias, _column, refs);
     }
 
     @property int queryNodeId() { return _queryNodeId; }
@@ -100,6 +108,7 @@ class ProjectJoinedColumnExpr(T) : Expr!T, ProjectJoinedColumnInfo {
 
 /// Projects refs from a QueryResult (for root expressions).
 /// Replaces GetByIdsExpr/GetAllExpr in optimized path.
+/// At the root level, there's always exactly 1 parent (queryRoot).
 class ProjectRefsExpr : Expr!(Ref[]) {
     private {
         int _queryNodeId;
@@ -121,13 +130,12 @@ class ProjectRefsExpr : Expr!(Ref[]) {
         // Get all refs from the pre-fetched QueryResult via relational context
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
         auto result = relCtx.getQueryResult(_queryNodeId);
-        auto parentCount = ctx.currentRefs.length;
         if (result is null) {
-            return iota(parentCount).map!(_ => cast(Ref[])[]).array;
+            return [[]];  // Single empty result for the single root parent
         }
         auto refs = result.allRefs();
-        // Return same refs for each parent
-        return iota(parentCount).map!(_ => refs).array;
+        // Return single result for the single root parent
+        return [refs];
     }
 
     @property int queryNodeId() { return _queryNodeId; }
@@ -178,27 +186,31 @@ class ProjectBelongsToExpr : Expr!Ref {
         int _queryNodeId;
         string _fkColumn;
         string _parentTypeName;
+        ExprBase _input;  // The input chain (for deriving refs)
     }
 
-    this(int queryNodeId, string fkColumn, string parentTypeName) {
+    this(int queryNodeId, string fkColumn, string parentTypeName, Expr!Ref input) {
         _queryNodeId = queryNodeId;
         _fkColumn = fkColumn;
         _parentTypeName = parentTypeName;
+        _input = input;
     }
 
     override ExprBase[] dependencies() {
-        return [];  // Reads from QueryResult
+        return [_input];
     }
 
     override void replaceDependency(size_t index, ExprBase newDep) {
-        // No dependencies
+        if (index == 0)
+            _input = newDep;
     }
 
     override Ref[] eval(EvalContext ctx) {
+        // Derive refs from input chain
+        Ref[] refs = evalAs!Ref(_input, ctx);
         // Read FK values and encode as parent refs via relational context
-        // Use ctx.currentRefs as the lookup keys
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-        auto fkValues = relCtx.getColumnValues!long(_queryNodeId, _fkColumn, ctx.currentRefs);
+        auto fkValues = relCtx.getColumnValues!long(_queryNodeId, _fkColumn, refs);
         return fkValues.map!(fk => fk == 0 ? Ref.init : makeRef(_parentTypeName, fk)).array;
     }
 
@@ -227,11 +239,14 @@ unittest {
     result.loadFromRows(rows, "User");
     relCtx.storeQueryResult(0, result);
 
-    // Create projection
-    auto proj = new ProjectColumnExpr!string(0, "first_name");
+    // Create a mock input that returns the refs
+    auto item = new EveryItemOfExpr();
+    ctx.currentRefs = [Ref("User:1"), Ref("User:2")];
+
+    // Create projection with input
+    auto proj = new ProjectColumnExpr!string(0, "first_name", item);
 
     // Evaluate
-    ctx.currentRefs = [Ref("User:1"), Ref("User:2")];
     auto names = proj.eval(ctx);
     assert(names == ["Alice", "Bob"]);
 }
@@ -277,8 +292,11 @@ unittest {
     result.loadFromRows(rows, "Post");
     relCtx.storeQueryResult(0, result);
 
-    auto proj = new ProjectBelongsToExpr(0, "author_id", "User");
+    // Create a mock input that returns the refs
+    auto item = new EveryItemOfExpr();
     ctx.currentRefs = [Ref("Post:1"), Ref("Post:2")];
+
+    auto proj = new ProjectBelongsToExpr(0, "author_id", "User", item);
     auto parentRefs = proj.eval(ctx);
 
     assert(parentRefs == [Ref("User:10"), Ref("User:20")]);
