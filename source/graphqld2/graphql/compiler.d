@@ -39,6 +39,21 @@ alias GraphQLResult = Expr!JSONValue;
 /// auto result = executor.execute(query);
 /// ---
 GraphQLResult compileQuery(Query, DataSource)(string queryString, DataSource db) {
+    return compileQuery!(Query, DataSource)(queryString, db, JSONValue.emptyObject);
+}
+
+/// Compiles a GraphQL query string with variables into an executable Expr tree.
+///
+/// Example:
+/// ---
+/// auto variables = JSONValue(["format": JSONValue(["prefix": "Mr. "])]);
+/// auto query = compileQuery!Query(`
+///     query GetUsers($format: NameFormat!) {
+///         users { formattedName(format: $format) }
+///     }
+/// `, db, variables);
+/// ---
+GraphQLResult compileQuery(Query, DataSource)(string queryString, DataSource db, JSONValue variables) {
     // Parse the GraphQL query
     auto lexer = Lexer(queryString);
     auto parser = Parser(lexer);
@@ -50,8 +65,8 @@ GraphQLResult compileQuery(Query, DataSource)(string queryString, DataSource db)
         throw new CompilerException("No operation found in query");
     }
 
-    // Compile the root selection set
-    return compileRootSelectionSet!(Query, DataSource)(op.ss, db);
+    // Compile the root selection set with variables
+    return compileRootSelectionSet!(Query, DataSource)(op.ss, db, variables);
 }
 
 /// Exception thrown during query compilation
@@ -157,16 +172,35 @@ auto iterateArguments(Arguments args) @safe {
 // Argument Value Extraction
 // ============================================================================
 
-/// Find an argument by name and return its Value node, or null if not found
-Value findArgumentValue(Arguments args, string name) {
+/// Result of looking up an argument - either a literal Value or a variable reference
+struct ArgumentLookup {
+    Value value;           // Literal value (if not a variable)
+    string variableName;   // Variable name (if a variable reference)
+    bool isVariable;       // True if this is a variable reference
+
+    bool isNull() const {
+        return value is null && variableName is null;
+    }
+}
+
+/// Find an argument by name and return either its Value or variable name
+ArgumentLookup findArgumentValue(Arguments args, string name) {
+    import graphql.ast : ValueOrVariableEnum;
+
     foreach (arg; iterateArguments(args)) {
         if (arg.name.value == name) {
-            if (arg.vv !is null && arg.vv.val !is null) {
-                return arg.vv.val;
+            if (arg.vv !is null) {
+                if (arg.vv.ruleSelection == ValueOrVariableEnum.Var && arg.vv.var !is null) {
+                    // Variable reference
+                    return ArgumentLookup(null, arg.vv.var.name.value, true);
+                } else if (arg.vv.val !is null) {
+                    // Literal value
+                    return ArgumentLookup(arg.vv.val, null, false);
+                }
             }
         }
     }
-    return null;
+    return ArgumentLookup(null, null, false);
 }
 
 /// Extract a string value from a GraphQL Value node
@@ -215,6 +249,94 @@ bool extractBool(Value val) {
 bool isNullValue(Value val) {
     import graphql.ast : ValueEnum;
     return val is null || val.ruleSelection == ValueEnum.N;
+}
+
+// ============================================================================
+// JSON Value Extraction (for variables)
+// ============================================================================
+
+/// Extract a typed value from a JSONValue (used for variable resolution)
+T extractValueFromJson(T)(JSONValue json) {
+    import std.json : JSONType;
+
+    if (json.type == JSONType.null_) {
+        static if (is(T == Nullable!U, U)) {
+            return T.init;
+        } else {
+            throw new CompilerException("Null value for non-nullable type " ~ T.stringof);
+        }
+    }
+
+    static if (is(T == string)) {
+        if (json.type != JSONType.string) {
+            throw new CompilerException("Expected string variable, got " ~ json.type.to!string);
+        }
+        return json.str;
+    } else static if (is(T == long)) {
+        if (json.type != JSONType.integer) {
+            throw new CompilerException("Expected integer variable, got " ~ json.type.to!string);
+        }
+        return json.integer;
+    } else static if (is(T == int)) {
+        if (json.type != JSONType.integer) {
+            throw new CompilerException("Expected integer variable, got " ~ json.type.to!string);
+        }
+        return cast(int) json.integer;
+    } else static if (is(T == double)) {
+        if (json.type == JSONType.float_) {
+            return json.floating;
+        } else if (json.type == JSONType.integer) {
+            return cast(double) json.integer;
+        }
+        throw new CompilerException("Expected float variable, got " ~ json.type.to!string);
+    } else static if (is(T == float)) {
+        if (json.type == JSONType.float_) {
+            return cast(float) json.floating;
+        } else if (json.type == JSONType.integer) {
+            return cast(float) json.integer;
+        }
+        throw new CompilerException("Expected float variable, got " ~ json.type.to!string);
+    } else static if (is(T == bool)) {
+        if (json.type == JSONType.true_) return true;
+        if (json.type == JSONType.false_) return false;
+        throw new CompilerException("Expected boolean variable, got " ~ json.type.to!string);
+    } else static if (is(T == Nullable!U, U)) {
+        if (json.type == JSONType.null_) {
+            return T.init;
+        }
+        return T(extractValueFromJson!U(json));
+    } else static if (isInputType!T) {
+        return extractInputObjectFromJson!T(json);
+    } else {
+        static assert(false, "Unsupported variable type: " ~ T.stringof);
+    }
+}
+
+/// Extract an input object from a JSONValue
+T extractInputObjectFromJson(T)(JSONValue json) if (isInputType!T) {
+    import std.json : JSONType;
+
+    if (json.type != JSONType.object) {
+        throw new CompilerException(
+            "Expected object for input type " ~ T.stringof ~ ", got " ~ json.type.to!string
+        );
+    }
+
+    T result;
+
+    // Set each field from the JSON object
+    static foreach (member; __traits(allMembers, T)) {{
+        static if (!isInternalHelper!member) {
+            alias MemberType = typeof(__traits(getMember, T, member));
+            static if (!is(MemberType == function) && !is(MemberType == void)) {
+                if (member in json.object) {
+                    __traits(getMember, result, member) = extractValueFromJson!MemberType(json.object[member]);
+                }
+            }
+        }
+    }}
+
+    return result;
 }
 
 /// Extract a typed value from a GraphQL Value node
@@ -359,7 +481,8 @@ template allArgTypesSupported(alias fn) {
 /// Call a computed field with arguments extracted from GraphQL.
 /// Uses compile-time introspection to determine parameter types and names,
 /// then extracts values from the GraphQL Arguments at runtime.
-auto callComputedField(alias fn, Entity)(Expr!Entity entityRef, Arguments args) {
+/// Variables are resolved from the provided JSONValue map.
+auto callComputedField(alias fn, Entity)(Expr!Entity entityRef, Arguments args, JSONValue variables) {
     import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
 
     alias Params = Parameters!fn;
@@ -373,44 +496,62 @@ auto callComputedField(alias fn, Entity)(Expr!Entity entityRef, Arguments args) 
     static if (numArgs == 0) {
         return fn(entityRef);
     } else static if (numArgs == 1) {
-        auto arg0 = extractArg!(Params[1], Defaults[1])(args, paramNames[1]);
+        auto arg0 = extractArg!(Params[1], Defaults[1])(args, paramNames[1], variables);
         return fn(entityRef, arg0);
     } else static if (numArgs == 2) {
-        auto arg0 = extractArg!(Params[1], Defaults[1])(args, paramNames[1]);
-        auto arg1 = extractArg!(Params[2], Defaults[2])(args, paramNames[2]);
+        auto arg0 = extractArg!(Params[1], Defaults[1])(args, paramNames[1], variables);
+        auto arg1 = extractArg!(Params[2], Defaults[2])(args, paramNames[2], variables);
         return fn(entityRef, arg0, arg1);
     } else static if (numArgs == 3) {
-        auto arg0 = extractArg!(Params[1], Defaults[1])(args, paramNames[1]);
-        auto arg1 = extractArg!(Params[2], Defaults[2])(args, paramNames[2]);
-        auto arg2 = extractArg!(Params[3], Defaults[3])(args, paramNames[3]);
+        auto arg0 = extractArg!(Params[1], Defaults[1])(args, paramNames[1], variables);
+        auto arg1 = extractArg!(Params[2], Defaults[2])(args, paramNames[2], variables);
+        auto arg2 = extractArg!(Params[3], Defaults[3])(args, paramNames[3], variables);
         return fn(entityRef, arg0, arg1, arg2);
     } else static if (numArgs == 4) {
-        auto arg0 = extractArg!(Params[1], Defaults[1])(args, paramNames[1]);
-        auto arg1 = extractArg!(Params[2], Defaults[2])(args, paramNames[2]);
-        auto arg2 = extractArg!(Params[3], Defaults[3])(args, paramNames[3]);
-        auto arg3 = extractArg!(Params[4], Defaults[4])(args, paramNames[4]);
+        auto arg0 = extractArg!(Params[1], Defaults[1])(args, paramNames[1], variables);
+        auto arg1 = extractArg!(Params[2], Defaults[2])(args, paramNames[2], variables);
+        auto arg2 = extractArg!(Params[3], Defaults[3])(args, paramNames[3], variables);
+        auto arg3 = extractArg!(Params[4], Defaults[4])(args, paramNames[4], variables);
         return fn(entityRef, arg0, arg1, arg2, arg3);
     } else {
         static assert(false, "Computed fields with more than 4 arguments not supported");
     }
 }
 
-/// Extract an argument value, using default if not provided
-T extractArg(T, alias Default)(Arguments args, string name) {
-    auto val = findArgumentValue(args, name);
+/// Extract an argument value, using default if not provided.
+/// Handles both literal values and variable references.
+T extractArg(T, alias Default)(Arguments args, string name, JSONValue variables) {
+    import std.json : JSONType;
 
-    static if (is(Default == void)) {
-        // Required argument - no default
-        if (val is null) {
+    auto lookup = findArgumentValue(args, name);
+
+    if (lookup.isNull) {
+        // Argument not provided
+        static if (is(Default == void)) {
             throw new CompilerException("Missing required argument: " ~ name);
-        }
-        return extractValue!T(val);
-    } else {
-        // Optional argument - has default
-        if (val is null || isNullValue(val)) {
+        } else {
             return Default;
         }
-        return extractValue!T(val);
+    }
+
+    if (lookup.isVariable) {
+        // Variable reference - look up in variables map
+        if (variables.type != JSONType.object || lookup.variableName !in variables.object) {
+            static if (is(Default == void)) {
+                throw new CompilerException("Missing variable: $" ~ lookup.variableName);
+            } else {
+                return Default;
+            }
+        }
+        return extractValueFromJson!T(variables.object[lookup.variableName]);
+    } else {
+        // Literal value
+        static if (!is(Default == void)) {
+            if (isNullValue(lookup.value)) {
+                return Default;
+            }
+        }
+        return extractValue!T(lookup.value);
     }
 }
 
@@ -419,7 +560,7 @@ T extractArg(T, alias Default)(Arguments args, string name) {
 // ============================================================================
 
 /// Compile the root selection set (fields from Query type)
-DynamicJsonObjectExpr compileRootSelectionSet(Query, DataSource)(SelectionSet ss, DataSource db) {
+DynamicJsonObjectExpr compileRootSelectionSet(Query, DataSource)(SelectionSet ss, DataSource db, JSONValue variables) {
     auto selections = iterateSelections(ss);
 
     if (selections.length == 0) {
@@ -433,7 +574,7 @@ DynamicJsonObjectExpr compileRootSelectionSet(Query, DataSource)(SelectionSet ss
         if (sel.ruleSelection != SelectionEnum.Field) continue;
         auto field = sel.field;
         fieldNames ~= getOutputName(field);
-        fieldExprs ~= compileRootFieldExpr!(Query, DataSource)(field, db);
+        fieldExprs ~= compileRootFieldExpr!(Query, DataSource)(field, db, variables);
     }
 
     if (fieldNames.length == 0) {
@@ -445,7 +586,7 @@ DynamicJsonObjectExpr compileRootSelectionSet(Query, DataSource)(SelectionSet ss
 
 /// Compile a single root field expression (e.g., "users" from Query)
 /// Returns the expression for this field's value (typically a MapExpr producing JSONValue[])
-ExprBase compileRootFieldExpr(Query, DataSource)(Field field, DataSource db) {
+ExprBase compileRootFieldExpr(Query, DataSource)(Field field, DataSource db, JSONValue variables) {
     auto fieldName = getFieldName(field);
 
     // Look up the field in Query type at compile time
@@ -461,7 +602,7 @@ ExprBase compileRootFieldExpr(Query, DataSource)(Field field, DataSource db) {
 
                 // Compile the nested selection set
                 if (field.ss !is null) {
-                    return compileMapExpr!(FieldMeta.entityType)(rootExpr, field.ss);
+                    return compileMapExpr!(FieldMeta.entityType)(rootExpr, field.ss, variables);
                 } else {
                     throw new CompilerException("Root field '" ~ fieldName ~ "' requires a selection set");
                 }
@@ -479,27 +620,27 @@ ExprBase compileRootFieldExpr(Query, DataSource)(Field field, DataSource db) {
 /// Compile a selection set into a MapExpr with DynamicJsonObjectExpr body.
 /// Returns Expr!(JSONValue[]) which is the result of mapping over the collection.
 /// Note: Explicit return type breaks circular template instantiation.
-MapExpr!(Entity, DynamicJsonObjectExpr) compileMapExpr(Entity, Coll)(Coll collection, SelectionSet ss) {
+MapExpr!(Entity, DynamicJsonObjectExpr) compileMapExpr(Entity, Coll)(Coll collection, SelectionSet ss, JSONValue variables) {
     import graphqld2.core.expr : Expr, map;
 
     return map!(
-        (Expr!Entity entity) => compileSelectionSetBody!Entity(entity, ss)
+        (Expr!Entity entity) => compileSelectionSetBody!Entity(entity, ss, variables)
     )(collection);
 }
 
 /// Compile the body of a selection set (the fields to extract)
-DynamicJsonObjectExpr compileSelectionSetBody(Entity)(Expr!Entity entityRef, SelectionSet ss) {
+DynamicJsonObjectExpr compileSelectionSetBody(Entity)(Expr!Entity entityRef, SelectionSet ss, JSONValue variables) {
     auto selections = iterateSelections(ss);
     if (selections.length == 0) {
         throw new CompilerException("Empty selection set for " ~ Entity._typeName);
     }
 
     // Build field name/value pairs for jsonObject
-    return compileFieldsToJsonObject!Entity(entityRef, selections);
+    return compileFieldsToJsonObject!Entity(entityRef, selections, variables);
 }
 
 /// Compile selected fields into a jsonObject call
-DynamicJsonObjectExpr compileFieldsToJsonObject(Entity)(Expr!Entity entityRef, Selection[] selections) {
+DynamicJsonObjectExpr compileFieldsToJsonObject(Entity)(Expr!Entity entityRef, Selection[] selections, JSONValue variables) {
     // Collect field expressions
     ExprBase[] fieldExprs;
     string[] fieldNames;
@@ -511,7 +652,7 @@ DynamicJsonObjectExpr compileFieldsToJsonObject(Entity)(Expr!Entity entityRef, S
         auto outputName = getOutputName(field);
 
         fieldNames ~= outputName;
-        fieldExprs ~= compileFieldAccess!Entity(entityRef, field);
+        fieldExprs ~= compileFieldAccess!Entity(entityRef, field, variables);
     }
 
     // Build a dynamic JSON object using runtime construction
@@ -525,7 +666,7 @@ DynamicJsonObjectExpr buildDynamicJsonObject(string[] names, ExprBase[] exprs) {
 }
 
 /// Compile access to a single field
-ExprBase compileFieldAccess(Entity)(Expr!Entity entityRef, Field field) {
+ExprBase compileFieldAccess(Entity)(Expr!Entity entityRef, Field field, JSONValue variables) {
     auto fieldName = getFieldName(field);
 
     // Look up field in entity at compile time
@@ -557,7 +698,7 @@ ExprBase compileFieldAccess(Entity)(Expr!Entity entityRef, Field field) {
                     throw new CompilerException("Relationship field '" ~ fieldName ~ "' requires a selection set");
                 }
                 auto relExpr = __traits(getMember, Entity, FieldMeta.name)(entityRef);
-                return compileMapExpr!(FieldMeta.childType)(relExpr, field.ss);
+                return compileMapExpr!(FieldMeta.childType)(relExpr, field.ss, variables);
             }
         }
         else static if (member.length > 16 && member[0..16] == "_belongsToField_") {
@@ -571,7 +712,7 @@ ExprBase compileFieldAccess(Entity)(Expr!Entity entityRef, Field field) {
                 }
                 auto relExpr = __traits(getMember, Entity, FieldMeta.name)(entityRef);
                 // BelongsTo returns Expr!ParentEntity (single entity), not a collection
-                return compileSelectionSetBody!(FieldMeta.parentType)(relExpr, field.ss);
+                return compileSelectionSetBody!(FieldMeta.parentType)(relExpr, field.ss, variables);
             }
         }
         else static if (isComputedField!(Entity, member, __traits(getMember, Entity, member))) {
@@ -582,7 +723,7 @@ ExprBase compileFieldAccess(Entity)(Expr!Entity entityRef, Field field) {
 
                 if (fieldName == gqlName) {
                     // Computed field - call with arguments extracted from GraphQL
-                    return callComputedField!(fn, Entity)(entityRef, field.args);
+                    return callComputedField!(fn, Entity)(entityRef, field.args, variables);
                 }
             }
             // Skip computed fields with unsupported argument types (e.g., input objects)
@@ -981,4 +1122,119 @@ unittest {
     auto users = result["users"].array;
     assert(users.length == 1);
     assert(users[0]["styledName"].str == "[Alice - Smith]");
+}
+
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import graphqld2.core;
+    import graphqld2.relational.schema;
+    import graphqld2.relational.demo;
+    import graphqld2.relational.eval_context;
+
+    // Test GraphQL variables
+
+    static struct User {
+        mixin DemoEntity!"users";
+        mixin Col!("firstName", string);
+
+        // Computed field with arguments
+        static auto greeting(Expr!User u, string prefix, string suffix = "!") {
+            return prefix ~ " " ~ firstName(u) ~ suffix;
+        }
+    }
+
+    alias DB = MockDB!();
+
+    static struct Query {
+        mixin Table!(DB, User, "users");
+    }
+
+    auto db = new DB();
+    db.setTableData("users", `[
+        {"id": 1, "first_name": "Alice"},
+        {"id": 2, "first_name": "Bob"}
+    ]`);
+
+    // Query with variable for scalar argument
+    auto variables = JSONValue([
+        "greetPrefix": JSONValue("Hello"),
+        "greetSuffix": JSONValue("?")
+    ]);
+
+    auto query = compileQuery!Query(`
+        query GetUsers($greetPrefix: String!, $greetSuffix: String) {
+            users {
+                greeting(prefix: $greetPrefix, suffix: $greetSuffix)
+            }
+        }
+    `, db, variables);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query));
+
+    auto users = result["users"].array;
+    assert(users.length == 2);
+    assert(users[0]["greeting"].str == "Hello Alice?");
+    assert(users[1]["greeting"].str == "Hello Bob?");
+}
+
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import graphqld2.core;
+    import graphqld2.relational.schema;
+    import graphqld2.relational.demo;
+    import graphqld2.relational.eval_context;
+
+    // Test variables with input objects
+
+    static struct NameFormat {
+        string prefix;
+        string suffix;
+    }
+
+    static struct User {
+        mixin DemoEntity!"users";
+        mixin Col!("firstName", string);
+        mixin Col!("lastName", string);
+
+        static auto formattedName(Expr!User u, NameFormat format) {
+            return format.prefix ~ firstName(u) ~ " " ~ lastName(u) ~ format.suffix;
+        }
+    }
+
+    alias DB = MockDB!();
+
+    static struct Query {
+        mixin Table!(DB, User, "users");
+    }
+
+    auto db = new DB();
+    db.setTableData("users", `[
+        {"id": 1, "first_name": "Alice", "last_name": "Smith"}
+    ]`);
+
+    // Variable containing an input object
+    auto variables = JSONValue([
+        "fmt": JSONValue([
+            "prefix": JSONValue("Dr. "),
+            "suffix": JSONValue(", PhD")
+        ])
+    ]);
+
+    auto query = compileQuery!Query(`
+        query GetUsers($fmt: NameFormat!) {
+            users {
+                formattedName(format: $fmt)
+            }
+        }
+    `, db, variables);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query));
+
+    auto users = result["users"].array;
+    assert(users.length == 1);
+    assert(users[0]["formattedName"].str == "Dr. Alice Smith, PhD");
 }
