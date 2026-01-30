@@ -27,7 +27,8 @@ class EvalContext {
     /// - EveryItemOfExpr calls getCurrentRefs(_parentMap) to get its refs
     ///
     /// The null key is used for the root level (queryRoot).
-    private Ref[][void*] _refsMap;
+    /// Uses AnyRef for storage since different MapExpr scopes may have different entity types.
+    private AnyRef[][void*] _refsMap;
 
     /// Expression evaluation cache, keyed by expression object identity.
     /// Used by evalAs() to automatically memoize expression evaluation.
@@ -39,12 +40,12 @@ class EvalContext {
     private Object[void*] _exprCache;
 
     /// Set refs for a specific MapExpr (or null for root).
-    void setCurrentRefs(Object mapExpr, Ref[] refs) {
+    void setCurrentRefs(Object mapExpr, AnyRef[] refs) {
         _refsMap[cast(void*) mapExpr] = refs;
     }
 
     /// Get refs for a specific MapExpr (or null for root).
-    Ref[] getCurrentRefs(Object mapExpr) {
+    AnyRef[] getCurrentRefs(Object mapExpr) {
         if (auto p = cast(void*) mapExpr in _refsMap) {
             return *p;
         }

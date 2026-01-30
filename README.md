@@ -229,6 +229,14 @@ SELECT * FROM layer1;
 - Real database DataFetcher (PostgreSQL, etc.)
 - Filtering/pagination (WHERE, LIMIT, OFFSET)
 - Polymorphism (GraphQL union/interface types)
+- Field metadata (descriptions, deprecation)
+- Field arguments for computed fields
+- Input types for mutations
+- Runtime introspection (`__schema`, `__type`, `__typename`)
+
+**Known issues:**
+- FK columns (e.g., `authorId`) are exposed in GraphQL schema - should be hideable
+- D keyword conflicts require workarounds (e.g., `body_` instead of `body`)
 
 ## Running Tests
 

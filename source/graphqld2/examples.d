@@ -36,7 +36,7 @@ struct User {
     mixin HasMany!("comments", Comment, "author_id");
 
     /// Computed field using operator overloading
-    static auto fullName(Expr!Ref u) => firstName(u) ~ " " ~ lastName(u);
+    static auto fullName(Expr!(Ref!User) u) => firstName(u) ~ " " ~ lastName(u);
 }
 
 /// Post entity - belongs to a User (author) and has many Comments
@@ -49,7 +49,7 @@ struct Post {
     mixin HasMany!("comments", Comment, "post_id");
 
     /// Computed: render full post as HTML with author and comments
-    static auto html(Expr!Ref p) {
+    static auto html(Expr!(Ref!Post) p) {
         return use(
             (string title, string body_, string authorName, string[] commentHtmls) {
                 auto commentsHtml = commentHtmls.join("\n");
@@ -69,13 +69,13 @@ struct Post {
             body_(p),
             User.fullName(author(p)),
             map!(
-                (Expr!Ref c) => Comment.html(c)
+                (Expr!(Ref!Comment) c) => Comment.html(c)
             )(comments(p))
         );
     }
 
     /// Computed: short summary for listings
-    static auto summary(Expr!Ref p) {
+    static auto summary(Expr!(Ref!Post) p) {
         return use(
             (string title, string body_, string authorName) {
                 auto truncated = body_.length > 100 ? body_[0..100] ~ "..." : body_;
@@ -98,7 +98,7 @@ struct Comment {
     mixin BelongsTo!("author", "authorId");  // Relationship - derives User from FK column
 
     /// Computed: render comment as HTML with author name
-    static auto html(Expr!Ref c) {
+    static auto html(Expr!(Ref!Comment) c) {
         return use(
             (string body_, string authorName) =>
                 `<div class="comment">
@@ -148,7 +148,7 @@ unittest {
     auto executor = new Executor();
 
     auto query = map!(
-        (Expr!Ref p) => Post.title(p)
+        (Expr!(Ref!Post) p) => Post.title(p)
     )(getByIds!Post([1, 2], db));
 
     auto titles = awaitSync(executor.execute(query));
@@ -181,7 +181,7 @@ unittest {
     auto executor = new Executor();
 
     auto query = map!(
-        (Expr!Ref p) => Post.summary(p)
+        (Expr!(Ref!Post) p) => Post.summary(p)
     )(getByIds!Post([1, 2], db));
 
     auto summaries = awaitSync(executor.execute(query));
@@ -204,7 +204,7 @@ unittest {
     auto executor = new Executor();
 
     auto query = map!(
-        (Expr!Ref p) => Post.html(p)
+        (Expr!(Ref!Post) p) => Post.html(p)
     )(getByIds!Post([1], db));
 
     auto htmls = awaitSync(executor.execute(query));
@@ -230,10 +230,10 @@ unittest {
 
     // Query: { users { firstName, posts { title } } }
     auto query = map!(
-        (Expr!Ref user) => jsonObject(
+        (Expr!(Ref!User) user) => jsonObject(
             "firstName", User.firstName(user),
             "posts", map!(
-                (Expr!Ref post) => jsonObject(
+                (Expr!(Ref!Post) post) => jsonObject(
                     "title", Post.title(post)
                 )
             )(User.posts(user))
@@ -267,15 +267,15 @@ unittest {
 
     // Query: { users { firstName, posts { title }, comments { body } } }
     auto query = map!(
-        (Expr!Ref user) => jsonObject(
+        (Expr!(Ref!User) user) => jsonObject(
             "firstName", User.firstName(user),
             "posts", map!(
-                (Expr!Ref post) => jsonObject(
+                (Expr!(Ref!Post) post) => jsonObject(
                     "title", Post.title(post)
                 )
             )(User.posts(user)),
             "comments", map!(
-                (Expr!Ref comment) => jsonObject(
+                (Expr!(Ref!Comment) comment) => jsonObject(
                     "body", Comment.body_(comment)
                 )
             )(User.comments(user))
@@ -322,7 +322,7 @@ unittest {
     //   }
     // }
     auto query = map!(
-        (Expr!Ref user) => jsonObject(
+        (Expr!(Ref!User) user) => jsonObject(
             "firstName", User.firstName(user),
             "lastName", User.lastName(user),
             "email", User.email(user)
@@ -352,10 +352,10 @@ unittest {
 
     // Simpler: users -> posts (2 levels)
     auto query = map!(
-        (Expr!Ref user) => jsonObject(
+        (Expr!(Ref!User) user) => jsonObject(
             "fullName", User.fullName(user),
             "posts", map!(
-                (Expr!Ref post) => jsonObject(
+                (Expr!(Ref!Post) post) => jsonObject(
                     "title", Post.title(post)
                 )
             )(User.posts(user))
@@ -386,13 +386,13 @@ unittest {
     auto executor = new Executor();
 
     auto query = map!(
-        (Expr!Ref user) => jsonObject(
+        (Expr!(Ref!User) user) => jsonObject(
             "fullName", User.fullName(user),
             "posts", map!(
-                (Expr!Ref post) => jsonObject(
+                (Expr!(Ref!Post) post) => jsonObject(
                     "title", Post.title(post),
                     "comments", map!(
-                        (Expr!Ref comment) => jsonObject(
+                        (Expr!(Ref!Comment) comment) => jsonObject(
                             "body", Comment.body_(comment)
                         )
                     )(Post.comments(post))
@@ -427,7 +427,7 @@ unittest {
     // Query: { users { fullName } }
     // fullName = firstName ~ " " ~ lastName
     auto query = map!(
-        (Expr!Ref user) => User.fullName(user)
+        (Expr!(Ref!User) user) => User.fullName(user)
     )(getByIds!User([1, 2]));
 
     // Phase 1: Standard optimization (creates QueryNodes and ProjectColumnExprs)

@@ -67,15 +67,20 @@ class Executor {
 // Tests
 // ============================================================================
 
+/// Dummy entity type for tests
+private struct TestEntity {
+    enum _typeName = "Test";
+}
+
 /// Helper: expression that returns a fixed array of refs.
-private class MockCollectionExpr : Expr!(Ref[]) {
-    Ref[] _refs;
-    this(Ref[] refs) { _refs = refs; }
+private class MockCollectionExpr(Entity) : Expr!(Ref!Entity[]) {
+    Ref!Entity[] _refs;
+    this(Ref!Entity[] refs) { _refs = refs; }
 
     override ExprBase[] dependencies() { return []; }
     override void replaceDependency(size_t index, ExprBase newDep) {}
 
-    override Promise!(Ref[][]) eval(EvalContext ctx) {
+    override Promise!(Ref!Entity[][]) eval(EvalContext ctx) {
         return resolve([_refs]);
     }
 }
@@ -84,9 +89,9 @@ unittest {
     // Test executor with map expression
     auto executor = new Executor();
 
-    auto collection = new MockCollectionExpr([Ref("Test:1"), Ref("Test:2")]);
+    auto collection = new MockCollectionExpr!TestEntity([Ref!TestEntity("Test:1"), Ref!TestEntity("Test:2")]);
     auto query = map!(
-        (Expr!Ref item) => use((Ref r) => r.nodeId, item)
+        (Expr!(Ref!TestEntity) item) => use((Ref!TestEntity r) => r.nodeId, item)
     )(collection);
 
     auto result = awaitSync(executor.execute(query));
@@ -99,9 +104,9 @@ unittest {
 
     auto executor = new Executor();
 
-    auto collection = new MockCollectionExpr([Ref("Test:1"), Ref("Test:2")]);
+    auto collection = new MockCollectionExpr!TestEntity([Ref!TestEntity("Test:1"), Ref!TestEntity("Test:2")]);
     auto query = map!(
-        (Expr!Ref item) => use((Ref r) => r.localId.to!long, item) * 10 + 1
+        (Expr!(Ref!TestEntity) item) => use((Ref!TestEntity r) => r.localId.to!long, item) * 10 + 1
     )(collection);
 
     auto result = awaitSync(executor.execute(query));

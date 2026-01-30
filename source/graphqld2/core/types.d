@@ -42,16 +42,26 @@ mixin template SourceContextRegistry() {
 // Core Reference Type
 // ============================================================================
 
-/// A reference to any entity via opaque node ID.
+/// A typed reference to an entity via opaque node ID.
 /// Format: "TypeName:localId" (e.g., "User:123", "Order:a1b2-c3d4")
 ///
-/// Following the GraphQL Relay specification, all entity references use
-/// opaque string node IDs. This simplifies the type system while aligning
-/// with GraphQL conventions.
-struct Ref {
+/// The Entity type parameter carries compile-time type information,
+/// enabling type-safe relationship traversal and schema generation.
+/// The runtime representation is just the nodeId string.
+///
+/// Use `Ref!User` for typed refs, `AnyRef` when type doesn't matter.
+struct Ref(Entity) {
     string nodeId;
 
-    /// Extract the entity type name
+    /// The entity type this ref points to (compile-time)
+    alias EntityType = Entity;
+
+    /// Get the entity type name (compile-time when Entity is known)
+    static if (!is(Entity == void)) {
+        enum string entityTypeName = Entity._typeName;
+    }
+
+    /// Extract the entity type name from nodeId (runtime)
     string typeName() const {
         auto sep = nodeId.indexOf(':');
         return sep >= 0 ? nodeId[0 .. sep] : nodeId;
@@ -76,8 +86,8 @@ struct Ref {
     /// For debugging
     string toString() const { return nodeId; }
 
-    /// Equality comparison
-    bool opEquals(const Ref other) const {
+    /// Equality comparison (works across Ref types with same nodeId)
+    bool opEquals(T)(const Ref!T other) const {
         return nodeId == other.nodeId;
     }
 
@@ -85,11 +95,25 @@ struct Ref {
     size_t toHash() const nothrow @safe {
         return hashOf(nodeId);
     }
+
+    /// Convert to untyped AnyRef
+    AnyRef toAnyRef() const {
+        return AnyRef(nodeId);
+    }
+
+    /// Convert from AnyRef (unsafe - caller must ensure correct type)
+    static Ref!Entity fromAnyRef(AnyRef r) {
+        return Ref!Entity(r.nodeId);
+    }
 }
+
+/// Untyped reference for internal storage where entity type doesn't matter.
+/// Used in EvalContext, DataFetcher internals, etc.
+alias AnyRef = Ref!void;
 
 /// The query root reference (singleton)
 /// Used as the starting point for all queries
-enum Ref queryRoot = Ref("Query:");
+enum AnyRef queryRoot = AnyRef("Query:");
 
 // ============================================================================
 // Node ID Encoding/Decoding Utilities
@@ -105,23 +129,33 @@ string encodeNodeId(string typeName, string id) {
     return typeName ~ ":" ~ id;
 }
 
-/// Create a Ref from type name and long ID
-Ref makeRef(string typeName, long id) {
-    return Ref(encodeNodeId(typeName, id));
+/// Create a typed Ref from entity type and long ID
+Ref!Entity makeRef(Entity)(long id) {
+    return Ref!Entity(Entity._typeName ~ ":" ~ id.to!string);
 }
 
-/// Create a Ref from type name and string ID
-Ref makeRef(string typeName, string id) {
-    return Ref(encodeNodeId(typeName, id));
+/// Create a typed Ref from entity type and string ID
+Ref!Entity makeRef(Entity)(string id) {
+    return Ref!Entity(Entity._typeName ~ ":" ~ id);
+}
+
+/// Create an untyped AnyRef from type name and long ID (for internal use)
+AnyRef makeAnyRef(string typeName, long id) {
+    return AnyRef(encodeNodeId(typeName, id));
+}
+
+/// Create an untyped AnyRef from type name and string ID (for internal use)
+AnyRef makeAnyRef(string typeName, string id) {
+    return AnyRef(encodeNodeId(typeName, id));
 }
 
 /// Decode a node ID to a long (assumes ID portion is numeric)
-long decodeAsLong(Ref r) {
+long decodeAsLong(T)(Ref!T r) {
     return r.localId.to!long;
 }
 
 /// Decode multiple refs to long IDs
-long[] decodeAsLongs(Ref[] refs) {
+long[] decodeAsLongs(T)(Ref!T[] refs) {
     return refs.map!(r => decodeAsLong(r)).array;
 }
 
@@ -193,23 +227,28 @@ string[] decodeCompositeKey(string encoded) {
     return result;
 }
 
-/// Create a Ref from type name and multiple key values (composite key)
-Ref makeCompositeRef(string typeName, string[] keyValues) {
-    return Ref(typeName ~ ":" ~ encodeCompositeKey(keyValues));
+/// Create a typed Ref from entity type and multiple key values (composite key)
+Ref!Entity makeCompositeRef(Entity)(string[] keyValues) {
+    return Ref!Entity(Entity._typeName ~ ":" ~ encodeCompositeKey(keyValues));
 }
 
 /// Convenience overload for two-part composite keys
-Ref makeCompositeRef(T1, T2)(string typeName, T1 val1, T2 val2) {
-    return makeCompositeRef(typeName, [val1.to!string, val2.to!string]);
+Ref!Entity makeCompositeRef(Entity, T1, T2)(T1 val1, T2 val2) {
+    return makeCompositeRef!Entity([val1.to!string, val2.to!string]);
 }
 
 /// Convenience overload for three-part composite keys
-Ref makeCompositeRef(T1, T2, T3)(string typeName, T1 val1, T2 val2, T3 val3) {
-    return makeCompositeRef(typeName, [val1.to!string, val2.to!string, val3.to!string]);
+Ref!Entity makeCompositeRef(Entity, T1, T2, T3)(T1 val1, T2 val2, T3 val3) {
+    return makeCompositeRef!Entity([val1.to!string, val2.to!string, val3.to!string]);
+}
+
+/// Create an untyped AnyRef from type name and multiple key values (for internal use)
+AnyRef makeAnyCompositeRef(string typeName, string[] keyValues) {
+    return AnyRef(typeName ~ ":" ~ encodeCompositeKey(keyValues));
 }
 
 /// Decode a Ref's localId as composite key parts
-string[] decodeCompositeKey(Ref r) {
+string[] decodeCompositeKey(T)(Ref!T r) {
     return decodeCompositeKey(r.localId);
 }
 
@@ -321,14 +360,33 @@ unittest {
 // Tests
 // ============================================================================
 
+// Test entity types for unit tests
+private struct TestUser {
+    enum _typeName = "User";
+}
+
+private struct TestPost {
+    enum _typeName = "Post";
+}
+
+private struct TestOrderItem {
+    enum _typeName = "OrderItem";
+}
+
 unittest {
-    // Test Ref basics
-    auto userRef = Ref("User:123");
+    // Test AnyRef basics (untyped)
+    auto userRef = AnyRef("User:123");
     assert(userRef.typeName == "User");
     assert(userRef.localId == "123");
     assert(userRef.isA("User"));
     assert(!userRef.isA("Post"));
     assert(userRef.isValid);
+
+    // Test typed Ref
+    auto typedRef = Ref!TestUser("User:456");
+    assert(typedRef.typeName == "User");
+    assert(typedRef.localId == "456");
+    static assert(Ref!TestUser.entityTypeName == "User");
 
     // Test queryRoot
     assert(queryRoot.nodeId == "Query:");
@@ -339,22 +397,39 @@ unittest {
     assert(encodeNodeId("User", 42) == "User:42");
     assert(encodeNodeId("Post", "abc-123") == "Post:abc-123");
 
-    // Test makeRef
-    auto ref1 = makeRef("User", 42);
+    // Test typed makeRef
+    auto ref1 = makeRef!TestUser(42);
     assert(ref1.nodeId == "User:42");
+    static assert(is(typeof(ref1) == Ref!TestUser));
+
+    auto ref2 = makeRef!TestUser("abc-123");
+    assert(ref2.nodeId == "User:abc-123");
+
+    // Test untyped makeAnyRef
+    auto anyRef = makeAnyRef("User", 42);
+    assert(anyRef.nodeId == "User:42");
 
     // Test decoding
-    assert(decodeAsLong(Ref("User:123")) == 123);
-    assert(decodeAsLongs([Ref("User:1"), Ref("User:2")]) == [1, 2]);
+    assert(decodeAsLong(AnyRef("User:123")) == 123);
+    assert(decodeAsLong(Ref!TestUser("User:123")) == 123);
+    assert(decodeAsLongs([AnyRef("User:1"), AnyRef("User:2")]) == [1, 2]);
 
-    // Test equality and hashing
-    assert(Ref("User:1") == Ref("User:1"));
-    assert(Ref("User:1") != Ref("User:2"));
+    // Test equality (works across Ref types)
+    assert(AnyRef("User:1") == AnyRef("User:1"));
+    assert(AnyRef("User:1") != AnyRef("User:2"));
+    assert(Ref!TestUser("User:1") == AnyRef("User:1"));  // Cross-type equality
 
     // Test in associative arrays
-    int[Ref] counts;
-    counts[Ref("User:1")] = 5;
-    assert(counts[Ref("User:1")] == 5);
+    int[AnyRef] counts;
+    counts[AnyRef("User:1")] = 5;
+    assert(counts[AnyRef("User:1")] == 5);
+
+    // Test conversion between typed and untyped
+    auto typed = Ref!TestUser("User:99");
+    auto untyped = typed.toAnyRef();
+    assert(untyped.nodeId == "User:99");
+    auto backToTyped = Ref!TestUser.fromAnyRef(untyped);
+    assert(backToTyped.nodeId == "User:99");
 }
 
 unittest {
@@ -384,12 +459,19 @@ unittest {
     auto decoded = decodeCompositeKey(encoded);
     assert(decoded == original);
 
-    // Test makeCompositeRef
-    auto ref1 = makeCompositeRef("OrderItem", 100, 200);
+    // Test typed makeCompositeRef
+    auto ref1 = makeCompositeRef!(TestOrderItem, int, int)(100, 200);
     assert(ref1.typeName == "OrderItem");
     assert(ref1.localId == "100,200");
+    static assert(is(typeof(ref1) == Ref!TestOrderItem));
     assert(decodeCompositeKey(ref1) == ["100", "200"]);
 
-    auto ref2 = makeCompositeRef("OrderItem", ["order-1", "prod-2"]);
+    // Test untyped makeAnyCompositeRef
+    auto ref2 = makeAnyCompositeRef("OrderItem", ["order-1", "prod-2"]);
     assert(ref2.nodeId == "OrderItem:order-1,prod-2");
+
+    // Test typed makeCompositeRef with string array
+    auto ref3 = makeCompositeRef!TestOrderItem(["order-1", "prod-2"]);
+    assert(ref3.nodeId == "OrderItem:order-1,prod-2");
+    static assert(is(typeof(ref3) == Ref!TestOrderItem));
 }

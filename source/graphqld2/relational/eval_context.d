@@ -47,7 +47,7 @@ abstract class DataFetcher {
     // =========================================================================
 
     /// Fetch column values for refs (template dispatcher)
-    final T[] fetchColumn(T)(string table, string column, Ref[] refs) {
+    final T[] fetchColumn(T)(string table, string column, AnyRef[] refs) {
         import graphqld2.core.types : isCustomScalar;
         import std.algorithm : map;
         import std.array : array;
@@ -68,14 +68,14 @@ abstract class DataFetcher {
     }
 
     /// Fetch string column values - override in subclass
-    string[] fetchColumnString(string table, string column, Ref[] refs) {
+    string[] fetchColumnString(string table, string column, AnyRef[] refs) {
         string[] result;
         result.length = refs.length;
         return result;
     }
 
     /// Fetch long column values - override in subclass
-    long[] fetchColumnLong(string table, string column, Ref[] refs) {
+    long[] fetchColumnLong(string table, string column, AnyRef[] refs) {
         long[] result;
         result.length = refs.length;
         return result;
@@ -85,15 +85,15 @@ abstract class DataFetcher {
     abstract long[] fetchAllIds(string table);
 
     /// Fetch children for parent refs (hasMany)
-    /// Returns Ref[][] - one Ref[] per parent
-    abstract Ref[][] fetchChildren(string childTable, string childType, string fk, Ref[] parentRefs);
+    /// Returns AnyRef[][] - one AnyRef[] per parent
+    abstract AnyRef[][] fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs);
 
     /// Fetch parent refs for child refs (belongsTo)
-    /// Returns one Ref per child (or Ref.init for NULL FKs)
-    abstract Ref[] fetchBelongsTo(string childTable, string fk, string parentType, Ref[] childRefs);
+    /// Returns one AnyRef per child (or AnyRef.init for NULL FKs)
+    abstract AnyRef[] fetchBelongsTo(string childTable, string fk, string parentType, AnyRef[] childRefs);
 
     /// Fetch a column as JSONValue array (type-erased).
-    abstract JSONValue[] fetchColumnJson(string table, string column, Ref[] refs);
+    abstract JSONValue[] fetchColumnJson(string table, string column, AnyRef[] refs);
 }
 
 // ============================================================================
@@ -113,14 +113,14 @@ class QueryResult {
         JSONValue[string][string] _columns;
 
         /// All refs in result order
-        Ref[] _allRefs;
+        AnyRef[] _allRefs;
 
         /// For child layers: groups of child refs by parent nodeId
-        Ref[][string] _childRefsByParent;
+        AnyRef[][string] _childRefsByParent;
     }
 
     /// Initialize with refs (call before loadColumn)
-    void initialize(string typeName, Ref[] refs) {
+    void initialize(string typeName, AnyRef[] refs) {
         _typeName = typeName;
         _allRefs = refs;
     }
@@ -160,7 +160,7 @@ class QueryResult {
             }
             string idStr = idColumns.length == 1 ? keyParts[0] : encodeCompositeKey(keyParts);
             auto nodeId = typeName ~ ":" ~ idStr;
-            _allRefs ~= Ref(nodeId);
+            _allRefs ~= AnyRef(nodeId);
 
             // If this is a child layer, also index by parent
             if (parentFk !is null && parentType !is null && parentFk in row) {
@@ -168,7 +168,7 @@ class QueryResult {
                 if (parentIdVal.type != JSONType.null_) {
                     auto parentIdStr = jsonValToString(parentIdVal);
                     auto parentNodeId = parentType ~ ":" ~ parentIdStr;
-                    _childRefsByParent[parentNodeId] ~= Ref(nodeId);
+                    _childRefsByParent[parentNodeId] ~= AnyRef(nodeId);
                 }
             }
         }
@@ -187,7 +187,7 @@ class QueryResult {
     }
 
     /// Initialize as child result with parent grouping
-    void initializeAsChild(string typeName, Ref[] refs, Ref[] parentRefs,
+    void initializeAsChild(string typeName, AnyRef[] refs, AnyRef[] parentRefs,
                            string fkColumn, JSONValue[] fkValues) {
         _typeName = typeName;
         _allRefs = refs;
@@ -211,7 +211,7 @@ class QueryResult {
     }
 
     /// Load a column's data
-    void loadColumn(string column, Ref[] refs, JSONValue[] values) {
+    void loadColumn(string column, AnyRef[] refs, JSONValue[] values) {
         JSONValue[string] colData;
         foreach (i, r; refs) {
             colData[r.nodeId] = values[i];
@@ -220,12 +220,12 @@ class QueryResult {
     }
 
     /// Get all refs in this result
-    Ref[] allRefs() {
+    AnyRef[] allRefs() {
         return _allRefs;
     }
 
     /// Get column values for given refs
-    T[] getColumn(T)(string column, Ref[] refs) {
+    T[] getColumn(T)(string column, AnyRef[] refs) {
         auto colData = _columns.get(column, null);
         if (colData is null) {
             T[] result;
@@ -246,14 +246,14 @@ class QueryResult {
     }
 
     /// Get column from JOINed data (aliased columns like "j0.first_name")
-    T[] getJoinedColumn(T)(string joinAlias, string column, Ref[] refs) {
+    T[] getJoinedColumn(T)(string joinAlias, string column, AnyRef[] refs) {
         auto fullColumn = joinAlias ~ "." ~ column;
         return getColumn!T(fullColumn, refs);
     }
 
     /// Get child refs for parent refs (used by HasMany projection)
-    Ref[][] getChildRefs(Ref[] parentRefs) {
-        Ref[][] result;
+    AnyRef[][] getChildRefs(AnyRef[] parentRefs) {
+        AnyRef[][] result;
         result.length = parentRefs.length;
         foreach (i, p; parentRefs) {
             if (auto children = p.nodeId in _childRefsByParent) {
@@ -266,7 +266,7 @@ class QueryResult {
     }
 
     /// Check if a ref exists in this result
-    bool hasRef(Ref r) {
+    bool hasRef(AnyRef r) {
         // Check if ref is in _allRefs
         foreach (ref_; _allRefs) {
             if (ref_.nodeId == r.nodeId) return true;
@@ -308,8 +308,8 @@ class QueryResult {
         } else static if (is(T == float)) {
             if (val.type == JSONType.integer) return cast(float)val.integer;
             return cast(float)val.floating;
-        } else static if (is(T == Ref)) {
-            return Ref(val.str);
+        } else static if (is(T == AnyRef)) {
+            return AnyRef(val.str);
         } else {
             static assert(false, "Unsupported type: " ~ T.stringof);
         }
@@ -347,14 +347,14 @@ class RelationalEvalContext {
     }
 
     /// Get column values from pre-fetched results
-    T[] getColumnValues(T)(int queryNodeId, string column, Ref[] refs) {
+    T[] getColumnValues(T)(int queryNodeId, string column, AnyRef[] refs) {
         auto result = _queryResults.get(queryNodeId, null);
         if (result is null) return refs.map!(_ => T.init).array;
         return result.getColumn!T(column, refs);
     }
 
     /// Get column values from a JOINed table
-    T[] getJoinedColumnValues(T)(int queryNodeId, string joinAlias, string column, Ref[] refs) {
+    T[] getJoinedColumnValues(T)(int queryNodeId, string joinAlias, string column, AnyRef[] refs) {
         auto result = _queryResults.get(queryNodeId, null);
         if (result is null) return refs.map!(_ => T.init).array;
         return result.getJoinedColumn!T(joinAlias, column, refs);
@@ -409,7 +409,7 @@ class MockDataFetcher : DataFetcher {
     /// Synchronous implementation of executeQueryNode
     private QueryResult executeQueryNodeSync(QueryNode node, QueryResult parentResult) {
         auto result = new QueryResult();
-        Ref[] refs;
+        AnyRef[] refs;
 
         // Step 1: Determine refs based on root filter or parent relationship
         if (node.isRoot) {
@@ -419,7 +419,7 @@ class MockDataFetcher : DataFetcher {
                 case FilterType.all:
                     // Use string IDs to support any key type including composite keys
                     auto ids = fetchAllIdsString(node.table);
-                    refs = ids.map!(id => makeRef(node.typeName, id)).array;
+                    refs = ids.map!(id => makeAnyRef(node.typeName, id)).array;
                     result.initialize(node.typeName, refs);
                     break;
                 case FilterType.byId:
@@ -459,13 +459,13 @@ class MockDataFetcher : DataFetcher {
             // Get FK values to determine joined refs
             auto fkValues = fetchColumnJson(node.table, joinInfo.fk, refs);
 
-            Ref[] joinedRefs;
+            AnyRef[] joinedRefs;
             foreach (fkVal; fkValues) {
                 if (fkVal.type == JSONType.null_) {
-                    joinedRefs ~= Ref.init;
+                    joinedRefs ~= AnyRef.init;
                 } else {
                     auto fkId = jsonIdToString(fkVal);
-                    joinedRefs ~= makeRef(joinInfo.targetType, fkId);
+                    joinedRefs ~= makeAnyRef(joinInfo.targetType, fkId);
                 }
             }
 
@@ -479,11 +479,11 @@ class MockDataFetcher : DataFetcher {
         return result;
     }
 
-    override string[] fetchColumnString(string table, string column, Ref[] refs) {
+    override string[] fetchColumnString(string table, string column, AnyRef[] refs) {
         return fetchColumnGeneric!string(table, column, refs);
     }
 
-    override long[] fetchColumnLong(string table, string column, Ref[] refs) {
+    override long[] fetchColumnLong(string table, string column, AnyRef[] refs) {
         return fetchColumnGeneric!long(table, column, refs);
     }
 
@@ -512,13 +512,13 @@ class MockDataFetcher : DataFetcher {
         return encodeCompositeKey(keyParts);
     }
 
-    /// Build a Ref from a row using the table's PK columns
-    private Ref buildRefFromRow(string table, string typeName, JSONValue row) {
+    /// Build an AnyRef from a row using the table's PK columns
+    private AnyRef buildRefFromRow(string table, string typeName, JSONValue row) {
         auto keyStr = buildKeyFromRow(table, row);
-        return Ref(typeName ~ ":" ~ keyStr);
+        return AnyRef(typeName ~ ":" ~ keyStr);
     }
 
-    private T[] fetchColumnGeneric(T)(string table, string column, Ref[] refs) {
+    private T[] fetchColumnGeneric(T)(string table, string column, AnyRef[] refs) {
         T[] result;
         if (table !in _tableData) {
             result.length = refs.length;
@@ -555,13 +555,13 @@ class MockDataFetcher : DataFetcher {
         return _tableData[table].array.map!(row => buildKeyFromRow(table, row)).array;
     }
 
-    override Ref[][] fetchChildren(string childTable, string childType, string fk, Ref[] parentRefs) {
+    override AnyRef[][] fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs) {
         if (childTable !in _tableData) {
-            return parentRefs.map!(_ => cast(Ref[])[]).array;
+            return parentRefs.map!(_ => cast(AnyRef[])[]).array;
         }
 
         // Group children by FK value (using string keys)
-        Ref[][string] childrenByParentId;
+        AnyRef[][string] childrenByParentId;
         foreach (row; _tableData[childTable].array) {
             auto fkVal = row[fk];
             if (fkVal.type != JSONType.null_) {
@@ -572,20 +572,20 @@ class MockDataFetcher : DataFetcher {
         }
 
         // Return children for each parent ref
-        Ref[][] result;
+        AnyRef[][] result;
         foreach (parentRef; parentRefs) {
             if (auto children = parentRef.localId in childrenByParentId) {
                 result ~= *children;
             } else {
-                result ~= cast(Ref[])[];  // Explicit cast to avoid ambiguity
+                result ~= cast(AnyRef[])[];  // Explicit cast to avoid ambiguity
             }
         }
         return result;
     }
 
-    override Ref[] fetchBelongsTo(string childTable, string fk, string parentType, Ref[] childRefs) {
+    override AnyRef[] fetchBelongsTo(string childTable, string fk, string parentType, AnyRef[] childRefs) {
         if (childTable !in _tableData) {
-            return childRefs.map!(_ => Ref.init).array;
+            return childRefs.map!(_ => AnyRef.init).array;
         }
 
         // Build key -> row (using composite key string)
@@ -594,23 +594,23 @@ class MockDataFetcher : DataFetcher {
             rowByKey[buildKeyFromRow(childTable, row)] = row;
         }
 
-        Ref[] result;
+        AnyRef[] result;
         foreach (childRef; childRefs) {
             if (auto rowPtr = childRef.localId in rowByKey) {
                 auto fkVal = (*rowPtr)[fk];
                 if (fkVal.type != JSONType.null_) {
-                    result ~= makeRef(parentType, jsonIdToString(fkVal));
+                    result ~= makeAnyRef(parentType, jsonIdToString(fkVal));
                 } else {
-                    result ~= Ref.init;
+                    result ~= AnyRef.init;
                 }
             } else {
-                result ~= Ref.init;
+                result ~= AnyRef.init;
             }
         }
         return result;
     }
 
-    override JSONValue[] fetchColumnJson(string table, string column, Ref[] refs) {
+    override JSONValue[] fetchColumnJson(string table, string column, AnyRef[] refs) {
         if (table !in _tableData) {
             JSONValue[] result;
             result.length = refs.length;
@@ -733,11 +733,11 @@ class DebugSqlFetcher : DataFetcher {
     }
 
     // Delegate all other methods to wrapped fetcher
-    override string[] fetchColumnString(string table, string column, Ref[] refs) {
+    override string[] fetchColumnString(string table, string column, AnyRef[] refs) {
         return _delegate.fetchColumnString(table, column, refs);
     }
 
-    override long[] fetchColumnLong(string table, string column, Ref[] refs) {
+    override long[] fetchColumnLong(string table, string column, AnyRef[] refs) {
         return _delegate.fetchColumnLong(table, column, refs);
     }
 
@@ -745,15 +745,15 @@ class DebugSqlFetcher : DataFetcher {
         return _delegate.fetchAllIds(table);
     }
 
-    override Ref[][] fetchChildren(string childTable, string childType, string fk, Ref[] parentRefs) {
+    override AnyRef[][] fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs) {
         return _delegate.fetchChildren(childTable, childType, fk, parentRefs);
     }
 
-    override Ref[] fetchBelongsTo(string childTable, string fk, string parentType, Ref[] childRefs) {
+    override AnyRef[] fetchBelongsTo(string childTable, string fk, string parentType, AnyRef[] childRefs) {
         return _delegate.fetchBelongsTo(childTable, fk, parentType, childRefs);
     }
 
-    override JSONValue[] fetchColumnJson(string table, string column, Ref[] refs) {
+    override JSONValue[] fetchColumnJson(string table, string column, AnyRef[] refs) {
         return _delegate.fetchColumnJson(table, column, refs);
     }
 }
@@ -771,13 +771,13 @@ unittest {
     ];
     result.loadFromRows(rows, "User");
 
-    auto refs = [Ref("User:1"), Ref("User:2")];
+    auto refs = [AnyRef("User:1"), AnyRef("User:2")];
     auto names = result.getColumn!string("first_name", refs);
     assert(names == ["Alice", "Bob"]);
 
     assert(result.allRefs == refs);
-    assert(result.hasRef(Ref("User:1")));
-    assert(!result.hasRef(Ref("User:99")));
+    assert(result.hasRef(AnyRef("User:1")));
+    assert(!result.hasRef(AnyRef("User:99")));
 }
 
 unittest {
@@ -790,7 +790,7 @@ unittest {
     ];
     result.loadFromRows(rows, "Comment", "id", "post_id", "Post");
 
-    auto childRefs = result.getChildRefs([Ref("Post:1"), Ref("Post:2"), Ref("Post:3")]);
+    auto childRefs = result.getChildRefs([AnyRef("Post:1"), AnyRef("Post:2"), AnyRef("Post:3")]);
     assert(childRefs.length == 3);
     assert(childRefs[0].length == 2);  // Post:1 has 2 comments
     assert(childRefs[1].length == 1);  // Post:2 has 1 comment
@@ -805,7 +805,7 @@ unittest {
         {"id": 2, "first_name": "Bob"}
     ]`);
 
-    auto refs = [Ref("User:1"), Ref("User:2")];
+    auto refs = [AnyRef("User:1"), AnyRef("User:2")];
     auto names = fetcher.fetchColumn!string("users", "first_name", refs);
     assert(names == ["Alice", "Bob"]);
 
@@ -822,7 +822,7 @@ unittest {
         {"id": 3, "author_id": 2, "title": "D Lang"}
     ]`);
 
-    auto parentRefs = [Ref("User:1"), Ref("User:2")];
+    auto parentRefs = [AnyRef("User:1"), AnyRef("User:2")];
     auto children = fetcher.fetchChildren("posts", "Post", "author_id", parentRefs);
     assert(children.length == 2);
     assert(children[0].length == 2);  // User:1 has 2 posts
@@ -837,9 +837,9 @@ unittest {
         {"id": 2, "author_id": 20, "title": "World"}
     ]`);
 
-    auto childRefs = [Ref("Post:1"), Ref("Post:2")];
+    auto childRefs = [AnyRef("Post:1"), AnyRef("Post:2")];
     auto parents = fetcher.fetchBelongsTo("posts", "author_id", "User", childRefs);
-    assert(parents == [Ref("User:10"), Ref("User:20")]);
+    assert(parents == [AnyRef("User:10"), AnyRef("User:20")]);
 }
 
 unittest {
@@ -847,7 +847,7 @@ unittest {
     auto ctx = new RelationalEvalContext();
 
     auto result = new QueryResult();
-    result.initialize("User", [Ref("User:1"), Ref("User:2")]);
+    result.initialize("User", [AnyRef("User:1"), AnyRef("User:2")]);
     ctx.storeQueryResult(0, result);
 
     assert(ctx.hasQueryResult(0));
@@ -865,7 +865,7 @@ unittest {
     ]`);
 
     // Fetch by string IDs
-    auto refs = [Ref("Item:abc-123"), Ref("Item:def-456")];
+    auto refs = [AnyRef("Item:abc-123"), AnyRef("Item:def-456")];
     auto names = fetcher.fetchColumn!string("items", "name", refs);
     assert(names == ["First", "Second"]);
 
@@ -888,12 +888,12 @@ unittest {
     ]`);
 
     // Fetch belongsTo with string FKs
-    auto childRefs = [Ref("Product:prod-1"), Ref("Product:prod-2")];
+    auto childRefs = [AnyRef("Product:prod-1"), AnyRef("Product:prod-2")];
     auto parents = fetcher.fetchBelongsTo("products", "category_id", "Category", childRefs);
-    assert(parents == [Ref("Category:cat-a"), Ref("Category:cat-b")]);
+    assert(parents == [AnyRef("Category:cat-a"), AnyRef("Category:cat-b")]);
 
     // Fetch hasMany with string FKs
-    auto parentRefs = [Ref("Category:cat-a"), Ref("Category:cat-b")];
+    auto parentRefs = [AnyRef("Category:cat-a"), AnyRef("Category:cat-b")];
     auto children = fetcher.fetchChildren("products", "Product", "category_id", parentRefs);
     assert(children.length == 2);
     assert(children[0].length == 2);  // cat-a has 2 products
@@ -914,9 +914,9 @@ unittest {
     ]`);
 
     // Build refs with composite keys (comma-separated)
-    auto ref1 = Ref("OrderItem:1,100");  // order 1, product 100
-    auto ref2 = Ref("OrderItem:1,101");  // order 1, product 101
-    auto ref3 = Ref("OrderItem:2,100");  // order 2, product 100
+    auto ref1 = AnyRef("OrderItem:1,100");  // order 1, product 100
+    auto ref2 = AnyRef("OrderItem:1,101");  // order 1, product 101
+    auto ref3 = AnyRef("OrderItem:2,100");  // order 2, product 100
 
     // Verify key building
     assert(fetcher.fetchAllIdsString("order_items") == ["1,100", "1,101", "2,100", "2,102"]);
@@ -942,8 +942,8 @@ unittest {
     auto encodedKey = encodeCompositeKey(["en-US", "hello,world"]);
     assert(encodedKey == `en-US,"hello,world"`);
 
-    auto ref1 = Ref("Translation:en-US,hello");
-    auto ref2 = Ref("Translation:" ~ encodedKey);  // en-US,"hello,world"
+    auto ref1 = AnyRef("Translation:en-US,hello");
+    auto ref2 = AnyRef("Translation:" ~ encodedKey);  // en-US,"hello,world"
 
     auto values = fetcher.fetchColumn!string("translations", "value", [ref1, ref2]);
     assert(values == ["Hello", "Hello, World"]);

@@ -177,13 +177,12 @@ class SqlOptimizer : ExprOptimizer {
     }
 
     /// Extract the input expression from a projection or binary op
-    private Expr!Ref extractInputFromExpr(ExprBase expr) {
+    private ExprBase extractInputFromExpr(ExprBase expr) {
         // Check dependencies - projection expressions have their input as first dependency
         auto deps = expr.dependencies();
         if (deps.length > 0) {
-            if (auto refExpr = cast(Expr!Ref) deps[0]) {
-                return refExpr;
-            }
+            // Return the first dependency as the input expression
+            return deps[0];
         }
         // Recurse into binary ops
         if (auto binOp = cast(BinaryOpInfo) expr) {
@@ -259,7 +258,7 @@ class SqlOptimizer : ExprOptimizer {
     /// Create a ProjectComputedExpr for the given result type.
     /// Since we need to create a typed expression but only have TypeInfo at runtime,
     /// we use a factory approach with common types.
-    private ExprBase createProjectComputedExpr(int queryNodeId, string alias_, TypeInfo type, Expr!Ref input, PrefetchExpr prefetch) {
+    private ExprBase createProjectComputedExpr(int queryNodeId, string alias_, TypeInfo type, ExprBase input, PrefetchExpr prefetch) {
         // Handle common types
         if (type == typeid(string)) {
             return new ProjectComputedExpr!string(queryNodeId, alias_, input, prefetch);
@@ -312,7 +311,8 @@ class ProjectComputedExpr(T) : Expr!T {
     private ExprBase _input;     // The input chain (for deriving refs)
     private ExprBase _prefetch;  // PrefetchExpr - ensures data is loaded
 
-    this(int queryNodeId, string alias_, Expr!Ref input, PrefetchExpr prefetch) {
+    /// Accepts ExprBase to work with both typed Expr!(Ref!Entity) and untyped Expr!AnyRef
+    this(int queryNodeId, string alias_, ExprBase input, PrefetchExpr prefetch) {
         _queryNodeId = queryNodeId;
         _alias = alias_;
         _input = input;
@@ -336,9 +336,9 @@ class ProjectComputedExpr(T) : Expr!T {
         auto input = _input;
 
         // Ensure data is prefetched, then evaluate input, then read
-        return evalAs!(Ref[])(_prefetch, ctx).then((_) {
-            return evalAs!Ref(input, ctx);
-        }).then((Ref[] refs) {
+        return evalAs!(AnyRef[])(_prefetch, ctx).then((_) {
+            return evalRefAsAnyRef(input, ctx);
+        }).then((AnyRef[] refs) {
             auto relCtx = ctx.getSourceContext!RelationalEvalContext();
             return relCtx.getColumnValues!T(queryNodeId, alias_, refs);
         });
@@ -496,8 +496,8 @@ unittest {
     auto node = new QueryNode(0, "User", "users");
     auto prefetch = new PrefetchExpr(node);
 
-    // Create a mock input (EveryItemOfExpr)
-    auto item = new EveryItemOfExpr();
+    // Create a mock input (EveryItemOfExpr!void for internal test)
+    auto item = new EveryItemOfExpr!void();
 
     // First, set up mock projections with input and prefetch
     auto proj1 = new ProjectColumnExpr!string(0, "first_name", item, prefetch);
@@ -526,7 +526,7 @@ unittest {
     // Test ProjectComputedExpr
     auto node = new QueryNode(0, "User", "users");
     auto prefetch = new PrefetchExpr(node);
-    auto item = new EveryItemOfExpr();
+    auto item = new EveryItemOfExpr!void();
     auto proj = new ProjectComputedExpr!string(0, "computed_0", item, prefetch);
     assert(proj.queryNodeId == 0);
     assert(proj.columnAlias == "computed_0");

@@ -4,7 +4,7 @@ import std.algorithm;
 import std.array;
 import std.conv;
 
-import graphqld2.core.types : Ref;
+import graphqld2.core.types : AnyRef;
 
 // ============================================================================
 // Filter Types (for root queries)
@@ -58,7 +58,7 @@ class QueryNode {
     FilterType rootFilter = FilterType.none;
 
     /// Root filter IDs (for byId/byIds filters)
-    Ref[] rootFilterRefs;
+    AnyRef[] rootFilterRefs;
 
     /// JOINs for belongsTo chains
     JoinInfo[] joins;
@@ -92,7 +92,7 @@ class QueryNode {
     }
 
     /// Set root filter (for root nodes)
-    void setRootFilter(FilterType filter, Ref[] refs = null) {
+    void setRootFilter(FilterType filter, AnyRef[] refs = null) {
         this.rootFilter = filter;
         this.rootFilterRefs = refs;
     }

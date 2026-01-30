@@ -1,6 +1,6 @@
 module graphqld2.relational.optimize_context;
 
-import graphqld2.core.types;
+import graphqld2.core.types : AnyRef, Ref;
 import graphqld2.core.expr;
 import graphqld2.relational.project;
 import graphqld2.relational.query_node;
@@ -99,11 +99,12 @@ class RelationalOptimizeContext {
 /// Access expressions call this during optimization to find their query scope.
 ///
 /// Returns: the MapExpr as Object, or null if not found.
-Object findMapExpr(Expr!Ref expr) {
+Object findMapExpr(ExprBase expr) {
     while (expr !is null) {
         // Found the placeholder? Return its parent map.
-        if (auto every = cast(EveryItemOfExpr) expr) {
-            return every._parentMap;
+        // Use EveryItemOfExprInfo interface to detect any EveryItemOfExpr!Entity
+        if (auto every = cast(EveryItemOfExprInfo) expr) {
+            return every.parentMap;
         }
 
         // Try to continue through access expressions
@@ -114,7 +115,7 @@ Object findMapExpr(Expr!Ref expr) {
 
 /// Get the _input field from an access expression using runtime reflection.
 /// Returns null if the expression doesn't have an _input field.
-private Expr!Ref getInputExpr(Expr!Ref expr) {
+private ExprBase getInputExpr(ExprBase expr) {
     // This uses runtime type checking since we can't easily get _input
     // from arbitrary expression types. The access expressions in schema.d
     // handle this through their own interfaces.
@@ -194,7 +195,7 @@ unittest {
 
     auto makeQuery() {
         return map!(
-            (Expr!Ref user) => jsonObject(
+            (Expr!(Ref!User) user) => jsonObject(
                 "first", User.firstName(user),
                 "last", User.lastName(user)
             )
@@ -227,7 +228,7 @@ unittest {
     }
 
     auto query = map!(
-        (Expr!Ref user) => jsonObject(
+        (Expr!(Ref!User) user) => jsonObject(
             "name", User.firstName(user),
             "age", User.age(user)
         )
@@ -269,10 +270,10 @@ unittest {
     }
 
     auto query = map!(
-        (Expr!Ref user) => jsonObject(
+        (Expr!(Ref!User) user) => jsonObject(
             "name", User.firstName(user),
             "posts", map!(
-                (Expr!Ref post) => jsonObject(
+                (Expr!(Ref!Post) post) => jsonObject(
                     "title", Post.title(post)
                 )
             )(User.posts(user))
@@ -322,7 +323,7 @@ unittest {
         mixin Col!("authorId", ForeignKey!User);
         mixin BelongsTo!("author", "authorId");
 
-        static auto authorName(Expr!Ref p) {
+        static auto authorName(Expr!(Ref!Post) p) {
             return User.firstName(author(p));
         }
     }
@@ -342,7 +343,7 @@ unittest {
 
     auto makeQuery() {
         return map!(
-            (Expr!Ref post) => jsonObject(
+            (Expr!(Ref!Post) post) => jsonObject(
                 "title", Post.title(post),
                 "authorName", Post.authorName(post)
             )
