@@ -91,10 +91,18 @@ import graphqld2.core;
 import graphqld2.relational;
 import graphqld2.graphql;
 
+// Data source configuration (optional - defaults are fine for simple cases)
+enum myConfig = DBConfig(
+    pagination: true,   // Enable limit/offset parameters
+    filtering: true,    // Enable where parameter
+);
+alias MyDB = MockDB!myConfig;  // Or PostgreSQLDB!myConfig for real DB
+
 // Schema definition - the Query type defines root entry points
+// Table mixin takes: DataSource, Entity, fieldName
 struct Query {
-    mixin Table!(User, "users");
-    mixin Table!(Post, "posts");
+    mixin Table!(MyDB, User, "users");
+    mixin Table!(MyDB, Post, "posts");
 }
 
 // Entity definitions with mixins
@@ -169,7 +177,7 @@ struct Comment {
 }
 
 // Usage - query from root
-auto db = new MockDataFetcher();
+auto db = new MyDB();
 auto executor = new Executor();
 
 // Query: { posts { title, author { fullName } } }

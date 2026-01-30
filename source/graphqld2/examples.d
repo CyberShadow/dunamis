@@ -11,15 +11,22 @@ import graphqld2.core;
 import graphqld2.relational;
 
 // ============================================================================
+// Data Source Configuration
+// ============================================================================
+
+/// Default data source for this schema - uses DebugSqlDB!() for SQL inspection
+alias DB = DebugSqlDB!();
+
+// ============================================================================
 // Schema Definition - Query root with all entry points
 // ============================================================================
 
 /// The Query root - defines all entry points into the schema.
 /// This mirrors what a GraphQL schema's Query type would look like.
 struct Query {
-    mixin Table!(User, "users");
-    mixin Table!(Post, "posts");
-    mixin Table!(Comment, "comments");
+    mixin Table!(DB, User, "users");
+    mixin Table!(DB, Post, "posts");
+    mixin Table!(DB, Comment, "comments");
 }
 
 // ============================================================================
@@ -169,9 +176,9 @@ struct Comment {
 // ============================================================================
 
 /// Helper to create a mock database with sample data.
-/// Returns a DebugSqlFetcher that prints SQL when run with -d=sql
-private DebugSqlFetcher createMockDB() {
-    auto mock = new MockDataFetcher();
+/// Returns a DebugSqlDB!() that prints SQL when run with -d=sql
+private DebugSqlDB!() createMockDB() {
+    auto mock = new MockDB!()();
 
     mock.setTableData("users", `[
         {"id": 1, "first_name": "Alice", "last_name": "Smith", "email": "alice@example.com"},
@@ -191,7 +198,7 @@ private DebugSqlFetcher createMockDB() {
         {"id": 103, "post_id": 2, "body": "I agree!", "author_id": 1}
     ]`);
 
-    return new DebugSqlFetcher(mock);
+    return new DebugSqlDB!()(mock);
 }
 
 unittest {

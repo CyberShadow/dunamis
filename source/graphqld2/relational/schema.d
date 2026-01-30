@@ -23,23 +23,31 @@ import graphqld2.relational.query_node;
 /// Mixin to define a root query field that returns all entities of a type.
 /// Used in a Query struct to define the schema's entry points.
 ///
+/// The DataSource type parameter ties this table to a specific data source,
+/// allowing compile-time access to configuration (pagination, filtering, etc.).
+///
 /// Example:
 /// ---
+/// alias MyDB = MockDB!(DBConfig(pagination: true));
+///
 /// struct Query {
-///     mixin Table!(User, "users");   // generates: static auto users(db) => getAll!User(db)
-///     mixin Table!(Post, "posts");
+///     mixin Table!(MyDB, User, "users");
+///     mixin Table!(MyDB, Post, "posts");
 /// }
 ///
+/// auto db = new MyDB();
 /// auto query = map!(u => User.firstName(u))(Query.users(db));
 /// ---
-mixin template Table(Entity, string fieldName) {
+mixin template Table(DataSource, Entity, string fieldName) {
     // Metadata for schema introspection (unique struct name per field)
     mixin("struct _tableField_" ~ fieldName ~ " {
         enum name = \"" ~ fieldName ~ "\";
         alias entityType = Entity;
+        alias dataSourceType = DataSource;
     }");
 
-    mixin("static auto " ~ fieldName ~ "(DataFetcher db) {
+    // Function takes the specific data source type
+    mixin("static auto " ~ fieldName ~ "(DataSource db) {
         return getAll!Entity(db);
     }");
 }
@@ -1018,7 +1026,7 @@ unittest {
     }
 
     // Set up mock data with string IDs
-    auto fetcher = new MockDataFetcher();
+    auto fetcher = new MockDB!()();
     fetcher.setTableData("items", `[
         {"id": "uuid-abc", "name": "First Item"},
         {"id": "uuid-def", "name": "Second Item"}
@@ -1055,7 +1063,7 @@ unittest {
         mixin BelongsTo!("category", "categoryId");
     }
 
-    auto fetcher = new MockDataFetcher();
+    auto fetcher = new MockDB!()();
     fetcher.setTableData("categories", `[
         {"id": "cat-1", "name": "Electronics"},
         {"id": "cat-2", "name": "Books"}
@@ -1108,7 +1116,7 @@ unittest {
     static assert(OrderItem._typeName == "OrderItem");
 
     // Set up mock data
-    auto fetcher = new MockDataFetcher();
+    auto fetcher = new MockDB!()();
     fetcher.setPrimaryKey("order_items", "order_id", "product_id");
     fetcher.setTableData("order_items", `[
         {"order_id": 1, "product_id": 100, "quantity": 2, "price": "10.00"},
@@ -1152,7 +1160,7 @@ unittest {
         mixin Col!("quantity", long);
     }
 
-    auto fetcher = new MockDataFetcher();
+    auto fetcher = new MockDB!()();
     fetcher.setPrimaryKey("order_items", "order_id", "product_id");
     fetcher.setTableData("order_items", `[
         {"order_id": 1, "product_id": 100, "quantity": 2},

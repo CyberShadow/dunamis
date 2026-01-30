@@ -184,7 +184,7 @@ unittest {
         mixin Col!("lastName", string);
     }
 
-    auto fetcher = new MockDataFetcher();
+    auto fetcher = new MockDB!()();
     fetcher.setTableData("users", `[
         {"id": 1, "first_name": "Alice", "last_name": "Smith"},
         {"id": 2, "first_name": "Bob", "last_name": "Jones"},
@@ -328,7 +328,7 @@ unittest {
         }
     }
 
-    auto fetcher = new MockDataFetcher();
+    auto fetcher = new MockDB!()();
     fetcher.setTableData("users", `[
         {"id": 1, "first_name": "Alice"},
         {"id": 2, "first_name": "Bob"}

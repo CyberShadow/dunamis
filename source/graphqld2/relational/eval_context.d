@@ -4,11 +4,43 @@ import std.algorithm;
 import std.array;
 import std.conv;
 import std.json;
+import std.typecons : Nullable;
 
 import ae.utils.promise;
 
 import graphqld2.core.types;
 import graphqld2.relational.query_node;
+
+// ============================================================================
+// Data Source Configuration
+// ============================================================================
+
+/// Configuration for a data source.
+/// Controls feature generation (pagination, filtering) and naming conventions.
+/// Used at compile-time by Table mixin to determine what to generate.
+struct DBConfig {
+    /// Enable pagination parameters (limit, offset)
+    bool pagination = false;
+
+    /// Enable filtering parameter (where)
+    bool filtering = false;
+
+    /// Enable ordering parameter (orderBy)
+    bool ordering = false;
+
+    /// Parameter name customization
+    string limitName = "limit";
+    string offsetName = "offset";
+    string whereName = "where";
+    string orderByName = "orderBy";
+
+    /// Pagination limits
+    Nullable!int defaultLimit;
+    Nullable!int maxLimit;
+}
+
+/// Default configuration with all features disabled
+enum defaultDBConfig = DBConfig();
 
 // ============================================================================
 // Data Fetcher Base Class
@@ -18,10 +50,10 @@ import graphqld2.relational.query_node;
 ///
 /// The main method is executeQueryNode(), which executes a QueryNode as a
 /// single query and returns all results. SqlDataFetcher generates and executes
-/// SQL; MockDataFetcher filters in-memory data.
+/// SQL; MockDB!() filters in-memory data.
 ///
 /// The individual fetch methods (fetchColumn, fetchChildren, etc.) are used
-/// by the naive (unoptimized) evaluation path and internally by MockDataFetcher.
+/// by the naive (unoptimized) evaluation path and internally by MockDB!().
 abstract class DataFetcher {
     import graphqld2.core.optimize : ExprOptimizer;
     import graphqld2.core.expr : ExprBase;
@@ -35,7 +67,7 @@ abstract class DataFetcher {
 
     /// Get the original expression for a computed column alias (for fallback evaluation).
     /// Used when SQL push-down creates ProjectComputedExpr but the data source
-    /// (like MockDataFetcher) can't actually evaluate the SQL expression.
+    /// (like MockDB!()) can't actually evaluate the SQL expression.
     /// Returns null by default (no fallback available).
     ExprBase getOriginalExpr(string alias_) {
         return null;
@@ -48,11 +80,11 @@ abstract class DataFetcher {
     /// For child nodes, parentResult contains the parent's data (for FK lookups).
     ///
     /// SqlDataFetcher: generates SQL from QueryNode, executes, parses results.
-    /// MockDataFetcher: filters in-memory data based on QueryNode criteria.
+    /// MockDB!(): filters in-memory data based on QueryNode criteria.
     abstract Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult);
 
     // =========================================================================
-    // Individual fetch methods (for naive path and MockDataFetcher internals)
+    // Individual fetch methods (for naive path and MockDB!() internals)
     // =========================================================================
 
     /// Fetch column values for refs (template dispatcher)
@@ -387,8 +419,12 @@ class RelationalEvalContext {
 // Mock Data Fetcher for Testing
 // ============================================================================
 
-/// Simple mock data fetcher for unit tests
-class MockDataFetcher : DataFetcher {
+/// Mock data fetcher for unit tests.
+/// Parameterized by DBConfig for compile-time feature configuration.
+class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
+    /// Configuration accessible at compile time
+    enum configuration = config;
+
     private {
         JSONValue[string] _tableData;  // table -> array of rows
         string[][string] _primaryKeys;  // table -> list of PK column names (default: ["id"])
@@ -416,7 +452,7 @@ class MockDataFetcher : DataFetcher {
 
     /// Execute a QueryNode by filtering in-memory data
     override Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult) {
-        // MockDataFetcher resolves immediately (sync execution wrapped in promise)
+        // MockDB!() resolves immediately (sync execution wrapped in promise)
         return resolve(executeQueryNodeSync(node, parentResult));
     }
 
@@ -684,13 +720,14 @@ class MockDataFetcher : DataFetcher {
     }
 }
 
+
 // ============================================================================
 // Debug SQL Fetcher - Prints SQL, Delegates to Mock
 // ============================================================================
 
 /// A DataFetcher wrapper that prints the SQL it would execute.
 /// Useful for debugging and understanding what queries are generated.
-/// Wraps another fetcher (typically MockDataFetcher) for actual data.
+/// Wraps another fetcher (typically MockDB) for actual data.
 ///
 /// Call printSQL() after query execution to see the combined CTE query.
 ///
@@ -698,10 +735,15 @@ class MockDataFetcher : DataFetcher {
 /// still being able to evaluate computed columns. The optimizer captures
 /// original D expressions before replacing them with ProjectComputedExpr,
 /// and this fetcher evaluates those expressions to populate computed columns.
-class DebugSqlFetcher : DataFetcher {
+///
+/// Parameterized by DBConfig for compile-time feature configuration.
+class DebugSqlDB(DBConfig config = defaultDBConfig) : DataFetcher {
     import std.stdio : writeln;
     import graphqld2.relational.sql_optimizer : toSQL, CapturingSqlOptimizer;
     import graphqld2.core.optimize : ExprOptimizer;
+
+    /// Configuration accessible at compile time
+    enum configuration = config;
 
     private DataFetcher _delegate;
     private QueryNode[] _executedNodes;
@@ -797,6 +839,7 @@ class DebugSqlFetcher : DataFetcher {
     }
 }
 
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -837,8 +880,8 @@ unittest {
 }
 
 unittest {
-    // Test MockDataFetcher
-    auto fetcher = new MockDataFetcher();
+    // Test MockDB!()
+    auto fetcher = new MockDB!()();
     fetcher.setTableData("users", `[
         {"id": 1, "first_name": "Alice"},
         {"id": 2, "first_name": "Bob"}
@@ -853,8 +896,8 @@ unittest {
 }
 
 unittest {
-    // Test MockDataFetcher hasMany
-    auto fetcher = new MockDataFetcher();
+    // Test MockDB!() hasMany
+    auto fetcher = new MockDB!()();
     fetcher.setTableData("posts", `[
         {"id": 1, "author_id": 1, "title": "Hello"},
         {"id": 2, "author_id": 1, "title": "World"},
@@ -869,8 +912,8 @@ unittest {
 }
 
 unittest {
-    // Test MockDataFetcher belongsTo
-    auto fetcher = new MockDataFetcher();
+    // Test MockDB!() belongsTo
+    auto fetcher = new MockDB!()();
     fetcher.setTableData("posts", `[
         {"id": 1, "author_id": 10, "title": "Hello"},
         {"id": 2, "author_id": 20, "title": "World"}
@@ -896,7 +939,7 @@ unittest {
 
 unittest {
     // Test string (UUID-style) primary keys
-    auto fetcher = new MockDataFetcher();
+    auto fetcher = new MockDB!()();
     fetcher.setTableData("items", `[
         {"id": "abc-123", "name": "First"},
         {"id": "def-456", "name": "Second"},
@@ -915,7 +958,7 @@ unittest {
 
 unittest {
     // Test string FK references
-    auto fetcher = new MockDataFetcher();
+    auto fetcher = new MockDB!()();
     fetcher.setTableData("categories", `[
         {"id": "cat-a", "name": "Category A"},
         {"id": "cat-b", "name": "Category B"}
@@ -943,7 +986,7 @@ unittest {
     import graphqld2.core.types : encodeCompositeKey, decodeCompositeKey;
 
     // Test composite primary keys (e.g., OrderItem with order_id + product_id)
-    auto fetcher = new MockDataFetcher();
+    auto fetcher = new MockDB!()();
     fetcher.setPrimaryKey("order_items", "order_id", "product_id");
     fetcher.setTableData("order_items", `[
         {"order_id": 1, "product_id": 100, "quantity": 2, "price": 10.00},
@@ -969,7 +1012,7 @@ unittest {
     import graphqld2.core.types : encodeCompositeKey;
 
     // Test composite keys with special characters (requiring quoting)
-    auto fetcher = new MockDataFetcher();
+    auto fetcher = new MockDB!()();
     fetcher.setPrimaryKey("translations", "locale", "key");
     fetcher.setTableData("translations", `[
         {"locale": "en-US", "key": "hello", "value": "Hello"},

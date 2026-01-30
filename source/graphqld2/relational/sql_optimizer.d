@@ -351,14 +351,14 @@ class SqlOptimizer : ExprOptimizer {
 }
 
 // ============================================================================
-// Capturing SQL Optimizer (for MockDataFetcher compatibility)
+// Capturing SQL Optimizer (for MockDB compatibility)
 // ============================================================================
 
 /// SQL optimizer that captures original expressions before replacing them.
-/// Used by DebugSqlFetcher to enable SQL push-down while still being able
+/// Used by DebugSqlDB to enable SQL push-down while still being able
 /// to evaluate computed columns using the original D expressions.
 ///
-/// Production DataFetchers should use plain SqlOptimizer (no capture overhead).
+/// Production data sources should use plain SqlOptimizer (no capture overhead).
 class CapturingSqlOptimizer : SqlOptimizer {
     /// Original expressions keyed by computed column alias
     private ExprBase[string] _originalExprs;
@@ -440,7 +440,7 @@ class ProjectComputedExpr(T) : Expr!T, ProjectComputedInfo {
                 return resolve(relCtx.getColumnValues!T(queryNodeId, alias_, refs));
             }
 
-            // Fallback path: evaluate original expression (MockDataFetcher)
+            // Fallback path: evaluate original expression (MockDB)
             auto originalExpr = relCtx.fetcher.getOriginalExpr(alias_);
             if (originalExpr !is null) {
                 return evalAs!T(originalExpr, ctx);
