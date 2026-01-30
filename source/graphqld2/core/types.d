@@ -126,6 +126,94 @@ long[] decodeAsLongs(Ref[] refs) {
 }
 
 // ============================================================================
+// Composite Key Encoding/Decoding
+// ============================================================================
+
+/// Check if a value needs quoting (contains comma, quote, or problematic whitespace)
+private bool needsQuoting(string value) {
+    if (value.length == 0) return true;
+    if (value[0] == ' ' || value[$ - 1] == ' ') return true;
+    foreach (c; value) {
+        if (c == ',' || c == '"') return true;
+    }
+    return false;
+}
+
+/// Encode a single value for composite key (quote if needed)
+private string encodeKeyPart(string value) {
+    if (!needsQuoting(value)) return value;
+    // Quote and escape internal quotes
+    return `"` ~ value.replace(`"`, `""`) ~ `"`;
+}
+
+/// Encode multiple values as a composite key string
+string encodeCompositeKey(string[] values) {
+    return values.map!(v => encodeKeyPart(v)).join(",");
+}
+
+/// Decode a composite key string back to individual values
+string[] decodeCompositeKey(string encoded) {
+    string[] result;
+    size_t i = 0;
+
+    while (i < encoded.length) {
+        if (encoded[i] == '"') {
+            // Quoted value
+            i++;  // skip opening quote
+            string value;
+            while (i < encoded.length) {
+                if (encoded[i] == '"') {
+                    if (i + 1 < encoded.length && encoded[i + 1] == '"') {
+                        // Escaped quote
+                        value ~= '"';
+                        i += 2;
+                    } else {
+                        // End of quoted value
+                        i++;  // skip closing quote
+                        break;
+                    }
+                } else {
+                    value ~= encoded[i];
+                    i++;
+                }
+            }
+            result ~= value;
+            // Skip comma if present
+            if (i < encoded.length && encoded[i] == ',') i++;
+        } else {
+            // Unquoted value - read until comma or end
+            size_t start = i;
+            while (i < encoded.length && encoded[i] != ',') i++;
+            result ~= encoded[start .. i];
+            // Skip comma if present
+            if (i < encoded.length && encoded[i] == ',') i++;
+        }
+    }
+
+    return result;
+}
+
+/// Create a Ref from type name and multiple key values (composite key)
+Ref makeCompositeRef(string typeName, string[] keyValues) {
+    return Ref(typeName ~ ":" ~ encodeCompositeKey(keyValues));
+}
+
+/// Convenience overload for two-part composite keys
+Ref makeCompositeRef(T1, T2)(string typeName, T1 val1, T2 val2) {
+    return makeCompositeRef(typeName, [val1.to!string, val2.to!string]);
+}
+
+/// Convenience overload for three-part composite keys
+Ref makeCompositeRef(T1, T2, T3)(string typeName, T1 val1, T2 val2, T3 val3) {
+    return makeCompositeRef(typeName, [val1.to!string, val2.to!string, val3.to!string]);
+}
+
+/// Decode a Ref's localId as composite key parts
+string[] decodeCompositeKey(Ref r) {
+    return decodeCompositeKey(r.localId);
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -163,4 +251,41 @@ unittest {
     int[Ref] counts;
     counts[Ref("User:1")] = 5;
     assert(counts[Ref("User:1")] == 5);
+}
+
+unittest {
+    // Test composite key encoding - simple values (no quoting needed)
+    assert(encodeCompositeKey(["123", "456"]) == "123,456");
+    assert(encodeCompositeKey(["abc", "def", "ghi"]) == "abc,def,ghi");
+    assert(encodeCompositeKey(["uuid-123", "uuid-456"]) == "uuid-123,uuid-456");
+
+    // Test composite key encoding - values that need quoting
+    assert(encodeCompositeKey(["hello,world", "foo"]) == `"hello,world",foo`);
+    assert(encodeCompositeKey(["say \"hi\"", "bar"]) == `"say ""hi""",bar`);
+    assert(encodeCompositeKey([" spaces ", "ok"]) == `" spaces ",ok`);
+    assert(encodeCompositeKey(["", "empty"]) == `"",empty`);
+
+    // Test composite key decoding - simple values
+    assert(decodeCompositeKey("123,456") == ["123", "456"]);
+    assert(decodeCompositeKey("abc,def,ghi") == ["abc", "def", "ghi"]);
+
+    // Test composite key decoding - quoted values
+    assert(decodeCompositeKey(`"hello,world",foo`) == ["hello,world", "foo"]);
+    assert(decodeCompositeKey(`"say ""hi""",bar`) == [`say "hi"`, "bar"]);
+    assert(decodeCompositeKey(`" spaces ",ok`) == [" spaces ", "ok"]);
+
+    // Test round-trip
+    auto original = ["order-123", "product,special", `quoted"value`];
+    auto encoded = encodeCompositeKey(original);
+    auto decoded = decodeCompositeKey(encoded);
+    assert(decoded == original);
+
+    // Test makeCompositeRef
+    auto ref1 = makeCompositeRef("OrderItem", 100, 200);
+    assert(ref1.typeName == "OrderItem");
+    assert(ref1.localId == "100,200");
+    assert(decodeCompositeKey(ref1) == ["100", "200"]);
+
+    auto ref2 = makeCompositeRef("OrderItem", ["order-1", "prod-2"]);
+    assert(ref2.nodeId == "OrderItem:order-1,prod-2");
 }

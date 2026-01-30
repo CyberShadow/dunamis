@@ -521,6 +521,23 @@ auto getByIds(Entity, IdType)(IdType[] ids, DataFetcher fetcher) {
     return new GetByIdsExpr!Entity(ids, fetcher);
 }
 
+/// Factory function to create GetByIdsExpr for composite keys.
+/// Takes an array of key-part arrays, e.g. [[1, 100], [1, 101]] for orderId, productId.
+auto getByCompositeIds(Entity, IdType)(IdType[][] keyParts, DataFetcher fetcher = null) {
+    import graphqld2.core.types : encodeCompositeKey;
+
+    Ref[] refs;
+    foreach (parts; keyParts) {
+        string[] strParts;
+        foreach (p; parts) {
+            strParts ~= p.to!string;
+        }
+        string keyStr = strParts.length == 1 ? strParts[0] : encodeCompositeKey(strParts);
+        refs ~= makeRef(Entity._typeName, keyStr);
+    }
+    return new GetByIdsExpr!Entity(refs, fetcher);
+}
+
 /// Root expression that fetches all entities of a type
 class GetAllExpr(Entity) : Expr!(Ref[]), RootExprInfo {
     import graphqld2.core.optimize : ExprOptimizer;
@@ -986,4 +1003,95 @@ unittest {
     assert(result[0]["categoryName"].str == "Electronics");
     assert(result[1]["name"].str == "Novel");
     assert(result[1]["categoryName"].str == "Books");
+}
+
+// Test composite primary keys end-to-end
+unittest {
+    import std.json : parseJSON;
+    import ae.utils.promise.await : awaitSync;
+    import graphqld2.core.types : encodeCompositeKey;
+
+    // Entity with composite primary key (order_id + product_id)
+    struct OrderItem {
+        mixin Entity!"order_items";
+
+        // Define the composite key columns
+        mixin Col!("orderId", long);
+        mixin Col!("productId", long);
+        mixin PrimaryKey!("orderId", "productId");
+
+        // Other columns
+        mixin Col!("quantity", long);
+        mixin Col!("price", string);  // Use string for decimal
+    }
+
+    // Verify composite key metadata
+    static assert(OrderItem._primaryKey.columns == ["orderId", "productId"]);
+    static assert(OrderItem._table == "order_items");
+    static assert(OrderItem._typeName == "OrderItem");
+
+    // Set up mock data
+    auto fetcher = new MockDataFetcher();
+    fetcher.setPrimaryKey("order_items", "order_id", "product_id");
+    fetcher.setTableData("order_items", `[
+        {"order_id": 1, "product_id": 100, "quantity": 2, "price": "10.00"},
+        {"order_id": 1, "product_id": 101, "quantity": 1, "price": "25.00"},
+        {"order_id": 2, "product_id": 100, "quantity": 3, "price": "10.00"}
+    ]`);
+
+    // Query using pre-encoded composite keys
+    auto refs = [
+        Ref("OrderItem:1,100"),  // order 1, product 100
+        Ref("OrderItem:1,101")   // order 1, product 101
+    ];
+
+    auto query = map!(
+        (Expr!Ref item) => jsonObject(
+            "quantity", OrderItem.quantity(item),
+            "price", OrderItem.price(item)
+        )
+    )(new GetByIdsExpr!OrderItem(refs, fetcher));
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query, true));
+
+    assert(result.length == 2);
+    assert(result[0]["quantity"].integer == 2);
+    assert(result[0]["price"].str == "10.00");
+    assert(result[1]["quantity"].integer == 1);
+    assert(result[1]["price"].str == "25.00");
+}
+
+// Test getByCompositeIds helper function
+unittest {
+    import std.json : parseJSON;
+    import ae.utils.promise.await : awaitSync;
+
+    struct OrderItem {
+        mixin Entity!"order_items";
+        mixin Col!("orderId", long);
+        mixin Col!("productId", long);
+        mixin PrimaryKey!("orderId", "productId");
+        mixin Col!("quantity", long);
+    }
+
+    auto fetcher = new MockDataFetcher();
+    fetcher.setPrimaryKey("order_items", "order_id", "product_id");
+    fetcher.setTableData("order_items", `[
+        {"order_id": 1, "product_id": 100, "quantity": 2},
+        {"order_id": 1, "product_id": 101, "quantity": 1},
+        {"order_id": 2, "product_id": 100, "quantity": 3}
+    ]`);
+
+    // Use getByCompositeIds helper with array of key-parts
+    auto query = map!(
+        (Expr!Ref item) => OrderItem.quantity(item)
+    )(getByCompositeIds!OrderItem([[1, 100], [2, 100]], fetcher));
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query, true));
+
+    assert(result.length == 2);
+    assert(result[0] == 2);  // order 1, product 100 -> quantity 2
+    assert(result[1] == 3);  // order 2, product 100 -> quantity 3
 }

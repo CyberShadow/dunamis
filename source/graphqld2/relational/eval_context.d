@@ -120,18 +120,37 @@ class QueryResult {
     /// Load from row-oriented data (for tests and backwards compatibility)
     void loadFromRows(JSONValue[] rows, string typeName, string idColumn = "id",
                       string parentFk = null, string parentType = null) {
+        // Single-column ID - delegate to composite version
+        loadFromRowsComposite(rows, typeName, [idColumn], parentFk, parentType);
+    }
+
+    /// Load from row-oriented data with composite primary key
+    void loadFromRowsComposite(JSONValue[] rows, string typeName, string[] idColumns,
+                               string parentFk = null, string parentType = null) {
+        import graphqld2.core.types : encodeCompositeKey;
+
         _typeName = typeName;
         _allRefs = [];
 
+        // Helper to extract ID value as string from JSON
+        static string jsonValToString(JSONValue val) {
+            if (val.type == JSONType.integer) {
+                return val.integer.to!string;
+            } else if (val.type == JSONType.string) {
+                return val.str;
+            } else {
+                return "";
+            }
+        }
+
         // First pass: collect all refs and build parent grouping
         foreach (row; rows) {
-            auto id = row[idColumn];
-            string idStr;
-            if (id.type == JSONType.integer) {
-                idStr = id.integer.to!string;
-            } else {
-                idStr = id.str;
+            // Build composite key from all ID columns
+            string[] keyParts;
+            foreach (col; idColumns) {
+                keyParts ~= jsonValToString(row[col]);
             }
+            string idStr = idColumns.length == 1 ? keyParts[0] : encodeCompositeKey(keyParts);
             auto nodeId = typeName ~ ":" ~ idStr;
             _allRefs ~= Ref(nodeId);
 
@@ -139,12 +158,7 @@ class QueryResult {
             if (parentFk !is null && parentType !is null && parentFk in row) {
                 auto parentIdVal = row[parentFk];
                 if (parentIdVal.type != JSONType.null_) {
-                    string parentIdStr;
-                    if (parentIdVal.type == JSONType.integer) {
-                        parentIdStr = parentIdVal.integer.to!string;
-                    } else {
-                        parentIdStr = parentIdVal.str;
-                    }
+                    auto parentIdStr = jsonValToString(parentIdVal);
                     auto parentNodeId = parentType ~ ":" ~ parentIdStr;
                     _childRefsByParent[parentNodeId] ~= Ref(nodeId);
                 }
@@ -350,6 +364,17 @@ class RelationalEvalContext {
 class MockDataFetcher : DataFetcher {
     private {
         JSONValue[string] _tableData;  // table -> array of rows
+        string[][string] _primaryKeys;  // table -> list of PK column names (default: ["id"])
+    }
+
+    /// Set the primary key columns for a table (for composite keys)
+    void setPrimaryKey(string table, string[] columns...) {
+        _primaryKeys[table] = columns.dup;
+    }
+
+    /// Get the primary key columns for a table (defaults to ["id"])
+    string[] getPrimaryKey(string table) {
+        return _primaryKeys.get(table, ["id"]);
     }
 
     /// Set data for a table
@@ -379,7 +404,8 @@ class MockDataFetcher : DataFetcher {
                 case FilterType.none:
                     break;
                 case FilterType.all:
-                    auto ids = fetchAllIds(node.table);
+                    // Use string IDs to support any key type including composite keys
+                    auto ids = fetchAllIdsString(node.table);
                     refs = ids.map!(id => makeRef(node.typeName, id)).array;
                     result.initialize(node.typeName, refs);
                     break;
@@ -459,6 +485,26 @@ class MockDataFetcher : DataFetcher {
         }
     }
 
+    /// Build composite key string from a row using the table's PK columns
+    private string buildKeyFromRow(string table, JSONValue row) {
+        import graphqld2.core.types : encodeCompositeKey;
+        auto pkCols = getPrimaryKey(table);
+        if (pkCols.length == 1) {
+            return jsonIdToString(row[pkCols[0]]);
+        }
+        string[] keyParts;
+        foreach (col; pkCols) {
+            keyParts ~= jsonIdToString(row[col]);
+        }
+        return encodeCompositeKey(keyParts);
+    }
+
+    /// Build a Ref from a row using the table's PK columns
+    private Ref buildRefFromRow(string table, string typeName, JSONValue row) {
+        auto keyStr = buildKeyFromRow(table, row);
+        return Ref(typeName ~ ":" ~ keyStr);
+    }
+
     private T[] fetchColumnGeneric(T)(string table, string column, Ref[] refs) {
         T[] result;
         if (table !in _tableData) {
@@ -466,14 +512,14 @@ class MockDataFetcher : DataFetcher {
             return result;
         }
 
-        // Build id -> row index (using string keys to support non-numeric IDs)
-        JSONValue[string] rowById;
+        // Build key -> row (using composite key string)
+        JSONValue[string] rowByKey;
         foreach (row; _tableData[table].array) {
-            rowById[jsonIdToString(row["id"])] = row;
+            rowByKey[buildKeyFromRow(table, row)] = row;
         }
 
         foreach (r; refs) {
-            if (auto rowPtr = r.localId in rowById) {
+            if (auto rowPtr = r.localId in rowByKey) {
                 result ~= extractValue!T((*rowPtr)[column]);
             } else {
                 result ~= T.init;
@@ -490,10 +536,10 @@ class MockDataFetcher : DataFetcher {
             .array;
     }
 
-    /// Fetch all IDs as strings (supports any ID type)
+    /// Fetch all IDs as strings (supports any ID type including composite keys)
     string[] fetchAllIdsString(string table) {
         if (table !in _tableData) return [];
-        return _tableData[table].array.map!(row => jsonIdToString(row["id"])).array;
+        return _tableData[table].array.map!(row => buildKeyFromRow(table, row)).array;
     }
 
     override Ref[][] fetchChildren(string childTable, string childType, string fk, Ref[] parentRefs) {
@@ -507,8 +553,8 @@ class MockDataFetcher : DataFetcher {
             auto fkVal = row[fk];
             if (fkVal.type != JSONType.null_) {
                 auto parentId = jsonIdToString(fkVal);
-                auto childId = jsonIdToString(row["id"]);
-                childrenByParentId[parentId] ~= makeRef(childType, childId);
+                auto childRef = buildRefFromRow(childTable, childType, row);
+                childrenByParentId[parentId] ~= childRef;
             }
         }
 
@@ -529,15 +575,15 @@ class MockDataFetcher : DataFetcher {
             return childRefs.map!(_ => Ref.init).array;
         }
 
-        // Build id -> row index (using string keys)
-        JSONValue[string] rowById;
+        // Build key -> row (using composite key string)
+        JSONValue[string] rowByKey;
         foreach (row; _tableData[childTable].array) {
-            rowById[jsonIdToString(row["id"])] = row;
+            rowByKey[buildKeyFromRow(childTable, row)] = row;
         }
 
         Ref[] result;
         foreach (childRef; childRefs) {
-            if (auto rowPtr = childRef.localId in rowById) {
+            if (auto rowPtr = childRef.localId in rowByKey) {
                 auto fkVal = (*rowPtr)[fk];
                 if (fkVal.type != JSONType.null_) {
                     result ~= makeRef(parentType, jsonIdToString(fkVal));
@@ -559,16 +605,16 @@ class MockDataFetcher : DataFetcher {
             return result;
         }
 
-        // Build id -> row index (using string keys)
-        JSONValue[string] rowById;
+        // Build key -> row (using composite key string)
+        JSONValue[string] rowByKey;
         foreach (row; _tableData[table].array) {
-            rowById[jsonIdToString(row["id"])] = row;
+            rowByKey[buildKeyFromRow(table, row)] = row;
         }
 
         JSONValue[] result;
         result.reserve(refs.length);
         foreach (r; refs) {
-            if (auto rowPtr = r.localId in rowById) {
+            if (auto rowPtr = r.localId in rowByKey) {
                 if (column in *rowPtr) {
                     result ~= (*rowPtr)[column];
                 } else {
@@ -820,4 +866,53 @@ unittest {
     assert(children.length == 2);
     assert(children[0].length == 2);  // cat-a has 2 products
     assert(children[1].length == 1);  // cat-b has 1 product
+}
+
+unittest {
+    import graphqld2.core.types : encodeCompositeKey, decodeCompositeKey;
+
+    // Test composite primary keys (e.g., OrderItem with order_id + product_id)
+    auto fetcher = new MockDataFetcher();
+    fetcher.setPrimaryKey("order_items", "order_id", "product_id");
+    fetcher.setTableData("order_items", `[
+        {"order_id": 1, "product_id": 100, "quantity": 2, "price": 10.00},
+        {"order_id": 1, "product_id": 101, "quantity": 1, "price": 25.00},
+        {"order_id": 2, "product_id": 100, "quantity": 3, "price": 10.00},
+        {"order_id": 2, "product_id": 102, "quantity": 1, "price": 50.00}
+    ]`);
+
+    // Build refs with composite keys (comma-separated)
+    auto ref1 = Ref("OrderItem:1,100");  // order 1, product 100
+    auto ref2 = Ref("OrderItem:1,101");  // order 1, product 101
+    auto ref3 = Ref("OrderItem:2,100");  // order 2, product 100
+
+    // Verify key building
+    assert(fetcher.fetchAllIdsString("order_items") == ["1,100", "1,101", "2,100", "2,102"]);
+
+    // Fetch column values by composite key
+    auto quantities = fetcher.fetchColumn!long("order_items", "quantity", [ref1, ref2, ref3]);
+    assert(quantities == [2, 1, 3]);
+}
+
+unittest {
+    import graphqld2.core.types : encodeCompositeKey;
+
+    // Test composite keys with special characters (requiring quoting)
+    auto fetcher = new MockDataFetcher();
+    fetcher.setPrimaryKey("translations", "locale", "key");
+    fetcher.setTableData("translations", `[
+        {"locale": "en-US", "key": "hello", "value": "Hello"},
+        {"locale": "en-US", "key": "hello,world", "value": "Hello, World"},
+        {"locale": "de-DE", "key": "hello", "value": "Hallo"}
+    ]`);
+
+    // The key "hello,world" contains a comma, so it needs quoting
+    auto encodedKey = encodeCompositeKey(["en-US", "hello,world"]);
+    assert(encodedKey == `en-US,"hello,world"`);
+
+    auto ref1 = Ref("Translation:en-US,hello");
+    auto ref2 = Ref("Translation:" ~ encodedKey);  // en-US,"hello,world"
+
+    auto values = fetcher.fetchColumn!string("translations", "value", [ref1, ref2]);
+    assert(values == ["Hello", "Hello, World"]);
 }
