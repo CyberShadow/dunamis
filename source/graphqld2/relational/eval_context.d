@@ -685,6 +685,7 @@ class DebugSqlFetcher : DataFetcher {
 
     private DataFetcher _delegate;
     private QueryNode[] _executedNodes;
+    private string _cachedSQL;  // Cached to avoid duplicate debug output
 
     this(DataFetcher delegate_) {
         _delegate = delegate_;
@@ -695,17 +696,35 @@ class DebugSqlFetcher : DataFetcher {
         return _executedNodes;
     }
 
+    /// Get the combined SQL for all executed nodes as a string.
+    /// Caches the result to avoid regenerating (and re-printing in debug mode).
+    string getSQL() {
+        if (_cachedSQL.length == 0 && _executedNodes.length > 0) {
+            _cachedSQL = toSQL(_executedNodes);
+        }
+        return _cachedSQL;
+    }
+
     /// Print the combined SQL for all executed nodes.
-    /// This shows what a real SQL executor would run as a single query.
+    /// Note: When running with -debug=sql, toSQL() already prints the SQL,
+    /// so this only prints if SQL hasn't been generated yet.
     void printSQL() {
-        if (_executedNodes.length > 0) {
-            writeln(toSQL(_executedNodes));
+        debug(sql) {
+            // In debug mode, toSQL() prints automatically.
+            // Just trigger generation if not already done.
+            getSQL();
+        } else {
+            auto sql = getSQL();
+            if (sql.length > 0) {
+                writeln(sql);
+            }
         }
     }
 
     /// Reset collected nodes (call between queries)
     void reset() {
         _executedNodes = [];
+        _cachedSQL = "";
     }
 
     override Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult) {

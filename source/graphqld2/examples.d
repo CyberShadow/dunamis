@@ -154,6 +154,20 @@ unittest {
     auto titles = awaitSync(executor.execute(query));
     assert(titles == ["Hello World", "D Programming"]);
 
+    // Verify generated SQL
+    enum expectedSQL = q"EOF
+WITH
+  layer0 AS (
+    SELECT posts.id, posts.title
+    FROM posts
+    WHERE posts.id = ANY($1)
+  )
+SELECT json_build_object(
+  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer0 t)
+)
+EOF";
+    assert(db.getSQL() == expectedSQL, "Generated SQL does not match expected");
+
     debug(sql) {
         writeln("\n=== Test: Simple field (Post.title) ===");
         db.printSQL();
@@ -410,8 +424,6 @@ unittest {
 unittest {
     import std.stdio : writeln;
 
-    debug(sql) writeln("\n=== Test: SQL push-down for computed fullName ===");
-
     // Query: { users { fullName } }
     // fullName = firstName ~ " " ~ lastName
     auto query = map!(
@@ -429,11 +441,6 @@ unittest {
     // Get the relational optimization context
     auto relCtx = optCtx.getSourceContext!RelationalOptimizeContext();
 
-    // Show the full SQL query with computed columns
-    debug(sql) {
-        writeln(toSQL(relCtx.nodesInOrder(), sqlOpt));
-    }
-
     // Verify computed column was created
     auto nodes = relCtx.allNodes();
     assert(nodes.length == 1);
@@ -441,13 +448,25 @@ unittest {
     auto computed = sqlOpt.getComputedColumns(nodes[0].id);
     assert(computed.length >= 1, "Should have at least 1 computed column for fullName");
 
-    // The SQL expression should be string concatenation
-    assert(computed[0].sqlExpr.canFind("||"),
-        "SQL should use || for concatenation, got: " ~ computed[0].sqlExpr);
-    assert(computed[0].sqlExpr.canFind("first_name"),
-        "SQL should reference first_name");
-    assert(computed[0].sqlExpr.canFind("last_name"),
-        "SQL should reference last_name");
+    // Verify the full SQL output
+    auto sql = toSQL(relCtx.nodesInOrder(), sqlOpt);
+    enum expectedSQL = q"EOF
+WITH
+  layer0 AS (
+    SELECT users.id, users.first_name, users.last_name, ((first_name || ' ') || last_name) AS computed_0
+    FROM users
+    WHERE users.id = ANY($1)
+  )
+SELECT json_build_object(
+  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer0 t)
+)
+EOF";
+    assert(sql == expectedSQL, "Generated SQL does not match expected:\n---ACTUAL---\n" ~ sql ~ "\n---EXPECTED---\n" ~ expectedSQL);
+
+    debug(sql) {
+        writeln("\n=== Test: SQL push-down for computed fullName ===");
+        writeln(sql);
+    }
 }
 
 // ============================================================================
@@ -466,29 +485,44 @@ unittest {
         writeln(schema);
     }
 
-    // Verify Query type
-    assert(schema.canFind("type Query {"));
-    assert(schema.canFind("users: [User!]!"));
-    assert(schema.canFind("posts: [Post!]!"));
-    assert(schema.canFind("comments: [Comment!]!"));
+    enum expected = q"EOF
+scalar Int64
 
-    // Verify User type
-    assert(schema.canFind("type User {"));
-    assert(schema.canFind("id: ID!"));
-    assert(schema.canFind("firstName: String!"));
-    assert(schema.canFind("lastName: String!"));
-    assert(schema.canFind("email: String!"));
-    assert(schema.canFind("posts: [Post!]"));
-    assert(schema.canFind("comments: [Comment!]"));
+type Query {
+  users: [User!]!
+  posts: [Post!]!
+  comments: [Comment!]!
+}
 
-    // Verify Post type
-    assert(schema.canFind("type Post {"));
-    assert(schema.canFind("title: String!"));
-    assert(schema.canFind("author: User!"));
+type User {
+  id: ID!
+  firstName: String!
+  lastName: String!
+  email: String!
+  posts: [Post!]!
+  comments: [Comment!]!
+}
 
-    // Verify Comment type
-    assert(schema.canFind("type Comment {"));
-    assert(schema.canFind("author: User!"));
+type Post {
+  id: ID!
+  title: String!
+  body_: String!
+  authorId: Int64!
+  author: User!
+  comments: [Comment!]!
+}
+
+type Comment {
+  id: ID!
+  body_: String!
+  postId: Int64!
+  authorId: Int64!
+  post: Post!
+  author: User!
+}
+
+EOF";
+    assert(schema == expected, "Generated schema does not match expected:\n---ACTUAL---\n" ~ schema ~ "\n---EXPECTED---\n" ~ expected);
 }
 
 // Test individual type generation
@@ -554,32 +588,51 @@ unittest {
         writeln(ddl);
     }
 
-    // Verify users table
-    assert(ddl.canFind("CREATE TABLE users"));
-    assert(ddl.canFind("id BIGINT PRIMARY KEY"));
-    assert(ddl.canFind("first_name TEXT NOT NULL"));
-    assert(ddl.canFind("last_name TEXT NOT NULL"));
-    assert(ddl.canFind("email TEXT NOT NULL"));
+    enum expected = q"EOF
+-- Generated DDL for schema
+-- Tables are ordered by dependency (referenced tables first)
 
-    // Verify posts table with foreign key
-    assert(ddl.canFind("CREATE TABLE posts"));
-    assert(ddl.canFind("title TEXT NOT NULL"));
-    assert(ddl.canFind("author_id BIGINT NOT NULL"));
-    assert(ddl.canFind("FOREIGN KEY (author_id) REFERENCES users(id)"));
+CREATE TABLE users (
+  id BIGINT PRIMARY KEY,
+  first_name TEXT NOT NULL,
+  last_name TEXT NOT NULL,
+  email TEXT NOT NULL
+);
 
-    // Verify comments table with foreign keys
-    assert(ddl.canFind("CREATE TABLE comments"));
-    assert(ddl.canFind("FOREIGN KEY (author_id) REFERENCES users(id)"));
+CREATE TABLE posts (
+  id BIGINT PRIMARY KEY,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  author_id BIGINT NOT NULL,
+  FOREIGN KEY (author_id) REFERENCES users(id)
+);
+
+CREATE TABLE comments (
+  id BIGINT PRIMARY KEY,
+  body TEXT NOT NULL,
+  post_id BIGINT NOT NULL,
+  author_id BIGINT NOT NULL,
+  FOREIGN KEY (post_id) REFERENCES posts(id),
+  FOREIGN KEY (author_id) REFERENCES users(id)
+);
+
+EOF";
+    assert(ddl == expected, "Generated DDL does not match expected:\n---ACTUAL---\n" ~ ddl ~ "\n---EXPECTED---\n" ~ expected);
 }
 
 // Test individual table DDL
 unittest {
     enum usersDDL = generateCreateTable!User;
 
-    assert(usersDDL.canFind("CREATE TABLE users"));
-    assert(usersDDL.canFind("id BIGINT PRIMARY KEY"));
-    assert(usersDDL.canFind("first_name TEXT"));
-    assert(usersDDL.canFind("last_name TEXT"));
+    enum expected = q"EOF
+CREATE TABLE users (
+  id BIGINT PRIMARY KEY,
+  first_name TEXT NOT NULL,
+  last_name TEXT NOT NULL,
+  email TEXT NOT NULL
+);
+EOF";
+    assert(usersDDL == expected, "Generated User DDL does not match expected:\n---ACTUAL---\n" ~ usersDDL ~ "\n---EXPECTED---\n" ~ expected);
 }
 
 // Test column extraction

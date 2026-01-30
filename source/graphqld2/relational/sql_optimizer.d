@@ -383,9 +383,17 @@ string toSQL(QueryNode[] nodes, SqlOptimizer sqlOpt) {
             node.id, node.id);
     }
     sql ~= jsonParts.join(",\n");
-    sql ~= "\n)";
+    sql ~= "\n)\n";
 
-    return sql.data;
+    auto result = sql.data;
+
+    // Debug output for real applications running with -debug=sql
+    debug(sql) {
+        import std.stdio : writeln;
+        writeln(result);
+    }
+
+    return result;
 }
 
 /// Generate CTE for a single QueryNode with computed columns
