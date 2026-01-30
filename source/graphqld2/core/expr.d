@@ -799,6 +799,127 @@ auto jsonObject(Args...)(Args args)
     return new JsonObjectExpr!Args(args);
 }
 
+/// Dynamic JSON object expression for runtime-determined field names.
+/// Used by the GraphQL compiler when field names are only known at runtime.
+///
+/// This expression evaluates each field and converts results to JSON.
+/// Field expressions can return any type - they're converted via toJsonValue.
+class DynamicJsonObjectExpr : Expr!JSONValue {
+    private string[] _names;
+    private ExprBase[] _exprs;
+
+    this(string[] names, ExprBase[] exprs) {
+        assert(names.length == exprs.length, "Names and exprs must have same length");
+        _names = names;
+        _exprs = exprs;
+    }
+
+    override ExprBase[] dependencies() {
+        return _exprs.dup;
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index < _exprs.length) {
+            _exprs[index] = newDep;
+        }
+    }
+
+    override Expr!JSONValue optimize(OptimizeContext ctx) {
+        // Optimize all field expressions by calling their typed optimize
+        foreach (ref expr; _exprs) {
+            expr = optimizeExpr(expr, ctx);
+        }
+        return this;
+    }
+
+    override Promise!(JSONValue[]) eval(EvalContext ctx) {
+        // Evaluate all field expressions and convert to JSON
+        Promise!(JSONValue[])[] promises;
+        foreach (expr; _exprs) {
+            promises ~= evalToJson(expr, ctx);
+        }
+
+        auto names = _names;
+
+        return all(promises).then((JSONValue[][] results) {
+            // All field results should have the same length
+            auto count = results.length > 0 ? results[0].length : 0;
+
+            JSONValue[] jsonResults = new JSONValue[count];
+            foreach (idx; 0 .. count) {
+                jsonResults[idx] = JSONValue.emptyObject;
+                foreach (i, name; names) {
+                    jsonResults[idx][name] = results[i][idx];
+                }
+            }
+            return jsonResults;
+        });
+    }
+}
+
+/// Optimize an ExprBase by dispatching to common result types.
+private ExprBase optimizeExpr(ExprBase expr, OptimizeContext ctx) {
+    // Try common types
+    if (auto e = cast(Expr!string) expr) return e.optimize(ctx);
+    if (auto e = cast(Expr!long) expr) return e.optimize(ctx);
+    if (auto e = cast(Expr!bool) expr) return e.optimize(ctx);
+    if (auto e = cast(Expr!double) expr) return e.optimize(ctx);
+    if (auto e = cast(Expr!JSONValue) expr) return e.optimize(ctx);
+    if (auto e = cast(Expr!(JSONValue[])) expr) return e.optimize(ctx);
+    if (auto e = cast(Expr!(AnyRef[])) expr) return e.optimize(ctx);
+    // Fallback - return as-is
+    return expr;
+}
+
+/// Evaluate an expression and convert its result to JSONValue[].
+private Promise!(JSONValue[]) evalToJson(ExprBase expr, EvalContext ctx) {
+    import std.algorithm : stdMap = map;
+    import std.array : array;
+
+    // Try common types and convert to JSON
+    if (auto e = cast(Expr!string) expr) {
+        return e.eval(ctx).then((string[] vals) {
+            JSONValue[] result = new JSONValue[vals.length];
+            foreach (i, v; vals) result[i] = JSONValue(v);
+            return result;
+        });
+    }
+    if (auto e = cast(Expr!long) expr) {
+        return e.eval(ctx).then((long[] vals) {
+            JSONValue[] result = new JSONValue[vals.length];
+            foreach (i, v; vals) result[i] = JSONValue(v);
+            return result;
+        });
+    }
+    if (auto e = cast(Expr!bool) expr) {
+        return e.eval(ctx).then((bool[] vals) {
+            JSONValue[] result = new JSONValue[vals.length];
+            foreach (i, v; vals) result[i] = JSONValue(v);
+            return result;
+        });
+    }
+    if (auto e = cast(Expr!double) expr) {
+        return e.eval(ctx).then((double[] vals) {
+            JSONValue[] result = new JSONValue[vals.length];
+            foreach (i, v; vals) result[i] = JSONValue(v);
+            return result;
+        });
+    }
+    if (auto e = cast(Expr!JSONValue) expr) {
+        return e.eval(ctx);
+    }
+    if (auto e = cast(Expr!(JSONValue[])) expr) {
+        return e.eval(ctx).then((JSONValue[][] vals) {
+            JSONValue[] result = new JSONValue[vals.length];
+            foreach (i, v; vals) result[i] = JSONValue(v);
+            return result;
+        });
+    }
+
+    // Fallback - return null values
+    return resolve(cast(JSONValue[]) null);
+}
+
 // ============================================================================
 // Tests
 // ============================================================================

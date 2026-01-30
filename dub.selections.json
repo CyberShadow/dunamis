@@ -1,6 +1,7 @@
 {
 	"fileVersion": 1,
 	"versions": {
-		"ae": "0.0.3730"
+		"ae": "0.0.3730",
+		"graphqld": {"path":"../extern/graphqld"}
 	}
 }

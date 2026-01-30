@@ -55,7 +55,8 @@ alias Int64 = CustomScalar!(
 /// }
 /// ---
 mixin template DemoEntity(string tableName, IdType = Int64, string typeName = "", string sourceId = "default") {
-    import graphqld2.relational.schema : Entity, PrimaryKey;
+    import graphqld2.relational.schema : Entity, PrimaryKey, column;
+    import graphqld2.core.expr : Expr;
 
     mixin Entity!(tableName, typeName, sourceId);
 
@@ -67,6 +68,11 @@ mixin template DemoEntity(string tableName, IdType = Int64, string typeName = ""
         enum isForeignKey = false;
         enum isNullable = false;
         enum isPrimaryKey = true;
+    }
+
+    /// ID accessor - reads the id column
+    static auto id(Expr!(typeof(this)) e) {
+        return e.column!(IdType, typeof(this))("id");
     }
 
     mixin PrimaryKey!"id";

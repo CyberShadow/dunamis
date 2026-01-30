@@ -78,7 +78,7 @@ This is an acceptable trade-off for most CRUD applications.
 │         GraphQL Layer               │
 │  - Schema SDL generation            │
 │  - SQL DDL generation               │
-│  - Query parsing (planned)          │
+│  - Query compilation (runtime)      │
 └─────────────────────────────────────┘
 ```
 
@@ -293,6 +293,64 @@ The three-state mapping (`Nullable!(Nullable!T)`) supports patch mutation semant
 
 This distinction is semantic (handled in your resolver logic), not schema-level—GraphQL represents both `Nullable!T` and `Nullable!(Nullable!T)` as nullable types.
 
+### Runtime Query Compilation
+
+Use `compileQuery` to compile GraphQL query strings at runtime:
+
+```d
+import graphqld2.graphql : compileQuery;
+
+auto db = new MyDB();
+auto executor = new Executor();
+
+// Simple query
+auto query = compileQuery!Query(`{
+    users {
+        firstName
+        posts { title }
+    }
+}`, db);
+
+auto result = executor.execute(query);
+// Returns: {"users": [{"firstName": "Alice", "posts": [...]}, ...]}
+```
+
+**With variables:**
+
+```d
+// Define variables as JSONValue
+auto variables = JSONValue([
+    "greeting": JSONValue("Hello"),
+    "format": JSONValue([
+        "prefix": JSONValue("Dr. "),
+        "suffix": JSONValue(", PhD")
+    ])
+]);
+
+auto query = compileQuery!Query(`
+    query GetUsers($greeting: String!, $format: FormatOptions!) {
+        users {
+            greeting(prefix: $greeting)
+            formattedName(format: $format)
+        }
+    }
+`, db, variables);
+
+auto result = executor.execute(query);
+```
+
+**Multiple root fields:**
+
+```d
+auto query = compileQuery!Query(`{
+    users { firstName }
+    posts { title }
+}`, db);
+
+auto result = executor.execute(query);
+// Returns: {"users": [...], "posts": [...]}
+```
+
 ## Current Status
 
 **Working:**
@@ -318,10 +376,13 @@ This distinction is semantic (handled in your resolver logic), not schema-level�
 - DebugSqlFetcher for SQL inspection (with SQL push-down support)
 - GraphQL schema generation (`generateSchemaSDL!Query`)
 - SQL DDL generation (`generateDDL!Query`)
+- GraphQL query compilation (`compileQuery`) with:
+  - Multiple root fields
+  - Field arguments (scalars and input objects)
+  - Variables (scalars and input objects)
 
 **Not yet implemented:**
-- GraphQL query parsing
-- Mutations (depends on query parsing)
+- Mutations
 - Response serialization
 - Real database DataFetcher (PostgreSQL, etc.)
 - Filtering/pagination (WHERE, LIMIT, OFFSET)

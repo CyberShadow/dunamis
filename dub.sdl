@@ -9,3 +9,4 @@ targetPath "build"
 sourcePaths "source"
 
 dependency "ae" version="==0.0.3730"
+dependency "graphqld:parser" path="../extern/graphqld"
