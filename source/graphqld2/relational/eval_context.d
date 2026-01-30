@@ -125,7 +125,7 @@ class QueryResult {
         _allRefs = refs;
     }
 
-    /// Load from row-oriented data (for tests and backwards compatibility)
+    /// Load from row-oriented data (for tests)
     void loadFromRows(JSONValue[] rows, string typeName, string idColumn = "id",
                       string parentFk = null, string parentType = null) {
         // Single-column ID - delegate to composite version

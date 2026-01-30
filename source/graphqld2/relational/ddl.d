@@ -115,7 +115,6 @@ template getColumnDefs(Entity) {
         }}
 
         // Also check BelongsTo for FK columns not defined via Col
-        // (for backward compatibility with schemas that don't use ForeignKey)
         static foreach (member; __traits(allMembers, Entity)) {{
             static if (member.length > 16 && member[0..16] == "_belongsToField_") {
                 alias FieldMeta = __traits(getMember, Entity, member);
