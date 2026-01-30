@@ -28,11 +28,23 @@ struct Query {
 
 /// User entity
 struct User {
+    import graphqld2.graphql : GqlDescription, GqlDeprecated;
+
     mixin DemoEntity!"users";
+
+    @GqlDescription("The user's first name")
     mixin Col!("firstName", string);
+
+    @GqlDescription("The user's last name")
     mixin Col!("lastName", string);
+
+    @GqlDescription("Primary email address")
+    @GqlDeprecated("Use the emails field instead")
     mixin Col!("email", string);
+
+    @GqlDescription("Posts authored by this user")
     mixin HasMany!("posts", Post, "author_id");
+
     mixin HasMany!("comments", Comment, "author_id");
 
     /// Computed field using operator overloading and property-like access
@@ -501,7 +513,8 @@ unittest {
     }
 
     // Note: FK columns (authorId, postId) are hidden with @GqlHidden,
-    // and D keyword conflicts are resolved with @GqlName (body_ → body)
+    // D keyword conflicts are resolved with @GqlName (body_ → body),
+    // and User fields demonstrate @GqlDescription and @GqlDeprecated
     enum expected = q"EOF
 scalar Int64
 
@@ -513,9 +526,13 @@ type Query {
 
 type User {
   id: ID!
+  """The user's first name"""
   firstName: String!
+  """The user's last name"""
   lastName: String!
-  email: String!
+  """Primary email address"""
+  email: String! @deprecated(reason: "Use the emails field instead")
+  """Posts authored by this user"""
   posts: [Post!]!
   comments: [Comment!]!
 }

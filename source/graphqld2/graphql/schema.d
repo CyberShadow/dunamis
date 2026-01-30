@@ -27,6 +27,26 @@ struct GqlName {
     string name;
 }
 
+/// UDA to add a description to a field or type.
+/// Rendered as a doc comment in GraphQL SDL.
+///
+/// Example:
+///   @GqlDescription("The user's email address")
+///   mixin Col!("email", string);
+struct GqlDescription {
+    string text;
+}
+
+/// UDA to mark a field as deprecated.
+/// Rendered with @deprecated directive in GraphQL SDL.
+///
+/// Example:
+///   @GqlDeprecated("Use fullName instead")
+///   mixin Col!("name", string);
+struct GqlDeprecated {
+    string reason = "No longer supported";
+}
+
 // ============================================================================
 // GraphQL Type Mapping
 // ============================================================================
@@ -95,7 +115,9 @@ struct FieldInfo {
     string graphqlType;
     bool nullable;
     FieldKind kind;
-    bool hidden;  // True if @GqlHidden UDA is present
+    bool hidden;           // @GqlHidden
+    string description;    // @GqlDescription (empty if not set)
+    string deprecation;    // @GqlDeprecated reason (empty if not deprecated)
 }
 
 enum FieldKind {
@@ -119,6 +141,32 @@ template getGqlName(alias member, string defaultName) {
             }
         }
         return defaultName;
+    }();
+}
+
+/// Get the @GqlDescription text if present, otherwise return empty string
+template getGqlDescription(alias member) {
+    enum getGqlDescription = () {
+        alias attrs = __traits(getAttributes, member);
+        static foreach (attr; attrs) {
+            static if (is(typeof(attr) == GqlDescription)) {
+                return attr.text;
+            }
+        }
+        return "";
+    }();
+}
+
+/// Get the @GqlDeprecated reason if present, otherwise return empty string
+template getGqlDeprecated(alias member) {
+    enum getGqlDeprecated = () {
+        alias attrs = __traits(getAttributes, member);
+        static foreach (attr; attrs) {
+            static if (is(typeof(attr) == GqlDeprecated)) {
+                return attr.reason;
+            }
+        }
+        return "";
     }();
 }
 
@@ -158,12 +206,18 @@ template getEntityFields(Entity) {
                 // Get GraphQL field name (use @GqlName if present)
                 enum gqlFieldName = getGqlName!(FieldMeta, FieldMeta.name);
 
+                // Get description and deprecation
+                enum description = getGqlDescription!FieldMeta;
+                enum deprecation = getGqlDeprecated!FieldMeta;
+
                 fields ~= FieldInfo(
                     gqlFieldName,
                     gqlType,
                     colNullable,
                     FieldKind.column,
-                    isHidden
+                    isHidden,
+                    description,
+                    deprecation
                 );
             }
             // Check for hasMany fields (_hasManyField_*)
@@ -171,13 +225,17 @@ template getEntityFields(Entity) {
                 alias FieldMeta = __traits(getMember, Entity, member);
                 enum isHidden = hasGqlHidden!FieldMeta;
                 enum gqlFieldName = getGqlName!(FieldMeta, FieldMeta.name);
+                enum description = getGqlDescription!FieldMeta;
+                enum deprecation = getGqlDeprecated!FieldMeta;
                 // HasMany: non-nullable list of non-nullable items
                 fields ~= FieldInfo(
                     gqlFieldName,
                     "[" ~ FieldMeta.childType._typeName ~ "!]!",
                     false,
                     FieldKind.hasMany,
-                    isHidden
+                    isHidden,
+                    description,
+                    deprecation
                 );
             }
             // Check for belongsTo fields (_belongsToField_*)
@@ -185,6 +243,8 @@ template getEntityFields(Entity) {
                 alias FieldMeta = __traits(getMember, Entity, member);
                 enum isHidden = hasGqlHidden!FieldMeta;
                 enum gqlFieldName = getGqlName!(FieldMeta, FieldMeta.name);
+                enum description = getGqlDescription!FieldMeta;
+                enum deprecation = getGqlDeprecated!FieldMeta;
                 // BelongsTo: nullable or not based on FK column
                 static if (FieldMeta.nullable) {
                     enum belongsToType = FieldMeta.parentType._typeName;
@@ -196,7 +256,9 @@ template getEntityFields(Entity) {
                     belongsToType,
                     FieldMeta.nullable,
                     FieldKind.belongsTo,
-                    isHidden
+                    isHidden,
+                    description,
+                    deprecation
                 );
             }
         }}
@@ -343,8 +405,21 @@ string generateTypeSDL(Entity)() {
     foreach (field; getEntityFields!Entity) {
         // Skip hidden fields
         if (field.hidden) continue;
-        // graphqlType already includes "!" for non-nullable types
-        result ~= "  " ~ field.name ~ ": " ~ field.graphqlType ~ "\n";
+
+        // Add description as doc string
+        if (field.description.length > 0) {
+            result ~= "  \"\"\"" ~ field.description ~ "\"\"\"\n";
+        }
+
+        // Field name and type
+        result ~= "  " ~ field.name ~ ": " ~ field.graphqlType;
+
+        // Add @deprecated directive if present
+        if (field.deprecation.length > 0) {
+            result ~= " @deprecated(reason: \"" ~ field.deprecation ~ "\")";
+        }
+
+        result ~= "\n";
     }
 
     result ~= "}\n";
@@ -543,4 +618,63 @@ unittest {
     enum sdl = generateTypeSDL!User;
     assert(sdl.canFind("name:"), "SDL should include name field");
     assert(!sdl.canFind("passwordHash"), "SDL should NOT include passwordHash field");
+}
+
+// Test @GqlDescription and @GqlDeprecated UDAs
+unittest {
+    import std.algorithm : canFind;
+    import graphqld2.relational.demo : DemoEntity;
+    import graphqld2.relational.schema : Col;
+
+    static struct Article {
+        mixin DemoEntity!"articles";
+
+        @GqlDescription("The article title")
+        mixin Col!("title", string);
+
+        @GqlDescription("Main content")
+        @GqlDeprecated("Use content instead")
+        mixin Col!("body", string);
+
+        mixin Col!("plain", string);  // No annotations
+    }
+
+    // Check that getEntityFields extracts description and deprecation
+    enum fields = getEntityFields!Article;
+
+    bool foundTitle = false;
+    bool foundBody = false;
+    bool foundPlain = false;
+
+    foreach (f; fields) {
+        if (f.name == "title") {
+            foundTitle = true;
+            assert(f.description == "The article title", "title should have description");
+            assert(f.deprecation == "", "title should not be deprecated");
+        }
+        if (f.name == "body") {
+            foundBody = true;
+            assert(f.description == "Main content", "body should have description");
+            assert(f.deprecation == "Use content instead", "body should be deprecated");
+        }
+        if (f.name == "plain") {
+            foundPlain = true;
+            assert(f.description == "", "plain should have no description");
+            assert(f.deprecation == "", "plain should not be deprecated");
+        }
+    }
+    assert(foundTitle && foundBody && foundPlain, "All fields should exist");
+
+    // Verify SDL output
+    enum sdl = generateTypeSDL!Article;
+
+    // Should have description as doc string
+    assert(sdl.canFind(`"""The article title"""`), "SDL should include title description");
+    assert(sdl.canFind(`"""Main content"""`), "SDL should include body description");
+
+    // Should have @deprecated directive
+    assert(sdl.canFind(`@deprecated(reason: "Use content instead")`), "SDL should include deprecation");
+
+    // Plain field should exist without annotations
+    assert(sdl.canFind("plain: String!"), "plain field should exist in SDL");
 }

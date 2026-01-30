@@ -102,9 +102,17 @@ struct Query {
 // For full control, use the low-level Entity + Col + PrimaryKey mixins.
 struct User {
     mixin DemoEntity!"users";
+
+    @GqlDescription("The user's first name")
     mixin Col!("firstName", string);
+
+    @GqlDescription("The user's last name")
     mixin Col!("lastName", string);
+
+    @GqlDescription("Primary email address")
+    @GqlDeprecated("Use the emails field instead")
     mixin Col!("email", string);
+
     mixin HasMany!("posts", Post, "author_id");
     mixin HasMany!("comments", Comment, "author_id");
 
@@ -225,6 +233,8 @@ SELECT * FROM layer1;
 - `ForeignKey!Entity` type for type-safe FK columns
 - `@GqlHidden` UDA to hide fields from GraphQL schema
 - `@GqlName` UDA to override GraphQL field names (for D keyword conflicts)
+- `@GqlDescription` UDA to add field descriptions (rendered as doc comments in SDL)
+- `@GqlDeprecated` UDA to mark fields as deprecated (rendered with `@deprecated` directive)
 - QueryNode-based SQL planning
 - JOINs for belongsTo relationships
 - Child queries (CTEs) for hasMany relationships
@@ -241,7 +251,6 @@ SELECT * FROM layer1;
 - Real database DataFetcher (PostgreSQL, etc.)
 - Filtering/pagination (WHERE, LIMIT, OFFSET)
 - Polymorphism (GraphQL union/interface types)
-- Field metadata (descriptions, deprecation)
 - Field arguments for computed fields
 - Input types for mutations
 - Runtime introspection (`__schema`, `__type`, `__typename`)
