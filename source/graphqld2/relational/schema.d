@@ -49,11 +49,35 @@ mixin template Table(Entity, string fieldName) {
 // ============================================================================
 
 /// Mixin to define an entity (table mapping)
-/// Adds _typeName (for node ID encoding) and _table (for SQL generation)
-mixin template Entity(string tableName, string typeName = "", string sourceId = "default") {
+/// Adds _typeName (for node ID encoding), _table (for SQL generation),
+/// _idType (primary key type), and the id column metadata.
+///
+/// Example:
+/// ---
+/// struct User {
+///     mixin Entity!"users";                    // ID type defaults to long
+///     mixin Col!("name", string);
+/// }
+///
+/// struct UuidEntity {
+///     mixin Entity!("items", string);          // UUID stored as string
+/// }
+/// ---
+mixin template Entity(string tableName, IdType = long, string typeName = "", string sourceId = "default") {
     static immutable string _table = tableName;
     static immutable string _typeName = (typeName.length > 0) ? typeName : __traits(identifier, typeof(this));
     static immutable string _sourceId = sourceId;
+    alias _idType = IdType;
+
+    /// Column metadata for the primary key (id)
+    struct _colField_id {
+        enum name = "id";
+        enum column = "id";
+        alias type = IdType;
+        enum isForeignKey = false;
+        enum isNullable = false;
+        enum isPrimaryKey = true;
+    }
 }
 
 // ============================================================================
@@ -65,15 +89,15 @@ mixin template Entity(string tableName, string typeName = "", string sourceId = 
 /// Example: mixin Col!("authorId", ForeignKey!User);
 ///
 /// Benefits:
-/// - PK type is derived from the referenced entity (no need to repeat `long`)
+/// - PK type is derived from the referenced entity's _idType
 /// - DDL generation automatically creates FOREIGN KEY constraints
 /// - Single source of truth for the relationship
 struct ForeignKey(Entity) {
     /// The referenced entity type
     alias referencedEntity = Entity;
 
-    /// The underlying storage type (same as entity's PK type, assumed BIGINT/long)
-    alias StorageType = long;
+    /// The underlying storage type (derived from entity's PK type)
+    alias StorageType = Entity._idType;
 }
 
 /// Check if a type is a ForeignKey
@@ -144,10 +168,12 @@ mixin template Col(string fieldName, T, string columnName = toSnakeCase(fieldNam
     // Determine FK properties at compile time (before string mixin)
     static if (isNullableForeignKey!T) {
         private alias _Col_ReferencedEntity = getForeignKeyEntity!T;
+        private alias _Col_FkType = _Col_ReferencedEntity._idType;
         private enum _Col_IsForeignKey = true;
         private enum _Col_IsNullable = true;
     } else static if (isForeignKey!T) {
         private alias _Col_ReferencedEntity = getForeignKeyEntity!T;
+        private alias _Col_FkType = _Col_ReferencedEntity._idType;
         private enum _Col_IsForeignKey = true;
         private enum _Col_IsNullable = false;
     } else {
@@ -160,14 +186,14 @@ mixin template Col(string fieldName, T, string columnName = toSnakeCase(fieldNam
         mixin("struct _colField_" ~ fieldName ~ " {
             enum name = \"" ~ fieldName ~ "\";
             enum column = \"" ~ columnName ~ "\";
-            alias type = long;
+            alias type = _Col_FkType;
             enum isForeignKey = true;
             enum isNullable = _Col_IsNullable;
             alias referencedEntity = _Col_ReferencedEntity;
         }");
 
         mixin("static auto " ~ fieldName ~ "(Expr!Ref e) {
-            return e.column!(long, typeof(this))(\"" ~ columnName ~ "\");
+            return e.column!(_Col_FkType, typeof(this))(\"" ~ columnName ~ "\");
         }");
     } else {
         mixin("struct _colField_" ~ fieldName ~ " {
@@ -778,10 +804,17 @@ unittest {
     static assert(User._sourceId == "default");
 
     struct Post {
-        mixin Entity!("posts", "BlogPost");
+        mixin Entity!("posts", long, "BlogPost");
     }
     static assert(Post._table == "posts");
     static assert(Post._typeName == "BlogPost");
+    static assert(is(Post._idType == long));
+
+    // Test custom ID type
+    struct UuidEntity {
+        mixin Entity!("items", string);
+    }
+    static assert(is(UuidEntity._idType == string));
 }
 
 // Test optimization creates QueryNode

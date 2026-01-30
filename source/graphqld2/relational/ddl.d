@@ -52,16 +52,22 @@ template getColumnDefs(Entity) {
         ColumnDef[] columns;
         bool[string] seenColumns;
 
-        // Always add id as primary key
-        columns ~= ColumnDef("id", "BIGINT", false, true, "", "");
-        seenColumns["id"] = true;
-
-        // Collect all columns from Col mixins (including ForeignKey columns)
+        // Collect all columns from Col mixins (including id from Entity mixin)
         static foreach (member; __traits(allMembers, Entity)) {{
             static if (member.length > 10 && member[0..10] == "_colField_") {
                 alias FieldMeta = __traits(getMember, Entity, member);
                 if (FieldMeta.column !in seenColumns) {
-                    static if (FieldMeta.isForeignKey) {
+                    // Check if this is the primary key (id from Entity mixin)
+                    static if (__traits(hasMember, FieldMeta, "isPrimaryKey") && FieldMeta.isPrimaryKey) {
+                        columns ~= ColumnDef(
+                            FieldMeta.column,
+                            sqlTypeName!(FieldMeta.type),
+                            false,  // PK is never nullable
+                            true,   // isPrimaryKey
+                            "",
+                            ""
+                        );
+                    } else static if (FieldMeta.isForeignKey) {
                         // ForeignKey column - include FK constraint
                         columns ~= ColumnDef(
                             FieldMeta.column,
@@ -95,7 +101,7 @@ template getColumnDefs(Entity) {
                 if (FieldMeta.foreignKey !in seenColumns) {
                     columns ~= ColumnDef(
                         FieldMeta.foreignKey,
-                        "BIGINT",
+                        sqlTypeName!(FieldMeta.parentType._idType),
                         FieldMeta.nullable,
                         false,
                         FieldMeta.parentType._table,
