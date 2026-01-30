@@ -12,7 +12,7 @@ import graphqld2.core.types;
 import graphqld2.core.eval;
 import graphqld2.core.expr;
 import graphqld2.core.optimize : OptimizeContext, ExprOptimizer;
-import graphqld2.relational.eval_context : RelationalEvalContext;
+import graphqld2.relational.eval_context : RelationalEvalContext, QueryResult;
 import graphqld2.relational.query_node;
 import graphqld2.relational.schema;
 import graphqld2.relational.project;
@@ -128,8 +128,44 @@ class SqlOptimizer : ExprOptimizer {
         }
     }
 
+    /// Check if an expression tree contains any ProjectJoinedColumnExpr
+    private bool hasJoinedColumnExpr(ExprBase expr) {
+        if (expr is null) return false;
+
+        // Check if this is a joined column
+        if (cast(ProjectJoinedColumnInfo) expr !is null) {
+            return true;
+        }
+
+        // Recurse into binary ops
+        if (auto binOp = cast(BinaryOpInfo) expr) {
+            return hasJoinedColumnExpr(binOp.left) || hasJoinedColumnExpr(binOp.right);
+        }
+
+        // Constants don't have joined columns
+        if (cast(ConstantInfo) expr !is null) {
+            return false;
+        }
+
+        // Check dependencies
+        foreach (dep; expr.dependencies()) {
+            if (hasJoinedColumnExpr(dep)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// Try to push down a binary operation to SQL
-    private ExprBase tryPushDownBinaryOp(ExprBase expr, BinaryOpInfo binOp, OptimizeContext ctx) {
+    protected ExprBase tryPushDownBinaryOp(ExprBase expr, BinaryOpInfo binOp, OptimizeContext ctx) {
+        // Check if any operand involves joined columns - skip push-down if so.
+        // Joined columns are already fetched via JOINs, and ProjectComputedExpr
+        // doesn't handle their evaluation correctly.
+        if (hasJoinedColumnExpr(binOp.left) || hasJoinedColumnExpr(binOp.right)) {
+            return null;
+        }
+
         // Check if both operands can be translated to SQL
         int queryNodeId = -1;
         auto leftSql = tryGetSqlExpr(binOp.left, queryNodeId);
@@ -176,38 +212,53 @@ class SqlOptimizer : ExprOptimizer {
         return createProjectComputedExpr(queryNodeId, alias_, expr.resultType, input, prefetch);
     }
 
-    /// Extract the input expression from a projection or binary op
+    /// Extract the input expression from a projection or binary op.
+    /// Returns the entity ref source (e.g., EveryItemOfExpr) that provides the
+    /// refs for looking up computed column values.
     private ExprBase extractInputFromExpr(ExprBase expr) {
-        // Check dependencies - projection expressions have their input as first dependency
-        auto deps = expr.dependencies();
-        if (deps.length > 0) {
-            // Return the first dependency as the input expression
-            return deps[0];
-        }
-        // Recurse into binary ops
+        // First check for binary ops and recurse
         if (auto binOp = cast(BinaryOpInfo) expr) {
             auto left = extractInputFromExpr(binOp.left);
             if (left !is null) return left;
             return extractInputFromExpr(binOp.right);
         }
+
+        // Check for projection expressions - they have input as first dependency
+        if (cast(ProjectColumnInfo) expr !is null || cast(ProjectJoinedColumnInfo) expr !is null) {
+            auto deps = expr.dependencies();
+            if (deps.length > 0) {
+                return deps[0];  // Input expression that produces entity refs
+            }
+        }
+
+        // Constants don't have input
+        if (cast(ConstantInfo) expr !is null) {
+            return null;
+        }
+
         return null;
     }
 
-    /// Extract the PrefetchExpr from a projection or binary op
+    /// Extract the PrefetchExpr from a projection or binary op.
+    /// Returns the PrefetchExpr that ensures data is loaded before reading.
     private PrefetchExpr extractPrefetchFromExpr(ExprBase expr) {
-        // Check dependencies - projection expressions have prefetch as second dependency
-        auto deps = expr.dependencies();
-        if (deps.length > 1) {
-            if (auto prefetch = cast(PrefetchExpr) deps[1]) {
-                return prefetch;
-            }
-        }
-        // Recurse into binary ops
+        // First check for binary ops and recurse
         if (auto binOp = cast(BinaryOpInfo) expr) {
             auto left = extractPrefetchFromExpr(binOp.left);
             if (left !is null) return left;
             return extractPrefetchFromExpr(binOp.right);
         }
+
+        // Check for projection expressions - they have prefetch as second dependency
+        if (cast(ProjectColumnInfo) expr !is null || cast(ProjectJoinedColumnInfo) expr !is null) {
+            auto deps = expr.dependencies();
+            if (deps.length > 1) {
+                if (auto prefetch = cast(PrefetchExpr) deps[1]) {
+                    return prefetch;
+                }
+            }
+        }
+
         return null;
     }
 
@@ -300,12 +351,54 @@ class SqlOptimizer : ExprOptimizer {
 }
 
 // ============================================================================
+// Capturing SQL Optimizer (for MockDataFetcher compatibility)
+// ============================================================================
+
+/// SQL optimizer that captures original expressions before replacing them.
+/// Used by DebugSqlFetcher to enable SQL push-down while still being able
+/// to evaluate computed columns using the original D expressions.
+///
+/// Production DataFetchers should use plain SqlOptimizer (no capture overhead).
+class CapturingSqlOptimizer : SqlOptimizer {
+    /// Original expressions keyed by computed column alias
+    private ExprBase[string] _originalExprs;
+
+    /// Override to capture original expression before replacement
+    override protected ExprBase tryPushDownBinaryOp(ExprBase expr, BinaryOpInfo binOp, OptimizeContext ctx) {
+        auto replacement = super.tryPushDownBinaryOp(expr, binOp, ctx);
+        if (replacement !is null && replacement !is expr) {
+            // Capture the original expression
+            if (auto projComputed = cast(ProjectComputedInfo) replacement) {
+                _originalExprs[projComputed.columnAlias] = expr;
+            }
+        }
+        return replacement;
+    }
+
+    /// Get the original expression for a computed column alias
+    ExprBase getOriginalExpr(string alias_) {
+        return _originalExprs.get(alias_, null);
+    }
+
+    /// Get all captured original expressions
+    const(ExprBase[string]) allOriginalExprs() {
+        return _originalExprs;
+    }
+}
+
+// ============================================================================
 // Computed Column Projection Expression
 // ============================================================================
 
+/// Interface for ProjectComputedExpr pattern matching by external optimizers
+interface ProjectComputedInfo {
+    @property int queryNodeId();
+    @property string columnAlias();
+}
+
 /// Projection expression that reads a computed column from QueryResult.
 /// Created by SqlOptimizer when pushing down expressions to SQL.
-class ProjectComputedExpr(T) : Expr!T {
+class ProjectComputedExpr(T) : Expr!T, ProjectComputedInfo {
     private int _queryNodeId;
     private string _alias;
     private ExprBase _input;     // The input chain (for deriving refs)
@@ -340,7 +433,21 @@ class ProjectComputedExpr(T) : Expr!T {
             return evalRefAsAnyRef(input, ctx);
         }).then((AnyRef[] refs) {
             auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-            return relCtx.getColumnValues!T(queryNodeId, alias_, refs);
+            auto queryResult = relCtx.getQueryResult(queryNodeId);
+
+            // Fast path: computed column exists in QueryResult (real DB)
+            if (queryResult !is null && queryResult.hasColumn(alias_)) {
+                return resolve(relCtx.getColumnValues!T(queryNodeId, alias_, refs));
+            }
+
+            // Fallback path: evaluate original expression (MockDataFetcher)
+            auto originalExpr = relCtx.fetcher.getOriginalExpr(alias_);
+            if (originalExpr !is null) {
+                return evalAs!T(originalExpr, ctx);
+            }
+
+            // No column and no fallback - return defaults
+            return resolve(refs.map!(_ => T.init).array);
         });
     }
 

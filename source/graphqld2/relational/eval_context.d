@@ -24,12 +24,21 @@ import graphqld2.relational.query_node;
 /// by the naive (unoptimized) evaluation path and internally by MockDataFetcher.
 abstract class DataFetcher {
     import graphqld2.core.optimize : ExprOptimizer;
+    import graphqld2.core.expr : ExprBase;
 
     /// Get the optimizers this data source needs.
     /// Default: no additional optimizers.
     /// SQL-backed fetchers would override to return [new SqlOptimizer()].
     ExprOptimizer[] requestedOptimizers() {
         return [];
+    }
+
+    /// Get the original expression for a computed column alias (for fallback evaluation).
+    /// Used when SQL push-down creates ProjectComputedExpr but the data source
+    /// (like MockDataFetcher) can't actually evaluate the SQL expression.
+    /// Returns null by default (no fallback available).
+    ExprBase getOriginalExpr(string alias_) {
+        return null;
     }
 
     /// Execute a QueryNode as a single query and return all results.
@@ -263,6 +272,11 @@ class QueryResult {
             }
         }
         return result;
+    }
+
+    /// Check if a column exists in this result
+    bool hasColumn(string column) {
+        return (column in _columns) !is null;
     }
 
     /// Check if a ref exists in this result
@@ -679,16 +693,39 @@ class MockDataFetcher : DataFetcher {
 /// Wraps another fetcher (typically MockDataFetcher) for actual data.
 ///
 /// Call printSQL() after query execution to see the combined CTE query.
+///
+/// This fetcher uses CapturingSqlOptimizer to enable SQL push-down while
+/// still being able to evaluate computed columns. The optimizer captures
+/// original D expressions before replacing them with ProjectComputedExpr,
+/// and this fetcher evaluates those expressions to populate computed columns.
 class DebugSqlFetcher : DataFetcher {
     import std.stdio : writeln;
-    import graphqld2.relational.sql_optimizer : toSQL;
+    import graphqld2.relational.sql_optimizer : toSQL, CapturingSqlOptimizer;
+    import graphqld2.core.optimize : ExprOptimizer;
 
     private DataFetcher _delegate;
     private QueryNode[] _executedNodes;
     private string _cachedSQL;  // Cached to avoid duplicate debug output
+    private CapturingSqlOptimizer _sqlOptimizer;
 
     this(DataFetcher delegate_) {
         _delegate = delegate_;
+        _sqlOptimizer = new CapturingSqlOptimizer();
+    }
+
+    /// Return the CapturingSqlOptimizer to enable SQL push-down
+    override ExprOptimizer[] requestedOptimizers() {
+        return [_sqlOptimizer];
+    }
+
+    /// Get the SQL optimizer (for accessing computed columns info)
+    @property CapturingSqlOptimizer sqlOptimizer() {
+        return _sqlOptimizer;
+    }
+
+    /// Get original expression for fallback evaluation
+    override ExprBase getOriginalExpr(string alias_) {
+        return _sqlOptimizer.getOriginalExpr(alias_);
     }
 
     /// Get all executed nodes (for generating combined SQL)
@@ -698,9 +735,10 @@ class DebugSqlFetcher : DataFetcher {
 
     /// Get the combined SQL for all executed nodes as a string.
     /// Caches the result to avoid regenerating (and re-printing in debug mode).
+    /// Includes computed columns from SQL push-down optimization.
     string getSQL() {
         if (_cachedSQL.length == 0 && _executedNodes.length > 0) {
-            _cachedSQL = toSQL(_executedNodes);
+            _cachedSQL = toSQL(_executedNodes, _sqlOptimizer);
         }
         return _cachedSQL;
     }
@@ -725,6 +763,7 @@ class DebugSqlFetcher : DataFetcher {
     void reset() {
         _executedNodes = [];
         _cachedSQL = "";
+        _sqlOptimizer = new CapturingSqlOptimizer();
     }
 
     override Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult) {
