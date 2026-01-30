@@ -35,8 +35,8 @@ struct User {
     mixin HasMany!("posts", Post, "author_id");
     mixin HasMany!("comments", Comment, "author_id");
 
-    /// Computed field using operator overloading
-    static auto fullName(Expr!(Ref!User) u) => firstName(u) ~ " " ~ lastName(u);
+    /// Computed field using operator overloading and property-like access
+    static auto fullName(RefExpr!User u) => u.firstName ~ " " ~ u.lastName;
 }
 
 /// Post entity - belongs to a User (author) and has many Comments
@@ -49,7 +49,7 @@ struct Post {
     mixin HasMany!("comments", Comment, "post_id");
 
     /// Computed: render full post as HTML with author and comments
-    static auto html(Expr!(Ref!Post) p) {
+    static auto html(RefExpr!Post p) {
         return use(
             (string title, string body_, string authorName, string[] commentHtmls) {
                 auto commentsHtml = commentHtmls.join("\n");
@@ -65,25 +65,25 @@ struct Post {
                 </section>
             </article>`;
             },
-            title(p),
-            body_(p),
-            User.fullName(author(p)),
+            p.title,
+            p.body_,
+            p.author.fullName,
             map!(
-                (Expr!(Ref!Comment) c) => Comment.html(c)
-            )(comments(p))
+                (RefExpr!Comment c) => c.html
+            )(p.comments)
         );
     }
 
     /// Computed: short summary for listings
-    static auto summary(Expr!(Ref!Post) p) {
+    static auto summary(RefExpr!Post p) {
         return use(
             (string title, string body_, string authorName) {
                 auto truncated = body_.length > 100 ? body_[0..100] ~ "..." : body_;
                 return title ~ " by " ~ authorName ~ " - " ~ truncated;
             },
-            title(p),
-            body_(p),
-            User.fullName(author(p))
+            p.title,
+            p.body_,
+            p.author.fullName
         );
     }
 }
@@ -98,15 +98,15 @@ struct Comment {
     mixin BelongsTo!("author", "authorId");  // Relationship - derives User from FK column
 
     /// Computed: render comment as HTML with author name
-    static auto html(Expr!(Ref!Comment) c) {
+    static auto html(RefExpr!Comment c) {
         return use(
             (string body_, string authorName) =>
                 `<div class="comment">
                 <span class="author">` ~ authorName ~ `</span>
                 <p>` ~ body_ ~ `</p>
             </div>`,
-            body_(c),
-            User.fullName(author(c))
+            c.body_,
+            c.author.fullName
         );
     }
 }
@@ -148,7 +148,7 @@ unittest {
     auto executor = new Executor();
 
     auto query = map!(
-        (Expr!(Ref!Post) p) => Post.title(p)
+        (RefExpr!Post p) => p.title
     )(getByIds!Post([1, 2], db));
 
     auto titles = awaitSync(executor.execute(query));
@@ -181,7 +181,7 @@ unittest {
     auto executor = new Executor();
 
     auto query = map!(
-        (Expr!(Ref!Post) p) => Post.summary(p)
+        (RefExpr!Post p) => p.summary
     )(getByIds!Post([1, 2], db));
 
     auto summaries = awaitSync(executor.execute(query));
@@ -204,7 +204,7 @@ unittest {
     auto executor = new Executor();
 
     auto query = map!(
-        (Expr!(Ref!Post) p) => Post.html(p)
+        (RefExpr!Post p) => p.html
     )(getByIds!Post([1], db));
 
     auto htmls = awaitSync(executor.execute(query));
@@ -230,13 +230,13 @@ unittest {
 
     // Query: { users { firstName, posts { title } } }
     auto query = map!(
-        (Expr!(Ref!User) user) => jsonObject(
-            "firstName", User.firstName(user),
+        (RefExpr!User user) => jsonObject(
+            "firstName", user.firstName,
             "posts", map!(
-                (Expr!(Ref!Post) post) => jsonObject(
-                    "title", Post.title(post)
+                (RefExpr!Post post) => jsonObject(
+                    "title", post.title
                 )
-            )(User.posts(user))
+            )(user.posts)
         )
     )(getByIds!User([1, 2], db));
 
@@ -267,18 +267,18 @@ unittest {
 
     // Query: { users { firstName, posts { title }, comments { body } } }
     auto query = map!(
-        (Expr!(Ref!User) user) => jsonObject(
-            "firstName", User.firstName(user),
+        (RefExpr!User user) => jsonObject(
+            "firstName", user.firstName,
             "posts", map!(
-                (Expr!(Ref!Post) post) => jsonObject(
-                    "title", Post.title(post)
+                (RefExpr!Post post) => jsonObject(
+                    "title", post.title
                 )
-            )(User.posts(user)),
+            )(user.posts),
             "comments", map!(
-                (Expr!(Ref!Comment) comment) => jsonObject(
-                    "body", Comment.body_(comment)
+                (RefExpr!Comment comment) => jsonObject(
+                    "body", comment.body_
                 )
-            )(User.comments(user))
+            )(user.comments)
         )
     )(getByIds!User([1, 2], db));
 
@@ -322,10 +322,10 @@ unittest {
     //   }
     // }
     auto query = map!(
-        (Expr!(Ref!User) user) => jsonObject(
-            "firstName", User.firstName(user),
-            "lastName", User.lastName(user),
-            "email", User.email(user)
+        (RefExpr!User user) => jsonObject(
+            "firstName", user.firstName,
+            "lastName", user.lastName,
+            "email", user.email
         )
     )(Query.users(db));
 
@@ -352,13 +352,13 @@ unittest {
 
     // Simpler: users -> posts (2 levels)
     auto query = map!(
-        (Expr!(Ref!User) user) => jsonObject(
-            "fullName", User.fullName(user),
+        (RefExpr!User user) => jsonObject(
+            "fullName", user.fullName,
             "posts", map!(
-                (Expr!(Ref!Post) post) => jsonObject(
-                    "title", Post.title(post)
+                (RefExpr!Post post) => jsonObject(
+                    "title", post.title
                 )
-            )(User.posts(user))
+            )(user.posts)
         )
     )(Query.users(db));
 
@@ -386,18 +386,18 @@ unittest {
     auto executor = new Executor();
 
     auto query = map!(
-        (Expr!(Ref!User) user) => jsonObject(
-            "fullName", User.fullName(user),
+        (RefExpr!User user) => jsonObject(
+            "fullName", user.fullName,
             "posts", map!(
-                (Expr!(Ref!Post) post) => jsonObject(
-                    "title", Post.title(post),
+                (RefExpr!Post post) => jsonObject(
+                    "title", post.title,
                     "comments", map!(
-                        (Expr!(Ref!Comment) comment) => jsonObject(
-                            "body", Comment.body_(comment)
+                        (RefExpr!Comment comment) => jsonObject(
+                            "body", comment.body_
                         )
-                    )(Post.comments(post))
+                    )(post.comments)
                 )
-            )(User.posts(user))
+            )(user.posts)
         )
     )(Query.users(db));
 
@@ -427,7 +427,7 @@ unittest {
     // Query: { users { fullName } }
     // fullName = firstName ~ " " ~ lastName
     auto query = map!(
-        (Expr!(Ref!User) user) => User.fullName(user)
+        (RefExpr!User user) => user.fullName
     )(getByIds!User([1, 2]));
 
     // Phase 1: Standard optimization (creates QueryNodes and ProjectColumnExprs)

@@ -108,8 +108,8 @@ struct User {
     mixin HasMany!("posts", Post, "author_id");
     mixin HasMany!("comments", Comment, "author_id");
 
-    // Computed field
-    static auto fullName(Expr!Ref u) => firstName(u) ~ " " ~ lastName(u);
+    // Computed field - uses property-like access via opDispatch
+    static auto fullName(RefExpr!User u) => u.firstName ~ " " ~ u.lastName;
 }
 
 struct Post {
@@ -138,10 +138,11 @@ auto db = new MockDataFetcher();
 auto executor = new Executor();
 
 // Query: { posts { title, author { fullName } } }
+// Uses property-like syntax: p.title, p.author.fullName
 auto query = map!(
-    (Expr!Ref p) => jsonObject(
-        "title", Post.title(p),
-        "author", User.fullName(Post.author(p))
+    (RefExpr!Post p) => jsonObject(
+        "title", p.title,
+        "author", p.author.fullName
     )
 )(Query.posts(db));  // Entry point from Query root
 
@@ -178,13 +179,13 @@ WHERE posts.id IN (1, 2)
 ```d
 // Query: { users { firstName, posts { title } } }
 auto query = map!(
-    (Expr!Ref user) => jsonObject(
-        "firstName", User.firstName(user),
+    (RefExpr!User user) => jsonObject(
+        "firstName", user.firstName,
         "posts", map!(
-            (Expr!Ref post) => jsonObject(
-                "title", Post.title(post)
+            (RefExpr!Post post) => jsonObject(
+                "title", post.title
             )
-        )(User.posts(user))
+        )(user.posts)
     )
 )(getByIds!User([1, 2], db));
 ```

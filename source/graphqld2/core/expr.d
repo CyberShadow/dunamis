@@ -207,7 +207,28 @@ abstract class Expr(T) : ExprBase {
     auto ge(R)(R rhs) if (!is(R : Expr!U, U) && isValidBinaryOp!(T, ">=", R)) {
         return new BinaryOpExpr!(T, ">=", R)(this, constant(rhs, this));
     }
+
+    // =========================================================================
+    // Field Access via opDispatch (for Ref!Entity expressions)
+    // =========================================================================
+
+    /// When T is Ref!Entity, enable property-like field access.
+    /// Allows: `user.firstName` instead of `User.firstName(user)`
+    ///
+    /// This works by looking up the field accessor on the Entity type
+    /// and calling it with this expression as the argument.
+    static if (is(T == Ref!E, E)) {
+        auto opDispatch(string name)()
+            if (__traits(hasMember, E, name))
+        {
+            return __traits(getMember, E, name)(this);
+        }
+    }
 }
+
+/// Convenience alias for entity reference expressions.
+/// Reduces verbosity: `RefExpr!User` instead of `Expr!(Ref!User)`
+alias RefExpr(Entity) = Expr!(Ref!Entity);
 
 // ============================================================================
 // Helper Templates
