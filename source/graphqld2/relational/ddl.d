@@ -66,7 +66,7 @@ template getColumnDefs(Entity) {
                         columns ~= ColumnDef(
                             FieldMeta.column,
                             sqlTypeName!(FieldMeta.type),
-                            false,
+                            FieldMeta.isNullable,
                             false,
                             FieldMeta.referencedEntity._table,
                             "id"
@@ -76,7 +76,7 @@ template getColumnDefs(Entity) {
                         columns ~= ColumnDef(
                             FieldMeta.column,
                             sqlTypeName!(FieldMeta.type),
-                            false,
+                            FieldMeta.isNullable,
                             false,
                             "",
                             ""
@@ -180,4 +180,76 @@ unittest {
     static assert(sqlTypeName!long == "BIGINT");
     static assert(sqlTypeName!bool == "BOOLEAN");
     static assert(sqlTypeName!double == "DOUBLE PRECISION");
+}
+
+unittest {
+    import std.algorithm : canFind;
+    import std.typecons : Nullable;
+    import graphqld2.core.expr : Expr;
+    import graphqld2.core.types : Ref;
+    import graphqld2.relational.schema : Entity, Col, BelongsTo, ForeignKey, belongsTo;
+
+    // Test nullable FK via Col + BelongsTo
+    struct Manager {
+        mixin Entity!"managers";
+    }
+
+    struct Employee {
+        mixin Entity!"employees";
+        mixin Col!("managerId", Nullable!(ForeignKey!Manager));  // nullable FK column
+        mixin BelongsTo!("manager", "managerId");  // derives nullability from column
+    }
+
+    auto cols = getColumnDefs!Employee;
+    // Find the manager_id column
+    bool found = false;
+    foreach (col; cols) {
+        if (col.name == "manager_id") {
+            found = true;
+            assert(col.nullable == true, "manager_id should be nullable");
+            assert(col.foreignKeyTable == "managers", "Should reference managers table");
+        }
+    }
+    assert(found, "manager_id column should exist");
+
+    // Verify DDL output doesn't have NOT NULL for nullable FK
+    enum ddl = generateCreateTable!Employee;
+    assert(ddl.canFind("manager_id BIGINT,") || ddl.canFind("manager_id BIGINT\n"),
+           "Nullable FK should not have NOT NULL constraint");
+    assert(!ddl.canFind("manager_id BIGINT NOT NULL"),
+           "Nullable FK should not have NOT NULL");
+}
+
+unittest {
+    import std.algorithm : canFind;
+    import std.typecons : Nullable;
+    import graphqld2.core.expr : Expr;
+    import graphqld2.core.types : Ref;
+    import graphqld2.relational.schema : Entity, Col, BelongsTo, ForeignKey, belongsTo;
+
+    // Test required FK via Col + BelongsTo
+    struct Department {
+        mixin Entity!"departments";
+    }
+
+    struct Employee2 {
+        mixin Entity!"employees2";
+        mixin Col!("departmentId", ForeignKey!Department);  // required FK column
+        mixin BelongsTo!("department", "departmentId");  // derives from column
+    }
+
+    auto cols = getColumnDefs!Employee2;
+    bool found = false;
+    foreach (col; cols) {
+        if (col.name == "department_id") {
+            found = true;
+            assert(col.nullable == false, "department_id should be required");
+        }
+    }
+    assert(found, "department_id column should exist");
+
+    // Verify DDL output has NOT NULL for required FK
+    enum ddl = generateCreateTable!Employee2;
+    assert(ddl.canFind("department_id BIGINT NOT NULL"),
+           "Required FK should have NOT NULL constraint");
 }

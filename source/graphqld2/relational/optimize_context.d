@@ -315,7 +315,8 @@ unittest {
     struct Post {
         mixin Entity!"posts";
         mixin Col!("title", string);
-        mixin BelongsTo!("author", User, "author_id");
+        mixin Col!("authorId", ForeignKey!User);
+        mixin BelongsTo!("author", "authorId");
 
         static auto authorName(Expr!Ref p) {
             return User.firstName(author(p));

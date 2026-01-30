@@ -114,16 +114,21 @@ struct Post {
     mixin Entity!"posts";
     mixin Col!("title", string);
     mixin Col!("body_", string, "body");
-    mixin Col!("authorId", ForeignKey!User);  // Type-safe FK column
-    mixin BelongsTo!("author", User, "author_id");
+    mixin Col!("authorId", ForeignKey!User);  // Required FK column
+    mixin BelongsTo!("author", "authorId");   // Relationship - derives type from FK column
     mixin HasMany!("comments", Comment, "post_id");
+    // For nullable FKs:
+    // mixin Col!("editorId", Nullable!(ForeignKey!User));  // Nullable FK column
+    // mixin BelongsTo!("editor", "editorId");              // Automatically nullable
 }
 
 struct Comment {
     mixin Entity!"comments";
     mixin Col!("body_", string, "body");
     mixin Col!("postId", ForeignKey!Post);
-    mixin BelongsTo!("author", User, "author_id");
+    mixin Col!("authorId", ForeignKey!User);
+    mixin BelongsTo!("post", "postId");
+    mixin BelongsTo!("author", "authorId");
 }
 
 // Usage - query from root

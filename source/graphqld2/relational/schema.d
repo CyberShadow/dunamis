@@ -85,9 +85,25 @@ template isForeignKey(T) {
     }
 }
 
+/// Check if a type is a Nullable ForeignKey
+template isNullableForeignKey(T) {
+    static if (is(T == Nullable!(ForeignKey!E), E)) {
+        enum isNullableForeignKey = true;
+    } else {
+        enum isNullableForeignKey = false;
+    }
+}
+
+/// Check if a type is any kind of ForeignKey (required or nullable)
+template isAnyForeignKey(T) {
+    enum isAnyForeignKey = isForeignKey!T || isNullableForeignKey!T;
+}
+
 /// Get the referenced entity from a ForeignKey type
 template getForeignKeyEntity(T) {
     static if (is(T == ForeignKey!E, E)) {
+        alias getForeignKeyEntity = E;
+    } else static if (is(T == Nullable!(ForeignKey!E), E)) {
         alias getForeignKeyEntity = E;
     } else {
         static assert(false, "Not a ForeignKey type");
@@ -115,31 +131,51 @@ private string toSnakeCase(string input) {
 }
 
 /// Mixin to define a column accessor.
-/// Example: mixin Col!("firstName", string);  // generates firstName() method, maps to "first_name" column
-/// Example: mixin Col!("authorId", ForeignKey!User);  // FK column referencing User
-/// Example: mixin Col!("createdAt", string, "created_at");  // explicit column name
+///
+/// Examples:
+///   mixin Col!("firstName", string);                      // regular column
+///   mixin Col!("authorId", ForeignKey!User);              // required FK
+///   mixin Col!("editorId", Nullable!(ForeignKey!User));   // nullable FK
+///   mixin Col!("createdAt", string, "created_at");        // explicit column name
 mixin template Col(string fieldName, T, string columnName = toSnakeCase(fieldName)) {
-    // Metadata for schema introspection (unique struct name per field)
-    static if (isForeignKey!T) {
-        // Foreign key column - store reference info
+    // Import helpers needed by the mixin (so they're visible at instantiation site)
+    import graphqld2.relational.schema : isForeignKey, isNullableForeignKey, getForeignKeyEntity, column;
+
+    // Determine FK properties at compile time (before string mixin)
+    static if (isNullableForeignKey!T) {
+        private alias _Col_ReferencedEntity = getForeignKeyEntity!T;
+        private enum _Col_IsForeignKey = true;
+        private enum _Col_IsNullable = true;
+    } else static if (isForeignKey!T) {
+        private alias _Col_ReferencedEntity = getForeignKeyEntity!T;
+        private enum _Col_IsForeignKey = true;
+        private enum _Col_IsNullable = false;
+    } else {
+        private enum _Col_IsForeignKey = false;
+        private enum _Col_IsNullable = false;
+    }
+
+    // Generate metadata struct
+    static if (_Col_IsForeignKey) {
         mixin("struct _colField_" ~ fieldName ~ " {
             enum name = \"" ~ fieldName ~ "\";
             enum column = \"" ~ columnName ~ "\";
-            alias type = T.StorageType;
+            alias type = long;
             enum isForeignKey = true;
-            alias referencedEntity = getForeignKeyEntity!T;
+            enum isNullable = _Col_IsNullable;
+            alias referencedEntity = _Col_ReferencedEntity;
         }");
 
         mixin("static auto " ~ fieldName ~ "(Expr!Ref e) {
-            return e.column!(T.StorageType, typeof(this))(\"" ~ columnName ~ "\");
+            return e.column!(long, typeof(this))(\"" ~ columnName ~ "\");
         }");
     } else {
-        // Regular column
         mixin("struct _colField_" ~ fieldName ~ " {
             enum name = \"" ~ fieldName ~ "\";
             enum column = \"" ~ columnName ~ "\";
             alias type = T;
             enum isForeignKey = false;
+            enum isNullable = false;
         }");
 
         mixin("static auto " ~ fieldName ~ "(Expr!Ref e) {
@@ -163,36 +199,46 @@ mixin template HasMany(string fieldName, Child, string fk) {
     }");
 }
 
-/// Mixin to define a required belongsTo relationship.
-/// Example: mixin BelongsTo!("author", User, "author_id");
-mixin template BelongsTo(string fieldName, Parent, string fk) {
-    // Metadata for schema introspection (unique struct name per field)
+/// Mixin to define a belongsTo relationship by referencing a FK column.
+/// The parent entity type and nullability are derived from the FK column definition.
+///
+/// Examples:
+///   mixin Col!("authorId", ForeignKey!User);              // required FK column
+///   mixin BelongsTo!("author", "authorId");               // derives User, nullable=false
+///
+///   mixin Col!("editorId", Nullable!(ForeignKey!User));   // nullable FK column
+///   mixin BelongsTo!("editor", "editorId");               // derives User, nullable=true
+mixin template BelongsTo(string fieldName, string fkFieldName) {
+    // Look up the FK column metadata
+    private alias _BelongsTo_FkMeta = __traits(getMember, typeof(this), "_colField_" ~ fkFieldName);
+
+    // Verify it's a foreign key column
+    static assert(_BelongsTo_FkMeta.isForeignKey,
+        "Field '" ~ fkFieldName ~ "' must be a ForeignKey column for BelongsTo");
+
+    // Extract properties from FK column metadata
+    private alias _BelongsTo_Parent = _BelongsTo_FkMeta.referencedEntity;
+    private enum _BelongsTo_FkColumn = _BelongsTo_FkMeta.column;
+    private enum _BelongsTo_IsNullable = _BelongsTo_FkMeta.isNullable;
+
+    // Generate metadata struct
     mixin("struct _belongsToField_" ~ fieldName ~ " {
         enum name = \"" ~ fieldName ~ "\";
-        enum foreignKey = \"" ~ fk ~ "\";
-        enum nullable = false;
-        alias parentType = Parent;
+        enum foreignKey = _BelongsTo_FkColumn;
+        enum nullable = _BelongsTo_IsNullable;
+        alias parentType = _BelongsTo_Parent;
     }");
 
-    mixin("static auto " ~ fieldName ~ "(Expr!Ref e) {
-        return e.belongsTo!(Parent, Ref, fk, typeof(this))();
-    }");
-}
-
-/// Mixin to define an optional belongsTo relationship (nullable FK).
-/// Example: mixin BelongsToOptional!("manager", User, "manager_id");
-mixin template BelongsToOptional(string fieldName, Parent, string fk) {
-    // Metadata for schema introspection (unique struct name per field)
-    mixin("struct _belongsToField_" ~ fieldName ~ " {
-        enum name = \"" ~ fieldName ~ "\";
-        enum foreignKey = \"" ~ fk ~ "\";
-        enum nullable = true;
-        alias parentType = Parent;
-    }");
-
-    mixin("static auto " ~ fieldName ~ "(Expr!Ref e) {
-        return e.belongsTo!(Parent, Nullable!Ref, fk, typeof(this))();
-    }");
+    // Generate accessor method
+    static if (_BelongsTo_IsNullable) {
+        mixin("static auto " ~ fieldName ~ "(Expr!Ref e) {
+            return e.belongsTo!(_BelongsTo_Parent, Nullable!Ref, _BelongsTo_FkColumn, typeof(this))();
+        }");
+    } else {
+        mixin("static auto " ~ fieldName ~ "(Expr!Ref e) {
+            return e.belongsTo!(_BelongsTo_Parent, Ref, _BelongsTo_FkColumn, typeof(this))();
+        }");
+    }
 }
 
 // ============================================================================
