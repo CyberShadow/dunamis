@@ -124,6 +124,18 @@ struct User {
     static auto greeting(RefExpr!User u, string prefix, string suffix = "!") {
         return constant(prefix, u) ~ " " ~ u.firstName ~ constant(suffix, u);
     }
+
+    // Computed field with struct argument - generates input type automatically
+    static auto formattedName(RefExpr!User u, FormatOptions options) {
+        return options.prefix ~ u.firstName;
+    }
+}
+
+// Input types - regular D structs used as computed field arguments
+struct FormatOptions {
+    string prefix;                           // Required: String!
+    Nullable!string suffix;                  // Optional (absent = null): String
+    Nullable!(Nullable!bool) uppercase;      // Three-state (absent/null/value): Boolean
 }
 
 struct Post {
@@ -228,6 +240,51 @@ SELECT * FROM layer0;
 SELECT * FROM layer1;
 ```
 
+### Input Types
+
+Struct arguments to computed fields are automatically discovered and generated as GraphQL input types:
+
+```d
+// D struct definition
+struct FormatOptions {
+    string prefix;                           // Required field
+    Nullable!string suffix;                  // Optional (absent = null)
+    Nullable!(Nullable!bool) uppercase;      // Three-state: absent/null/value
+}
+
+// Used in computed field
+static auto formattedName(RefExpr!User u, FormatOptions options) { ... }
+```
+
+Generates GraphQL schema:
+
+```graphql
+input FormatOptions {
+  prefix: String!
+  suffix: String
+  uppercase: Boolean
+}
+
+type User {
+  formattedName(options: FormatOptions!): String!
+}
+```
+
+**Type mapping for input fields:**
+
+| D Type | GraphQL | Semantics |
+|--------|---------|-----------|
+| `T` | `T!` | Required, non-null |
+| `Nullable!T` | `T` | Optional, absent = null |
+| `Nullable!(Nullable!T)` | `T` | Three-state: absent/null/value |
+
+The three-state mapping (`Nullable!(Nullable!T)`) supports patch mutation semantics where:
+- **Absent** = don't change this field
+- **Null** = set to NULL
+- **Value** = set to this value
+
+This distinction is semantic (handled in your resolver logic), not schema-level—GraphQL represents both `Nullable!T` and `Nullable!(Nullable!T)` as nullable types.
+
 ## Current Status
 
 **Working:**
@@ -247,19 +304,20 @@ SELECT * FROM layer1;
 - Computed fields with SQL push-down (concatenation becomes `||` in SQL)
 - Computed fields in GraphQL schema (static functions taking `RefExpr!Entity`)
 - Field arguments for computed fields (with defaults, introspected from D function signatures)
+- Input types auto-generated from struct arguments (with `Nullable!(Nullable!T)` for three-state fields)
 - Data-source agnostic Executor
 - MockDataFetcher for testing
-- DebugSqlFetcher for SQL inspection
+- DebugSqlFetcher for SQL inspection (with SQL push-down support)
 - GraphQL schema generation (`generateSchemaSDL!Query`)
 - SQL DDL generation (`generateDDL!Query`)
 
 **Not yet implemented:**
 - GraphQL query parsing
+- Mutations (depends on query parsing)
 - Response serialization
 - Real database DataFetcher (PostgreSQL, etc.)
 - Filtering/pagination (WHERE, LIMIT, OFFSET)
 - Polymorphism (GraphQL union/interface types)
-- Input types for mutations
 - Runtime introspection (`__schema`, `__type`, `__typename`)
 
 ## Running Tests
