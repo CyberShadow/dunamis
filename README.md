@@ -116,8 +116,11 @@ struct Post {
     mixin DemoEntity!"posts";
     mixin Col!("title", string);
     mixin Col!("body_", string, "body");
-    mixin Col!("authorId", ForeignKey!User);  // Required FK column
-    mixin BelongsTo!("author", "authorId");   // Relationship - derives type from FK column
+
+    @GqlHidden  // Hide FK column from GraphQL, expose only the relationship
+    mixin Col!("authorId", ForeignKey!User);
+    mixin BelongsTo!("author", "authorId");
+
     mixin HasMany!("comments", Comment, "post_id");
     // For nullable FKs:
     // mixin Col!("editorId", Nullable!(ForeignKey!User));  // Nullable FK column
@@ -127,8 +130,10 @@ struct Post {
 struct Comment {
     mixin DemoEntity!"comments";
     mixin Col!("body_", string, "body");
-    mixin Col!("postId", ForeignKey!Post);
-    mixin Col!("authorId", ForeignKey!User);
+
+    @GqlHidden mixin Col!("postId", ForeignKey!Post);
+    @GqlHidden mixin Col!("authorId", ForeignKey!User);
+
     mixin BelongsTo!("post", "postId");
     mixin BelongsTo!("author", "authorId");
 }
@@ -214,6 +219,7 @@ SELECT * FROM layer1;
 - Entity definition mixins (`Entity`, `Col`, `BelongsTo`, `HasMany`)
 - `Table` mixin for Query root entry points
 - `ForeignKey!Entity` type for type-safe FK columns
+- `@GqlHidden` UDA to hide fields from GraphQL schema
 - QueryNode-based SQL planning
 - JOINs for belongsTo relationships
 - Child queries (CTEs) for hasMany relationships
@@ -236,7 +242,6 @@ SELECT * FROM layer1;
 - Runtime introspection (`__schema`, `__type`, `__typename`)
 
 **Known issues:**
-- FK columns (e.g., `authorId`) are exposed in GraphQL schema - should be hideable
 - D keyword conflicts require workarounds (e.g., `body_` instead of `body`)
 
 ## Running Tests

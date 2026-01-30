@@ -10,6 +10,14 @@ import std.typecons : Nullable;
 import graphqld2.core.types : isCustomScalar;
 
 // ============================================================================
+// GraphQL UDAs
+// ============================================================================
+
+/// UDA to hide a field from the GraphQL schema.
+/// Can be attached to Col, HasMany, or BelongsTo mixin invocations.
+enum GqlHidden;
+
+// ============================================================================
 // GraphQL Type Mapping
 // ============================================================================
 
@@ -77,12 +85,18 @@ struct FieldInfo {
     string graphqlType;
     bool nullable;
     FieldKind kind;
+    bool hidden;  // True if @GqlHidden UDA is present
 }
 
 enum FieldKind {
     column,
     hasMany,
     belongsTo,
+}
+
+/// Check if a member has the @GqlHidden UDA
+template hasGqlHidden(alias member) {
+    enum hasGqlHidden = staticIndexOf!(GqlHidden, __traits(getAttributes, member)) >= 0;
 }
 
 /// Extract field information from an entity type
@@ -95,6 +109,9 @@ template getEntityFields(Entity) {
             // Check for column fields (_colField_*)
             static if (member.length > 10 && member[0..10] == "_colField_") {
                 alias FieldMeta = __traits(getMember, Entity, member);
+
+                // Check if @GqlHidden UDA is present
+                enum isHidden = hasGqlHidden!FieldMeta;
 
                 // Check if column is a primary key - use GraphQL ID type
                 static if (__traits(hasMember, FieldMeta, "isPrimaryKey") && FieldMeta.isPrimaryKey) {
@@ -119,23 +136,27 @@ template getEntityFields(Entity) {
                     FieldMeta.name,
                     gqlType,
                     colNullable,
-                    FieldKind.column
+                    FieldKind.column,
+                    isHidden
                 );
             }
             // Check for hasMany fields (_hasManyField_*)
             else static if (member.length > 14 && member[0..14] == "_hasManyField_") {
                 alias FieldMeta = __traits(getMember, Entity, member);
+                enum isHidden = hasGqlHidden!FieldMeta;
                 // HasMany: non-nullable list of non-nullable items
                 fields ~= FieldInfo(
                     FieldMeta.name,
                     "[" ~ FieldMeta.childType._typeName ~ "!]!",
                     false,
-                    FieldKind.hasMany
+                    FieldKind.hasMany,
+                    isHidden
                 );
             }
             // Check for belongsTo fields (_belongsToField_*)
             else static if (member.length > 16 && member[0..16] == "_belongsToField_") {
                 alias FieldMeta = __traits(getMember, Entity, member);
+                enum isHidden = hasGqlHidden!FieldMeta;
                 // BelongsTo: nullable or not based on FK column
                 static if (FieldMeta.nullable) {
                     enum belongsToType = FieldMeta.parentType._typeName;
@@ -146,7 +167,8 @@ template getEntityFields(Entity) {
                     FieldMeta.name,
                     belongsToType,
                     FieldMeta.nullable,
-                    FieldKind.belongsTo
+                    FieldKind.belongsTo,
+                    isHidden
                 );
             }
         }}
@@ -291,6 +313,8 @@ string generateTypeSDL(Entity)() {
     string result = "type " ~ Entity._typeName ~ " {\n";
 
     foreach (field; getEntityFields!Entity) {
+        // Skip hidden fields
+        if (field.hidden) continue;
         // graphqlType already includes "!" for non-nullable types
         result ~= "  " ~ field.name ~ ": " ~ field.graphqlType ~ "\n";
     }
@@ -424,4 +448,71 @@ unittest {
 
     // Verify unsupported types would error (can't test static assert failure directly)
     // graphqlTypeName!long would fail: "No GraphQL type mapping for `long`..."
+}
+
+// Test that UDAs on mixin templates propagate to generated members
+unittest {
+    import std.meta : staticIndexOf;
+
+    // Simple mixin template that generates a marker
+    mixin template TestCol(string name) {
+        mixin("enum _marker_" ~ name ~ " = true;");
+    }
+
+    static struct TestEntity {
+        @GqlHidden
+        mixin TestCol!"hidden";
+
+        mixin TestCol!"visible";
+    }
+
+    // Check if UDA propagates to generated member
+    static if (__traits(hasMember, TestEntity, "_marker_hidden")) {
+        alias attrs = __traits(getAttributes, __traits(getMember, TestEntity, "_marker_hidden"));
+        static assert(attrs.length == 1, "Expected 1 attribute on hidden marker, got " ~ attrs.length.stringof);
+        // GqlHidden is an enum, so check if it's in the attributes
+        static assert(staticIndexOf!(GqlHidden, attrs) >= 0, "Expected GqlHidden attribute");
+    }
+
+    static if (__traits(hasMember, TestEntity, "_marker_visible")) {
+        alias attrs2 = __traits(getAttributes, __traits(getMember, TestEntity, "_marker_visible"));
+        static assert(attrs2.length == 0, "Expected no attributes on visible marker");
+    }
+}
+
+// Test @GqlHidden with actual Col mixin
+unittest {
+    import std.algorithm : canFind;
+    import graphqld2.relational.demo : DemoEntity;  // Uses Int64 for id
+    import graphqld2.relational.schema : Col;
+
+    static struct User {
+        mixin DemoEntity!"users";
+        mixin Col!("name", string);
+
+        @GqlHidden
+        mixin Col!("passwordHash", string);
+    }
+
+    // Check that getEntityFields detects hidden field
+    enum fields = getEntityFields!User;
+    static assert(fields.length == 3);
+
+    // Find the passwordHash field and verify it's hidden
+    bool foundPasswordHash = false;
+    foreach (f; fields) {
+        if (f.name == "passwordHash") {
+            foundPasswordHash = true;
+            assert(f.hidden, "passwordHash should be hidden");
+        }
+        if (f.name == "name") {
+            assert(!f.hidden, "name should not be hidden");
+        }
+    }
+    assert(foundPasswordHash, "passwordHash field should exist");
+
+    // Verify SDL doesn't include hidden field
+    enum sdl = generateTypeSDL!User;
+    assert(sdl.canFind("name:"), "SDL should include name field");
+    assert(!sdl.canFind("passwordHash"), "SDL should NOT include passwordHash field");
 }

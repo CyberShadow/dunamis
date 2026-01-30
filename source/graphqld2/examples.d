@@ -41,11 +41,16 @@ struct User {
 
 /// Post entity - belongs to a User (author) and has many Comments
 struct Post {
+    import graphqld2.graphql : GqlHidden;
+
     mixin DemoEntity!"posts";
     mixin Col!("title", string);
     mixin Col!("body_", string, "body");  // D keyword, explicit column name
-    mixin Col!("authorId", ForeignKey!User);  // FK column - type derived from User
-    mixin BelongsTo!("author", "authorId");  // Relationship - derives parent from FK column
+
+    @GqlHidden  // Hide FK column, expose only the relationship
+    mixin Col!("authorId", ForeignKey!User);
+    mixin BelongsTo!("author", "authorId");
+
     mixin HasMany!("comments", Comment, "post_id");
 
     /// Computed: render full post as HTML with author and comments
@@ -90,12 +95,18 @@ struct Post {
 
 /// Comment entity - belongs to a Post and has an author (User)
 struct Comment {
+    import graphqld2.graphql : GqlHidden;
+
     mixin DemoEntity!"comments";
     mixin Col!("body_", string, "body");  // D keyword, explicit column name
-    mixin Col!("postId", ForeignKey!Post);  // FK to Post
-    mixin Col!("authorId", ForeignKey!User);  // FK to User
-    mixin BelongsTo!("post", "postId");  // Relationship - derives Post from FK column
-    mixin BelongsTo!("author", "authorId");  // Relationship - derives User from FK column
+
+    @GqlHidden  // Hide FK columns, expose only the relationships
+    mixin Col!("postId", ForeignKey!Post);
+    @GqlHidden
+    mixin Col!("authorId", ForeignKey!User);
+
+    mixin BelongsTo!("post", "postId");
+    mixin BelongsTo!("author", "authorId");
 
     /// Computed: render comment as HTML with author name
     static auto html(RefExpr!Comment c) {
@@ -485,6 +496,8 @@ unittest {
         writeln(schema);
     }
 
+    // Note: FK columns (authorId, postId) are hidden with @GqlHidden,
+    // only the relationships (author, post) are exposed
     enum expected = q"EOF
 scalar Int64
 
@@ -507,7 +520,6 @@ type Post {
   id: ID!
   title: String!
   body_: String!
-  authorId: Int64!
   author: User!
   comments: [Comment!]!
 }
@@ -515,8 +527,6 @@ type Post {
 type Comment {
   id: ID!
   body_: String!
-  postId: Int64!
-  authorId: Int64!
   post: Post!
   author: User!
 }
