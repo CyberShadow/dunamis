@@ -20,13 +20,12 @@ import graphqld2.relational.query_node;
 // Prefetch Expression
 // ============================================================================
 
-// TODO: Memoization should be handled by the executor, not here.
-// All expressions should be memoized uniformly by the executor.
-
 /// Expression that prefetches data for a QueryNode.
 /// When evaluated, executes the query and stores results in RelationalEvalContext.
 ///
 /// Projection expressions depend on this to ensure data is loaded before reading.
+/// Uses EvalContext's expression memoization to prevent duplicate fetches when
+/// multiple projections depend on the same prefetch.
 class PrefetchExpr : Expr!(Ref[]) {
     private {
         QueryNode _node;
@@ -50,15 +49,13 @@ class PrefetchExpr : Expr!(Ref[]) {
     override Promise!(Ref[][]) eval(EvalContext ctx) {
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
 
-        // Check if already fetched (memoization via EvalContext)
+        // Fast-path: data already stored from a previous evaluation
         if (relCtx.getQueryResult(_node.id) !is null) {
             return resolve([relCtx.getQueryResult(_node.id).allRefs()]);
         }
 
-        // Check if fetch is already in progress (prevents duplicate fetches)
-        if (auto pending = relCtx.getPendingPrefetch(_node.id)) {
-            return pending;
-        }
+        // Note: Expression memoization is handled by evalAs(), so we don't need
+        // to cache the Promise here. Multiple callers will get the same Promise.
 
         // Ensure parent is fetched first
         Promise!void parentReady;
@@ -71,7 +68,7 @@ class PrefetchExpr : Expr!(Ref[]) {
         // Capture node for use in closure
         auto node = _node;
 
-        auto promise = parentReady.then(() {
+        return parentReady.then(() {
             // Get parent result for child nodes
             QueryResult parentResult = null;
             if (node.parent !is null) {
@@ -84,10 +81,6 @@ class PrefetchExpr : Expr!(Ref[]) {
             relCtx.storeQueryResult(node.id, result);
             return [result.allRefs()];
         });
-
-        // Cache the promise to prevent duplicate fetches
-        relCtx.storePendingPrefetch(node.id, promise);
-        return promise;
     }
 
     @property QueryNode node() { return _node; }

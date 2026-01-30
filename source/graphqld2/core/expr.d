@@ -50,10 +50,24 @@ abstract class ExprBase {
 /// Helper to evaluate an ExprBase with a known type.
 /// Returns a Promise that resolves to T[].
 /// Asserts if the runtime type doesn't match.
+///
+/// Automatically memoizes: if the same expression is evaluated multiple times
+/// (e.g., via parallel dependencies), returns the cached Promise instead of
+/// re-evaluating. This is safe because expressions are pure/deterministic.
 Promise!(T[]) evalAs(T)(ExprBase expr, EvalContext ctx) {
+    // Check memoization cache first
+    if (auto cached = ctx.getCachedEval(expr)) {
+        return cast(Promise!(T[])) cached;
+    }
+
     auto typed = cast(Expr!T) expr;
     assert(typed !is null, "Type mismatch in evalAs: expected " ~ T.stringof);
-    return typed.eval(ctx);
+
+    auto promise = typed.eval(ctx);
+
+    // Cache for future calls
+    ctx.setCachedEval(expr, promise);
+    return promise;
 }
 
 // ============================================================================

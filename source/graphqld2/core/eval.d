@@ -29,6 +29,15 @@ class EvalContext {
     /// The null key is used for the root level (queryRoot).
     private Ref[][void*] _refsMap;
 
+    /// Expression evaluation cache, keyed by expression object identity.
+    /// Used by evalAs() to automatically memoize expression evaluation.
+    /// When the same expression is evaluated multiple times (e.g., via
+    /// parallel dependencies), the same Promise is returned.
+    ///
+    /// This is type-erased (Object) since different expressions return
+    /// different Promise types. evalAs() casts back to the expected type.
+    private Object[void*] _exprCache;
+
     /// Set refs for a specific MapExpr (or null for root).
     void setCurrentRefs(Object mapExpr, Ref[] refs) {
         _refsMap[cast(void*) mapExpr] = refs;
@@ -40,6 +49,21 @@ class EvalContext {
             return *p;
         }
         return [];
+    }
+
+    /// Get cached Promise for an expression, or null if not cached.
+    /// Used internally by evalAs() for automatic memoization.
+    Object getCachedEval(Object expr) {
+        if (auto p = cast(void*) expr in _exprCache) {
+            return *p;
+        }
+        return null;
+    }
+
+    /// Cache a Promise for an expression.
+    /// Used internally by evalAs() for automatic memoization.
+    void setCachedEval(Object expr, Object promise) {
+        _exprCache[cast(void*) expr] = promise;
     }
 }
 
