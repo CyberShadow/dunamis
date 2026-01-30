@@ -50,12 +50,12 @@ mixin template Table(Entity, string fieldName) {
 
 /// Mixin to define an entity (table mapping)
 /// Adds _typeName (for node ID encoding), _table (for SQL generation),
-/// _idType (primary key type), and the id column metadata.
+/// and the id column metadata.
 ///
 /// Example:
 /// ---
 /// struct User {
-///     mixin Entity!"users";                    // ID type defaults to long
+///     mixin Entity!"users";                    // ID defaults to long
 ///     mixin Col!("name", string);
 /// }
 ///
@@ -67,7 +67,6 @@ mixin template Entity(string tableName, IdType = long, string typeName = "", str
     static immutable string _table = tableName;
     static immutable string _typeName = (typeName.length > 0) ? typeName : __traits(identifier, typeof(this));
     static immutable string _sourceId = sourceId;
-    alias _idType = IdType;
 
     /// Column metadata for the primary key (id)
     struct _colField_id {
@@ -86,23 +85,30 @@ mixin template Entity(string tableName, IdType = long, string typeName = "", str
 
 /// Foreign key reference to another entity.
 /// Use with Col to define FK columns that reference another entity's primary key.
-/// Example: mixin Col!("authorId", ForeignKey!User);
+///
+/// Examples:
+///   mixin Col!("authorId", ForeignKey!User);              // references users.id
+///   mixin Col!("email", ForeignKey!(User, "email"));      // references users.email
 ///
 /// Benefits:
-/// - PK type is derived from the referenced entity's _idType
+/// - Type is derived from the referenced column's type
 /// - DDL generation automatically creates FOREIGN KEY constraints
 /// - Single source of truth for the relationship
-struct ForeignKey(Entity) {
+struct ForeignKey(Entity, string idField = "id") {
     /// The referenced entity type
     alias referencedEntity = Entity;
 
-    /// The underlying storage type (derived from entity's PK type)
-    alias StorageType = Entity._idType;
+    /// The referenced column name
+    enum referencedColumn = idField;
+
+    /// The underlying storage type (derived from referenced column's type)
+    private alias _ColMeta = __traits(getMember, Entity, "_colField_" ~ idField);
+    alias StorageType = _ColMeta.type;
 }
 
 /// Check if a type is a ForeignKey
 template isForeignKey(T) {
-    static if (is(T == ForeignKey!E, E)) {
+    static if (is(T == ForeignKey!(E, col), E, string col)) {
         enum isForeignKey = true;
     } else {
         enum isForeignKey = false;
@@ -111,7 +117,7 @@ template isForeignKey(T) {
 
 /// Check if a type is a Nullable ForeignKey
 template isNullableForeignKey(T) {
-    static if (is(T == Nullable!(ForeignKey!E), E)) {
+    static if (is(T == Nullable!(ForeignKey!(E, col)), E, string col)) {
         enum isNullableForeignKey = true;
     } else {
         enum isNullableForeignKey = false;
@@ -125,12 +131,21 @@ template isAnyForeignKey(T) {
 
 /// Get the referenced entity from a ForeignKey type
 template getForeignKeyEntity(T) {
-    static if (is(T == ForeignKey!E, E)) {
+    static if (is(T == ForeignKey!(E, col), E, string col)) {
         alias getForeignKeyEntity = E;
-    } else static if (is(T == Nullable!(ForeignKey!E), E)) {
+    } else static if (is(T == Nullable!(ForeignKey!(E, col)), E, string col)) {
         alias getForeignKeyEntity = E;
     } else {
         static assert(false, "Not a ForeignKey type");
+    }
+}
+
+/// Get the inner ForeignKey type from a Nullable!(ForeignKey!(...))
+template getInnerForeignKey(T) {
+    static if (is(T == Nullable!(ForeignKey!(E, col)), E, string col)) {
+        alias getInnerForeignKey = ForeignKey!(E, col);
+    } else {
+        static assert(false, "Not a Nullable ForeignKey type");
     }
 }
 
@@ -163,17 +178,21 @@ private string toSnakeCase(string input) {
 ///   mixin Col!("createdAt", string, "created_at");        // explicit column name
 mixin template Col(string fieldName, T, string columnName = toSnakeCase(fieldName)) {
     // Import helpers needed by the mixin (so they're visible at instantiation site)
-    import graphqld2.relational.schema : isForeignKey, isNullableForeignKey, getForeignKeyEntity, column;
+    import graphqld2.relational.schema : isForeignKey, isNullableForeignKey, getForeignKeyEntity, getInnerForeignKey, column;
 
     // Determine FK properties at compile time (before string mixin)
     static if (isNullableForeignKey!T) {
-        private alias _Col_ReferencedEntity = getForeignKeyEntity!T;
-        private alias _Col_FkType = _Col_ReferencedEntity._idType;
+        // Extract inner ForeignKey type from Nullable!(ForeignKey!(...))
+        private alias _Col_InnerFk = getInnerForeignKey!T;
+        private alias _Col_FkType = _Col_InnerFk.StorageType;
+        private alias _Col_ReferencedEntity = _Col_InnerFk.referencedEntity;
+        private enum _Col_ReferencedColumn = _Col_InnerFk.referencedColumn;
         private enum _Col_IsForeignKey = true;
         private enum _Col_IsNullable = true;
     } else static if (isForeignKey!T) {
+        private alias _Col_FkType = T.StorageType;
         private alias _Col_ReferencedEntity = getForeignKeyEntity!T;
-        private alias _Col_FkType = _Col_ReferencedEntity._idType;
+        private enum _Col_ReferencedColumn = T.referencedColumn;
         private enum _Col_IsForeignKey = true;
         private enum _Col_IsNullable = false;
     } else {
@@ -190,6 +209,7 @@ mixin template Col(string fieldName, T, string columnName = toSnakeCase(fieldNam
             enum isForeignKey = true;
             enum isNullable = _Col_IsNullable;
             alias referencedEntity = _Col_ReferencedEntity;
+            enum referencedColumn = _Col_ReferencedColumn;
         }");
 
         mixin("static auto " ~ fieldName ~ "(Expr!Ref e) {
@@ -808,13 +828,13 @@ unittest {
     }
     static assert(Post._table == "posts");
     static assert(Post._typeName == "BlogPost");
-    static assert(is(Post._idType == long));
+    static assert(is(Post._colField_id.type == long));
 
     // Test custom ID type
     struct UuidEntity {
         mixin Entity!("items", string);
     }
-    static assert(is(UuidEntity._idType == string));
+    static assert(is(UuidEntity._colField_id.type == string));
 }
 
 // Test optimization creates QueryNode

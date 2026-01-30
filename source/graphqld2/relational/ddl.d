@@ -75,7 +75,7 @@ template getColumnDefs(Entity) {
                             FieldMeta.isNullable,
                             false,
                             FieldMeta.referencedEntity._table,
-                            "id"
+                            FieldMeta.referencedColumn
                         );
                     } else {
                         // Regular column
@@ -99,9 +99,11 @@ template getColumnDefs(Entity) {
             static if (member.length > 16 && member[0..16] == "_belongsToField_") {
                 alias FieldMeta = __traits(getMember, Entity, member);
                 if (FieldMeta.foreignKey !in seenColumns) {
+                    // Get parent's id column type
+                    alias ParentIdCol = __traits(getMember, FieldMeta.parentType, "_colField_id");
                     columns ~= ColumnDef(
                         FieldMeta.foreignKey,
-                        sqlTypeName!(FieldMeta.parentType._idType),
+                        sqlTypeName!(ParentIdCol.type),
                         FieldMeta.nullable,
                         false,
                         FieldMeta.parentType._table,
