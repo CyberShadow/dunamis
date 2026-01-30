@@ -311,7 +311,7 @@ class ProjectComputedExpr(T) : Expr!T {
     private ExprBase _input;     // The input chain (for deriving refs)
     private ExprBase _prefetch;  // PrefetchExpr - ensures data is loaded
 
-    /// Accepts ExprBase to work with both typed Expr!(Ref!Entity) and untyped Expr!AnyRef
+    /// Accepts ExprBase to work with both typed Expr!Entity and untyped Expr!AnyRef
     this(int queryNodeId, string alias_, ExprBase input, PrefetchExpr prefetch) {
         _queryNodeId = queryNodeId;
         _alias = alias_;
@@ -492,12 +492,17 @@ unittest {
     // Test computed column detection
     // Create a mock expression tree: ProjectColumn + " " + ProjectColumn
 
+    // Minimal entity for testing
+    static struct TestUser {
+        string nodeId;
+    }
+
     // Create mock QueryNode and PrefetchExpr
     auto node = new QueryNode(0, "User", "users");
     auto prefetch = new PrefetchExpr(node);
 
-    // Create a mock input (EveryItemOfExpr!void for internal test)
-    auto item = new EveryItemOfExpr!void();
+    // Create a mock input
+    auto item = new EveryItemOfExpr!TestUser();
 
     // First, set up mock projections with input and prefetch
     auto proj1 = new ProjectColumnExpr!string(0, "first_name", item, prefetch);
@@ -524,9 +529,13 @@ unittest {
 
 unittest {
     // Test ProjectComputedExpr
+    static struct TestUser {
+        string nodeId;
+    }
+
     auto node = new QueryNode(0, "User", "users");
     auto prefetch = new PrefetchExpr(node);
-    auto item = new EveryItemOfExpr!void();
+    auto item = new EveryItemOfExpr!TestUser();
     auto proj = new ProjectComputedExpr!string(0, "computed_0", item, prefetch);
     assert(proj.queryNodeId == 0);
     assert(proj.columnAlias == "computed_0");

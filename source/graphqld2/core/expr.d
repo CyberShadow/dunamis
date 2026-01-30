@@ -79,7 +79,7 @@ interface AnyRefEvaluable {
 }
 
 /// Evaluate any ref-producing expression and return as AnyRef[].
-/// Works with typed Expr!(Ref!Entity) expressions by using interface dispatch.
+/// Works with typed Expr!Entity expressions by using interface dispatch.
 /// Used by projection expressions that need to evaluate input refs without
 /// knowing the specific entity type at compile time.
 Promise!(AnyRef[]) evalRefAsAnyRef(ExprBase expr, EvalContext ctx) {
@@ -209,26 +209,25 @@ abstract class Expr(T) : ExprBase {
     }
 
     // =========================================================================
-    // Field Access via opDispatch (for Ref!Entity expressions)
+    // Field Access via opDispatch
     // =========================================================================
 
-    /// When T is Ref!Entity, enable property-like field access.
+    /// Enable property-like field access when T has a callable member.
     /// Allows: `user.firstName` instead of `User.firstName(user)`
     ///
-    /// This works by looking up the field accessor on the Entity type
-    /// and calling it with this expression as the argument.
-    static if (is(T == Ref!E, E)) {
-        auto opDispatch(string name)()
-            if (__traits(hasMember, E, name))
-        {
-            return __traits(getMember, E, name)(this);
-        }
+    /// Uses design-by-introspection: if T has a member `name` that can be
+    /// called with `Expr!T`, forward to it. Works for any type, not just entities.
+    auto opDispatch(string name)()
+        if (__traits(hasMember, T, name) && __traits(compiles, __traits(getMember, T, name)(this)))
+    {
+        return __traits(getMember, T, name)(this);
     }
 }
 
 /// Convenience alias for entity reference expressions.
-/// Reduces verbosity: `RefExpr!User` instead of `Expr!(Ref!User)`
-alias RefExpr(Entity) = Expr!(Ref!Entity);
+/// Since Entity structs now serve as their own reference type,
+/// this is simply `Expr!Entity`.
+alias RefExpr(Entity) = Expr!Entity;
 
 // ============================================================================
 // Helper Templates
@@ -525,8 +524,8 @@ interface EveryItemOfExprInfo : AnyRefEvaluable {
 /// EveryItemOfExpr just returns those refs unchanged - it's a pass-through
 /// that represents "the items being iterated over".
 ///
-/// Typed with the Entity being iterated. Returns Ref!Entity for type safety.
-class EveryItemOfExpr(Entity) : Expr!(Ref!Entity), EveryItemOfExprInfo {
+/// Typed with the Entity being iterated. Returns Entity with nodeId populated.
+class EveryItemOfExpr(Entity) : Expr!Entity, EveryItemOfExprInfo {
     /// Back-reference to owning MapExpr (set at construction)
     Object _parentMap;  // Use Object to avoid template instantiation issues
 
@@ -540,10 +539,15 @@ class EveryItemOfExpr(Entity) : Expr!(Ref!Entity), EveryItemOfExprInfo {
         // No dependencies to replace
     }
 
-    override Promise!(Ref!Entity[]) eval(EvalContext ctx) {
-        // Return the refs set by our parent MapExpr (convert from AnyRef storage)
+    override Promise!(Entity[]) eval(EvalContext ctx) {
+        // Return entities with nodeIds set by our parent MapExpr (convert from AnyRef storage)
         import std.algorithm : map;
-        return resolve(ctx.getCurrentRefs(_parentMap).map!(r => Ref!Entity.fromAnyRef(r)).array);
+        static if (is(Entity == void)) {
+            // Void entity type - shouldn't be used in practice
+            static assert(false, "EveryItemOfExpr!void should not be evaluated directly");
+        } else {
+            return resolve(ctx.getCurrentRefs(_parentMap).map!(r => Entity(r.nodeId)).array);
+        }
     }
 
     /// Evaluate and return as AnyRef[] (for type-agnostic internal use)
@@ -576,7 +580,7 @@ class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
     EveryItemOfExpr!Entity _item;        // mutable placeholder for "current item"
     private ExprBase _body;              // expression built using _item (type-erased)
 
-    this(Expr!(Ref!Entity[]) collection, EveryItemOfExpr!Entity item, Body body_) {
+    this(Expr!(Entity[]) collection, EveryItemOfExpr!Entity item, Body body_) {
         _collection = collection;
         _item = item;
         _body = body_;  // Implicit upcast to ExprBase
@@ -595,7 +599,7 @@ class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
 
     override Expr!(R[]) optimize(OptimizeContext ctx) {
         // Optimize children, but MapExpr itself stays unchanged
-        _collection = (cast(Expr!(Ref!Entity[])) _collection).optimize(ctx);
+        _collection = (cast(Expr!(Entity[])) _collection).optimize(ctx);
         _body = (cast(Expr!R) _body).optimize(ctx);
         return this;
     }
@@ -608,14 +612,14 @@ class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
         auto self = this;  // Key for refs map
 
         // 1. Evaluate collection for each parent ref
-        return evalAs!(Ref!Entity[])(_collection, ctx).then((Ref!Entity[][] collectionResults) {
-            // 2. Flatten for batch evaluation (convert to AnyRef for storage)
+        return evalAs!(Entity[])(_collection, ctx).then((Entity[][] collectionResults) {
+            // 2. Flatten for batch evaluation (convert to AnyRef for internal storage)
             AnyRef[] flatRefs;
             size_t[] lengths;
             foreach (group; collectionResults) {
                 lengths ~= group.length;
-                foreach (r; group) {
-                    flatRefs ~= r.toAnyRef();
+                foreach (e; group) {
+                    flatRefs ~= AnyRef(e.nodeId);
                 }
             }
 
@@ -645,18 +649,18 @@ class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
     Object collection() { return _collection; }
 }
 
-/// Extract the Entity type from an Expr!(Ref!Entity[]) type
+/// Extract the Entity type from an Expr!(Entity[]) type
 private template CollectionEntityType(Coll) {
-    static if (is(Coll : Expr!(Ref!E[]), E)) {
+    static if (is(Coll : Expr!(E[]), E)) {
         alias CollectionEntityType = E;
     } else {
-        static assert(false, "Expected Expr!(Ref!Entity[]), got " ~ Coll.stringof);
+        static assert(false, "Expected Expr!(Entity[]), got " ~ Coll.stringof);
     }
 }
 
 /// Factory function wires up the MapExpr <-> EveryItemOfExpr linkage
 auto map(alias fn, Coll)(Coll collection)
-    if (is(Coll : Expr!(Ref!E[]), E))
+    if (is(Coll : Expr!(E[]), E))
 {
     alias Entity = CollectionEntityType!Coll;
 
@@ -789,31 +793,44 @@ auto jsonObject(Args...)(Args args)
 
 import ae.utils.promise.await : awaitSync;
 
-/// Dummy entity type for tests
+/// Dummy entity type for tests (with Entity-like structure)
 private struct TestEntity {
+    import std.string : indexOf;
+
+    string nodeId;
     enum _typeName = "Test";
+
+    string localId() const {
+        auto sep = nodeId.indexOf(':');
+        return sep >= 0 ? nodeId[sep + 1 .. $] : "";
+    }
+
+    string typeName() const {
+        auto sep = nodeId.indexOf(':');
+        return sep >= 0 ? nodeId[0 .. sep] : nodeId;
+    }
 }
 
-/// Helper: expression that returns a fixed array of refs.
+/// Helper: expression that returns a fixed array of entities.
 /// Used as a collection source in tests.
-private class MockCollectionExpr(Entity) : Expr!(Ref!Entity[]) {
-    Ref!Entity[] _refs;
-    this(Ref!Entity[] refs) { _refs = refs; }
+private class MockCollectionExpr(Entity) : Expr!(Entity[]) {
+    Entity[] _entities;
+    this(Entity[] entities) { _entities = entities; }
 
     override ExprBase[] dependencies() { return []; }
     override void replaceDependency(size_t index, ExprBase newDep) {}
 
-    override Promise!(Ref!Entity[][]) eval(EvalContext ctx) {
-        return resolve([_refs]);
+    override Promise!(Entity[][]) eval(EvalContext ctx) {
+        return resolve([_entities]);
     }
 }
 
 unittest {
     // Test map with use combinator - extracts node IDs
-    auto collection = new MockCollectionExpr!TestEntity([Ref!TestEntity("Test:1"), Ref!TestEntity("Test:2")]);
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("Test:1"), TestEntity("Test:2")]);
 
     auto query = map!(
-        (Expr!(Ref!TestEntity) item) => use((Ref!TestEntity r) => r.nodeId, item)
+        (Expr!TestEntity item) => use((TestEntity e) => e.nodeId, item)
     )(collection);
 
     auto ctx = new EvalContext();
@@ -826,12 +843,12 @@ unittest {
 
 unittest {
     // Test map with jsonObject - builds structured output
-    auto collection = new MockCollectionExpr!TestEntity([Ref!TestEntity("User:1"), Ref!TestEntity("User:2")]);
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("User:1"), TestEntity("User:2")]);
 
     auto query = map!(
-        (Expr!(Ref!TestEntity) item) => jsonObject(
-            "id", use((Ref!TestEntity r) => r.nodeId, item),
-            "type", use((Ref!TestEntity r) => r.typeName, item)
+        (Expr!TestEntity item) => jsonObject(
+            "id", use((TestEntity e) => e.nodeId, item),
+            "type", use((TestEntity e) => e.typeName, item)
         )
     )(collection);
 
@@ -848,10 +865,10 @@ unittest {
 
 unittest {
     // Test string concatenation with literals inside map
-    auto collection = new MockCollectionExpr!TestEntity([Ref!TestEntity("Test:1"), Ref!TestEntity("Test:2")]);
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("Test:1"), TestEntity("Test:2")]);
 
     auto query = map!(
-        (Expr!(Ref!TestEntity) item) => use((Ref!TestEntity r) => r.typeName, item) ~ ":" ~ use((Ref!TestEntity r) => r.nodeId, item)
+        (Expr!TestEntity item) => use((TestEntity e) => e.typeName, item) ~ ":" ~ use((TestEntity e) => e.nodeId, item)
     )(collection);
 
     auto ctx = new EvalContext();
@@ -866,12 +883,12 @@ unittest {
     import std.conv : to;
 
     // Test arithmetic operators with literals inside map
-    auto collection = new MockCollectionExpr!TestEntity([Ref!TestEntity("Test:1"), Ref!TestEntity("Test:2"), Ref!TestEntity("Test:3")]);
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("Test:1"), TestEntity("Test:2"), TestEntity("Test:3")]);
 
     auto query = map!(
-        (Expr!(Ref!TestEntity) item) {
+        (Expr!TestEntity item) {
             // Use localId parsed to int for arithmetic test
-            auto id = use((Ref!TestEntity r) => r.localId.to!long, item);
+            auto id = use((TestEntity e) => e.localId.to!long, item);
             return id * 10 + 5;
         }
     )(collection);
@@ -888,11 +905,11 @@ unittest {
     import std.conv : to;
 
     // Test comparison operators inside map
-    auto collection = new MockCollectionExpr!TestEntity([Ref!TestEntity("Test:5"), Ref!TestEntity("Test:10"), Ref!TestEntity("Test:15")]);
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("Test:5"), TestEntity("Test:10"), TestEntity("Test:15")]);
 
     auto query = map!(
-        (Expr!(Ref!TestEntity) item) {
-            auto val = use((Ref!TestEntity r) => r.localId.to!long, item);
+        (Expr!TestEntity item) {
+            auto val = use((TestEntity e) => e.localId.to!long, item);
             return val.gt(7);  // 5 > 7 = false, 10 > 7 = true, 15 > 7 = true
         }
     )(collection);

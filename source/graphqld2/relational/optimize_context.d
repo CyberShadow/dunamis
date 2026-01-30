@@ -1,6 +1,6 @@
 module graphqld2.relational.optimize_context;
 
-import graphqld2.core.types : AnyRef, Ref;
+import graphqld2.core.types : AnyRef;
 import graphqld2.core.expr;
 import graphqld2.relational.project;
 import graphqld2.relational.query_node;
@@ -178,7 +178,7 @@ unittest {
     import graphqld2.relational.eval_context;
 
     // Test: Optimized execution produces same results as naive
-    struct User {
+    static struct User {
         mixin DemoEntity!"users";
         mixin Col!("firstName", string);
         mixin Col!("lastName", string);
@@ -195,9 +195,9 @@ unittest {
 
     auto makeQuery() {
         return map!(
-            (Expr!(Ref!User) user) => jsonObject(
-                "first", User.firstName(user),
-                "last", User.lastName(user)
+            (Expr!User user) => jsonObject(
+                "first", user.firstName,
+                "last", user.lastName
             )
         )(getByIds!User([1, 2, 3], fetcher));
     }
@@ -221,16 +221,16 @@ unittest {
     import graphqld2.relational.demo;
 
     // Test: QueryNode inspection - verify optimization creates correct nodes
-    struct User {
+    static struct User {
         mixin DemoEntity!"users";
         mixin Col!("firstName", string);
         mixin Col!("age", long);
     }
 
     auto query = map!(
-        (Expr!(Ref!User) user) => jsonObject(
-            "name", User.firstName(user),
-            "age", User.age(user)
+        (Expr!User user) => jsonObject(
+            "name", user.firstName,
+            "age", user.age
         )
     )(getByIds!User([1, 2]));
 
@@ -258,25 +258,25 @@ unittest {
     import graphqld2.relational.demo;
 
     // Test: Nested hasMany creates linked QueryNodes
-    struct Post {
+    static struct Post {
         mixin DemoEntity!"posts";
         mixin Col!("title", string);
     }
 
-    struct User {
+    static struct User {
         mixin DemoEntity!"users";
         mixin Col!("firstName", string);
         mixin HasMany!("posts", Post, "author_id");
     }
 
     auto query = map!(
-        (Expr!(Ref!User) user) => jsonObject(
-            "name", User.firstName(user),
+        (Expr!User user) => jsonObject(
+            "name", user.firstName,
             "posts", map!(
-                (Expr!(Ref!Post) post) => jsonObject(
-                    "title", Post.title(post)
+                (Expr!Post post) => jsonObject(
+                    "title", post.title
                 )
-            )(User.posts(user))
+            )(user.posts)
         )
     )(getByIds!User([1, 2]));
 
@@ -312,18 +312,18 @@ unittest {
     import graphqld2.relational.eval_context;
 
     // Test: BelongsTo creates JOINs (not separate QueryNodes)
-    struct User {
+    static struct User {
         mixin DemoEntity!"users";
         mixin Col!("firstName", string);
     }
 
-    struct Post {
+    static struct Post {
         mixin DemoEntity!"posts";
         mixin Col!("title", string);
         mixin Col!("authorId", ForeignKey!User);
         mixin BelongsTo!("author", "authorId");
 
-        static auto authorName(Expr!(Ref!Post) p) {
+        static auto authorName(Expr!Post p) {
             return User.firstName(author(p));
         }
     }
@@ -343,9 +343,9 @@ unittest {
 
     auto makeQuery() {
         return map!(
-            (Expr!(Ref!Post) post) => jsonObject(
-                "title", Post.title(post),
-                "authorName", Post.authorName(post)
+            (Expr!Post post) => jsonObject(
+                "title", post.title,
+                "authorName", post.authorName
             )
         )(getByIds!Post([1, 2, 3], fetcher));
     }

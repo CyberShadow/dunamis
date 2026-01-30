@@ -49,8 +49,8 @@ mixin template Table(Entity, string fieldName) {
 // ============================================================================
 
 /// Low-level mixin to define an entity (table mapping).
-/// Only provides table metadata - no columns are added automatically.
-/// Use with Col and PrimaryKey mixins to define the schema.
+/// The entity struct becomes a reference type - it holds a nodeId that identifies
+/// a specific row in the database. Schema metadata is static, nodeId is runtime.
 ///
 /// Example:
 /// ---
@@ -70,9 +70,29 @@ mixin template Table(Entity, string fieldName) {
 /// }
 /// ---
 mixin template Entity(string tableName, string typeName = "", string sourceId = "default") {
+    import std.string : indexOf;
+
+    // Runtime state: the node ID that identifies this entity reference
+    string nodeId;
+
+    // Schema metadata (compile-time)
     static immutable string _table = tableName;
     static immutable string _typeName = (typeName.length > 0) ? typeName : __traits(identifier, typeof(this));
     static immutable string _sourceId = sourceId;
+
+    /// Extract the local ID portion (after the colon)
+    string localId() const {
+        auto sep = nodeId.indexOf(':');
+        return sep >= 0 ? nodeId[sep + 1 .. $] : "";
+    }
+
+    /// Check if this is a valid (non-empty) reference
+    bool isValid() const {
+        return nodeId.length > 0;
+    }
+
+    /// For debugging
+    string toString() const { return nodeId; }
 }
 
 // ============================================================================
@@ -201,7 +221,6 @@ mixin template Col(string fieldName, T, string columnName = toSnakeCase(fieldNam
     // Import helpers needed by the mixin (so they're visible at instantiation site)
     import graphqld2.relational.schema : isForeignKey, isNullableForeignKey, getForeignKeyEntity, getInnerForeignKey, column;
     import graphqld2.core.expr : Expr;
-    import graphqld2.core.types : Ref;
 
     // Determine FK properties at compile time (before string mixin)
     static if (isNullableForeignKey!T) {
@@ -235,8 +254,8 @@ mixin template Col(string fieldName, T, string columnName = toSnakeCase(fieldNam
             enum referencedColumn = _Col_ReferencedColumn;
         }");
 
-        // Typed accessor - takes Expr!(Ref!Entity)
-        mixin("static auto " ~ fieldName ~ "(Expr!(Ref!(typeof(this))) e) {
+        // Typed accessor - takes Expr!Entity (entity IS the reference type now)
+        mixin("static auto " ~ fieldName ~ "(Expr!(typeof(this)) e) {
             return e.column!(_Col_FkType, typeof(this))(\"" ~ columnName ~ "\");
         }");
     } else {
@@ -248,8 +267,8 @@ mixin template Col(string fieldName, T, string columnName = toSnakeCase(fieldNam
             enum isNullable = false;
         }");
 
-        // Typed accessor - takes Expr!(Ref!Entity)
-        mixin("static auto " ~ fieldName ~ "(Expr!(Ref!(typeof(this))) e) {
+        // Typed accessor - takes Expr!Entity (entity IS the reference type now)
+        mixin("static auto " ~ fieldName ~ "(Expr!(typeof(this)) e) {
             return e.column!(T, typeof(this))(\"" ~ columnName ~ "\");
         }");
     }
@@ -259,7 +278,6 @@ mixin template Col(string fieldName, T, string columnName = toSnakeCase(fieldNam
 /// Example: mixin HasMany!("posts", Post, "author_id");
 mixin template HasMany(string fieldName, Child, string fk) {
     import graphqld2.core.expr : Expr;
-    import graphqld2.core.types : Ref;
 
     // Metadata for schema introspection (unique struct name per field)
     mixin("struct _hasManyField_" ~ fieldName ~ " {
@@ -268,8 +286,8 @@ mixin template HasMany(string fieldName, Child, string fk) {
         alias childType = Child;
     }");
 
-    // Typed accessor - takes Expr!(Ref!Parent), returns Expr!(Ref!Child[])
-    mixin("static auto " ~ fieldName ~ "(Expr!(Ref!(typeof(this))) e) {
+    // Typed accessor - takes Expr!Parent, returns Expr!(Child[])
+    mixin("static auto " ~ fieldName ~ "(Expr!(typeof(this)) e) {
         return e.hasMany!(Child, fk, typeof(this))();
     }");
 }
@@ -285,7 +303,6 @@ mixin template HasMany(string fieldName, Child, string fk) {
 ///   mixin BelongsTo!("editor", "editorId");               // derives User, nullable=true
 mixin template BelongsTo(string fieldName, string fkFieldName) {
     import graphqld2.core.expr : Expr;
-    import graphqld2.core.types : Ref;
     import std.typecons : Nullable;
     import graphqld2.relational.schema : belongsTo;
 
@@ -309,14 +326,14 @@ mixin template BelongsTo(string fieldName, string fkFieldName) {
         alias parentType = _BelongsTo_Parent;
     }");
 
-    // Generate accessor method - typed with Ref!Child and Ref!Parent
+    // Generate accessor method - typed with Child and Parent entities
     static if (_BelongsTo_IsNullable) {
-        mixin("static auto " ~ fieldName ~ "(Expr!(Ref!(typeof(this))) e) {
-            return e.belongsTo!(_BelongsTo_Parent, Nullable!(Ref!_BelongsTo_Parent), _BelongsTo_FkColumn, typeof(this))();
+        mixin("static auto " ~ fieldName ~ "(Expr!(typeof(this)) e) {
+            return e.belongsTo!(_BelongsTo_Parent, Nullable!_BelongsTo_Parent, _BelongsTo_FkColumn, typeof(this))();
         }");
     } else {
-        mixin("static auto " ~ fieldName ~ "(Expr!(Ref!(typeof(this))) e) {
-            return e.belongsTo!(_BelongsTo_Parent, Ref!_BelongsTo_Parent, _BelongsTo_FkColumn, typeof(this))();
+        mixin("static auto " ~ fieldName ~ "(Expr!(typeof(this)) e) {
+            return e.belongsTo!(_BelongsTo_Parent, _BelongsTo_Parent, _BelongsTo_FkColumn, typeof(this))();
         }");
     }
 }
@@ -325,23 +342,23 @@ mixin template BelongsTo(string fieldName, string fkFieldName) {
 // UFCS Access Functions
 // ============================================================================
 
-/// Column access - reads a column value for each input ref.
-/// Takes typed Expr!(Ref!Entity) for compile-time type safety.
-auto column(T, Entity)(Expr!(Ref!Entity) input, string name) {
+/// Column access - reads a column value for each entity ref.
+/// Takes typed Expr!Entity for compile-time type safety.
+auto column(T, Entity)(Expr!Entity input, string name) {
     return new ColumnAccessExpr!(T, Entity)(input, name);
 }
 
-/// HasMany relationship - returns collection of child refs for each parent ref.
-/// Takes typed Expr!(Ref!Parent) and returns Expr!(Ref!Child[]).
-auto hasMany(Child, string fk, Parent)(Expr!(Ref!Parent) input) {
+/// HasMany relationship - returns collection of child entities for each parent.
+/// Takes typed Expr!Parent and returns Expr!(Child[]).
+auto hasMany(Child, string fk, Parent)(Expr!Parent input) {
     return new HasManyAccessExpr!(Parent, Child, fk)(input);
 }
 
-/// BelongsTo relationship - returns parent ref for each child ref.
-/// Takes typed Expr!(Ref!Child) and returns Expr!(Ref!Parent) or Expr!(Nullable!(Ref!Parent)).
-/// RefType should be Ref!Parent (required FK) or Nullable!(Ref!Parent) (optional FK).
-auto belongsTo(Parent, RefType = Ref!Parent, string fk, Child)(Expr!(Ref!Child) input) {
-    return new BelongsToAccessExpr!(Child, Parent, RefType, fk)(input);
+/// BelongsTo relationship - returns parent entity for each child.
+/// Takes typed Expr!Child and returns Expr!Parent or Expr!(Nullable!Parent).
+/// ResultType should be Parent (required FK) or Nullable!Parent (optional FK).
+auto belongsTo(Parent, ResultType = Parent, string fk, Child)(Expr!Child input) {
+    return new BelongsToAccessExpr!(Child, Parent, ResultType, fk)(input);
 }
 
 // ============================================================================
@@ -353,7 +370,7 @@ auto belongsTo(Parent, RefType = Ref!Parent, string fk, Child)(Expr!(Ref!Child) 
 /// Also returns the base input expression (the one that produces refs for the
 /// query node's base table) via the baseInput out parameter.
 ///
-/// Accepts ExprBase to work with any Expr!(Ref!Entity) type.
+/// Accepts ExprBase to work with any Expr!Entity type.
 private Object findMapExprFromChain(ExprBase expr, ref JoinHop[] joinPath, out ExprBase baseInput) {
     import graphqld2.core.expr : EveryItemOfExprInfo;
 
@@ -469,21 +486,21 @@ interface RootExprInfo {
 }
 
 /// Root expression that returns specific entities by their IDs.
-/// Returns typed Ref!Entity[] for compile-time type safety.
-class GetByIdsExpr(Entity) : Expr!(Ref!Entity[]), RootExprInfo {
+/// Returns typed Entity[] for compile-time type safety.
+class GetByIdsExpr(Entity) : Expr!(Entity[]), RootExprInfo {
     import graphqld2.core.optimize : ExprOptimizer;
 
-    private Ref!Entity[] _refs;
+    private Entity[] _entities;
     private DataFetcher _fetcher;
 
     /// Construct from array of IDs (any type convertible to string)
     this(IdType)(IdType[] ids, DataFetcher fetcher = null) {
-        _refs = ids.map!(id => makeRef!Entity(id.to!string)).array;
+        _entities = ids.map!(id => Entity(Entity._typeName ~ ":" ~ id.to!string)).array;
         _fetcher = fetcher;
     }
 
-    this(Ref!Entity[] refs, DataFetcher fetcher = null) {
-        _refs = refs;
+    this(Entity[] entities, DataFetcher fetcher = null) {
+        _entities = entities;
         _fetcher = fetcher;
     }
 
@@ -502,7 +519,7 @@ class GetByIdsExpr(Entity) : Expr!(Ref!Entity[]), RootExprInfo {
         return [];
     }
 
-    override Promise!(Ref!Entity[][]) eval(EvalContext ctx) {
+    override Promise!(Entity[][]) eval(EvalContext ctx) {
         // Set up RelationalEvalContext with fetcher if we have one
         if (_fetcher !is null) {
             auto relCtx = ctx.getSourceContext!RelationalEvalContext(Entity._sourceId);
@@ -511,14 +528,14 @@ class GetByIdsExpr(Entity) : Expr!(Ref!Entity[]), RootExprInfo {
             }
         }
         // At root level, there's always exactly 1 parent (queryRoot)
-        return resolve([_refs]);
+        return resolve([_entities]);
     }
 
-    @property Ref!Entity[] refs() { return _refs; }
+    @property Entity[] entities() { return _entities; }
 
     // RootExprInfo implementation
     FilterType filterType() { return FilterType.byIds; }
-    AnyRef[] filterRefs() { return _refs.map!(r => r.toAnyRef()).array; }
+    AnyRef[] filterRefs() { return _entities.map!(e => AnyRef(e.nodeId)).array; }
     string entityTypeName() { return Entity._typeName; }
     string entityTable() { return Entity._table; }
     DataFetcher dataFetcher() { return _fetcher; }
@@ -537,22 +554,22 @@ auto getByIds(Entity, IdType)(IdType[] ids, DataFetcher fetcher) {
 /// Factory function to create GetByIdsExpr for composite keys.
 /// Takes an array of key-part arrays, e.g. [[1, 100], [1, 101]] for orderId, productId.
 auto getByCompositeIds(Entity, IdType)(IdType[][] keyParts, DataFetcher fetcher = null) {
-    import graphqld2.core.types : encodeCompositeKey, makeCompositeRef;
+    import graphqld2.core.types : encodeCompositeKey;
 
-    Ref!Entity[] refs;
+    Entity[] entities;
     foreach (parts; keyParts) {
         string[] strParts;
         foreach (p; parts) {
             strParts ~= p.to!string;
         }
-        refs ~= makeCompositeRef!Entity(strParts);
+        entities ~= Entity(Entity._typeName ~ ":" ~ encodeCompositeKey(strParts));
     }
-    return new GetByIdsExpr!Entity(refs, fetcher);
+    return new GetByIdsExpr!Entity(entities, fetcher);
 }
 
 /// Root expression that fetches all entities of a type.
-/// Returns typed Ref!Entity[] for compile-time type safety.
-class GetAllExpr(Entity) : Expr!(Ref!Entity[]), RootExprInfo {
+/// Returns typed Entity[] for compile-time type safety.
+class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo {
     import graphqld2.core.optimize : ExprOptimizer;
 
     private DataFetcher _fetcher;
@@ -576,7 +593,7 @@ class GetAllExpr(Entity) : Expr!(Ref!Entity[]), RootExprInfo {
         return [];
     }
 
-    override Promise!(Ref!Entity[][]) eval(EvalContext ctx) {
+    override Promise!(Entity[][]) eval(EvalContext ctx) {
         // Set up RelationalEvalContext with fetcher if we have one
         if (_fetcher !is null) {
             auto relCtx = ctx.getSourceContext!RelationalEvalContext(Entity._sourceId);
@@ -585,12 +602,12 @@ class GetAllExpr(Entity) : Expr!(Ref!Entity[]), RootExprInfo {
             }
         }
 
-        // Fetch all IDs from data source, encode as typed refs
+        // Fetch all IDs from data source, encode as entities with nodeIds
         auto relCtx = ctx.getSourceContext!RelationalEvalContext(Entity._sourceId);
         auto ids = relCtx.fetchAllIds(Entity._table);
-        auto refs = ids.map!(id => makeRef!Entity(id)).array;
+        auto entities = ids.map!(id => Entity(Entity._typeName ~ ":" ~ id.to!string)).array;
         // At root level, there's always exactly 1 parent (queryRoot)
-        return resolve([refs]);
+        return resolve([entities]);
     }
 
     // RootExprInfo implementation
@@ -616,12 +633,12 @@ auto getAll(Entity)(DataFetcher fetcher) {
 // ============================================================================
 
 /// Expression that reads a column from entities.
-/// Takes typed Expr!(Ref!Entity) for type safety.
+/// Takes typed Expr!Entity for type safety.
 class ColumnAccessExpr(T, Entity) : Expr!T {
-    private ExprBase _input;  // the entity ref we're reading from (type-erased for storage)
+    private ExprBase _input;  // the entity we're reading from (type-erased for storage)
     string _column;
 
-    this(Expr!(Ref!Entity) input, string column) {
+    this(Expr!Entity input, string column) {
         _input = input;
         _column = column;
     }
@@ -637,7 +654,7 @@ class ColumnAccessExpr(T, Entity) : Expr!T {
 
     override Expr!T optimize(OptimizeContext ctx) {
         // First optimize input
-        _input = (cast(Expr!(Ref!Entity)) _input).optimize(ctx);
+        _input = (cast(Expr!Entity) _input).optimize(ctx);
 
         // Find the MapExpr this column belongs to
         JoinHop[] joinPath;
@@ -738,12 +755,12 @@ class ColumnAccessExpr(T, Entity) : Expr!T {
 // ============================================================================
 
 /// Expression representing a one-to-many relationship.
-/// Takes typed Ref!Parent input, returns typed Ref!Child[] for each parent.
-class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Ref!Child[]), HasManyInfo {
+/// Takes typed Parent input, returns typed Child[] for each parent.
+class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Child[]), HasManyInfo {
     private ExprBase _input;
 
     static if (!is(Parent == void)) {
-        this(Expr!(Ref!Parent) input) {
+        this(Expr!Parent input) {
             _input = input;
         }
     } else {
@@ -762,20 +779,20 @@ class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Ref!Child[]), HasManyI
     }
 
     static if (!is(Parent == void)) {
-        override Expr!(Ref!Child[]) optimize(OptimizeContext ctx) {
-            _input = (cast(Expr!(Ref!Parent)) _input).optimize(ctx);
+        override Expr!(Child[]) optimize(OptimizeContext ctx) {
+            _input = (cast(Expr!Parent) _input).optimize(ctx);
             // HasMany doesn't transform itself - the inner MapExpr's
             // access expressions will create a child QueryNode
             return this;
         }
     } else {
-        override Expr!(Ref!Child[]) optimize(OptimizeContext ctx) {
+        override Expr!(Child[]) optimize(OptimizeContext ctx) {
             // Can't optimize input without Parent type
             return this;
         }
     }
 
-    override Promise!(Ref!Child[][]) eval(EvalContext ctx) {
+    override Promise!(Child[][]) eval(EvalContext ctx) {
         auto input = _input;
 
         // Get the parent refs from the input chain, then fetch children
@@ -784,12 +801,12 @@ class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Ref!Child[]), HasManyI
             auto relCtx = ctx.getSourceContext!RelationalEvalContext(Child._sourceId);
             if (relCtx.fetcher !is null) {
                 auto children = relCtx.fetcher.fetchChildren(Child._table, Child._typeName, fk, parentRefs);
-                // Convert AnyRef[][] to Ref!Child[][]
-                return children.map!(group => group.map!(r => Ref!Child.fromAnyRef(r)).array).array;
+                // Convert AnyRef[][] to Child[][]
+                return children.map!(group => group.map!(r => Child(r.nodeId)).array).array;
             }
 
             // Fallback to empty results
-            return parentRefs.map!(_ => cast(Ref!Child[])[]).array;
+            return parentRefs.map!(_ => cast(Child[])[]).array;
         });
     }
 
@@ -812,14 +829,14 @@ class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Ref!Child[]), HasManyI
 // ============================================================================
 
 /// Expression representing a many-to-one relationship.
-/// Takes typed Ref!Child input, returns typed Ref!Parent for each child.
-/// RefType is either Ref!Parent (required FK) or Nullable!(Ref!Parent) (optional FK).
+/// Takes typed Child input, returns typed Parent for each child.
+/// ResultType is either Parent (required FK) or Nullable!Parent (optional FK).
 /// Implements AnyRefEvaluable for type-agnostic evaluation by downstream expressions.
-class BelongsToAccessExpr(Child, Parent, RefType, string fk) : Expr!RefType, BelongsToInfo, AnyRefEvaluable {
+class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultType, BelongsToInfo, AnyRefEvaluable {
     private ExprBase _input;
 
     static if (!is(Child == void)) {
-        this(Expr!(Ref!Child) input) {
+        this(Expr!Child input) {
             _input = input;
         }
     } else {
@@ -838,59 +855,59 @@ class BelongsToAccessExpr(Child, Parent, RefType, string fk) : Expr!RefType, Bel
     }
 
     static if (!is(Child == void)) {
-        override Expr!RefType optimize(OptimizeContext ctx) {
-            _input = (cast(Expr!(Ref!Child)) _input).optimize(ctx);
+        override Expr!ResultType optimize(OptimizeContext ctx) {
+            _input = (cast(Expr!Child) _input).optimize(ctx);
             // BelongsTo stays as-is; column access through it uses JOINs
             return this;
         }
     } else {
-        override Expr!RefType optimize(OptimizeContext ctx) {
+        override Expr!ResultType optimize(OptimizeContext ctx) {
             return this;
         }
     }
 
     /// Evaluate and return as AnyRef[] (for type-agnostic internal use).
-    /// Converts typed Ref!Parent to AnyRef, handling Nullable properly.
+    /// Converts typed Parent to AnyRef, handling Nullable properly.
     Promise!(AnyRef[]) evalAsAnyRef(EvalContext ctx) {
-        return this.eval(ctx).then((RefType[] refs) {
-            static if (is(RefType == Ref!Parent)) {
-                // Direct conversion from typed ref to AnyRef
-                return refs.map!(r => r.toAnyRef()).array;
-            } else static if (is(RefType == Nullable!(Ref!Parent))) {
-                // Handle nullable refs - convert valid refs, use AnyRef.init for null
-                return refs.map!(r => r.isNull ? AnyRef.init : r.get.toAnyRef()).array;
+        return this.eval(ctx).then((ResultType[] results) {
+            static if (is(ResultType == Parent)) {
+                // Direct conversion from entity to AnyRef via nodeId
+                return results.map!(r => AnyRef(r.nodeId)).array;
+            } else static if (is(ResultType == Nullable!Parent)) {
+                // Handle nullable - convert valid refs, use AnyRef.init for null
+                return results.map!(r => r.isNull ? AnyRef.init : AnyRef(r.get.nodeId)).array;
             } else {
-                static assert(false, "Unexpected RefType in BelongsToAccessExpr");
+                static assert(false, "Unexpected ResultType in BelongsToAccessExpr");
             }
         });
     }
 
-    override Promise!(RefType[]) eval(EvalContext ctx) {
+    override Promise!(ResultType[]) eval(EvalContext ctx) {
         auto input = _input;
 
         // Get the child refs from the input chain, then fetch parent
         return evalRefAsAnyRef(input, ctx).then((AnyRef[] childRefs) {
             static if (is(Child == void)) {
                 // Can't fetch without knowing child entity type
-                return childRefs.map!(_ => RefType.init).array;
+                return childRefs.map!(_ => ResultType.init).array;
             } else {
                 // Naive path: fetch parent refs directly
                 auto relCtx = ctx.getSourceContext!RelationalEvalContext(Child._sourceId);
                 if (relCtx.fetcher !is null) {
                     auto parentRefs = relCtx.fetcher.fetchBelongsTo(Child._table, fk, Parent._typeName, childRefs);
 
-                    static if (is(RefType == Ref!Parent)) {
-                        // Convert AnyRef[] to Ref!Parent[]
-                        return parentRefs.map!(r => Ref!Parent.fromAnyRef(r)).array;
-                    } else static if (is(RefType == Nullable!(Ref!Parent))) {
+                    static if (is(ResultType == Parent)) {
+                        // Convert AnyRef[] to Parent[] via nodeId
+                        return parentRefs.map!(r => Parent(r.nodeId)).array;
+                    } else static if (is(ResultType == Nullable!Parent)) {
                         // Wrap in Nullable, handling invalid refs as null
-                        return parentRefs.map!(r => r.isValid ? Nullable!(Ref!Parent)(Ref!Parent.fromAnyRef(r)) : Nullable!(Ref!Parent).init).array;
+                        return parentRefs.map!(r => r.isValid ? Nullable!Parent(Parent(r.nodeId)) : Nullable!Parent.init).array;
                     } else {
-                        static assert(false, "RefType must be Ref!Parent or Nullable!(Ref!Parent)");
+                        static assert(false, "ResultType must be Parent or Nullable!Parent");
                     }
                 }
 
-                return childRefs.map!(_ => RefType.init).array;
+                return childRefs.map!(_ => ResultType.init).array;
             }
         });
     }
@@ -915,7 +932,7 @@ class BelongsToAccessExpr(Child, Parent, RefType, string fk) : Expr!RefType, Bel
 
 unittest {
     // Test low-level Entity mixin (no id column)
-    struct User {
+    static struct User {
         mixin Entity!"users";
         mixin Col!("id", long);
         mixin PrimaryKey!"id";
@@ -926,7 +943,7 @@ unittest {
     static assert(is(User._colField_id.type == long));
 
     // Test Entity with custom type name
-    struct Post {
+    static struct Post {
         mixin Entity!("posts", "BlogPost");
         mixin Col!("id", long);
         mixin PrimaryKey!"id";
@@ -940,14 +957,14 @@ unittest {
     import graphqld2.relational.demo : DemoEntity, Int64;
 
     // Test DemoEntity convenience (includes id column with Int64 type)
-    struct Comment {
+    static struct Comment {
         mixin DemoEntity!"comments";
     }
     static assert(Comment._table == "comments");
     static assert(is(Comment._colField_id.type == Int64));
 
     // Test DemoEntity with custom ID type
-    struct UuidEntity {
+    static struct UuidEntity {
         mixin DemoEntity!("items", string);
     }
     static assert(is(UuidEntity._colField_id.type == string));
@@ -958,7 +975,7 @@ unittest {
     import std.json : parseJSON;
     import graphqld2.relational.demo : DemoEntity;
 
-    struct User {
+    static struct User {
         mixin DemoEntity!"users";
         mixin Col!("firstName", string);
         mixin Col!("lastName", string);
@@ -967,10 +984,10 @@ unittest {
     // Build a simple query: map over users, get first + last name
     auto userRefs = getByIds!User([1, 2]);
     auto query = map!(
-        (Expr!(Ref!User) user) => use(
+        (Expr!User user) => use(
             (string first, string last) => first ~ " " ~ last,
-            User.firstName(user),
-            User.lastName(user)
+            user.firstName,
+            user.lastName
         )
     )(userRefs);
 
@@ -995,7 +1012,7 @@ unittest {
     import graphqld2.relational.demo : DemoEntity;
 
     // Entity with string ID (UUID-style)
-    struct Item {
+    static struct Item {
         mixin DemoEntity!("items", string);
         mixin Col!("name", string);
     }
@@ -1009,7 +1026,7 @@ unittest {
 
     // Query by string IDs
     auto query = map!(
-        (Expr!(Ref!Item) item) => Item.name(item)
+        (Expr!Item item) => item.name
     )(getByIds!Item(["uuid-abc", "uuid-def"], fetcher));
 
     auto executor = new Executor();
@@ -1026,12 +1043,12 @@ unittest {
     import ae.utils.promise.await : awaitSync;
     import graphqld2.relational.demo : DemoEntity;
 
-    struct Category {
+    static struct Category {
         mixin DemoEntity!("categories", string);
         mixin Col!("name", string);
     }
 
-    struct Product {
+    static struct Product {
         mixin DemoEntity!("products", string);
         mixin Col!("name", string);
         mixin Col!("categoryId", ForeignKey!Category);
@@ -1049,9 +1066,9 @@ unittest {
     ]`);
 
     auto query = map!(
-        (Expr!(Ref!Product) prod) => jsonObject(
-            "name", Product.name(prod),
-            "categoryName", Category.name(Product.category(prod))
+        (Expr!Product prod) => jsonObject(
+            "name", prod.name,
+            "categoryName", prod.category.name
         )
     )(getByIds!Product(["prod-a", "prod-b"], fetcher));
 
@@ -1072,7 +1089,7 @@ unittest {
     import graphqld2.core.types : encodeCompositeKey;
 
     // Entity with composite primary key (order_id + product_id)
-    struct OrderItem {
+    static struct OrderItem {
         mixin Entity!"order_items";
 
         // Define the composite key columns
@@ -1101,14 +1118,14 @@ unittest {
 
     // Query using pre-encoded composite keys
     auto refs = [
-        Ref!OrderItem("OrderItem:1,100"),  // order 1, product 100
-        Ref!OrderItem("OrderItem:1,101")   // order 1, product 101
+        OrderItem("OrderItem:1,100"),  // order 1, product 100
+        OrderItem("OrderItem:1,101")   // order 1, product 101
     ];
 
     auto query = map!(
-        (Expr!(Ref!OrderItem) item) => jsonObject(
-            "quantity", OrderItem.quantity(item),
-            "price", OrderItem.price(item)
+        (Expr!OrderItem item) => jsonObject(
+            "quantity", item.quantity,
+            "price", item.price
         )
     )(new GetByIdsExpr!OrderItem(refs, fetcher));
 
@@ -1127,7 +1144,7 @@ unittest {
     import std.json : parseJSON;
     import ae.utils.promise.await : awaitSync;
 
-    struct OrderItem {
+    static struct OrderItem {
         mixin Entity!"order_items";
         mixin Col!("orderId", long);
         mixin Col!("productId", long);
@@ -1145,7 +1162,7 @@ unittest {
 
     // Use getByCompositeIds helper with array of key-parts
     auto query = map!(
-        (Expr!(Ref!OrderItem) item) => OrderItem.quantity(item)
+        (Expr!OrderItem item) => item.quantity
     )(getByCompositeIds!OrderItem([[1, 100], [2, 100]], fetcher));
 
     auto executor = new Executor();

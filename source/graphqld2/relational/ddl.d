@@ -232,16 +232,15 @@ unittest {
     import std.algorithm : canFind;
     import std.typecons : Nullable;
     import graphqld2.core.expr : Expr;
-    import graphqld2.core.types : Ref;
     import graphqld2.relational.schema : Col, BelongsTo, ForeignKey, belongsTo;
     import graphqld2.relational.demo : DemoEntity;
 
     // Test nullable FK via Col + BelongsTo
-    struct Manager {
+    static struct Manager {
         mixin DemoEntity!"managers";
     }
 
-    struct Employee {
+    static struct Employee {
         mixin DemoEntity!"employees";
         mixin Col!("managerId", Nullable!(ForeignKey!Manager));  // nullable FK column
         mixin BelongsTo!("manager", "managerId");  // derives nullability from column
@@ -271,16 +270,15 @@ unittest {
     import std.algorithm : canFind;
     import std.typecons : Nullable;
     import graphqld2.core.expr : Expr;
-    import graphqld2.core.types : Ref;
     import graphqld2.relational.schema : Col, BelongsTo, ForeignKey, belongsTo;
     import graphqld2.relational.demo : DemoEntity;
 
     // Test required FK via Col + BelongsTo
-    struct Department {
+    static struct Department {
         mixin DemoEntity!"departments";
     }
 
-    struct Employee2 {
+    static struct Employee2 {
         mixin DemoEntity!"employees2";
         mixin Col!("departmentId", ForeignKey!Department);  // required FK column
         mixin BelongsTo!("department", "departmentId");  // derives from column

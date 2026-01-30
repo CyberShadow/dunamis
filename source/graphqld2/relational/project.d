@@ -113,11 +113,11 @@ class ProjectColumnExpr(T) : Expr!T, ProjectColumnInfo {
     private {
         int _queryNodeId;
         string _column;
-        ExprBase _input;     // The input chain (for deriving refs) - may be Expr!(Ref!Entity) or Expr!AnyRef
+        ExprBase _input;     // The input chain (for deriving refs) - may be Expr!Entity or Expr!AnyRef
         ExprBase _prefetch;  // PrefetchExpr - ensures data is loaded
     }
 
-    /// Accepts ExprBase to work with both typed Expr!(Ref!Entity) and untyped Expr!AnyRef
+    /// Accepts ExprBase to work with both typed Expr!Entity and untyped Expr!AnyRef
     this(int queryNodeId, string column, ExprBase input, PrefetchExpr prefetch) {
         _queryNodeId = queryNodeId;
         _column = column;
@@ -165,7 +165,7 @@ class ProjectJoinedColumnExpr(T) : Expr!T, ProjectJoinedColumnInfo {
         ExprBase _prefetch;  // PrefetchExpr - ensures data is loaded
     }
 
-    /// Accepts ExprBase to work with both typed Expr!(Ref!Entity) and untyped Expr!AnyRef
+    /// Accepts ExprBase to work with both typed Expr!Entity and untyped Expr!AnyRef
     this(int queryNodeId, string joinAlias, string column, ExprBase input, PrefetchExpr prefetch) {
         _queryNodeId = queryNodeId;
         _joinAlias = joinAlias;
@@ -256,7 +256,7 @@ class ProjectChildRefsExpr : Expr!(AnyRef[]) {
         ExprBase _prefetch;     // PrefetchExpr - ensures data is loaded
     }
 
-    /// Accepts ExprBase to work with both typed Expr!(Ref!Entity) and untyped Expr!AnyRef
+    /// Accepts ExprBase to work with both typed Expr!Entity and untyped Expr!AnyRef
     this(int queryNodeId, ExprBase parentInput, PrefetchExpr prefetch) {
         _queryNodeId = queryNodeId;
         _parentInput = parentInput;
@@ -305,7 +305,7 @@ class ProjectBelongsToExpr : Expr!AnyRef {
         ExprBase _prefetch;  // PrefetchExpr - ensures data is loaded
     }
 
-    /// Accepts ExprBase to work with both typed Expr!(Ref!Entity) and untyped Expr!AnyRef
+    /// Accepts ExprBase to work with both typed Expr!Entity and untyped Expr!AnyRef
     this(int queryNodeId, string fkColumn, string parentTypeName, ExprBase input, PrefetchExpr prefetch) {
         _queryNodeId = queryNodeId;
         _fkColumn = fkColumn;
@@ -355,6 +355,11 @@ class ProjectBelongsToExpr : Expr!AnyRef {
 unittest {
     import std.json : parseJSON;
 
+    // Minimal entity for testing
+    static struct TestUser {
+        string nodeId;
+    }
+
     // Test ProjectColumnExpr
     auto ctx = new EvalContext();
     auto relCtx = ctx.getSourceContext!RelationalEvalContext();
@@ -372,8 +377,8 @@ unittest {
     auto node = new QueryNode(0, "User", "users");
     auto prefetch = new PrefetchExpr(node);
 
-    // Create a mock input that returns the refs (use void for internal test)
-    auto item = new EveryItemOfExpr!void();
+    // Create a mock input that returns the refs
+    auto item = new EveryItemOfExpr!TestUser();
     ctx.setCurrentRefs(null, [AnyRef("User:1"), AnyRef("User:2")]);
 
     // Create projection with input and prefetch
@@ -417,6 +422,11 @@ unittest {
 unittest {
     import std.json : parseJSON;
 
+    // Minimal entity for testing
+    static struct TestPost {
+        string nodeId;
+    }
+
     // Test ProjectBelongsToExpr
     auto ctx = new EvalContext();
     auto relCtx = ctx.getSourceContext!RelationalEvalContext();
@@ -433,8 +443,8 @@ unittest {
     auto node = new QueryNode(0, "Post", "posts");
     auto prefetch = new PrefetchExpr(node);
 
-    // Create a mock input that returns the refs (use void for internal test)
-    auto item = new EveryItemOfExpr!void();
+    // Create a mock input that returns the refs
+    auto item = new EveryItemOfExpr!TestPost();
     ctx.setCurrentRefs(null, [AnyRef("Post:1"), AnyRef("Post:2")]);
 
     auto proj = new ProjectBelongsToExpr(0, "author_id", "User", item, prefetch);

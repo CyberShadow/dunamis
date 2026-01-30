@@ -69,19 +69,26 @@ class Executor {
 
 /// Dummy entity type for tests
 private struct TestEntity {
+    string nodeId;
     enum _typeName = "Test";
+
+    string localId() const {
+        import std.string : indexOf;
+        auto sep = nodeId.indexOf(':');
+        return sep >= 0 ? nodeId[sep + 1 .. $] : "";
+    }
 }
 
-/// Helper: expression that returns a fixed array of refs.
-private class MockCollectionExpr(Entity) : Expr!(Ref!Entity[]) {
-    Ref!Entity[] _refs;
-    this(Ref!Entity[] refs) { _refs = refs; }
+/// Helper: expression that returns a fixed array of entities.
+private class MockCollectionExpr(Entity) : Expr!(Entity[]) {
+    Entity[] _entities;
+    this(Entity[] entities) { _entities = entities; }
 
     override ExprBase[] dependencies() { return []; }
     override void replaceDependency(size_t index, ExprBase newDep) {}
 
-    override Promise!(Ref!Entity[][]) eval(EvalContext ctx) {
-        return resolve([_refs]);
+    override Promise!(Entity[][]) eval(EvalContext ctx) {
+        return resolve([_entities]);
     }
 }
 
@@ -89,9 +96,9 @@ unittest {
     // Test executor with map expression
     auto executor = new Executor();
 
-    auto collection = new MockCollectionExpr!TestEntity([Ref!TestEntity("Test:1"), Ref!TestEntity("Test:2")]);
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("Test:1"), TestEntity("Test:2")]);
     auto query = map!(
-        (Expr!(Ref!TestEntity) item) => use((Ref!TestEntity r) => r.nodeId, item)
+        (Expr!TestEntity item) => use((TestEntity e) => e.nodeId, item)
     )(collection);
 
     auto result = awaitSync(executor.execute(query));
@@ -104,9 +111,9 @@ unittest {
 
     auto executor = new Executor();
 
-    auto collection = new MockCollectionExpr!TestEntity([Ref!TestEntity("Test:1"), Ref!TestEntity("Test:2")]);
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("Test:1"), TestEntity("Test:2")]);
     auto query = map!(
-        (Expr!(Ref!TestEntity) item) => use((Ref!TestEntity r) => r.localId.to!long, item) * 10 + 1
+        (Expr!TestEntity item) => use((TestEntity e) => e.localId.to!long, item) * 10 + 1
     )(collection);
 
     auto result = awaitSync(executor.execute(query));
