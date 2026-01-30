@@ -165,6 +165,8 @@ unittest {
 // Integration Tests: Optimization produces correct QueryNodes
 // ============================================================================
 
+import ae.utils.promise.await : awaitSync;
+
 unittest {
     import std.algorithm : canFind;
     import std.conv : to;
@@ -198,8 +200,8 @@ unittest {
         )(getByIds!User([1, 2, 3], fetcher));
     }
 
-    auto naiveResult = executor.execute(makeQuery(), false);
-    auto optimizedResult = executor.execute(makeQuery(), true);
+    auto naiveResult = awaitSync(executor.execute(makeQuery(), false));
+    auto optimizedResult = awaitSync(executor.execute(makeQuery(), true));
 
     assert(naiveResult.length == optimizedResult.length);
     assert(naiveResult.length == 3);
@@ -343,8 +345,8 @@ unittest {
     }
 
     // Execute both ways
-    auto naiveResult = executor.execute(makeQuery(), false);
-    auto optimizedResult = executor.execute(makeQuery(), true);
+    auto naiveResult = awaitSync(executor.execute(makeQuery(), false));
+    auto optimizedResult = awaitSync(executor.execute(makeQuery(), true));
 
     // Verify optimization creates JOINs
     auto queryForInspection = makeQuery();

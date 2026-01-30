@@ -19,16 +19,28 @@ import graphqld2.core.types;
 class EvalContext {
     mixin SourceContextRegistry;
 
-    /// The refs currently being iterated over within a MapExpr.
+    /// Refs keyed by MapExpr identity.
+    /// This allows parallel evaluation of expressions without interference.
     ///
-    /// This is the communication channel between MapExpr and EveryItemOfExpr:
-    /// - MapExpr sets this to the flattened collection items before evaluating its body
-    /// - EveryItemOfExpr returns this value (representing "the current items")
-    /// - MapExpr restores the previous value after body evaluation
+    /// Communication between MapExpr and EveryItemOfExpr:
+    /// - MapExpr calls setCurrentRefs(this, flatRefs) before evaluating its body
+    /// - EveryItemOfExpr calls getCurrentRefs(_parentMap) to get its refs
     ///
-    /// Other expressions should NOT use this for batch size - they should derive
-    /// length from their inputs instead.
-    Ref[] currentRefs;
+    /// The null key is used for the root level (queryRoot).
+    private Ref[][void*] _refsMap;
+
+    /// Set refs for a specific MapExpr (or null for root).
+    void setCurrentRefs(Object mapExpr, Ref[] refs) {
+        _refsMap[cast(void*) mapExpr] = refs;
+    }
+
+    /// Get refs for a specific MapExpr (or null for root).
+    Ref[] getCurrentRefs(Object mapExpr) {
+        if (auto p = cast(void*) mapExpr in _refsMap) {
+            return *p;
+        }
+        return [];
+    }
 }
 
 // ============================================================================

@@ -1,5 +1,8 @@
 module graphqld2.core.executor;
 
+import ae.utils.promise;
+import ae.utils.promise.await : awaitSync;
+
 import graphqld2.core.eval;
 import graphqld2.core.expr;
 import graphqld2.core.optimize;
@@ -14,7 +17,8 @@ import graphqld2.core.types;
 /// 4. Evaluates the expression
 class Executor {
     /// Execute an expression, optionally with optimization.
-    T execute(E, T = E.ResultType)(E expr, bool optimize = true) {
+    /// Returns a Promise that resolves to the result.
+    Promise!T execute(E, T = E.ResultType)(E expr, bool optimize = true) {
         E toEval = expr;
 
         if (optimize) {
@@ -28,8 +32,8 @@ class Executor {
         }
 
         auto ctx = new EvalContext();
-        ctx.currentRefs = [queryRoot];
-        return toEval.eval(ctx)[0];
+        ctx.setCurrentRefs(null, [queryRoot]);  // null key for root level
+        return toEval.eval(ctx).then((results) => results[0]);
     }
 
     /// Walk expression tree and collect optimizers, deduplicated by instance.
@@ -63,41 +67,43 @@ class Executor {
 // Tests
 // ============================================================================
 
-unittest {
-    // Test basic execution with constant expressions
-    auto executor = new Executor();
+/// Helper: expression that returns a fixed array of refs.
+private class MockCollectionExpr : Expr!(Ref[]) {
+    Ref[] _refs;
+    this(Ref[] refs) { _refs = refs; }
 
-    auto expr = constant(42);
-    // Note: constant expressions need a length source or will use ctx.currentRefs
-    // For this test, queryRoot provides 1 ref, so we get 1 result
-    auto result = executor.execute(expr);
-    assert(result == 42);
+    override ExprBase[] dependencies() { return []; }
+    override void replaceDependency(size_t index, ExprBase newDep) {}
+
+    override Promise!(Ref[][]) eval(EvalContext ctx) {
+        return resolve([_refs]);
+    }
 }
 
 unittest {
-    // Test execution with map expression
-    class ConstRefArrayExpr : Expr!(Ref[]) {
-        Ref[] _refs;
-        this(Ref[] refs) { _refs = refs; }
+    // Test executor with map expression
+    auto executor = new Executor();
 
-        override ExprBase[] dependencies() { return []; }
-        override void replaceDependency(size_t index, ExprBase newDep) {}
+    auto collection = new MockCollectionExpr([Ref("Test:1"), Ref("Test:2")]);
+    auto query = map!(
+        (Expr!Ref item) => use((Ref r) => r.nodeId, item)
+    )(collection);
 
-        override Ref[][] eval(EvalContext ctx) {
-            return [_refs];
-        }
-    }
+    auto result = awaitSync(executor.execute(query));
+    assert(result == ["Test:1", "Test:2"]);
+}
+
+unittest {
+    // Test executor with operators and literals
+    import std.conv : to;
 
     auto executor = new Executor();
 
-    auto collection = new ConstRefArrayExpr([Ref("Test:1"), Ref("Test:2")]);
-    auto mapExpr = map!(
-        (Expr!Ref item) => use(
-            (Ref r) => r.nodeId,
-            item
-        )
+    auto collection = new MockCollectionExpr([Ref("Test:1"), Ref("Test:2")]);
+    auto query = map!(
+        (Expr!Ref item) => use((Ref r) => r.localId.to!long, item) * 10 + 1
     )(collection);
 
-    auto result = executor.execute(mapExpr);
-    assert(result == ["Test:1", "Test:2"]);
+    auto result = awaitSync(executor.execute(query));
+    assert(result == [11, 21]);
 }

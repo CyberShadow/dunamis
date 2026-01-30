@@ -6,6 +6,9 @@ import std.conv;
 import std.json;
 import std.range : iota;
 
+import ae.utils.promise;
+import ae.utils.promise.await : awaitSync;
+
 import graphqld2.core.types;
 import graphqld2.core.eval;
 import graphqld2.core.expr;
@@ -44,30 +47,38 @@ class PrefetchExpr : Expr!(Ref[]) {
             _parentPrefetch = cast(PrefetchExpr) newDep;
     }
 
-    override Ref[][] eval(EvalContext ctx) {
+    override Promise!(Ref[][]) eval(EvalContext ctx) {
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
 
         // Check if already fetched (memoization via EvalContext)
         if (relCtx.getQueryResult(_node.id) !is null) {
-            return [relCtx.getQueryResult(_node.id).allRefs()];
+            return resolve([relCtx.getQueryResult(_node.id).allRefs()]);
         }
 
-        // Ensure parent is fetched first (dependency should handle this, but be safe)
+        // Ensure parent is fetched first
+        Promise!void parentReady;
         if (_parentPrefetch !is null) {
-            evalAs!(Ref[])(_parentPrefetch, ctx);
+            parentReady = evalAs!(Ref[])(_parentPrefetch, ctx).then((_) {});
+        } else {
+            parentReady = resolve();
         }
 
-        // Get parent result for child nodes
-        QueryResult parentResult = null;
-        if (_node.parent !is null) {
-            parentResult = relCtx.getQueryResult(_node.parent.id);
-        }
+        // Capture node for use in closure
+        auto node = _node;
 
-        // Execute the query via DataFetcher
-        auto result = relCtx.fetcher.executeQueryNode(_node, parentResult);
-        relCtx.storeQueryResult(_node.id, result);
+        return parentReady.then(() {
+            // Get parent result for child nodes
+            QueryResult parentResult = null;
+            if (node.parent !is null) {
+                parentResult = relCtx.getQueryResult(node.parent.id);
+            }
 
-        return [result.allRefs()];
+            // Execute the query via DataFetcher (async)
+            return relCtx.fetcher.executeQueryNode(node, parentResult);
+        }).then((QueryResult result) {
+            relCtx.storeQueryResult(node.id, result);
+            return [result.allRefs()];
+        });
     }
 
     @property QueryNode node() { return _node; }
@@ -122,15 +133,18 @@ class ProjectColumnExpr(T) : Expr!T, ProjectColumnInfo {
             _prefetch = newDep;
     }
 
-    override T[] eval(EvalContext ctx) {
-        // Ensure data is prefetched (evaluates PrefetchExpr)
-        evalAs!(Ref[])(_prefetch, ctx);
+    override Promise!(T[]) eval(EvalContext ctx) {
+        auto queryNodeId = _queryNodeId;
+        auto column = _column;
+        auto input = _input;
 
-        // Derive refs from input chain
-        Ref[] refs = evalAs!Ref(_input, ctx);
-        // Read from pre-fetched data via relational context
-        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-        return relCtx.getColumnValues!T(_queryNodeId, _column, refs);
+        // Ensure data is prefetched, then evaluate input, then read
+        return evalAs!(Ref[])(_prefetch, ctx).then((_) {
+            return evalAs!Ref(input, ctx);
+        }).then((Ref[] refs) {
+            auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+            return relCtx.getColumnValues!T(queryNodeId, column, refs);
+        });
     }
 
     @property int queryNodeId() { return _queryNodeId; }
@@ -167,15 +181,19 @@ class ProjectJoinedColumnExpr(T) : Expr!T, ProjectJoinedColumnInfo {
             _prefetch = newDep;
     }
 
-    override T[] eval(EvalContext ctx) {
-        // Ensure data is prefetched
-        evalAs!(Ref[])(_prefetch, ctx);
+    override Promise!(T[]) eval(EvalContext ctx) {
+        auto queryNodeId = _queryNodeId;
+        auto joinAlias = _joinAlias;
+        auto column = _column;
+        auto input = _input;
 
-        // Derive refs from input chain
-        Ref[] refs = evalAs!Ref(_input, ctx);
-        // Read from JOINed data via relational context
-        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-        return relCtx.getJoinedColumnValues!T(_queryNodeId, _joinAlias, _column, refs);
+        // Ensure data is prefetched, then evaluate input, then read
+        return evalAs!(Ref[])(_prefetch, ctx).then((_) {
+            return evalAs!Ref(input, ctx);
+        }).then((Ref[] refs) {
+            auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+            return relCtx.getJoinedColumnValues!T(queryNodeId, joinAlias, column, refs);
+        });
     }
 
     @property int queryNodeId() { return _queryNodeId; }
@@ -206,19 +224,20 @@ class ProjectRefsExpr : Expr!(Ref[]) {
             _prefetch = newDep;
     }
 
-    override Ref[][] eval(EvalContext ctx) {
-        // Ensure data is prefetched
-        evalAs!(Ref[])(_prefetch, ctx);
+    override Promise!(Ref[][]) eval(EvalContext ctx) {
+        auto queryNodeId = _queryNodeId;
 
-        // Get all refs from the pre-fetched QueryResult via relational context
-        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-        auto result = relCtx.getQueryResult(_queryNodeId);
-        if (result is null) {
-            return [[]];  // Single empty result for the single root parent
-        }
-        auto refs = result.allRefs();
-        // Return single result for the single root parent
-        return [refs];
+        // Ensure data is prefetched, then read refs
+        return evalAs!(Ref[])(_prefetch, ctx).then((_) {
+            auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+            auto result = relCtx.getQueryResult(queryNodeId);
+            if (result is null) {
+                return [cast(Ref[])[]];  // Single empty result for the single root parent
+            }
+            auto refs = result.allRefs();
+            // Return single result for the single root parent
+            return [refs];
+        });
     }
 
     @property int queryNodeId() { return _queryNodeId; }
@@ -250,20 +269,21 @@ class ProjectChildRefsExpr : Expr!(Ref[]) {
             _prefetch = newDep;
     }
 
-    override Ref[][] eval(EvalContext ctx) {
-        // Ensure data is prefetched
-        evalAs!(Ref[])(_prefetch, ctx);
+    override Promise!(Ref[][]) eval(EvalContext ctx) {
+        auto queryNodeId = _queryNodeId;
+        auto parentInput = _parentInput;
 
-        // Get parent refs from the input chain
-        Ref[] parentRefs = evalAs!Ref(_parentInput, ctx);
-
-        // Get children grouped by parent from QueryResult via relational context
-        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-        auto result = relCtx.getQueryResult(_queryNodeId);
-        if (result is null) {
-            return parentRefs.map!(_ => cast(Ref[])[]).array;
-        }
-        return result.getChildRefs(parentRefs);
+        // Ensure data is prefetched, then get parent refs, then lookup children
+        return evalAs!(Ref[])(_prefetch, ctx).then((_) {
+            return evalAs!Ref(parentInput, ctx);
+        }).then((Ref[] parentRefs) {
+            auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+            auto result = relCtx.getQueryResult(queryNodeId);
+            if (result is null) {
+                return parentRefs.map!(_ => cast(Ref[])[]).array;
+            }
+            return result.getChildRefs(parentRefs);
+        });
     }
 
     @property int queryNodeId() { return _queryNodeId; }
@@ -299,16 +319,20 @@ class ProjectBelongsToExpr : Expr!Ref {
             _prefetch = newDep;
     }
 
-    override Ref[] eval(EvalContext ctx) {
-        // Ensure data is prefetched
-        evalAs!(Ref[])(_prefetch, ctx);
+    override Promise!(Ref[]) eval(EvalContext ctx) {
+        auto queryNodeId = _queryNodeId;
+        auto fkColumn = _fkColumn;
+        auto parentTypeName = _parentTypeName;
+        auto input = _input;
 
-        // Derive refs from input chain
-        Ref[] refs = evalAs!Ref(_input, ctx);
-        // Read FK values and encode as parent refs via relational context
-        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-        auto fkValues = relCtx.getColumnValues!long(_queryNodeId, _fkColumn, refs);
-        return fkValues.map!(fk => fk == 0 ? Ref.init : makeRef(_parentTypeName, fk)).array;
+        // Ensure data is prefetched, then derive refs, then read FK values
+        return evalAs!(Ref[])(_prefetch, ctx).then((_) {
+            return evalAs!Ref(input, ctx);
+        }).then((Ref[] refs) {
+            auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+            auto fkValues = relCtx.getColumnValues!long(queryNodeId, fkColumn, refs);
+            return fkValues.map!(fk => fk == 0 ? Ref.init : makeRef(parentTypeName, fk)).array;
+        });
     }
 
     @property int queryNodeId() { return _queryNodeId; }
@@ -319,6 +343,7 @@ class ProjectBelongsToExpr : Expr!Ref {
 // ============================================================================
 // Tests
 // ============================================================================
+
 
 unittest {
     import std.json : parseJSON;
@@ -342,13 +367,13 @@ unittest {
 
     // Create a mock input that returns the refs
     auto item = new EveryItemOfExpr();
-    ctx.currentRefs = [Ref("User:1"), Ref("User:2")];
+    ctx.setCurrentRefs(null, [Ref("User:1"), Ref("User:2")]);
 
     // Create projection with input and prefetch
     auto proj = new ProjectColumnExpr!string(0, "first_name", item, prefetch);
 
     // Evaluate
-    auto names = proj.eval(ctx);
+    auto names = awaitSync(proj.eval(ctx));
     assert(names == ["Alice", "Bob"]);
 }
 
@@ -373,8 +398,8 @@ unittest {
     auto prefetch = new PrefetchExpr(node);
 
     auto proj = new ProjectRefsExpr(0, prefetch);
-    ctx.currentRefs = [queryRoot];
-    auto refArrays = proj.eval(ctx);
+    ctx.setCurrentRefs(null, [queryRoot]);
+    auto refArrays = awaitSync(proj.eval(ctx));
 
     assert(refArrays.length == 1);
     assert(refArrays[0] == [Ref("User:1"), Ref("User:2"), Ref("User:3")]);
@@ -403,10 +428,10 @@ unittest {
 
     // Create a mock input that returns the refs
     auto item = new EveryItemOfExpr();
-    ctx.currentRefs = [Ref("Post:1"), Ref("Post:2")];
+    ctx.setCurrentRefs(null, [Ref("Post:1"), Ref("Post:2")]);
 
     auto proj = new ProjectBelongsToExpr(0, "author_id", "User", item, prefetch);
-    auto parentRefs = proj.eval(ctx);
+    auto parentRefs = awaitSync(proj.eval(ctx));
 
     assert(parentRefs == [Ref("User:10"), Ref("User:20")]);
 }

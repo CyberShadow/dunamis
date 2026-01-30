@@ -8,6 +8,8 @@ import std.range : iota;
 import std.traits;
 import std.typecons : Nullable;
 
+import ae.utils.promise;
+
 import graphqld2.core;
 import graphqld2.relational.eval_context;
 import graphqld2.relational.optimize_context;
@@ -373,7 +375,7 @@ class GetByIdsExpr(Entity) : Expr!(Ref[]), RootExprInfo {
         return [];
     }
 
-    override Ref[][] eval(EvalContext ctx) {
+    override Promise!(Ref[][]) eval(EvalContext ctx) {
         // Set up RelationalEvalContext with fetcher if we have one
         if (_fetcher !is null) {
             auto relCtx = ctx.getSourceContext!RelationalEvalContext(Entity._sourceId);
@@ -382,7 +384,7 @@ class GetByIdsExpr(Entity) : Expr!(Ref[]), RootExprInfo {
             }
         }
         // At root level, there's always exactly 1 parent (queryRoot)
-        return [_refs];
+        return resolve([_refs]);
     }
 
     @property Ref[] refs() { return _refs; }
@@ -430,7 +432,7 @@ class GetAllExpr(Entity) : Expr!(Ref[]), RootExprInfo {
         return [];
     }
 
-    override Ref[][] eval(EvalContext ctx) {
+    override Promise!(Ref[][]) eval(EvalContext ctx) {
         // Set up RelationalEvalContext with fetcher if we have one
         if (_fetcher !is null) {
             auto relCtx = ctx.getSourceContext!RelationalEvalContext(Entity._sourceId);
@@ -444,7 +446,7 @@ class GetAllExpr(Entity) : Expr!(Ref[]), RootExprInfo {
         auto ids = relCtx.fetchAllIds(Entity._table);
         auto refs = ids.map!(id => makeRef(Entity._typeName, id)).array;
         // At root level, there's always exactly 1 parent (queryRoot)
-        return [refs];
+        return resolve([refs]);
     }
 
     // RootExprInfo implementation
@@ -566,17 +568,20 @@ class ColumnAccessExpr(T, Entity) : Expr!T {
         return new ProjectJoinedColumnExpr!T(node.id, lastAlias, _column, baseInput, prefetch);
     }
 
-    override T[] eval(EvalContext ctx) {
-        // Get the entity refs from the input chain
-        Ref[] entityRefs = evalAs!Ref(_input, ctx);
+    override Promise!(T[]) eval(EvalContext ctx) {
+        auto column = _column;
+        auto input = _input;
 
-        auto relCtx = ctx.getSourceContext!RelationalEvalContext(Entity._sourceId);
-        if (relCtx.fetcher !is null) {
-            return relCtx.fetcher.fetchColumn!T(Entity._table, _column, entityRefs);
-        }
+        // Get the entity refs from the input chain, then fetch column
+        return evalAs!Ref(input, ctx).then((Ref[] entityRefs) {
+            auto relCtx = ctx.getSourceContext!RelationalEvalContext(Entity._sourceId);
+            if (relCtx.fetcher !is null) {
+                return relCtx.fetcher.fetchColumn!T(Entity._table, column, entityRefs);
+            }
 
-        // Fallback to empty results
-        return entityRefs.map!(_ => T.init).array;
+            // Fallback to empty results
+            return entityRefs.map!(_ => T.init).array;
+        });
     }
 
     @property string column() { return _column; }
@@ -612,18 +617,20 @@ class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Ref[]), HasManyInfo {
         return this;
     }
 
-    override Ref[][] eval(EvalContext ctx) {
-        // Get the parent refs from the input chain
-        Ref[] parentRefs = evalAs!Ref(_input, ctx);
+    override Promise!(Ref[][]) eval(EvalContext ctx) {
+        auto input = _input;
 
-        // Naive path: fetch children directly
-        auto relCtx = ctx.getSourceContext!RelationalEvalContext(Child._sourceId);
-        if (relCtx.fetcher !is null) {
-            return relCtx.fetcher.fetchChildren(Child._table, Child._typeName, fk, parentRefs);
-        }
+        // Get the parent refs from the input chain, then fetch children
+        return evalAs!Ref(input, ctx).then((Ref[] parentRefs) {
+            // Naive path: fetch children directly
+            auto relCtx = ctx.getSourceContext!RelationalEvalContext(Child._sourceId);
+            if (relCtx.fetcher !is null) {
+                return relCtx.fetcher.fetchChildren(Child._table, Child._typeName, fk, parentRefs);
+            }
 
-        // Fallback to empty results
-        return parentRefs.map!(_ => cast(Ref[])[]).array;
+            // Fallback to empty results
+            return parentRefs.map!(_ => cast(Ref[])[]).array;
+        });
     }
 
     @property ExprBase input() { return _input; }
@@ -668,31 +675,33 @@ class BelongsToAccessExpr(Child, Parent, RefType, string fk) : Expr!RefType, Bel
         return this;
     }
 
-    override RefType[] eval(EvalContext ctx) {
-        // Get the child refs from the input chain
-        Ref[] childRefs = evalAs!Ref(_input, ctx);
+    override Promise!(RefType[]) eval(EvalContext ctx) {
+        auto input = _input;
 
-        static if (is(Child == void)) {
-            // Can't fetch without knowing child entity type
-            return childRefs.map!(_ => RefType.init).array;
-        } else {
-            // Naive path: fetch parent refs directly
-            auto relCtx = ctx.getSourceContext!RelationalEvalContext(Child._sourceId);
-            if (relCtx.fetcher !is null) {
-                auto parentRefs = relCtx.fetcher.fetchBelongsTo(Child._table, fk, Parent._typeName, childRefs);
+        // Get the child refs from the input chain, then fetch parent
+        return evalAs!Ref(input, ctx).then((Ref[] childRefs) {
+            static if (is(Child == void)) {
+                // Can't fetch without knowing child entity type
+                return childRefs.map!(_ => RefType.init).array;
+            } else {
+                // Naive path: fetch parent refs directly
+                auto relCtx = ctx.getSourceContext!RelationalEvalContext(Child._sourceId);
+                if (relCtx.fetcher !is null) {
+                    auto parentRefs = relCtx.fetcher.fetchBelongsTo(Child._table, fk, Parent._typeName, childRefs);
 
-                static if (is(RefType == Ref)) {
-                    return parentRefs;
-                } else static if (is(RefType == Nullable!Ref)) {
-                    // Wrap in Nullable
-                    return parentRefs.map!(r => r.isValid ? Nullable!Ref(r) : Nullable!Ref.init).array;
-                } else {
-                    static assert(false, "RefType must be Ref or Nullable!Ref");
+                    static if (is(RefType == Ref)) {
+                        return parentRefs;
+                    } else static if (is(RefType == Nullable!Ref)) {
+                        // Wrap in Nullable
+                        return parentRefs.map!(r => r.isValid ? Nullable!Ref(r) : Nullable!Ref.init).array;
+                    } else {
+                        static assert(false, "RefType must be Ref or Nullable!Ref");
+                    }
                 }
-            }
 
-            return childRefs.map!(_ => RefType.init).array;
-        }
+                return childRefs.map!(_ => RefType.init).array;
+            }
+        });
     }
 
     @property ExprBase input() { return _input; }

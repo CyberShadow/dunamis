@@ -6,6 +6,8 @@ import std.conv;
 import std.traits;
 import std.typecons : Nullable;
 
+import ae.utils.promise;
+
 import graphqld2.core.types;
 import graphqld2.core.eval;
 import graphqld2.core.expr;
@@ -328,15 +330,18 @@ class ProjectComputedExpr(T) : Expr!T {
             _prefetch = newDep;
     }
 
-    override T[] eval(EvalContext ctx) {
-        // Ensure data is prefetched
-        evalAs!(Ref[])(_prefetch, ctx);
+    override Promise!(T[]) eval(EvalContext ctx) {
+        auto queryNodeId = _queryNodeId;
+        auto alias_ = _alias;
+        auto input = _input;
 
-        // Derive refs from input chain
-        Ref[] refs = evalAs!Ref(_input, ctx);
-        // Read computed column from pre-fetched data via relational context
-        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-        return relCtx.getColumnValues!T(_queryNodeId, _alias, refs);
+        // Ensure data is prefetched, then evaluate input, then read
+        return evalAs!(Ref[])(_prefetch, ctx).then((_) {
+            return evalAs!Ref(input, ctx);
+        }).then((Ref[] refs) {
+            auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+            return relCtx.getColumnValues!T(queryNodeId, alias_, refs);
+        });
     }
 
     @property int queryNodeId() { return _queryNodeId; }

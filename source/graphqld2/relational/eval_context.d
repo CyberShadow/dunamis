@@ -5,6 +5,8 @@ import std.array;
 import std.conv;
 import std.json;
 
+import ae.utils.promise;
+
 import graphqld2.core.types;
 import graphqld2.relational.query_node;
 
@@ -38,7 +40,7 @@ abstract class DataFetcher {
     ///
     /// SqlDataFetcher: generates SQL from QueryNode, executes, parses results.
     /// MockDataFetcher: filters in-memory data based on QueryNode criteria.
-    abstract QueryResult executeQueryNode(QueryNode node, QueryResult parentResult);
+    abstract Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult);
 
     // =========================================================================
     // Individual fetch methods (for naive path and MockDataFetcher internals)
@@ -349,7 +351,13 @@ class MockDataFetcher : DataFetcher {
     }
 
     /// Execute a QueryNode by filtering in-memory data
-    override QueryResult executeQueryNode(QueryNode node, QueryResult parentResult) {
+    override Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult) {
+        // MockDataFetcher resolves immediately (sync execution wrapped in promise)
+        return resolve(executeQueryNodeSync(node, parentResult));
+    }
+
+    /// Synchronous implementation of executeQueryNode
+    private QueryResult executeQueryNodeSync(QueryNode node, QueryResult parentResult) {
         auto result = new QueryResult();
         Ref[] refs;
 
@@ -601,7 +609,7 @@ class DebugSqlFetcher : DataFetcher {
         _executedNodes = [];
     }
 
-    override QueryResult executeQueryNode(QueryNode node, QueryResult parentResult) {
+    override Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult) {
         _executedNodes ~= node;
         return _delegate.executeQueryNode(node, parentResult);
     }

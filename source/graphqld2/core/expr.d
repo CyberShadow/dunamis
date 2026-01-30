@@ -8,6 +8,9 @@ import std.traits;
 import std.typecons : Nullable, Tuple, tuple;
 static import std.algorithm;
 
+import ae.utils.promise;
+import ae.net.asockets : socketManager;
+
 import graphqld2.core.types;
 import graphqld2.core.eval;
 import graphqld2.core.optimize;
@@ -34,7 +37,7 @@ abstract class ExprBase {
 
     /// Evaluate and return result length (type-erased).
     /// Used by ConstExpr to derive batch size from another expression.
-    abstract size_t evalResultLength(EvalContext ctx);
+    abstract Promise!size_t evalResultLength(EvalContext ctx);
 
     /// Get optimizers this expression needs.
     /// Override in expressions tied to specific data sources.
@@ -45,8 +48,9 @@ abstract class ExprBase {
 }
 
 /// Helper to evaluate an ExprBase with a known type.
+/// Returns a Promise that resolves to T[].
 /// Asserts if the runtime type doesn't match.
-T[] evalAs(T)(ExprBase expr, EvalContext ctx) {
+Promise!(T[]) evalAs(T)(ExprBase expr, EvalContext ctx) {
     auto typed = cast(Expr!T) expr;
     assert(typed !is null, "Type mismatch in evalAs: expected " ~ T.stringof);
     return typed.eval(ctx);
@@ -62,16 +66,12 @@ T[] evalAs(T)(ExprBase expr, EvalContext ctx) {
 /// Expressions are written with per-element semantics — as if operating on
 /// a single entity. Batching happens automatically during evaluation.
 ///
-/// Batch semantics: eval() always returns T[] — one result per input ref.
+/// Batch semantics: eval() returns Promise!(T[]) — one result per input ref.
 abstract class Expr(T) : ExprBase {
     alias ResultType = T;
 
     override TypeInfo resultType() {
         return typeid(T);
-    }
-
-    override size_t evalResultLength(EvalContext ctx) {
-        return eval(ctx).length;
     }
 
     /// Optimize this expression and its children.
@@ -81,9 +81,14 @@ abstract class Expr(T) : ExprBase {
     }
 
     /// Evaluate for the current batch of entity references.
-    /// Returns T[] with one result per ref in ctx.currentRefs.
+    /// Returns Promise!(T[]) with one result per ref in ctx.currentRefs.
     /// The batch refs are set by MapExpr before evaluating its body.
-    abstract T[] eval(EvalContext ctx);
+    abstract Promise!(T[]) eval(EvalContext ctx);
+
+    /// Evaluate and return result length.
+    override Promise!size_t evalResultLength(EvalContext ctx) {
+        return eval(ctx).then((T[] results) => results.length);
+    }
 
     // =========================================================================
     // Operator Overloading
@@ -205,40 +210,31 @@ interface ConstantInfo {
 }
 
 /// Expression that returns a constant value for all inputs.
-/// When used with a length source (e.g., from opBinary), derives batch size
-/// from that expression. Otherwise falls back to ctx.currentRefs.length.
+/// Batch size is derived from the length source expression.
 class ConstExpr(T) : Expr!T, ConstantInfo {
     private T _value;
-    private ExprBase _lengthSource;  // Expression to derive batch size from
-
-    this(T value) {
-        _value = value;
-    }
+    private ExprBase _lengthSource;
 
     this(T value, ExprBase lengthSource) {
         _value = value;
         _lengthSource = lengthSource;
+        assert(_lengthSource !is null, "ConstExpr requires a length source");
     }
 
     override ExprBase[] dependencies() {
-        // Length source is a dependency for tree traversal
-        return _lengthSource !is null ? [_lengthSource] : [];
+        return [_lengthSource];
     }
 
     override void replaceDependency(size_t index, ExprBase newDep) {
-        if (index == 0 && _lengthSource !is null)
+        if (index == 0)
             _lengthSource = newDep;
     }
 
-    override T[] eval(EvalContext ctx) {
-        // Derive batch size from length source if available
-        size_t count;
-        if (_lengthSource !is null) {
-            count = _lengthSource.evalResultLength(ctx);
-        } else {
-            count = ctx.currentRefs.length;
-        }
-        return std.algorithm.map!(_ => _value)(iota(count)).array;
+    override Promise!(T[]) eval(EvalContext ctx) {
+        auto value = _value;
+        return _lengthSource.evalResultLength(ctx).then((size_t count) {
+            return std.algorithm.map!(_ => value)(iota(count)).array;
+        });
     }
 
     /// Get the constant value (for optimizer inspection)
@@ -257,12 +253,8 @@ class ConstExpr(T) : Expr!T, ConstantInfo {
     }
 }
 
-/// Create a constant expression
-auto constant(T)(T value) {
-    return new ConstExpr!T(value);
-}
-
-/// Create a constant expression that derives its batch size from another expression
+/// Create a constant expression with a length source.
+/// The length source is evaluated to determine how many copies of the constant to produce.
 auto constant(T)(T value, ExprBase lengthSource) {
     return new ConstExpr!T(value, lengthSource);
 }
@@ -328,16 +320,21 @@ class BinaryOpExpr(L, string op, R = L) : Expr!(typeof(mixin("L.init " ~ op ~ " 
         return this;
     }
 
-    override ResultT[] eval(EvalContext ctx) {
-        auto lefts = evalAs!L(_left, ctx);
-        auto rights = evalAs!R(_right, ctx);
+    override Promise!(ResultT[]) eval(EvalContext ctx) {
+        auto left = _left;
+        auto right = _right;
 
-        auto count = lefts.length;
-        ResultT[] result = new ResultT[count];
-        foreach (i; 0 .. count) {
-            result[i] = mixin("lefts[i] " ~ op ~ " rights[i]");
-        }
-        return result;
+        // Evaluate both operands sequentially, then combine
+        return evalAs!L(left, ctx).then((lefts) {
+            return evalAs!R(right, ctx).then((rights) {
+                auto count = lefts.length;
+                ResultT[] result = new ResultT[count];
+                foreach (i; 0 .. count) {
+                    result[i] = mixin("lefts[i] " ~ op ~ " rights[i]");
+                }
+                return result;
+            });
+        });
     }
 
     /// Generate SQL expression for this operation
@@ -392,26 +389,44 @@ class UseExpr(Fn, Exprs...) : Expr!(ReturnType!Fn)
         return this;
     }
 
-    override R[] eval(EvalContext ctx) {
-        // Evaluate all inputs with known types
-        EvaluatedArrays evaluated;
+    override Promise!(R[]) eval(EvalContext ctx) {
+        auto fn = _fn;
+
+        // Build tuple of promises for all inputs
+        alias PromiseTypes = staticMap!(toPromiseArray, InputTypes);
+        Tuple!PromiseTypes promises;
         static foreach (i; 0 .. Exprs.length) {
-            evaluated[i] = evalAs!(InputTypes[i])(_inputs[i], ctx);
+            promises[i] = evalAs!(InputTypes[i])(_inputs[i], ctx);
         }
 
-        // Apply function per-element (derive count from first input)
-        auto count = evaluated[0].length;
-        R[] result = new R[count];
-        foreach (idx; 0 .. count) {
-            // Build args tuple for this index
-            Tuple!InputTypes args;
-            static foreach (i; 0 .. Exprs.length) {
-                args[i] = evaluated[i][idx];
+        // Wait for all, then combine results
+        return all(promises.expand).then((EvaluatedArrays results) {
+            R[] result = new R[results[0].length];
+            foreach (idx; 0 .. results[0].length) {
+                // Build argument tuple and call fn
+                Tuple!InputTypes args;
+                static foreach (i; 0 .. Exprs.length) {
+                    args[i] = results[i][idx];
+                }
+                result[idx] = fn(args.expand);
             }
-            result[idx] = _fn(args.expand);
-        }
-        return result;
+            return result;
+        });
     }
+}
+
+/// Helper to convert T to Promise!(T[])
+private template toPromiseArray(T) {
+    alias toPromiseArray = Promise!(T[]);
+}
+
+/// Generate AliasSeq!(0, 1, 2, ..., N-1) at compile time
+private template staticIota(size_t N) {
+    import std.meta : AliasSeq;
+    static if (N == 0)
+        alias staticIota = AliasSeq!();
+    else
+        alias staticIota = AliasSeq!(staticIota!(N - 1), N - 1);
 }
 
 /// Create a use expression from a callable and expressions
@@ -441,9 +456,9 @@ class EveryItemOfExpr : Expr!Ref {
         // No dependencies to replace
     }
 
-    override Ref[] eval(EvalContext ctx) {
-        // Return the current batch refs set by MapExpr
-        return ctx.currentRefs;
+    override Promise!(Ref[]) eval(EvalContext ctx) {
+        // Return the refs set by our parent MapExpr
+        return resolve(ctx.getCurrentRefs(_parentMap).dup);
     }
 }
 
@@ -493,41 +508,41 @@ class MapExpr(Body) : Expr!(Body.ResultType[]), MapExprInfo
 
     /// Batched eval: evaluates all items at once.
     /// Works correctly for both naive and optimized paths.
-    override R[][] eval(EvalContext ctx) {
+    override Promise!(R[][]) eval(EvalContext ctx) {
+        // Capture for use in closures
+        auto bodyExpr = _body;
+        auto self = this;  // Key for refs map
+
         // 1. Evaluate collection for each parent ref
-        Ref[][] collectionResults = evalAs!(Ref[])(_collection, ctx);
+        return evalAs!(Ref[])(_collection, ctx).then((Ref[][] collectionResults) {
+            // 2. Flatten for batch evaluation
+            Ref[] flatRefs;
+            size_t[] lengths;
+            foreach (group; collectionResults) {
+                lengths ~= group.length;
+                flatRefs ~= group;
+            }
 
-        // 2. Flatten for batch evaluation
-        Ref[] flatRefs;
-        size_t[] lengths;
-        foreach (group; collectionResults) {
-            lengths ~= group.length;
-            flatRefs ~= group;
-        }
+            if (flatRefs.length == 0) {
+                // No items to process - return empty array for each parent
+                return resolve(std.algorithm.map!(_ => cast(R[])[])(iota(collectionResults.length)).array);
+            }
 
-        if (flatRefs.length == 0) {
-            // No items to process - return empty array for each parent
-            return std.algorithm.map!(_ => cast(R[])[])(iota(collectionResults.length)).array;
-        }
+            // 3. Set current refs for this MapExpr (keyed by identity)
+            ctx.setCurrentRefs(self, flatRefs);
 
-        // 3. Save parent refs and set current refs to the flattened collection
-        auto savedRefs = ctx.currentRefs;
-        ctx.currentRefs = flatRefs;
-
-        // 4. Evaluate body with ALL refs at once
-        R[] flatResults = evalAs!R(_body, ctx);
-
-        // 5. Restore parent refs
-        ctx.currentRefs = savedRefs;
-
-        // 6. Regroup to match input structure
-        R[][] result;
-        size_t offset = 0;
-        foreach (len; lengths) {
-            result ~= flatResults[offset .. offset + len];
-            offset += len;
-        }
-        return result;
+            // 4. Evaluate body with ALL refs at once
+            return evalAs!R(bodyExpr, ctx).then((R[] flatResults) {
+                // 5. Regroup to match input structure
+                R[][] result;
+                size_t offset = 0;
+                foreach (len; lengths) {
+                    result ~= flatResults[offset .. offset + len];
+                    offset += len;
+                }
+                return result;
+            });
+        });
     }
 
     // MapExprInfo implementation
@@ -623,43 +638,33 @@ class JsonObjectExpr(Args...) : Expr!JSONValue
         return this;
     }
 
-    override JSONValue[] eval(EvalContext ctx) {
-        // Evaluate all expressions first
-        alias FirstET = ExprTypeAt!0;
-        auto firstValues = evalAs!FirstET(_exprs[0], ctx);
-        auto count = firstValues.length;
+    // Tuple type for all field results
+    private alias FieldArrayTypes = staticMap!(toArray, staticMap!(ExprTypeAt, staticIota!(Args.length / 2)));
 
-        JSONValue[] results = new JSONValue[count];
+    override Promise!(JSONValue[]) eval(EvalContext ctx) {
+        auto exprs = _exprs;
+        auto names = _names;
 
-        // Initialize empty objects
-        foreach (ref r; results) {
-            r = JSONValue.emptyObject;
+        // Build tuple of promises for all fields
+        alias PromiseTypes = staticMap!(toPromiseArray, staticMap!(ExprTypeAt, staticIota!(Args.length / 2)));
+        Tuple!PromiseTypes promises;
+        static foreach (i; 0 .. Args.length / 2) {
+            promises[i] = evalAs!(ExprTypeAt!i)(exprs[i], ctx);
         }
 
-        // Populate first field
-        foreach (idx; 0 .. count) {
-            results[idx][_names[0]] = toJsonValue(firstValues[idx]);
-        }
-
-        // Process remaining name/expr pairs
-        static foreach (i; 1 .. Args.length / 2) {{
-            alias ET = ExprTypeAt!i;
-            string name = _names[i];
-            auto values = evalAs!ET(_exprs[i], ctx);
-
-            // Debug: verify all expressions return same number of results
-            import std.conv : to;
-            assert(values.length == count,
-                "JsonObjectExpr field '" ~ name ~ "' returned " ~
-                values.length.to!string ~ " values but expected " ~ count.to!string ~
-                " (first field '" ~ _names[0] ~ "' had " ~ count.to!string ~ ")");
+        // Wait for all fields, then build JSON objects
+        return all(promises.expand).then((Tuple!FieldArrayTypes results) {
+            auto count = results[0].length;
+            JSONValue[] jsonResults = new JSONValue[count];
 
             foreach (idx; 0 .. count) {
-                results[idx][name] = toJsonValue(values[idx]);
+                jsonResults[idx] = JSONValue.emptyObject;
+                static foreach (i; 0 .. Args.length / 2) {
+                    jsonResults[idx][names[i]] = toJsonValue(results[i][idx]);
+                }
             }
-        }}
-
-        return results;
+            return jsonResults;
+        });
     }
 }
 
@@ -675,138 +680,115 @@ auto jsonObject(Args...)(Args args)
 // Tests
 // ============================================================================
 
-unittest {
-    // Test ConstExpr
-    auto constExpr = constant(42);
-    auto ctx = new EvalContext();
-    ctx.currentRefs = [Ref("Test:1"), Ref("Test:2")];
-    auto result = constExpr.eval(ctx);
-    assert(result == [42, 42]);
-}
+import ae.utils.promise.await : awaitSync;
 
-unittest {
-    // Test UseExpr with mock expressions
-    auto expr1 = constant("Hello");
-    auto expr2 = constant("World");
+/// Helper: expression that returns a fixed array of refs.
+/// Used as a collection source in tests.
+private class MockCollectionExpr : Expr!(Ref[]) {
+    Ref[] _refs;
+    this(Ref[] refs) { _refs = refs; }
 
-    auto combined = use(
-        (string a, string b) => a ~ " " ~ b,
-        expr1,
-        expr2
-    );
+    override ExprBase[] dependencies() { return []; }
+    override void replaceDependency(size_t index, ExprBase newDep) {}
 
-    auto ctx = new EvalContext();
-    ctx.currentRefs = [Ref("Test:1"), Ref("Test:2"), Ref("Test:3")];
-    auto result = combined.eval(ctx);
-    assert(result == ["Hello World", "Hello World", "Hello World"]);
-}
-
-unittest {
-    // Test jsonObject combinator
-    auto nameExpr = constant("Alice");
-    auto ageExpr = constant(30);
-
-    auto obj = jsonObject(
-        "name", nameExpr,
-        "age", ageExpr
-    );
-
-    auto ctx = new EvalContext();
-    ctx.currentRefs = [Ref("Test:1"), Ref("Test:2")];
-    auto result = obj.eval(ctx);
-
-    assert(result.length == 2);
-    assert(result[0]["name"].str == "Alice");
-    assert(result[0]["age"].integer == 30);
-    assert(result[1]["name"].str == "Alice");
-    assert(result[1]["age"].integer == 30);
-}
-
-unittest {
-    // Test MapExpr with constant collection
-    class ConstRefArrayExpr : Expr!(Ref[]) {
-        Ref[] _refs;
-        this(Ref[] refs) { _refs = refs; }
-
-        override ExprBase[] dependencies() { return []; }
-        override void replaceDependency(size_t index, ExprBase newDep) {}
-
-        override Ref[][] eval(EvalContext ctx) {
-            // Root-level collection: return single result for queryRoot
-            return [_refs];
-        }
+    override Promise!(Ref[][]) eval(EvalContext ctx) {
+        return resolve([_refs]);
     }
+}
 
-    // Create a mock entity for GetByIdsExpr
-    struct TestEntity {
-        enum _typeName = "Test";
-        enum _table = "tests";
-    }
+unittest {
+    // Test map with use combinator - extracts node IDs
+    auto collection = new MockCollectionExpr([Ref("Test:1"), Ref("Test:2")]);
 
-    auto collection = new ConstRefArrayExpr([Ref("Test:1"), Ref("Test:2")]);
+    auto query = map!(
+        (Expr!Ref item) => use((Ref r) => r.nodeId, item)
+    )(collection);
 
-    // Map that extracts the node ID as a string
-    auto mapExpr = map!(
-        (Expr!Ref item) => use(
-            (Ref r) => r.nodeId,
-            item
+    auto ctx = new EvalContext();
+    ctx.setCurrentRefs(null, [queryRoot]);
+    auto result = awaitSync(query.eval(ctx));
+
+    assert(result.length == 1);
+    assert(result[0] == ["Test:1", "Test:2"]);
+}
+
+unittest {
+    // Test map with jsonObject - builds structured output
+    auto collection = new MockCollectionExpr([Ref("User:1"), Ref("User:2")]);
+
+    auto query = map!(
+        (Expr!Ref item) => jsonObject(
+            "id", use((Ref r) => r.nodeId, item),
+            "type", use((Ref r) => r.typeName, item)
         )
     )(collection);
 
     auto ctx = new EvalContext();
-    ctx.currentRefs = [queryRoot];  // Set the parent context
+    ctx.setCurrentRefs(null, [queryRoot]);
+    auto result = awaitSync(query.eval(ctx));
 
-    // Evaluate for one parent
-    auto result = mapExpr.eval(ctx);
-    assert(result.length == 1);  // One result per parent
-    assert(result[0] == ["Test:1", "Test:2"]);  // Array of node IDs
+    assert(result.length == 1);
+    assert(result[0].length == 2);
+    assert(result[0][0]["id"].str == "User:1");
+    assert(result[0][0]["type"].str == "User");
+    assert(result[0][1]["id"].str == "User:2");
 }
 
 unittest {
-    // Test string concatenation operator
-    auto first = constant("Hello");
-    auto second = constant("World");
+    // Test string concatenation with literals inside map
+    auto collection = new MockCollectionExpr([Ref("Test:1"), Ref("Test:2")]);
 
-    // expr ~ expr
-    auto combined = first ~ " " ~ second;
+    auto query = map!(
+        (Expr!Ref item) => use((Ref r) => r.typeName, item) ~ ":" ~ use((Ref r) => r.nodeId, item)
+    )(collection);
 
     auto ctx = new EvalContext();
-    ctx.currentRefs = [Ref("Test:1"), Ref("Test:2")];
-    auto result = combined.eval(ctx);
-    assert(result == ["Hello World", "Hello World"]);
+    ctx.setCurrentRefs(null, [queryRoot]);
+    auto result = awaitSync(query.eval(ctx));
+
+    assert(result.length == 1);
+    assert(result[0] == ["Test:Test:1", "Test:Test:2"]);
 }
 
 unittest {
-    // Test arithmetic operators
-    auto a = constant(10);
-    auto b = constant(3);
+    import std.conv : to;
+
+    // Test arithmetic operators with literals inside map
+    auto collection = new MockCollectionExpr([Ref("Test:1"), Ref("Test:2"), Ref("Test:3")]);
+
+    auto query = map!(
+        (Expr!Ref item) {
+            // Use localId parsed to int for arithmetic test
+            auto id = use((Ref r) => r.localId.to!long, item);
+            return id * 10 + 5;
+        }
+    )(collection);
 
     auto ctx = new EvalContext();
-    ctx.currentRefs = [Ref("Test:1")];
+    ctx.setCurrentRefs(null, [queryRoot]);
+    auto result = awaitSync(query.eval(ctx));
 
-    assert((a + b).eval(ctx) == [13]);
-    assert((a - b).eval(ctx) == [7]);
-    assert((a * b).eval(ctx) == [30]);
-    assert((a / b).eval(ctx) == [3]);
-
-    // With literals
-    assert((a + 5).eval(ctx) == [15]);
-    assert((5 + a).eval(ctx) == [15]);
+    assert(result.length == 1);
+    assert(result[0] == [15, 25, 35]);  // (1*10+5), (2*10+5), (3*10+5)
 }
 
 unittest {
-    // Test comparison operators
-    auto a = constant(10);
-    auto b = constant(3);
+    import std.conv : to;
+
+    // Test comparison operators inside map
+    auto collection = new MockCollectionExpr([Ref("Test:5"), Ref("Test:10"), Ref("Test:15")]);
+
+    auto query = map!(
+        (Expr!Ref item) {
+            auto val = use((Ref r) => r.localId.to!long, item);
+            return val.gt(7);  // 5 > 7 = false, 10 > 7 = true, 15 > 7 = true
+        }
+    )(collection);
 
     auto ctx = new EvalContext();
-    ctx.currentRefs = [Ref("Test:1")];
+    ctx.setCurrentRefs(null, [queryRoot]);
+    auto result = awaitSync(query.eval(ctx));
 
-    assert(a.eq(10).eval(ctx) == [true]);
-    assert(a.eq(5).eval(ctx) == [false]);
-    assert(a.ne(5).eval(ctx) == [true]);
-    assert(a.lt(b).eval(ctx) == [false]);
-    assert(a.gt(b).eval(ctx) == [true]);
-    assert(a.le(10).eval(ctx) == [true]);
-    assert(a.ge(10).eval(ctx) == [true]);
+    assert(result.length == 1);
+    assert(result[0] == [false, true, true]);
 }

@@ -5,6 +5,8 @@ import std.array;
 import std.conv;
 import std.json;
 
+import ae.utils.promise.await : awaitSync;
+
 import graphqld2.core;
 import graphqld2.relational;
 
@@ -149,7 +151,7 @@ unittest {
         (Expr!Ref p) => Post.title(p)
     )(getByIds!Post([1, 2], db));
 
-    auto titles = executor.execute(query);
+    auto titles = awaitSync(executor.execute(query));
     assert(titles == ["Hello World", "D Programming"]);
 
     debug(sql) {
@@ -168,7 +170,7 @@ unittest {
         (Expr!Ref p) => Post.summary(p)
     )(getByIds!Post([1, 2], db));
 
-    auto summaries = executor.execute(query);
+    auto summaries = awaitSync(executor.execute(query));
     assert(summaries[0].canFind("Hello World"));
     assert(summaries[0].canFind("Alice Smith"));
     assert(summaries[1].canFind("D Programming"));
@@ -191,7 +193,7 @@ unittest {
         (Expr!Ref p) => Post.html(p)
     )(getByIds!Post([1], db));
 
-    auto htmls = executor.execute(query);
+    auto htmls = awaitSync(executor.execute(query));
 
     assert(htmls.length == 1);
     assert(htmls[0].canFind("Hello World"));
@@ -224,7 +226,7 @@ unittest {
         )
     )(getByIds!User([1, 2], db));
 
-    auto result = executor.execute(query);
+    auto result = awaitSync(executor.execute(query));
 
     assert(result.length == 2);
 
@@ -266,7 +268,7 @@ unittest {
         )
     )(getByIds!User([1, 2], db));
 
-    auto result = executor.execute(query);
+    auto result = awaitSync(executor.execute(query));
 
     assert(result.length == 2);
 
@@ -313,7 +315,7 @@ unittest {
         )
     )(Query.users(db));
 
-    auto result = executor.execute(query);
+    auto result = awaitSync(executor.execute(query));
 
     assert(result.length == 3);  // All users
     assert(result[0]["firstName"].str == "Alice");
@@ -346,7 +348,7 @@ unittest {
         )
     )(Query.users(db));
 
-    auto result = executor.execute(query);
+    auto result = awaitSync(executor.execute(query));
 
     assert(result.length == 3);
     assert(result[0]["fullName"].str == "Alice Smith");
@@ -385,7 +387,7 @@ unittest {
         )
     )(Query.users(db));
 
-    auto result = executor.execute(query);
+    auto result = awaitSync(executor.execute(query));
 
     assert(result.length == 3);
 
