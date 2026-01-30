@@ -72,26 +72,31 @@ template getEntityFields(Entity) {
     enum getEntityFields = () {
         FieldInfo[] fields;
 
-        // Always add id field (non-nullable)
-        fields ~= FieldInfo("id", "ID!", false, FieldKind.column);
-
         // Introspect all members looking for field metadata
         static foreach (member; __traits(allMembers, Entity)) {{
             // Check for column fields (_colField_*)
             static if (member.length > 10 && member[0..10] == "_colField_") {
                 alias FieldMeta = __traits(getMember, Entity, member);
-                // Check if column has isNullable metadata
-                static if (__traits(hasMember, FieldMeta, "isNullable")) {
-                    enum colNullable = FieldMeta.isNullable;
-                } else {
+
+                // Check if column is a primary key - use GraphQL ID type
+                static if (__traits(hasMember, FieldMeta, "isPrimaryKey") && FieldMeta.isPrimaryKey) {
+                    enum gqlType = "ID!";
                     enum colNullable = false;
-                }
-                // Use base type name (without !) if nullable, full type name otherwise
-                static if (colNullable) {
-                    enum gqlType = graphqlBaseTypeName!(FieldMeta.type);
                 } else {
-                    enum gqlType = graphqlTypeName!(FieldMeta.type);
+                    // Check if column has isNullable metadata
+                    static if (__traits(hasMember, FieldMeta, "isNullable")) {
+                        enum colNullable = FieldMeta.isNullable;
+                    } else {
+                        enum colNullable = false;
+                    }
+                    // Use base type name (without !) if nullable, full type name otherwise
+                    static if (colNullable) {
+                        enum gqlType = graphqlBaseTypeName!(FieldMeta.type);
+                    } else {
+                        enum gqlType = graphqlTypeName!(FieldMeta.type);
+                    }
                 }
+
                 fields ~= FieldInfo(
                     FieldMeta.name,
                     gqlType,
@@ -289,12 +294,43 @@ string generateQuerySDL(Query)() {
     return result;
 }
 
+/// Check if any field in an entity uses a custom scalar type
+private template usesCustomScalar(string scalarName, Entity) {
+    enum usesCustomScalar = () {
+        foreach (field; getEntityFields!Entity) {
+            if (field.graphqlType.length >= scalarName.length) {
+                // Check if the type contains the scalar name
+                import std.algorithm : canFind;
+                if (field.graphqlType.canFind(scalarName)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }();
+}
+
+/// Check if any entity uses a custom scalar
+private template anyEntityUsesScalar(string scalarName, Entities...) {
+    static if (Entities.length == 0) {
+        enum anyEntityUsesScalar = false;
+    } else {
+        enum anyEntityUsesScalar = usesCustomScalar!(scalarName, Entities[0])
+            || anyEntityUsesScalar!(scalarName, Entities[1..$]);
+    }
+}
+
 /// Generate complete GraphQL schema SDL by discovering all types from Query
 template generateSchemaSDL(Query) {
     alias AllTypes = getAllEntityTypes!Query;
 
     enum generateSchemaSDL = () {
         string result;
+
+        // Declare custom scalars if used
+        static if (anyEntityUsesScalar!("Int64", AllTypes)) {
+            result ~= "scalar Int64\n\n";
+        }
 
         // Generate Query type
         result ~= generateQuerySDL!Query();
