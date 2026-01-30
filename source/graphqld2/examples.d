@@ -395,11 +395,12 @@ unittest {
 
     auto result = awaitSync(executor.execute(query));
 
-    assert(result.length == 3);  // All users
-    assert(result[0]["firstName"].str == "Alice");
-    assert(result[0]["email"].str == "alice@example.com");
-    assert(result[1]["firstName"].str == "Bob");
-    assert(result[2]["firstName"].str == "Carol");
+    auto users = result["users"].array;
+    assert(users.length == 3);  // All users
+    assert(users[0]["firstName"].str == "Alice");
+    assert(users[0]["email"].str == "alice@example.com");
+    assert(users[1]["firstName"].str == "Bob");
+    assert(users[2]["firstName"].str == "Carol");
 
     debug(sql) {
         writeln("\n=== Test: Basic query with scalar fields ===");
@@ -426,13 +427,14 @@ unittest {
 
     auto result = awaitSync(executor.execute(query));
 
-    assert(result.length == 3);
-    assert(result[0]["fullName"].str == "Alice Smith");
-    assert(result[0]["posts"].array.length == 2);  // Alice has posts 1 and 3
-    assert(result[1]["fullName"].str == "Bob Jones");
-    assert(result[1]["posts"].array.length == 1);  // Bob has post 2
-    assert(result[2]["fullName"].str == "Carol White");
-    assert(result[2]["posts"].array.length == 0);  // Carol has no posts
+    auto users = result["users"].array;
+    assert(users.length == 3);
+    assert(users[0]["fullName"].str == "Alice Smith");
+    assert(users[0]["posts"].array.length == 2);  // Alice has posts 1 and 3
+    assert(users[1]["fullName"].str == "Bob Jones");
+    assert(users[1]["posts"].array.length == 1);  // Bob has post 2
+    assert(users[2]["fullName"].str == "Carol White");
+    assert(users[2]["posts"].array.length == 0);  // Carol has no posts
 
     debug(sql) {
         writeln("\n=== Test: Query with computed field ===");
@@ -462,14 +464,15 @@ unittest {
 
     auto result = awaitSync(executor.execute(query));
 
-    assert(result.length == 3);
+    auto users = result["users"].array;
+    assert(users.length == 3);
 
     // Alice has 2 posts
-    assert(result[0]["fullName"].str == "Alice Smith");
-    assert(result[0]["posts"].array.length == 2);
+    assert(users[0]["fullName"].str == "Alice Smith");
+    assert(users[0]["posts"].array.length == 2);
 
     // Alice's first post (Hello World) has 2 comments
-    auto aliceFirstPost = result[0]["posts"].array[0];
+    auto aliceFirstPost = users[0]["posts"].array[0];
     assert(aliceFirstPost["title"].str == "Hello World");
     assert(aliceFirstPost["comments"].array.length == 2);
 
@@ -497,11 +500,12 @@ unittest {
 
     auto result = awaitSync(executor.execute(query));
 
-    assert(result.length == 3);
-    assert(result[0]["firstName"].str == "Alice");
-    assert(result[0]["greeting"].str == "Hello Alice!");
-    assert(result[1]["greeting"].str == "Hello Bob!");
-    assert(result[2]["greeting"].str == "Hello Carol!");
+    auto users = result["users"].array;
+    assert(users.length == 3);
+    assert(users[0]["firstName"].str == "Alice");
+    assert(users[0]["greeting"].str == "Hello Alice!");
+    assert(users[1]["greeting"].str == "Hello Bob!");
+    assert(users[2]["greeting"].str == "Hello Carol!");
 
     debug(sql) {
         writeln("\n=== Test: Computed field with arguments ===");

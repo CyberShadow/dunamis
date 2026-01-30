@@ -19,8 +19,8 @@ import graphqld2.graphql.schema;
 // ============================================================================
 
 /// Result type for compiled GraphQL queries.
-/// All GraphQL queries evaluate to an array of JSON objects.
-alias GraphQLResult = Expr!(JSONValue[]);
+/// A GraphQL query evaluates to a single JSON object containing all root fields.
+alias GraphQLResult = Expr!JSONValue;
 
 /// Compiles a GraphQL query string into an executable Expr tree.
 ///
@@ -337,25 +337,33 @@ T extractArg(T, alias Default)(Arguments args, string name) {
 // ============================================================================
 
 /// Compile the root selection set (fields from Query type)
-GraphQLResult compileRootSelectionSet(Query, DataSource)(SelectionSet ss, DataSource db) {
+DynamicJsonObjectExpr compileRootSelectionSet(Query, DataSource)(SelectionSet ss, DataSource db) {
     auto selections = iterateSelections(ss);
 
     if (selections.length == 0) {
         throw new CompilerException("Empty selection set");
     }
 
-    if (selections.length == 1 && selections[0].ruleSelection == SelectionEnum.Field) {
-        // Single root field - compile it directly
-        return compileRootField!(Query, DataSource)(selections[0].field, db);
+    string[] fieldNames;
+    ExprBase[] fieldExprs;
+
+    foreach (sel; selections) {
+        if (sel.ruleSelection != SelectionEnum.Field) continue;
+        auto field = sel.field;
+        fieldNames ~= getOutputName(field);
+        fieldExprs ~= compileRootFieldExpr!(Query, DataSource)(field, db);
     }
 
-    // Multiple root fields - combine into a JSON object
-    // This is unusual for GraphQL but we support it
-    throw new CompilerException("Multiple root fields not yet supported");
+    if (fieldNames.length == 0) {
+        throw new CompilerException("No fields in root selection set");
+    }
+
+    return buildDynamicJsonObject(fieldNames, fieldExprs);
 }
 
-/// Compile a single root field (e.g., "users" from Query)
-GraphQLResult compileRootField(Query, DataSource)(Field field, DataSource db) {
+/// Compile a single root field expression (e.g., "users" from Query)
+/// Returns the expression for this field's value (typically a MapExpr producing JSONValue[])
+ExprBase compileRootFieldExpr(Query, DataSource)(Field field, DataSource db) {
     auto fieldName = getFieldName(field);
 
     // Look up the field in Query type at compile time
@@ -543,14 +551,15 @@ unittest {
 
     // Execute
     auto executor = new Executor();
-    auto results = awaitSync(executor.execute(query));
+    auto result = awaitSync(executor.execute(query));
 
-    // Verify results (executor returns JSONValue[])
-    assert(results.length == 2);
-    assert(results[0]["firstName"].str == "Alice");
-    assert(results[0]["lastName"].str == "Smith");
-    assert(results[1]["firstName"].str == "Bob");
-    assert(results[1]["lastName"].str == "Jones");
+    // Verify results (executor returns JSONValue with root fields)
+    auto users = result["users"].array;
+    assert(users.length == 2);
+    assert(users[0]["firstName"].str == "Alice");
+    assert(users[0]["lastName"].str == "Smith");
+    assert(users[1]["firstName"].str == "Bob");
+    assert(users[1]["lastName"].str == "Jones");
 }
 
 unittest {
@@ -586,10 +595,11 @@ unittest {
     auto query = compileQuery!Query(`{ users { fullName } }`, db);
 
     auto executor = new Executor();
-    auto results = awaitSync(executor.execute(query));
+    auto result = awaitSync(executor.execute(query));
 
-    assert(results.length == 1);
-    assert(results[0]["fullName"].str == "Alice Smith");
+    auto users = result["users"].array;
+    assert(users.length == 1);
+    assert(users[0]["fullName"].str == "Alice Smith");
 }
 
 unittest {
@@ -632,20 +642,21 @@ unittest {
     auto query = compileQuery!Query(`{ users { firstName, posts { title } } }`, db);
 
     auto executor = new Executor();
-    auto results = awaitSync(executor.execute(query));
+    auto result = awaitSync(executor.execute(query));
 
-    assert(results.length == 2);
+    auto users = result["users"].array;
+    assert(users.length == 2);
 
     // Alice has 2 posts
-    assert(results[0]["firstName"].str == "Alice");
-    assert(results[0]["posts"].array.length == 2);
-    assert(results[0]["posts"][0]["title"].str == "Hello");
-    assert(results[0]["posts"][1]["title"].str == "World");
+    assert(users[0]["firstName"].str == "Alice");
+    assert(users[0]["posts"].array.length == 2);
+    assert(users[0]["posts"][0]["title"].str == "Hello");
+    assert(users[0]["posts"][1]["title"].str == "World");
 
     // Bob has 1 post
-    assert(results[1]["firstName"].str == "Bob");
-    assert(results[1]["posts"].array.length == 1);
-    assert(results[1]["posts"][0]["title"].str == "Test");
+    assert(users[1]["firstName"].str == "Bob");
+    assert(users[1]["posts"].array.length == 1);
+    assert(users[1]["posts"][0]["title"].str == "Test");
 }
 
 unittest {
@@ -687,25 +698,88 @@ unittest {
     // Test with required argument
     auto query1 = compileQuery!Query(`{ users { greeting(prefix: "Hello") } }`, db);
     auto executor = new Executor();
-    auto results1 = awaitSync(executor.execute(query1));
+    auto result1 = awaitSync(executor.execute(query1));
 
-    assert(results1.length == 2);
-    assert(results1[0]["greeting"].str == "Hello Alice");
-    assert(results1[1]["greeting"].str == "Hello Bob");
+    auto users1 = result1["users"].array;
+    assert(users1.length == 2);
+    assert(users1[0]["greeting"].str == "Hello Alice");
+    assert(users1[1]["greeting"].str == "Hello Bob");
 
     // Test with optional argument using default
     auto query2 = compileQuery!Query(`{ users { greetingWithSuffix(prefix: "Hi") } }`, db);
-    auto results2 = awaitSync(executor.execute(query2));
+    auto result2 = awaitSync(executor.execute(query2));
 
-    assert(results2.length == 2);
-    assert(results2[0]["greetingWithSuffix"].str == "Hi Alice!");
-    assert(results2[1]["greetingWithSuffix"].str == "Hi Bob!");
+    auto users2 = result2["users"].array;
+    assert(users2.length == 2);
+    assert(users2[0]["greetingWithSuffix"].str == "Hi Alice!");
+    assert(users2[1]["greetingWithSuffix"].str == "Hi Bob!");
 
     // Test with optional argument overridden
     auto query3 = compileQuery!Query(`{ users { greetingWithSuffix(prefix: "Hey", suffix: "?") } }`, db);
-    auto results3 = awaitSync(executor.execute(query3));
+    auto result3 = awaitSync(executor.execute(query3));
 
-    assert(results3.length == 2);
-    assert(results3[0]["greetingWithSuffix"].str == "Hey Alice?");
-    assert(results3[1]["greetingWithSuffix"].str == "Hey Bob?");
+    auto users3 = result3["users"].array;
+    assert(users3.length == 2);
+    assert(users3[0]["greetingWithSuffix"].str == "Hey Alice?");
+    assert(users3[1]["greetingWithSuffix"].str == "Hey Bob?");
+}
+
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import graphqld2.core;
+    import graphqld2.relational.schema;
+    import graphqld2.relational.demo;
+    import graphqld2.relational.eval_context;
+
+    // Test multiple root fields
+    static struct Post {
+        mixin DemoEntity!"posts";
+        mixin Col!("title", string);
+    }
+
+    static struct User {
+        mixin DemoEntity!"users";
+        mixin Col!("firstName", string);
+    }
+
+    alias DB = MockDB!();
+
+    static struct Query {
+        mixin Table!(DB, User, "users");
+        mixin Table!(DB, Post, "posts");
+    }
+
+    auto db = new DB();
+    db.setTableData("users", `[
+        {"id": 1, "first_name": "Alice"},
+        {"id": 2, "first_name": "Bob"}
+    ]`);
+    db.setTableData("posts", `[
+        {"id": 1, "title": "Hello"},
+        {"id": 2, "title": "World"},
+        {"id": 3, "title": "Test"}
+    ]`);
+
+    // Query with multiple root fields
+    auto query = compileQuery!Query(`{
+        users { firstName }
+        posts { title }
+    }`, db);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query));
+
+    // Result should have both users and posts
+    auto users = result["users"].array;
+    auto posts = result["posts"].array;
+
+    assert(users.length == 2);
+    assert(users[0]["firstName"].str == "Alice");
+    assert(users[1]["firstName"].str == "Bob");
+
+    assert(posts.length == 3);
+    assert(posts[0]["title"].str == "Hello");
+    assert(posts[1]["title"].str == "World");
+    assert(posts[2]["title"].str == "Test");
 }
