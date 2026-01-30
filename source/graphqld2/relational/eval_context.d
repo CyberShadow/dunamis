@@ -292,9 +292,29 @@ class RelationalEvalContext {
     /// Pre-fetched query results, keyed by QueryNode ID
     private QueryResult[int] _queryResults;
 
+    /// In-progress prefetch promises, keyed by QueryNode ID
+    /// Used to prevent duplicate fetches when multiple expressions depend on the same node
+    private Promise!(Ref[][])[int] _pendingPrefetch;
+
     /// Store results from a QueryNode execution
     void storeQueryResult(int queryNodeId, QueryResult result) {
         _queryResults[queryNodeId] = result;
+        // Clear pending promise once result is stored
+        _pendingPrefetch.remove(queryNodeId);
+    }
+
+    /// Get or create a pending prefetch promise
+    /// Returns existing promise if one is in progress, null otherwise
+    Promise!(Ref[][]) getPendingPrefetch(int queryNodeId) {
+        if (auto p = queryNodeId in _pendingPrefetch) {
+            return *p;
+        }
+        return null;
+    }
+
+    /// Store a pending prefetch promise
+    void storePendingPrefetch(int queryNodeId, Promise!(Ref[][]) promise) {
+        _pendingPrefetch[queryNodeId] = promise;
     }
 
     /// Check if we have results for a query node

@@ -55,6 +55,11 @@ class PrefetchExpr : Expr!(Ref[]) {
             return resolve([relCtx.getQueryResult(_node.id).allRefs()]);
         }
 
+        // Check if fetch is already in progress (prevents duplicate fetches)
+        if (auto pending = relCtx.getPendingPrefetch(_node.id)) {
+            return pending;
+        }
+
         // Ensure parent is fetched first
         Promise!void parentReady;
         if (_parentPrefetch !is null) {
@@ -66,7 +71,7 @@ class PrefetchExpr : Expr!(Ref[]) {
         // Capture node for use in closure
         auto node = _node;
 
-        return parentReady.then(() {
+        auto promise = parentReady.then(() {
             // Get parent result for child nodes
             QueryResult parentResult = null;
             if (node.parent !is null) {
@@ -79,6 +84,10 @@ class PrefetchExpr : Expr!(Ref[]) {
             relCtx.storeQueryResult(node.id, result);
             return [result.allRefs()];
         });
+
+        // Cache the promise to prevent duplicate fetches
+        relCtx.storePendingPrefetch(node.id, promise);
+        return promise;
     }
 
     @property QueryNode node() { return _node; }
