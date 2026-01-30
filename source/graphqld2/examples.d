@@ -29,6 +29,7 @@ struct Query {
     mixin Table!(DB, Comment, "comments");
 }
 
+
 // ============================================================================
 // Input Types - Structs used as computed field arguments
 // ============================================================================
@@ -172,8 +173,15 @@ struct Comment {
 }
 
 // ============================================================================
-// Test with mock database
+// Expression Tree Tests (Low-Level API)
 // ============================================================================
+//
+// These tests demonstrate the low-level expression tree API, which provides
+// full control over query construction. Use this API when you need:
+// - Features not yet supported by the compiler (BelongsTo, field arguments)
+// - Direct SQL verification
+// - Complex computed fields
+// - Custom query patterns (getByIds, etc.)
 
 /// Helper to create a mock database with sample data.
 /// Returns a DebugSqlDB!() that prints SQL when run with -d=sql
@@ -363,31 +371,27 @@ unittest {
 }
 
 // ============================================================================
-// Query Root Pattern Tests
+// High-Level GraphQL Query Tests (using compiler)
 // ============================================================================
+//
+// These tests demonstrate the library from an end-user perspective,
+// using compileQuery to execute GraphQL queries.
 
-// Test using Query root - mirrors GraphQL query structure
+// Test: Basic query with scalar fields
 unittest {
     import std.stdio : writeln;
+    import graphqld2.graphql : compileQuery;
 
     auto db = createMockDB();
     auto executor = new Executor();
 
-    // GraphQL equivalent:
-    // query {
-    //   users {
-    //     firstName
-    //     lastName
-    //     email
-    //   }
-    // }
-    auto query = map!(
-        (RefExpr!User user) => jsonObject(
-            "firstName", user.firstName,
-            "lastName", user.lastName,
-            "email", user.email
-        )
-    )(Query.users(db));
+    auto query = compileQuery!Query(`{
+        users {
+            firstName
+            lastName
+            email
+        }
+    }`, db);
 
     auto result = awaitSync(executor.execute(query));
 
@@ -398,29 +402,27 @@ unittest {
     assert(result[2]["firstName"].str == "Carol");
 
     debug(sql) {
-        writeln("\n=== Test: Query.users (getAll) ===");
+        writeln("\n=== Test: Basic query with scalar fields ===");
         db.printSQL();
     }
 }
 
-// Test nested query from Query root - simpler version first
+// Test: Query with computed field (fullName)
 unittest {
     import std.stdio : writeln;
+    import graphqld2.graphql : compileQuery;
 
     auto db = createMockDB();
     auto executor = new Executor();
 
-    // Simpler: users -> posts (2 levels)
-    auto query = map!(
-        (RefExpr!User user) => jsonObject(
-            "fullName", user.fullName,
-            "posts", map!(
-                (RefExpr!Post post) => jsonObject(
-                    "title", post.title
-                )
-            )(user.posts)
-        )
-    )(Query.users(db));
+    auto query = compileQuery!Query(`{
+        users {
+            fullName
+            posts {
+                title
+            }
+        }
+    }`, db);
 
     auto result = awaitSync(executor.execute(query));
 
@@ -433,33 +435,30 @@ unittest {
     assert(result[2]["posts"].array.length == 0);  // Carol has no posts
 
     debug(sql) {
-        writeln("\n=== Test: Query.users -> posts (2 levels) ===");
+        writeln("\n=== Test: Query with computed field ===");
         db.printSQL();
     }
 }
 
-// Test 3-level nesting: users -> posts -> comments
+// Test: 3-level nesting (users -> posts -> comments)
 unittest {
     import std.stdio : writeln;
+    import graphqld2.graphql : compileQuery;
 
     auto db = createMockDB();
     auto executor = new Executor();
 
-    auto query = map!(
-        (RefExpr!User user) => jsonObject(
-            "fullName", user.fullName,
-            "posts", map!(
-                (RefExpr!Post post) => jsonObject(
-                    "title", post.title,
-                    "comments", map!(
-                        (RefExpr!Comment comment) => jsonObject(
-                            "body", comment.body_
-                        )
-                    )(post.comments)
-                )
-            )(user.posts)
-        )
-    )(Query.users(db));
+    auto query = compileQuery!Query(`{
+        users {
+            fullName
+            posts {
+                title
+                comments {
+                    body
+                }
+            }
+        }
+    }`, db);
 
     auto result = awaitSync(executor.execute(query));
 
@@ -475,7 +474,7 @@ unittest {
     assert(aliceFirstPost["comments"].array.length == 2);
 
     debug(sql) {
-        writeln("\n=== Test: Query.users -> posts -> comments (3 levels) ===");
+        writeln("\n=== Test: 3-level nesting (users -> posts -> comments) ===");
         db.printSQL();
     }
 }
@@ -762,3 +761,4 @@ unittest {
     assert(hasId, "Should have id column");
     assert(hasFirstName, "Should have first_name column");
 }
+

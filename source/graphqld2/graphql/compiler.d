@@ -18,6 +18,10 @@ import graphqld2.graphql.schema;
 // Query Compiler
 // ============================================================================
 
+/// Result type for compiled GraphQL queries.
+/// All GraphQL queries evaluate to an array of JSON objects.
+alias GraphQLResult = Expr!(JSONValue[]);
+
 /// Compiles a GraphQL query string into an executable Expr tree.
 ///
 /// The compiler uses compile-time reflection on the Query type to look up
@@ -34,7 +38,7 @@ import graphqld2.graphql.schema;
 /// auto query = compileQuery!Query(`{ users { firstName, lastName } }`, db);
 /// auto result = executor.execute(query);
 /// ---
-auto compileQuery(Query, DataSource)(string queryString, DataSource db) {
+GraphQLResult compileQuery(Query, DataSource)(string queryString, DataSource db) {
     // Parse the GraphQL query
     auto lexer = Lexer(queryString);
     auto parser = Parser(lexer);
@@ -154,7 +158,7 @@ auto iterateArguments(Arguments args) @safe {
 // ============================================================================
 
 /// Compile the root selection set (fields from Query type)
-auto compileRootSelectionSet(Query, DataSource)(SelectionSet ss, DataSource db) {
+GraphQLResult compileRootSelectionSet(Query, DataSource)(SelectionSet ss, DataSource db) {
     auto selections = iterateSelections(ss);
 
     if (selections.length == 0) {
@@ -172,7 +176,7 @@ auto compileRootSelectionSet(Query, DataSource)(SelectionSet ss, DataSource db) 
 }
 
 /// Compile a single root field (e.g., "users" from Query)
-auto compileRootField(Query, DataSource)(Field field, DataSource db) {
+GraphQLResult compileRootField(Query, DataSource)(Field field, DataSource db) {
     auto fieldName = getFieldName(field);
 
     // Look up the field in Query type at compile time
@@ -203,19 +207,19 @@ auto compileRootField(Query, DataSource)(Field field, DataSource db) {
 // Selection Set Compilation (for entity types)
 // ============================================================================
 
-/// Compile a selection set into a MapExpr with JsonObjectExpr body
-auto compileMapExpr(Entity, Coll)(Coll collection, SelectionSet ss) {
+/// Compile a selection set into a MapExpr with DynamicJsonObjectExpr body.
+/// Returns Expr!(JSONValue[]) which is the result of mapping over the collection.
+/// Note: Explicit return type breaks circular template instantiation.
+MapExpr!(Entity, DynamicJsonObjectExpr) compileMapExpr(Entity, Coll)(Coll collection, SelectionSet ss) {
     import graphqld2.core.expr : Expr, map;
 
     return map!(
-        (Expr!Entity entity) {
-            return compileSelectionSetBody!Entity(entity, ss);
-        }
+        (Expr!Entity entity) => compileSelectionSetBody!Entity(entity, ss)
     )(collection);
 }
 
 /// Compile the body of a selection set (the fields to extract)
-auto compileSelectionSetBody(Entity)(Expr!Entity entityRef, SelectionSet ss) {
+DynamicJsonObjectExpr compileSelectionSetBody(Entity)(Expr!Entity entityRef, SelectionSet ss) {
     auto selections = iterateSelections(ss);
     if (selections.length == 0) {
         throw new CompilerException("Empty selection set for " ~ Entity._typeName);
@@ -226,7 +230,7 @@ auto compileSelectionSetBody(Entity)(Expr!Entity entityRef, SelectionSet ss) {
 }
 
 /// Compile selected fields into a jsonObject call
-auto compileFieldsToJsonObject(Entity)(Expr!Entity entityRef, Selection[] selections) {
+DynamicJsonObjectExpr compileFieldsToJsonObject(Entity)(Expr!Entity entityRef, Selection[] selections) {
     // Collect field expressions
     ExprBase[] fieldExprs;
     string[] fieldNames;
@@ -246,7 +250,7 @@ auto compileFieldsToJsonObject(Entity)(Expr!Entity entityRef, Selection[] select
 }
 
 /// Build a JSON object from runtime field names and expressions
-auto buildDynamicJsonObject(string[] names, ExprBase[] exprs) {
+DynamicJsonObjectExpr buildDynamicJsonObject(string[] names, ExprBase[] exprs) {
     import graphqld2.core.expr : DynamicJsonObjectExpr;
     return new DynamicJsonObjectExpr(names, exprs);
 }
@@ -258,9 +262,12 @@ ExprBase compileFieldAccess(Entity)(Expr!Entity entityRef, Field field) {
     // Look up field in entity at compile time
     // Check columns, relationships, and computed fields
     static foreach (member; __traits(allMembers, Entity)) {{
-        // Skip internal Col mixin helper symbols (they conflict when multiple Col mixins are used)
+        // Skip internal mixin helper symbols (they conflict when multiple mixins are used)
         static if (member.length >= 5 && member[0..5] == "_Col_") {
             // Skip _Col_IsForeignKey, _Col_IsNullable, etc.
+        }
+        else static if (member.length >= 11 && member[0..11] == "_BelongsTo_") {
+            // Skip _BelongsTo_FkMeta, _BelongsTo_Parent, etc.
         }
         else static if (member.length > 10 && member[0..10] == "_colField_") {
             alias FieldMeta = __traits(getMember, Entity, member);
@@ -289,22 +296,27 @@ ExprBase compileFieldAccess(Entity)(Expr!Entity entityRef, Field field) {
             enum gqlName = getGqlName!(FieldMeta, FieldMeta.name);
 
             if (fieldName == gqlName) {
-                // BelongsTo relationship - compile nested selection
+                // BelongsTo relationship - compile nested selection for single parent entity
                 if (field.ss is null) {
                     throw new CompilerException("Relationship field '" ~ fieldName ~ "' requires a selection set");
                 }
                 auto relExpr = __traits(getMember, Entity, FieldMeta.name)(entityRef);
-                return compileMapExpr!(FieldMeta.parentType)(relExpr, field.ss);
+                // BelongsTo returns Expr!ParentEntity (single entity), not a collection
+                return compileSelectionSetBody!(FieldMeta.parentType)(relExpr, field.ss);
             }
         }
         else static if (isComputedField!(Entity, member, __traits(getMember, Entity, member))) {
-            enum gqlName = getGqlName!(__traits(getMember, Entity, member), member);
+            // Check if this computed field can be called without additional arguments
+            alias fn = __traits(getMember, Entity, member);
+            static if (__traits(compiles, fn(entityRef))) {
+                enum gqlName = getGqlName!(fn, member);
 
-            if (fieldName == gqlName) {
-                // Computed field
-                // TODO: Handle arguments
-                return __traits(getMember, Entity, member)(entityRef);
+                if (fieldName == gqlName) {
+                    // Computed field callable without extra arguments
+                    return fn(entityRef);
+                }
             }
+            // Skip computed fields that require arguments (not yet supported)
         }
     }}
 
