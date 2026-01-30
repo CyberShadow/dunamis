@@ -479,6 +479,36 @@ unittest {
     }
 }
 
+// Test: Computed field with arguments
+unittest {
+    import std.stdio : writeln;
+    import graphqld2.graphql : compileQuery;
+
+    auto db = createMockDB();
+    auto executor = new Executor();
+
+    // User.greeting takes (prefix: String!, suffix: String = "!")
+    auto query = compileQuery!Query(`{
+        users {
+            firstName
+            greeting(prefix: "Hello")
+        }
+    }`, db);
+
+    auto result = awaitSync(executor.execute(query));
+
+    assert(result.length == 3);
+    assert(result[0]["firstName"].str == "Alice");
+    assert(result[0]["greeting"].str == "Hello Alice!");
+    assert(result[1]["greeting"].str == "Hello Bob!");
+    assert(result[2]["greeting"].str == "Hello Carol!");
+
+    debug(sql) {
+        writeln("\n=== Test: Computed field with arguments ===");
+        db.printSQL();
+    }
+}
+
 // Test SQL push-down for computed fullName field
 unittest {
     import std.stdio : writeln;

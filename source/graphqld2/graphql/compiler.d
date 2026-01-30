@@ -154,6 +154,185 @@ auto iterateArguments(Arguments args) @safe {
 }
 
 // ============================================================================
+// Argument Value Extraction
+// ============================================================================
+
+/// Find an argument by name and return its Value node, or null if not found
+Value findArgumentValue(Arguments args, string name) {
+    foreach (arg; iterateArguments(args)) {
+        if (arg.name.value == name) {
+            if (arg.vv !is null && arg.vv.val !is null) {
+                return arg.vv.val;
+            }
+        }
+    }
+    return null;
+}
+
+/// Extract a string value from a GraphQL Value node
+string extractString(Value val) {
+    import graphql.ast : ValueEnum;
+    if (val is null) return null;
+    if (val.ruleSelection == ValueEnum.STR) {
+        return val.tok.value;
+    }
+    throw new CompilerException("Expected string argument, got " ~ val.ruleSelection.to!string);
+}
+
+/// Extract a long value from a GraphQL Value node
+long extractLong(Value val) {
+    import graphql.ast : ValueEnum;
+    if (val is null) throw new CompilerException("Missing required integer argument");
+    if (val.ruleSelection == ValueEnum.INT) {
+        return val.tok.value.to!long;
+    }
+    throw new CompilerException("Expected integer argument, got " ~ val.ruleSelection.to!string);
+}
+
+/// Extract a double value from a GraphQL Value node
+double extractDouble(Value val) {
+    import graphql.ast : ValueEnum;
+    if (val is null) throw new CompilerException("Missing required float argument");
+    if (val.ruleSelection == ValueEnum.FLOAT) {
+        return val.tok.value.to!double;
+    }
+    if (val.ruleSelection == ValueEnum.INT) {
+        return val.tok.value.to!double;  // Allow int where float expected
+    }
+    throw new CompilerException("Expected float argument, got " ~ val.ruleSelection.to!string);
+}
+
+/// Extract a bool value from a GraphQL Value node
+bool extractBool(Value val) {
+    import graphql.ast : ValueEnum;
+    if (val is null) throw new CompilerException("Missing required boolean argument");
+    if (val.ruleSelection == ValueEnum.T) return true;
+    if (val.ruleSelection == ValueEnum.F) return false;
+    throw new CompilerException("Expected boolean argument, got " ~ val.ruleSelection.to!string);
+}
+
+/// Check if a Value node is null
+bool isNullValue(Value val) {
+    import graphql.ast : ValueEnum;
+    return val is null || val.ruleSelection == ValueEnum.N;
+}
+
+/// Extract a typed value from a GraphQL Value node
+T extractValue(T)(Value val, T defaultValue = T.init) {
+    import graphql.ast : ValueEnum;
+
+    if (val is null || val.ruleSelection == ValueEnum.N) {
+        return defaultValue;
+    }
+
+    static if (is(T == string)) {
+        return extractString(val);
+    } else static if (is(T == long) || is(T == int)) {
+        return cast(T) extractLong(val);
+    } else static if (is(T == double) || is(T == float)) {
+        return cast(T) extractDouble(val);
+    } else static if (is(T == bool)) {
+        return extractBool(val);
+    } else static if (is(T == Nullable!U, U)) {
+        if (isNullValue(val)) {
+            return T.init;  // null
+        }
+        return T(extractValue!U(val));
+    } else {
+        static assert(false, "Unsupported argument type: " ~ T.stringof);
+    }
+}
+
+// ============================================================================
+// Computed Field Invocation
+// ============================================================================
+
+/// Check if a type is a supported scalar argument type
+template isSupportedArgType(T) {
+    static if (is(T == string) || is(T == long) || is(T == int) ||
+               is(T == double) || is(T == float) || is(T == bool)) {
+        enum isSupportedArgType = true;
+    } else static if (is(T == Nullable!U, U)) {
+        enum isSupportedArgType = isSupportedArgType!U;
+    } else {
+        enum isSupportedArgType = false;
+    }
+}
+
+/// Check if all argument types of a function are supported
+template allArgTypesSupported(alias fn) {
+    import std.traits : Parameters;
+    alias Params = Parameters!fn;
+
+    enum allArgTypesSupported = () {
+        static foreach (i; 1 .. Params.length) {
+            if (!isSupportedArgType!(Params[i])) {
+                return false;
+            }
+        }
+        return true;
+    }();
+}
+
+/// Call a computed field with arguments extracted from GraphQL.
+/// Uses compile-time introspection to determine parameter types and names,
+/// then extracts values from the GraphQL Arguments at runtime.
+auto callComputedField(alias fn, Entity)(Expr!Entity entityRef, Arguments args) {
+    import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
+
+    alias Params = Parameters!fn;
+    alias Defaults = ParameterDefaults!fn;
+    enum paramNames = [ParameterIdentifierTuple!fn];
+
+    // Number of extra parameters (excluding first Expr!Entity parameter)
+    enum numArgs = Params.length - 1;
+
+    // Extract each argument and call the function
+    static if (numArgs == 0) {
+        return fn(entityRef);
+    } else static if (numArgs == 1) {
+        auto arg0 = extractArg!(Params[1], Defaults[1])(args, paramNames[1]);
+        return fn(entityRef, arg0);
+    } else static if (numArgs == 2) {
+        auto arg0 = extractArg!(Params[1], Defaults[1])(args, paramNames[1]);
+        auto arg1 = extractArg!(Params[2], Defaults[2])(args, paramNames[2]);
+        return fn(entityRef, arg0, arg1);
+    } else static if (numArgs == 3) {
+        auto arg0 = extractArg!(Params[1], Defaults[1])(args, paramNames[1]);
+        auto arg1 = extractArg!(Params[2], Defaults[2])(args, paramNames[2]);
+        auto arg2 = extractArg!(Params[3], Defaults[3])(args, paramNames[3]);
+        return fn(entityRef, arg0, arg1, arg2);
+    } else static if (numArgs == 4) {
+        auto arg0 = extractArg!(Params[1], Defaults[1])(args, paramNames[1]);
+        auto arg1 = extractArg!(Params[2], Defaults[2])(args, paramNames[2]);
+        auto arg2 = extractArg!(Params[3], Defaults[3])(args, paramNames[3]);
+        auto arg3 = extractArg!(Params[4], Defaults[4])(args, paramNames[4]);
+        return fn(entityRef, arg0, arg1, arg2, arg3);
+    } else {
+        static assert(false, "Computed fields with more than 4 arguments not supported");
+    }
+}
+
+/// Extract an argument value, using default if not provided
+T extractArg(T, alias Default)(Arguments args, string name) {
+    auto val = findArgumentValue(args, name);
+
+    static if (is(Default == void)) {
+        // Required argument - no default
+        if (val is null) {
+            throw new CompilerException("Missing required argument: " ~ name);
+        }
+        return extractValue!T(val);
+    } else {
+        // Optional argument - has default
+        if (val is null || isNullValue(val)) {
+            return Default;
+        }
+        return extractValue!T(val);
+    }
+}
+
+// ============================================================================
 // Root Selection Set Compilation
 // ============================================================================
 
@@ -306,17 +485,17 @@ ExprBase compileFieldAccess(Entity)(Expr!Entity entityRef, Field field) {
             }
         }
         else static if (isComputedField!(Entity, member, __traits(getMember, Entity, member))) {
-            // Check if this computed field can be called without additional arguments
             alias fn = __traits(getMember, Entity, member);
-            static if (__traits(compiles, fn(entityRef))) {
+            // Only support computed fields with scalar argument types
+            static if (allArgTypesSupported!fn) {
                 enum gqlName = getGqlName!(fn, member);
 
                 if (fieldName == gqlName) {
-                    // Computed field callable without extra arguments
-                    return fn(entityRef);
+                    // Computed field - call with arguments extracted from GraphQL
+                    return callComputedField!(fn, Entity)(entityRef, field.args);
                 }
             }
-            // Skip computed fields that require arguments (not yet supported)
+            // Skip computed fields with unsupported argument types (e.g., input objects)
         }
     }}
 
@@ -467,4 +646,66 @@ unittest {
     assert(results[1]["firstName"].str == "Bob");
     assert(results[1]["posts"].array.length == 1);
     assert(results[1]["posts"][0]["title"].str == "Test");
+}
+
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import graphqld2.core;
+    import graphqld2.relational.schema;
+    import graphqld2.relational.demo;
+    import graphqld2.relational.eval_context;
+
+    // Test computed fields with arguments
+    static struct User {
+        mixin DemoEntity!"users";
+        mixin Col!("firstName", string);
+
+        // Computed field with required argument
+        static auto greeting(Expr!User u, string prefix) {
+            return prefix ~ " " ~ firstName(u);
+        }
+
+        // Computed field with optional argument (has default)
+        static auto greetingWithSuffix(Expr!User u, string prefix, string suffix = "!") {
+            return prefix ~ " " ~ firstName(u) ~ suffix;
+        }
+    }
+
+    alias DB = MockDB!();
+
+    static struct Query {
+        mixin Table!(DB, User, "users");
+    }
+
+    auto db = new DB();
+    db.setTableData("users", `[
+        {"id": 1, "first_name": "Alice"},
+        {"id": 2, "first_name": "Bob"}
+    ]`);
+
+    // Test with required argument
+    auto query1 = compileQuery!Query(`{ users { greeting(prefix: "Hello") } }`, db);
+    auto executor = new Executor();
+    auto results1 = awaitSync(executor.execute(query1));
+
+    assert(results1.length == 2);
+    assert(results1[0]["greeting"].str == "Hello Alice");
+    assert(results1[1]["greeting"].str == "Hello Bob");
+
+    // Test with optional argument using default
+    auto query2 = compileQuery!Query(`{ users { greetingWithSuffix(prefix: "Hi") } }`, db);
+    auto results2 = awaitSync(executor.execute(query2));
+
+    assert(results2.length == 2);
+    assert(results2[0]["greetingWithSuffix"].str == "Hi Alice!");
+    assert(results2[1]["greetingWithSuffix"].str == "Hi Bob!");
+
+    // Test with optional argument overridden
+    auto query3 = compileQuery!Query(`{ users { greetingWithSuffix(prefix: "Hey", suffix: "?") } }`, db);
+    auto results3 = awaitSync(executor.execute(query3));
+
+    assert(results3.length == 2);
+    assert(results3[0]["greetingWithSuffix"].str == "Hey Alice?");
+    assert(results3[1]["greetingWithSuffix"].str == "Hey Bob?");
 }
