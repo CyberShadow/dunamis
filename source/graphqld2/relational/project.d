@@ -332,8 +332,9 @@ class ProjectBelongsToExpr : Expr!Ref {
             return evalAs!Ref(input, ctx);
         }).then((Ref[] refs) {
             auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-            auto fkValues = relCtx.getColumnValues!long(queryNodeId, fkColumn, refs);
-            return fkValues.map!(fk => fk == 0 ? Ref.init : makeRef(parentTypeName, fk)).array;
+            // Read FK as string to support non-numeric IDs
+            auto fkValues = relCtx.getColumnValues!string(queryNodeId, fkColumn, refs);
+            return fkValues.map!(fk => fk.length == 0 ? Ref.init : makeRef(parentTypeName, fk)).array;
         });
     }
 

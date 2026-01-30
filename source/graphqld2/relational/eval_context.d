@@ -257,10 +257,21 @@ class QueryResult {
             return T.init;
         }
         static if (is(T == string)) {
+            // Handle both string and integer values (for FK columns)
+            if (val.type == JSONType.integer) {
+                return val.integer.to!string;
+            }
             return val.str;
         } else static if (is(T == long)) {
+            // Handle both integer and string values
+            if (val.type == JSONType.string) {
+                return val.str.to!long;
+            }
             return val.integer;
         } else static if (is(T == int)) {
+            if (val.type == JSONType.string) {
+                return val.str.to!int;
+            }
             return cast(int)val.integer;
         } else static if (is(T == bool)) {
             return val.boolean;
@@ -414,7 +425,7 @@ class MockDataFetcher : DataFetcher {
                 if (fkVal.type == JSONType.null_) {
                     joinedRefs ~= Ref.init;
                 } else {
-                    long fkId = fkVal.type == JSONType.integer ? fkVal.integer : fkVal.str.to!long;
+                    auto fkId = jsonIdToString(fkVal);
                     joinedRefs ~= makeRef(joinInfo.targetType, fkId);
                 }
             }
@@ -437,6 +448,17 @@ class MockDataFetcher : DataFetcher {
         return fetchColumnGeneric!long(table, column, refs);
     }
 
+    /// Extract ID from JSON value as string (handles both integer and string IDs)
+    private static string jsonIdToString(JSONValue val) {
+        if (val.type == JSONType.integer) {
+            return val.integer.to!string;
+        } else if (val.type == JSONType.string) {
+            return val.str;
+        } else {
+            return "";
+        }
+    }
+
     private T[] fetchColumnGeneric(T)(string table, string column, Ref[] refs) {
         T[] result;
         if (table !in _tableData) {
@@ -444,15 +466,14 @@ class MockDataFetcher : DataFetcher {
             return result;
         }
 
-        // Build id -> row index
-        JSONValue[long] rowById;
+        // Build id -> row index (using string keys to support non-numeric IDs)
+        JSONValue[string] rowById;
         foreach (row; _tableData[table].array) {
-            rowById[row["id"].integer] = row;
+            rowById[jsonIdToString(row["id"])] = row;
         }
 
         foreach (r; refs) {
-            auto id = decodeAsLong(r);
-            if (auto rowPtr = id in rowById) {
+            if (auto rowPtr = r.localId in rowById) {
                 result ~= extractValue!T((*rowPtr)[column]);
             } else {
                 result ~= T.init;
@@ -463,7 +484,16 @@ class MockDataFetcher : DataFetcher {
 
     override long[] fetchAllIds(string table) {
         if (table !in _tableData) return [];
-        return _tableData[table].array.map!(row => row["id"].integer).array;
+        return _tableData[table].array
+            .filter!(row => row["id"].type == JSONType.integer)
+            .map!(row => row["id"].integer)
+            .array;
+    }
+
+    /// Fetch all IDs as strings (supports any ID type)
+    string[] fetchAllIdsString(string table) {
+        if (table !in _tableData) return [];
+        return _tableData[table].array.map!(row => jsonIdToString(row["id"])).array;
     }
 
     override Ref[][] fetchChildren(string childTable, string childType, string fk, Ref[] parentRefs) {
@@ -471,21 +501,21 @@ class MockDataFetcher : DataFetcher {
             return parentRefs.map!(_ => cast(Ref[])[]).array;
         }
 
-        // Group children by FK value
-        Ref[][long] childrenByParentId;
+        // Group children by FK value (using string keys)
+        Ref[][string] childrenByParentId;
         foreach (row; _tableData[childTable].array) {
             auto fkVal = row[fk];
             if (fkVal.type != JSONType.null_) {
-                auto parentId = fkVal.integer;
-                childrenByParentId[parentId] ~= makeRef(childType, row["id"].integer);
+                auto parentId = jsonIdToString(fkVal);
+                auto childId = jsonIdToString(row["id"]);
+                childrenByParentId[parentId] ~= makeRef(childType, childId);
             }
         }
 
         // Return children for each parent ref
         Ref[][] result;
         foreach (parentRef; parentRefs) {
-            auto parentId = decodeAsLong(parentRef);
-            if (auto children = parentId in childrenByParentId) {
+            if (auto children = parentRef.localId in childrenByParentId) {
                 result ~= *children;
             } else {
                 result ~= cast(Ref[])[];  // Explicit cast to avoid ambiguity
@@ -499,19 +529,18 @@ class MockDataFetcher : DataFetcher {
             return childRefs.map!(_ => Ref.init).array;
         }
 
-        // Build id -> row index
-        JSONValue[long] rowById;
+        // Build id -> row index (using string keys)
+        JSONValue[string] rowById;
         foreach (row; _tableData[childTable].array) {
-            rowById[row["id"].integer] = row;
+            rowById[jsonIdToString(row["id"])] = row;
         }
 
         Ref[] result;
         foreach (childRef; childRefs) {
-            auto childId = decodeAsLong(childRef);
-            if (auto rowPtr = childId in rowById) {
+            if (auto rowPtr = childRef.localId in rowById) {
                 auto fkVal = (*rowPtr)[fk];
                 if (fkVal.type != JSONType.null_) {
-                    result ~= makeRef(parentType, fkVal.integer);
+                    result ~= makeRef(parentType, jsonIdToString(fkVal));
                 } else {
                     result ~= Ref.init;
                 }
@@ -530,17 +559,16 @@ class MockDataFetcher : DataFetcher {
             return result;
         }
 
-        // Build id -> row index
-        JSONValue[long] rowById;
+        // Build id -> row index (using string keys)
+        JSONValue[string] rowById;
         foreach (row; _tableData[table].array) {
-            rowById[row["id"].integer] = row;
+            rowById[jsonIdToString(row["id"])] = row;
         }
 
         JSONValue[] result;
         result.reserve(refs.length);
         foreach (r; refs) {
-            auto id = decodeAsLong(r);
-            if (auto rowPtr = id in rowById) {
+            if (auto rowPtr = r.localId in rowById) {
                 if (column in *rowPtr) {
                     result ~= (*rowPtr)[column];
                 } else {
@@ -556,10 +584,21 @@ class MockDataFetcher : DataFetcher {
     private T extractValue(T)(JSONValue val) {
         if (val.type == JSONType.null_) return T.init;
         static if (is(T == string)) {
+            // Handle both string and integer values (for FK columns)
+            if (val.type == JSONType.integer) {
+                return val.integer.to!string;
+            }
             return val.str;
         } else static if (is(T == long)) {
+            // Handle both integer and string values
+            if (val.type == JSONType.string) {
+                return val.str.to!long;
+            }
             return val.integer;
         } else static if (is(T == int)) {
+            if (val.type == JSONType.string) {
+                return val.str.to!int;
+            }
             return cast(int)val.integer;
         } else static if (is(T == bool)) {
             return val.boolean;
@@ -736,4 +775,49 @@ unittest {
     assert(ctx.hasQueryResult(0));
     assert(!ctx.hasQueryResult(1));
     assert(ctx.getQueryResult(0) is result);
+}
+
+unittest {
+    // Test string (UUID-style) primary keys
+    auto fetcher = new MockDataFetcher();
+    fetcher.setTableData("items", `[
+        {"id": "abc-123", "name": "First"},
+        {"id": "def-456", "name": "Second"},
+        {"id": "ghi-789", "name": "Third"}
+    ]`);
+
+    // Fetch by string IDs
+    auto refs = [Ref("Item:abc-123"), Ref("Item:def-456")];
+    auto names = fetcher.fetchColumn!string("items", "name", refs);
+    assert(names == ["First", "Second"]);
+
+    // Fetch all IDs as strings
+    auto allIds = fetcher.fetchAllIdsString("items");
+    assert(allIds == ["abc-123", "def-456", "ghi-789"]);
+}
+
+unittest {
+    // Test string FK references
+    auto fetcher = new MockDataFetcher();
+    fetcher.setTableData("categories", `[
+        {"id": "cat-a", "name": "Category A"},
+        {"id": "cat-b", "name": "Category B"}
+    ]`);
+    fetcher.setTableData("products", `[
+        {"id": "prod-1", "category_id": "cat-a", "name": "Product 1"},
+        {"id": "prod-2", "category_id": "cat-b", "name": "Product 2"},
+        {"id": "prod-3", "category_id": "cat-a", "name": "Product 3"}
+    ]`);
+
+    // Fetch belongsTo with string FKs
+    auto childRefs = [Ref("Product:prod-1"), Ref("Product:prod-2")];
+    auto parents = fetcher.fetchBelongsTo("products", "category_id", "Category", childRefs);
+    assert(parents == [Ref("Category:cat-a"), Ref("Category:cat-b")]);
+
+    // Fetch hasMany with string FKs
+    auto parentRefs = [Ref("Category:cat-a"), Ref("Category:cat-b")];
+    auto children = fetcher.fetchChildren("products", "Product", "category_id", parentRefs);
+    assert(children.length == 2);
+    assert(children[0].length == 2);  // cat-a has 2 products
+    assert(children[1].length == 1);  // cat-b has 1 product
 }

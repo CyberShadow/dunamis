@@ -463,8 +463,9 @@ class GetByIdsExpr(Entity) : Expr!(Ref[]), RootExprInfo {
     private Ref[] _refs;
     private DataFetcher _fetcher;
 
-    this(long[] ids, DataFetcher fetcher = null) {
-        _refs = ids.map!(id => makeRef(Entity._typeName, id)).array;
+    /// Construct from array of IDs (any type convertible to string)
+    this(IdType)(IdType[] ids, DataFetcher fetcher = null) {
+        _refs = ids.map!(id => makeRef(Entity._typeName, id.to!string)).array;
         _fetcher = fetcher;
     }
 
@@ -510,13 +511,13 @@ class GetByIdsExpr(Entity) : Expr!(Ref[]), RootExprInfo {
     DataFetcher dataFetcher() { return _fetcher; }
 }
 
-/// Factory function to create GetByIdsExpr
-auto getByIds(Entity)(long[] ids) {
+/// Factory function to create GetByIdsExpr (works with any ID type)
+auto getByIds(Entity, IdType)(IdType[] ids) {
     return new GetByIdsExpr!Entity(ids);
 }
 
 /// Factory function to create GetByIdsExpr with a data fetcher
-auto getByIds(Entity)(long[] ids, DataFetcher fetcher) {
+auto getByIds(Entity, IdType)(IdType[] ids, DataFetcher fetcher) {
     return new GetByIdsExpr!Entity(ids, fetcher);
 }
 
@@ -908,4 +909,81 @@ unittest {
     assert(nodes[0].table == "users");
     assert(nodes[0].columns.canFind("first_name"));
     assert(nodes[0].columns.canFind("last_name"));
+}
+
+// Test end-to-end with string (UUID) primary keys
+unittest {
+    import std.json : parseJSON;
+    import ae.utils.promise.await : awaitSync;
+    import graphqld2.relational.demo : DemoEntity;
+
+    // Entity with string ID (UUID-style)
+    struct Item {
+        mixin DemoEntity!("items", string);
+        mixin Col!("name", string);
+    }
+
+    // Set up mock data with string IDs
+    auto fetcher = new MockDataFetcher();
+    fetcher.setTableData("items", `[
+        {"id": "uuid-abc", "name": "First Item"},
+        {"id": "uuid-def", "name": "Second Item"}
+    ]`);
+
+    // Query by string IDs
+    auto query = map!(
+        (Expr!Ref item) => Item.name(item)
+    )(getByIds!Item(["uuid-abc", "uuid-def"], fetcher));
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query, true));
+
+    assert(result.length == 2);
+    assert(result[0] == "First Item");
+    assert(result[1] == "Second Item");
+}
+
+// Test belongsTo with string FKs
+unittest {
+    import std.json : parseJSON;
+    import ae.utils.promise.await : awaitSync;
+    import graphqld2.relational.demo : DemoEntity;
+
+    struct Category {
+        mixin DemoEntity!("categories", string);
+        mixin Col!("name", string);
+    }
+
+    struct Product {
+        mixin DemoEntity!("products", string);
+        mixin Col!("name", string);
+        mixin Col!("categoryId", ForeignKey!Category);
+        mixin BelongsTo!("category", "categoryId");
+    }
+
+    auto fetcher = new MockDataFetcher();
+    fetcher.setTableData("categories", `[
+        {"id": "cat-1", "name": "Electronics"},
+        {"id": "cat-2", "name": "Books"}
+    ]`);
+    fetcher.setTableData("products", `[
+        {"id": "prod-a", "category_id": "cat-1", "name": "Phone"},
+        {"id": "prod-b", "category_id": "cat-2", "name": "Novel"}
+    ]`);
+
+    auto query = map!(
+        (Expr!Ref prod) => jsonObject(
+            "name", Product.name(prod),
+            "categoryName", Category.name(Product.category(prod))
+        )
+    )(getByIds!Product(["prod-a", "prod-b"], fetcher));
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query, true));
+
+    assert(result.length == 2);
+    assert(result[0]["name"].str == "Phone");
+    assert(result[0]["categoryName"].str == "Electronics");
+    assert(result[1]["name"].str == "Novel");
+    assert(result[1]["categoryName"].str == "Books");
 }
