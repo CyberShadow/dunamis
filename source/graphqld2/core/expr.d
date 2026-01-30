@@ -222,6 +222,18 @@ abstract class Expr(T) : ExprBase {
     {
         return __traits(getMember, T, name)(this);
     }
+
+    /// Enable property-like field access with arguments.
+    /// Allows: `user.greeting("Hello", "!")` instead of `User.greeting(user, "Hello", "!")`
+    ///
+    /// Arguments are passed as concrete values (available at planning time).
+    auto opDispatch(string name, Args...)(Args args)
+        if (Args.length > 0 &&
+            __traits(hasMember, T, name) &&
+            __traits(compiles, __traits(getMember, T, name)(this, args)))
+    {
+        return __traits(getMember, T, name)(this, args);
+    }
 }
 
 /// Convenience alias for entity reference expressions.

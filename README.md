@@ -118,6 +118,12 @@ struct User {
 
     // Computed field - uses property-like access via opDispatch
     static auto fullName(RefExpr!User u) => u.firstName ~ " " ~ u.lastName;
+
+    // Computed field with arguments - arguments are concrete values at planning time
+    @GqlDescription("A personalized greeting")
+    static auto greeting(RefExpr!User u, string prefix, string suffix = "!") {
+        return constant(prefix, u) ~ " " ~ u.firstName ~ constant(suffix, u);
+    }
 }
 
 struct Post {
@@ -239,6 +245,8 @@ SELECT * FROM layer1;
 - JOINs for belongsTo relationships
 - Child queries (CTEs) for hasMany relationships
 - Computed fields with SQL push-down (concatenation becomes `||` in SQL)
+- Computed fields in GraphQL schema (static functions taking `RefExpr!Entity`)
+- Field arguments for computed fields (with defaults, introspected from D function signatures)
 - Data-source agnostic Executor
 - MockDataFetcher for testing
 - DebugSqlFetcher for SQL inspection
@@ -251,7 +259,6 @@ SELECT * FROM layer1;
 - Real database DataFetcher (PostgreSQL, etc.)
 - Filtering/pagination (WHERE, LIMIT, OFFSET)
 - Polymorphism (GraphQL union/interface types)
-- Field arguments for computed fields
 - Input types for mutations
 - Runtime introspection (`__schema`, `__type`, `__typename`)
 

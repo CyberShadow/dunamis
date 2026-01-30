@@ -8,6 +8,7 @@ import std.traits;
 import std.typecons : Nullable;
 
 import graphqld2.core.types : isCustomScalar;
+import graphqld2.core.expr : Expr, ExprResultType, isExpr;
 
 // ============================================================================
 // GraphQL UDAs
@@ -109,6 +110,14 @@ template graphqlBaseTypeName(T) {
 // Schema Introspection
 // ============================================================================
 
+/// Argument information for computed fields
+struct ArgumentInfo {
+    string name;
+    string graphqlType;
+    bool hasDefault;
+    string defaultValue;   // String representation for SDL
+}
+
 /// Field information extracted from entity mixins
 struct FieldInfo {
     string name;
@@ -118,12 +127,14 @@ struct FieldInfo {
     bool hidden;           // @GqlHidden
     string description;    // @GqlDescription (empty if not set)
     string deprecation;    // @GqlDeprecated reason (empty if not deprecated)
+    ArgumentInfo[] arguments;  // For computed fields with arguments
 }
 
 enum FieldKind {
     column,
     hasMany,
     belongsTo,
+    computed,
 }
 
 /// Check if a member has the @GqlHidden UDA
@@ -170,6 +181,141 @@ template getGqlDeprecated(alias member) {
     }();
 }
 
+// ============================================================================
+// Computed Field Detection
+// ============================================================================
+
+/// Check if a member is a computed field for the given Entity.
+/// A computed field is a static function that:
+/// - Takes Expr!Entity as first parameter
+/// - Returns an Expr type
+/// - Is NOT a generated accessor (has no corresponding _colField_*, _hasManyField_*, or _belongsToField_*)
+template isComputedField(Entity, string memberName, alias member) {
+    static if (is(typeof(member) == function)) {
+        alias Params = Parameters!member;
+        alias Return = ReturnType!member;
+        static if (Params.length >= 1) {
+            // First parameter must be Expr!Entity
+            static if (is(Params[0] : Expr!E, E) && is(E == Entity)) {
+                // Return type must be an Expr
+                static if (isExpr!Return) {
+                    // Exclude generated accessors (those with corresponding metadata structs)
+                    enum hasColMeta = __traits(hasMember, Entity, "_colField_" ~ memberName);
+                    enum hasHasManyMeta = __traits(hasMember, Entity, "_hasManyField_" ~ memberName);
+                    enum hasBelongsToMeta = __traits(hasMember, Entity, "_belongsToField_" ~ memberName);
+                    enum isComputedField = !hasColMeta && !hasHasManyMeta && !hasBelongsToMeta;
+                } else {
+                    enum isComputedField = false;
+                }
+            } else {
+                enum isComputedField = false;
+            }
+        } else {
+            enum isComputedField = false;
+        }
+    } else {
+        enum isComputedField = false;
+    }
+}
+
+/// Get the GraphQL return type of a computed field
+template computedFieldReturnType(alias member) {
+    alias Return = ReturnType!(typeof(member));
+    // Extract T from Expr!T, then map to GraphQL type
+    alias ResultT = ExprResultType!Return;
+
+    // Handle string specially (it's immutable(char)[] but should map to String)
+    static if (is(ResultT == string)) {
+        enum computedFieldReturnType = "String!";
+    }
+    // Check if result is an array (for hasMany-like computed fields)
+    else static if (is(ResultT == E[], E)) {
+        static if (is(E : Expr!Inner, Inner)) {
+            // Array of expressions (e.g., from map) - extract inner type
+            enum computedFieldReturnType = "[" ~ graphqlTypeName!Inner ~ "]!";
+        } else {
+            // Regular array
+            enum computedFieldReturnType = "[" ~ graphqlTypeName!E ~ "]!";
+        }
+    } else {
+        enum computedFieldReturnType = graphqlTypeName!ResultT;
+    }
+}
+
+/// Extract arguments from a computed field (parameters after the first Expr!Entity)
+template getComputedFieldArguments(alias member) {
+    // Get parameter info - must use member directly, not typeof(member)
+    // typeof(member) loses parameter names and default values
+    alias Params = Parameters!member;
+    alias Defaults = ParameterDefaults!member;
+
+    // Get parameter names as a string array
+    enum string[] paramNames = [ParameterIdentifierTuple!member];
+
+    enum getComputedFieldArguments = () {
+        ArgumentInfo[] args;
+
+        // Skip first parameter (Expr!Entity), process rest as arguments
+        static foreach (i; 1 .. Params.length) {{
+            alias P = Params[i];
+
+            // Check if parameter has a default value
+            static if (is(Defaults[i] == void)) {
+                // No default - required argument
+                args ~= ArgumentInfo(
+                    paramNames[i],
+                    graphqlTypeName!P,
+                    false,
+                    ""
+                );
+            } else {
+                // Has default - optional argument (nullable in GraphQL)
+                // For nullable types, use base type; otherwise add null default
+                static if (is(P == Nullable!U, U)) {
+                    args ~= ArgumentInfo(
+                        paramNames[i],
+                        graphqlBaseTypeName!U,
+                        true,
+                        "null"
+                    );
+                } else {
+                    args ~= ArgumentInfo(
+                        paramNames[i],
+                        graphqlBaseTypeName!P,
+                        true,
+                        defaultValueToString(Defaults[i])
+                    );
+                }
+            }
+        }}
+        return args;
+    }();
+}
+
+/// Convert a default value to its GraphQL SDL string representation
+string defaultValueToString(T)(T value) {
+    static if (is(T == string)) {
+        return `"` ~ value ~ `"`;
+    } else static if (is(T == bool)) {
+        return value ? "true" : "false";
+    } else static if (is(T == typeof(null))) {
+        return "null";
+    } else {
+        return value.to!string;
+    }
+}
+
+/// Check if a member name is an internal mixin helper that should be skipped
+template isInternalHelper(string name) {
+    enum isInternalHelper =
+        // Internal Col mixin helpers
+        (name.length >= 5 && name[0..5] == "_Col_") ||
+        // Internal BelongsTo mixin helpers
+        (name.length >= 11 && name[0..11] == "_BelongsTo_") ||
+        // Internal HasMany mixin helpers (if any)
+        (name.length >= 9 && name[0..9] == "_HasMany_");
+}
+
 /// Extract field information from an entity type
 template getEntityFields(Entity) {
     enum getEntityFields = () {
@@ -177,7 +323,12 @@ template getEntityFields(Entity) {
 
         // Introspect all members looking for field metadata
         static foreach (member; __traits(allMembers, Entity)) {{
+            // Skip internal mixin helper symbols
+            static if (isInternalHelper!member) {
+                // Skip
+            }
             // Check for column fields (_colField_*)
+            else
             static if (member.length > 10 && member[0..10] == "_colField_") {
                 alias FieldMeta = __traits(getMember, Entity, member);
 
@@ -259,6 +410,31 @@ template getEntityFields(Entity) {
                     isHidden,
                     description,
                     deprecation
+                );
+            }
+            // Check for computed fields (static functions taking Expr!Entity)
+            else static if (isComputedField!(Entity, member, __traits(getMember, Entity, member))) {
+                alias fn = __traits(getMember, Entity, member);
+
+                // Get UDAs from the function
+                enum isHidden = hasGqlHidden!fn;
+                enum gqlFieldName = getGqlName!(fn, member);
+                enum description = getGqlDescription!fn;
+                enum deprecation = getGqlDeprecated!fn;
+
+                // Get return type and arguments
+                enum gqlType = computedFieldReturnType!fn;
+                enum arguments = getComputedFieldArguments!fn;
+
+                fields ~= FieldInfo(
+                    gqlFieldName,
+                    gqlType,
+                    false,  // computed fields are non-nullable by default
+                    FieldKind.computed,
+                    isHidden,
+                    description,
+                    deprecation,
+                    arguments
                 );
             }
         }}
@@ -411,8 +587,24 @@ string generateTypeSDL(Entity)() {
             result ~= "  \"\"\"" ~ field.description ~ "\"\"\"\n";
         }
 
-        // Field name and type
-        result ~= "  " ~ field.name ~ ": " ~ field.graphqlType;
+        // Field name
+        result ~= "  " ~ field.name;
+
+        // Add arguments if present
+        if (field.arguments.length > 0) {
+            result ~= "(";
+            foreach (i, arg; field.arguments) {
+                if (i > 0) result ~= ", ";
+                result ~= arg.name ~ ": " ~ arg.graphqlType;
+                if (arg.hasDefault) {
+                    result ~= " = " ~ arg.defaultValue;
+                }
+            }
+            result ~= ")";
+        }
+
+        // Return type
+        result ~= ": " ~ field.graphqlType;
 
         // Add @deprecated directive if present
         if (field.deprecation.length > 0) {

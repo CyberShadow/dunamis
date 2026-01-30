@@ -49,6 +49,12 @@ struct User {
 
     /// Computed field using operator overloading and property-like access
     static auto fullName(RefExpr!User u) => u.firstName ~ " " ~ u.lastName;
+
+    /// Computed field with arguments - demonstrates field argument support
+    @GqlDescription("A personalized greeting")
+    static auto greeting(RefExpr!User u, string prefix, string suffix = "!") {
+        return prefix ~ " " ~ u.firstName ~ suffix;
+    }
 }
 
 /// Post entity - belongs to a User (author) and has many Comments
@@ -496,6 +502,31 @@ EOF";
     }
 }
 
+// Test computed field with arguments
+unittest {
+    import std.stdio : writeln;
+
+    auto db = createMockDB();
+    auto executor = new Executor();
+
+    // Query: { users { greeting(prefix: "Hello") } }
+    // Uses opDispatch to call User.greeting with arguments
+    auto query = map!(
+        (RefExpr!User user) => user.greeting("Hello")  // Uses default suffix "!"
+    )(getByIds!User([1, 2], db));
+
+    auto result = awaitSync(executor.execute(query));
+
+    assert(result.length == 2);
+    assert(result[0] == "Hello Alice!");
+    assert(result[1] == "Hello Bob!");
+
+    debug(sql) {
+        writeln("\n=== Test: Computed field with arguments (greeting) ===");
+        db.printSQL();
+    }
+}
+
 // ============================================================================
 // GraphQL Schema Generation Tests
 // ============================================================================
@@ -535,6 +566,9 @@ type User {
   """Posts authored by this user"""
   posts: [Post!]!
   comments: [Comment!]!
+  fullName: String!
+  """A personalized greeting"""
+  greeting(prefix: String!, suffix: String = "!"): String!
 }
 
 type Post {
@@ -543,6 +577,8 @@ type Post {
   body: String!
   author: User!
   comments: [Comment!]!
+  html: String!
+  summary: String!
 }
 
 type Comment {
@@ -550,6 +586,7 @@ type Comment {
   body: String!
   post: Post!
   author: User!
+  html: String!
 }
 
 EOF";
