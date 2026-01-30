@@ -41,11 +41,13 @@ struct User {
 
 /// Post entity - belongs to a User (author) and has many Comments
 struct Post {
-    import graphqld2.graphql : GqlHidden;
+    import graphqld2.graphql : GqlHidden, GqlName;
 
     mixin DemoEntity!"posts";
     mixin Col!("title", string);
-    mixin Col!("body_", string, "body");  // D keyword, explicit column name
+
+    @GqlName("body")  // D keyword conflict: body_ in D → body in GraphQL
+    mixin Col!("body_", string, "body");
 
     @GqlHidden  // Hide FK column, expose only the relationship
     mixin Col!("authorId", ForeignKey!User);
@@ -95,10 +97,12 @@ struct Post {
 
 /// Comment entity - belongs to a Post and has an author (User)
 struct Comment {
-    import graphqld2.graphql : GqlHidden;
+    import graphqld2.graphql : GqlHidden, GqlName;
 
     mixin DemoEntity!"comments";
-    mixin Col!("body_", string, "body");  // D keyword, explicit column name
+
+    @GqlName("body")  // D keyword conflict: body_ in D → body in GraphQL
+    mixin Col!("body_", string, "body");
 
     @GqlHidden  // Hide FK columns, expose only the relationships
     mixin Col!("postId", ForeignKey!Post);
@@ -497,7 +501,7 @@ unittest {
     }
 
     // Note: FK columns (authorId, postId) are hidden with @GqlHidden,
-    // only the relationships (author, post) are exposed
+    // and D keyword conflicts are resolved with @GqlName (body_ → body)
     enum expected = q"EOF
 scalar Int64
 
@@ -519,14 +523,14 @@ type User {
 type Post {
   id: ID!
   title: String!
-  body_: String!
+  body: String!
   author: User!
   comments: [Comment!]!
 }
 
 type Comment {
   id: ID!
-  body_: String!
+  body: String!
   post: Post!
   author: User!
 }

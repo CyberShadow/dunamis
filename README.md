@@ -115,6 +115,8 @@ struct User {
 struct Post {
     mixin DemoEntity!"posts";
     mixin Col!("title", string);
+
+    @GqlName("body")  // D keyword conflict: body_ → body in GraphQL
     mixin Col!("body_", string, "body");
 
     @GqlHidden  // Hide FK column from GraphQL, expose only the relationship
@@ -129,6 +131,8 @@ struct Post {
 
 struct Comment {
     mixin DemoEntity!"comments";
+
+    @GqlName("body")
     mixin Col!("body_", string, "body");
 
     @GqlHidden mixin Col!("postId", ForeignKey!Post);
@@ -220,6 +224,7 @@ SELECT * FROM layer1;
 - `Table` mixin for Query root entry points
 - `ForeignKey!Entity` type for type-safe FK columns
 - `@GqlHidden` UDA to hide fields from GraphQL schema
+- `@GqlName` UDA to override GraphQL field names (for D keyword conflicts)
 - QueryNode-based SQL planning
 - JOINs for belongsTo relationships
 - Child queries (CTEs) for hasMany relationships
@@ -240,9 +245,6 @@ SELECT * FROM layer1;
 - Field arguments for computed fields
 - Input types for mutations
 - Runtime introspection (`__schema`, `__type`, `__typename`)
-
-**Known issues:**
-- D keyword conflicts require workarounds (e.g., `body_` instead of `body`)
 
 ## Running Tests
 

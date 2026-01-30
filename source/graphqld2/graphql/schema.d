@@ -17,6 +17,16 @@ import graphqld2.core.types : isCustomScalar;
 /// Can be attached to Col, HasMany, or BelongsTo mixin invocations.
 enum GqlHidden;
 
+/// UDA to override the GraphQL field name.
+/// Useful for D keyword conflicts (e.g., `body_` in D → `body` in GraphQL).
+///
+/// Example:
+///   @GqlName("body")
+///   mixin Col!("body_", string, "body");
+struct GqlName {
+    string name;
+}
+
 // ============================================================================
 // GraphQL Type Mapping
 // ============================================================================
@@ -99,6 +109,19 @@ template hasGqlHidden(alias member) {
     enum hasGqlHidden = staticIndexOf!(GqlHidden, __traits(getAttributes, member)) >= 0;
 }
 
+/// Get the @GqlName value if present, otherwise return the default name
+template getGqlName(alias member, string defaultName) {
+    enum getGqlName = () {
+        alias attrs = __traits(getAttributes, member);
+        static foreach (attr; attrs) {
+            static if (is(typeof(attr) == GqlName)) {
+                return attr.name;
+            }
+        }
+        return defaultName;
+    }();
+}
+
 /// Extract field information from an entity type
 template getEntityFields(Entity) {
     enum getEntityFields = () {
@@ -132,8 +155,11 @@ template getEntityFields(Entity) {
                     }
                 }
 
+                // Get GraphQL field name (use @GqlName if present)
+                enum gqlFieldName = getGqlName!(FieldMeta, FieldMeta.name);
+
                 fields ~= FieldInfo(
-                    FieldMeta.name,
+                    gqlFieldName,
                     gqlType,
                     colNullable,
                     FieldKind.column,
@@ -144,9 +170,10 @@ template getEntityFields(Entity) {
             else static if (member.length > 14 && member[0..14] == "_hasManyField_") {
                 alias FieldMeta = __traits(getMember, Entity, member);
                 enum isHidden = hasGqlHidden!FieldMeta;
+                enum gqlFieldName = getGqlName!(FieldMeta, FieldMeta.name);
                 // HasMany: non-nullable list of non-nullable items
                 fields ~= FieldInfo(
-                    FieldMeta.name,
+                    gqlFieldName,
                     "[" ~ FieldMeta.childType._typeName ~ "!]!",
                     false,
                     FieldKind.hasMany,
@@ -157,6 +184,7 @@ template getEntityFields(Entity) {
             else static if (member.length > 16 && member[0..16] == "_belongsToField_") {
                 alias FieldMeta = __traits(getMember, Entity, member);
                 enum isHidden = hasGqlHidden!FieldMeta;
+                enum gqlFieldName = getGqlName!(FieldMeta, FieldMeta.name);
                 // BelongsTo: nullable or not based on FK column
                 static if (FieldMeta.nullable) {
                     enum belongsToType = FieldMeta.parentType._typeName;
@@ -164,7 +192,7 @@ template getEntityFields(Entity) {
                     enum belongsToType = FieldMeta.parentType._typeName ~ "!";
                 }
                 fields ~= FieldInfo(
-                    FieldMeta.name,
+                    gqlFieldName,
                     belongsToType,
                     FieldMeta.nullable,
                     FieldKind.belongsTo,
