@@ -173,6 +173,7 @@ unittest {
     import std.json;
     import graphqld2.core;
     import graphqld2.relational.schema;
+    import graphqld2.relational.demo;
     import graphqld2.relational.eval_context;
 
     // Test: Optimized execution produces same results as naive
@@ -216,6 +217,7 @@ unittest {
     import std.algorithm : canFind;
     import graphqld2.core;
     import graphqld2.relational.schema;
+    import graphqld2.relational.demo;
 
     // Test: QueryNode inspection - verify optimization creates correct nodes
     struct User {
@@ -252,6 +254,7 @@ unittest {
     import std.algorithm : canFind;
     import graphqld2.core;
     import graphqld2.relational.schema;
+    import graphqld2.relational.demo;
 
     // Test: Nested hasMany creates linked QueryNodes
     struct Post {
@@ -304,6 +307,7 @@ unittest {
     import std.json;
     import graphqld2.core;
     import graphqld2.relational.schema;
+    import graphqld2.relational.demo;
     import graphqld2.relational.eval_context;
 
     // Test: BelongsTo creates JOINs (not separate QueryNodes)

@@ -228,7 +228,8 @@ unittest {
     import std.typecons : Nullable;
     import graphqld2.core.expr : Expr;
     import graphqld2.core.types : Ref;
-    import graphqld2.relational.schema : DemoEntity, Col, BelongsTo, ForeignKey, belongsTo;
+    import graphqld2.relational.schema : Col, BelongsTo, ForeignKey, belongsTo;
+    import graphqld2.relational.demo : DemoEntity;
 
     // Test nullable FK via Col + BelongsTo
     struct Manager {
@@ -266,7 +267,8 @@ unittest {
     import std.typecons : Nullable;
     import graphqld2.core.expr : Expr;
     import graphqld2.core.types : Ref;
-    import graphqld2.relational.schema : DemoEntity, Col, BelongsTo, ForeignKey, belongsTo;
+    import graphqld2.relational.schema : Col, BelongsTo, ForeignKey, belongsTo;
+    import graphqld2.relational.demo : DemoEntity;
 
     // Test required FK via Col + BelongsTo
     struct Department {

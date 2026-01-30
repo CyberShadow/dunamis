@@ -101,38 +101,6 @@ mixin template PrimaryKey(columnNames...) {
 }
 
 // ============================================================================
-// Demo Entity Mixin (High-level convenience)
-// ============================================================================
-
-/// High-level convenience mixin for demos and examples.
-/// Adds Entity metadata plus a standard `id` column (BIGINT primary key).
-///
-/// Example:
-/// ---
-/// struct User {
-///     mixin DemoEntity!"users";
-///     mixin Col!("email", string);
-/// }
-/// ---
-mixin template DemoEntity(string tableName, IdType = long, string typeName = "", string sourceId = "default") {
-    import graphqld2.relational.schema : Entity, PrimaryKey;
-
-    mixin Entity!(tableName, typeName, sourceId);
-
-    /// Column metadata for the primary key (id)
-    struct _colField_id {
-        enum name = "id";
-        enum column = "id";
-        alias type = IdType;
-        enum isForeignKey = false;
-        enum isNullable = false;
-        enum isPrimaryKey = true;
-    }
-
-    mixin PrimaryKey!"id";
-}
-
-// ============================================================================
 // Foreign Key Type
 // ============================================================================
 
@@ -888,6 +856,10 @@ unittest {
     static assert(Post._table == "posts");
     static assert(Post._typeName == "BlogPost");
     static assert(is(Post._colField_id.type == long));
+}
+
+unittest {
+    import graphqld2.relational.demo : DemoEntity;
 
     // Test DemoEntity convenience (includes id column)
     struct Comment {
@@ -906,6 +878,7 @@ unittest {
 // Test optimization creates QueryNode
 unittest {
     import std.json : parseJSON;
+    import graphqld2.relational.demo : DemoEntity;
 
     struct User {
         mixin DemoEntity!"users";

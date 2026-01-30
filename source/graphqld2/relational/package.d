@@ -2,6 +2,7 @@ module graphqld2.relational;
 
 public {
     import graphqld2.relational.ddl;
+    import graphqld2.relational.demo;
     import graphqld2.relational.eval_context;
     import graphqld2.relational.optimize_context;
     import graphqld2.relational.project;
