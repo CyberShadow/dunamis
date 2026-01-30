@@ -45,28 +45,79 @@ mixin template Table(Entity, string fieldName) {
 }
 
 // ============================================================================
-// Entity Mixin
+// Entity Mixin (Low-level)
 // ============================================================================
 
-/// Mixin to define an entity (table mapping)
-/// Adds _typeName (for node ID encoding), _table (for SQL generation),
-/// and the id column metadata.
+/// Low-level mixin to define an entity (table mapping).
+/// Only provides table metadata - no columns are added automatically.
+/// Use with Col and PrimaryKey mixins to define the schema.
 ///
 /// Example:
 /// ---
 /// struct User {
-///     mixin Entity!"users";                    // ID defaults to long
-///     mixin Col!("name", string);
+///     mixin Entity!"users";
+///     mixin Col!("id", long);
+///     mixin PrimaryKey!"id";
+///     mixin Col!("email", string);
 /// }
 ///
-/// struct UuidEntity {
-///     mixin Entity!("items", string);          // UUID stored as string
+/// // Composite primary key
+/// struct OrderItem {
+///     mixin Entity!"order_items";
+///     mixin Col!("orderId", long);
+///     mixin Col!("productId", long);
+///     mixin PrimaryKey!("orderId", "productId");
 /// }
 /// ---
-mixin template Entity(string tableName, IdType = long, string typeName = "", string sourceId = "default") {
+mixin template Entity(string tableName, string typeName = "", string sourceId = "default") {
     static immutable string _table = tableName;
     static immutable string _typeName = (typeName.length > 0) ? typeName : __traits(identifier, typeof(this));
     static immutable string _sourceId = sourceId;
+}
+
+// ============================================================================
+// Primary Key Mixin
+// ============================================================================
+
+/// Marks one or more columns as the primary key.
+/// The column(s) must be defined via Col mixin.
+///
+/// Example:
+/// ---
+/// mixin Col!("id", long);
+/// mixin PrimaryKey!"id";
+///
+/// // Composite key
+/// mixin Col!("orderId", long);
+/// mixin Col!("productId", long);
+/// mixin PrimaryKey!("orderId", "productId");
+/// ---
+mixin template PrimaryKey(columnNames...) {
+    static assert(columnNames.length > 0, "PrimaryKey requires at least one column name");
+
+    struct _primaryKey {
+        static immutable string[] columns = [columnNames];
+    }
+}
+
+// ============================================================================
+// Demo Entity Mixin (High-level convenience)
+// ============================================================================
+
+/// High-level convenience mixin for demos and examples.
+/// Adds Entity metadata plus a standard `id` column (BIGINT primary key).
+///
+/// Example:
+/// ---
+/// struct User {
+///     mixin DemoEntity!"users";
+///     mixin Col!("email", string);
+/// }
+/// ---
+mixin template DemoEntity(string tableName, IdType = long, string typeName = "", string sourceId = "default") {
+    import graphqld2.relational.schema : Entity, PrimaryKey;
+
+    mixin Entity!(tableName, typeName, sourceId);
 
     /// Column metadata for the primary key (id)
     struct _colField_id {
@@ -77,6 +128,8 @@ mixin template Entity(string tableName, IdType = long, string typeName = "", str
         enum isNullable = false;
         enum isPrimaryKey = true;
     }
+
+    mixin PrimaryKey!"id";
 }
 
 // ============================================================================
@@ -815,24 +868,37 @@ class BelongsToAccessExpr(Child, Parent, RefType, string fk) : Expr!RefType, Bel
 // ============================================================================
 
 unittest {
-    // Test Entity mixin
+    // Test low-level Entity mixin (no id column)
     struct User {
         mixin Entity!"users";
+        mixin Col!("id", long);
+        mixin PrimaryKey!"id";
     }
     static assert(User._table == "users");
     static assert(User._typeName == "User");
     static assert(User._sourceId == "default");
+    static assert(is(User._colField_id.type == long));
 
+    // Test Entity with custom type name
     struct Post {
-        mixin Entity!("posts", long, "BlogPost");
+        mixin Entity!("posts", "BlogPost");
+        mixin Col!("id", long);
+        mixin PrimaryKey!"id";
     }
     static assert(Post._table == "posts");
     static assert(Post._typeName == "BlogPost");
     static assert(is(Post._colField_id.type == long));
 
-    // Test custom ID type
+    // Test DemoEntity convenience (includes id column)
+    struct Comment {
+        mixin DemoEntity!"comments";
+    }
+    static assert(Comment._table == "comments");
+    static assert(is(Comment._colField_id.type == long));
+
+    // Test DemoEntity with custom ID type
     struct UuidEntity {
-        mixin Entity!("items", string);
+        mixin DemoEntity!("items", string);
     }
     static assert(is(UuidEntity._colField_id.type == string));
 }
@@ -842,7 +908,7 @@ unittest {
     import std.json : parseJSON;
 
     struct User {
-        mixin Entity!"users";
+        mixin DemoEntity!"users";
         mixin Col!("firstName", string);
         mixin Col!("lastName", string);
     }

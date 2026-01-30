@@ -98,8 +98,10 @@ struct Query {
 }
 
 // Entity definitions with mixins
+// DemoEntity is a convenience wrapper that adds an `id` column automatically.
+// For full control, use the low-level Entity + Col + PrimaryKey mixins.
 struct User {
-    mixin Entity!"users";
+    mixin DemoEntity!"users";
     mixin Col!("firstName", string);
     mixin Col!("lastName", string);
     mixin Col!("email", string);
@@ -111,7 +113,7 @@ struct User {
 }
 
 struct Post {
-    mixin Entity!"posts";
+    mixin DemoEntity!"posts";
     mixin Col!("title", string);
     mixin Col!("body_", string, "body");
     mixin Col!("authorId", ForeignKey!User);  // Required FK column
@@ -123,7 +125,7 @@ struct Post {
 }
 
 struct Comment {
-    mixin Entity!"comments";
+    mixin DemoEntity!"comments";
     mixin Col!("body_", string, "body");
     mixin Col!("postId", ForeignKey!Post);
     mixin Col!("authorId", ForeignKey!User);

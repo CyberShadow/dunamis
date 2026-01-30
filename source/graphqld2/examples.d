@@ -28,7 +28,7 @@ struct Query {
 
 /// User entity
 struct User {
-    mixin Entity!"users";
+    mixin DemoEntity!"users";
     mixin Col!("firstName", string);
     mixin Col!("lastName", string);
     mixin Col!("email", string);
@@ -41,7 +41,7 @@ struct User {
 
 /// Post entity - belongs to a User (author) and has many Comments
 struct Post {
-    mixin Entity!"posts";
+    mixin DemoEntity!"posts";
     mixin Col!("title", string);
     mixin Col!("body_", string, "body");  // D keyword, explicit column name
     mixin Col!("authorId", ForeignKey!User);  // FK column - type derived from User
@@ -90,7 +90,7 @@ struct Post {
 
 /// Comment entity - belongs to a Post and has an author (User)
 struct Comment {
-    mixin Entity!"comments";
+    mixin DemoEntity!"comments";
     mixin Col!("body_", string, "body");  // D keyword, explicit column name
     mixin Col!("postId", ForeignKey!Post);  // FK to Post
     mixin Col!("authorId", ForeignKey!User);  // FK to User

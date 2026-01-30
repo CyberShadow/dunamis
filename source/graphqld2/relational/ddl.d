@@ -46,34 +46,50 @@ struct ColumnDef {
     string foreignKeyColumn; // Empty if not a FK
 }
 
+/// Get primary key column names from entity (empty if none defined)
+template getPrimaryKeyColumns(Entity) {
+    static if (__traits(hasMember, Entity, "_primaryKey")) {
+        enum getPrimaryKeyColumns = Entity._primaryKey.columns;
+    } else {
+        enum string[] getPrimaryKeyColumns = [];
+    }
+}
+
+/// Check if a column name is part of the primary key
+bool isInPrimaryKey(string colName, const string[] pkColumns) {
+    foreach (pk; pkColumns) {
+        if (pk == colName) return true;
+    }
+    return false;
+}
+
 /// Extract column definitions from an entity type
 template getColumnDefs(Entity) {
     enum getColumnDefs = () {
         ColumnDef[] columns;
         bool[string] seenColumns;
+        enum pkColumns = getPrimaryKeyColumns!Entity;
 
-        // Collect all columns from Col mixins (including id from Entity mixin)
+        // Collect all columns from Col mixins
         static foreach (member; __traits(allMembers, Entity)) {{
             static if (member.length > 10 && member[0..10] == "_colField_") {
                 alias FieldMeta = __traits(getMember, Entity, member);
                 if (FieldMeta.column !in seenColumns) {
-                    // Check if this is the primary key (id from Entity mixin)
-                    static if (__traits(hasMember, FieldMeta, "isPrimaryKey") && FieldMeta.isPrimaryKey) {
-                        columns ~= ColumnDef(
-                            FieldMeta.column,
-                            sqlTypeName!(FieldMeta.type),
-                            false,  // PK is never nullable
-                            true,   // isPrimaryKey
-                            "",
-                            ""
-                        );
-                    } else static if (FieldMeta.isForeignKey) {
+                    // Check if this column is part of the primary key
+                    // (either via _primaryKey metadata or legacy isPrimaryKey field)
+                    static if (__traits(hasMember, FieldMeta, "isPrimaryKey")) {
+                        enum bool isPK = isInPrimaryKey(FieldMeta.name, pkColumns) || FieldMeta.isPrimaryKey;
+                    } else {
+                        enum bool isPK = isInPrimaryKey(FieldMeta.name, pkColumns);
+                    }
+
+                    static if (FieldMeta.isForeignKey) {
                         // ForeignKey column - include FK constraint
                         columns ~= ColumnDef(
                             FieldMeta.column,
                             sqlTypeName!(FieldMeta.type),
-                            FieldMeta.isNullable,
-                            false,
+                            isPK ? false : FieldMeta.isNullable,
+                            isPK,
                             FieldMeta.referencedEntity._table,
                             FieldMeta.referencedColumn
                         );
@@ -82,8 +98,8 @@ template getColumnDefs(Entity) {
                         columns ~= ColumnDef(
                             FieldMeta.column,
                             sqlTypeName!(FieldMeta.type),
-                            FieldMeta.isNullable,
-                            false,
+                            isPK ? false : FieldMeta.isNullable,
+                            isPK,
                             "",
                             ""
                         );
@@ -99,17 +115,19 @@ template getColumnDefs(Entity) {
             static if (member.length > 16 && member[0..16] == "_belongsToField_") {
                 alias FieldMeta = __traits(getMember, Entity, member);
                 if (FieldMeta.foreignKey !in seenColumns) {
-                    // Get parent's id column type
-                    alias ParentIdCol = __traits(getMember, FieldMeta.parentType, "_colField_id");
-                    columns ~= ColumnDef(
-                        FieldMeta.foreignKey,
-                        sqlTypeName!(ParentIdCol.type),
-                        FieldMeta.nullable,
-                        false,
-                        FieldMeta.parentType._table,
-                        "id"
-                    );
-                    seenColumns[FieldMeta.foreignKey] = true;
+                    // Get parent's id column type via _colField_id
+                    static if (__traits(hasMember, FieldMeta.parentType, "_colField_id")) {
+                        alias ParentIdCol = __traits(getMember, FieldMeta.parentType, "_colField_id");
+                        columns ~= ColumnDef(
+                            FieldMeta.foreignKey,
+                            sqlTypeName!(ParentIdCol.type),
+                            FieldMeta.nullable,
+                            false,
+                            FieldMeta.parentType._table,
+                            "id"
+                        );
+                        seenColumns[FieldMeta.foreignKey] = true;
+                    }
                 }
             }
         }}
@@ -127,13 +145,23 @@ string generateCreateTable(Entity)() {
     string result = "CREATE TABLE " ~ Entity._table ~ " (\n";
 
     auto columns = getColumnDefs!Entity;
+    enum pkColumns = getPrimaryKeyColumns!Entity;
+    enum bool isCompositePK = pkColumns.length > 1;
+
     string[] colDefs;
     string[] constraints;
+    string[] pkColNames;
 
     foreach (col; columns) {
         string def = "  " ~ col.name ~ " " ~ col.sqlType;
         if (col.isPrimaryKey) {
-            def ~= " PRIMARY KEY";
+            pkColNames ~= col.name;
+            // Only inline PRIMARY KEY for single-column PKs
+            if (!isCompositePK) {
+                def ~= " PRIMARY KEY";
+            } else if (!col.nullable) {
+                def ~= " NOT NULL";
+            }
         } else if (!col.nullable) {
             def ~= " NOT NULL";
         }
@@ -144,6 +172,11 @@ string generateCreateTable(Entity)() {
             constraints ~= "  FOREIGN KEY (" ~ col.name ~ ") REFERENCES " ~
                           col.foreignKeyTable ~ "(" ~ col.foreignKeyColumn ~ ")";
         }
+    }
+
+    // Add composite primary key constraint
+    if (isCompositePK && pkColNames.length > 0) {
+        constraints = ["  PRIMARY KEY (" ~ pkColNames.join(", ") ~ ")"] ~ constraints;
     }
 
     result ~= colDefs.join(",\n");
@@ -195,15 +228,15 @@ unittest {
     import std.typecons : Nullable;
     import graphqld2.core.expr : Expr;
     import graphqld2.core.types : Ref;
-    import graphqld2.relational.schema : Entity, Col, BelongsTo, ForeignKey, belongsTo;
+    import graphqld2.relational.schema : DemoEntity, Col, BelongsTo, ForeignKey, belongsTo;
 
     // Test nullable FK via Col + BelongsTo
     struct Manager {
-        mixin Entity!"managers";
+        mixin DemoEntity!"managers";
     }
 
     struct Employee {
-        mixin Entity!"employees";
+        mixin DemoEntity!"employees";
         mixin Col!("managerId", Nullable!(ForeignKey!Manager));  // nullable FK column
         mixin BelongsTo!("manager", "managerId");  // derives nullability from column
     }
@@ -233,15 +266,15 @@ unittest {
     import std.typecons : Nullable;
     import graphqld2.core.expr : Expr;
     import graphqld2.core.types : Ref;
-    import graphqld2.relational.schema : Entity, Col, BelongsTo, ForeignKey, belongsTo;
+    import graphqld2.relational.schema : DemoEntity, Col, BelongsTo, ForeignKey, belongsTo;
 
     // Test required FK via Col + BelongsTo
     struct Department {
-        mixin Entity!"departments";
+        mixin DemoEntity!"departments";
     }
 
     struct Employee2 {
-        mixin Entity!"employees2";
+        mixin DemoEntity!"employees2";
         mixin Col!("departmentId", ForeignKey!Department);  // required FK column
         mixin BelongsTo!("department", "departmentId");  // derives from column
     }

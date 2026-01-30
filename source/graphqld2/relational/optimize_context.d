@@ -177,7 +177,7 @@ unittest {
 
     // Test: Optimized execution produces same results as naive
     struct User {
-        mixin Entity!"users";
+        mixin DemoEntity!"users";
         mixin Col!("firstName", string);
         mixin Col!("lastName", string);
     }
@@ -219,7 +219,7 @@ unittest {
 
     // Test: QueryNode inspection - verify optimization creates correct nodes
     struct User {
-        mixin Entity!"users";
+        mixin DemoEntity!"users";
         mixin Col!("firstName", string);
         mixin Col!("age", long);
     }
@@ -255,12 +255,12 @@ unittest {
 
     // Test: Nested hasMany creates linked QueryNodes
     struct Post {
-        mixin Entity!"posts";
+        mixin DemoEntity!"posts";
         mixin Col!("title", string);
     }
 
     struct User {
-        mixin Entity!"users";
+        mixin DemoEntity!"users";
         mixin Col!("firstName", string);
         mixin HasMany!("posts", Post, "author_id");
     }
@@ -308,12 +308,12 @@ unittest {
 
     // Test: BelongsTo creates JOINs (not separate QueryNodes)
     struct User {
-        mixin Entity!"users";
+        mixin DemoEntity!"users";
         mixin Col!("firstName", string);
     }
 
     struct Post {
-        mixin Entity!"posts";
+        mixin DemoEntity!"posts";
         mixin Col!("title", string);
         mixin Col!("authorId", ForeignKey!User);
         mixin BelongsTo!("author", "authorId");
