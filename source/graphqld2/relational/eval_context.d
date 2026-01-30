@@ -48,7 +48,15 @@ abstract class DataFetcher {
 
     /// Fetch column values for refs (template dispatcher)
     final T[] fetchColumn(T)(string table, string column, Ref[] refs) {
-        static if (is(T == string)) {
+        import graphqld2.core.types : isCustomScalar;
+        import std.algorithm : map;
+        import std.array : array;
+
+        static if (isCustomScalar!T) {
+            // Custom scalar - fetch underlying type and wrap
+            auto rawValues = fetchColumn!(T.DType)(table, column, refs);
+            return rawValues.map!(v => T(v)).array;
+        } else static if (is(T == string)) {
             return fetchColumnString(table, column, refs);
         } else static if (is(T == long)) {
             return fetchColumnLong(table, column, refs);
@@ -267,10 +275,15 @@ class QueryResult {
     }
 
     private T extractValue(T)(JSONValue val) {
+        import graphqld2.core.types : isCustomScalar;
+
         if (val.type == JSONType.null_) {
             return T.init;
         }
-        static if (is(T == string)) {
+        static if (isCustomScalar!T) {
+            // Custom scalar - extract underlying type and wrap
+            return T(extractValue!(T.DType)(val));
+        } else static if (is(T == string)) {
             // Handle both string and integer values (for FK columns)
             if (val.type == JSONType.integer) {
                 return val.integer.to!string;

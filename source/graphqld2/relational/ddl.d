@@ -5,13 +5,18 @@ import std.array;
 import std.meta;
 import std.traits;
 
+import graphqld2.core.types : isCustomScalar;
+
 // ============================================================================
 // SQL Type Mapping
 // ============================================================================
 
 /// Map D types to SQL types
 template sqlTypeName(T) {
-    static if (is(T == string)) {
+    static if (isCustomScalar!T) {
+        // Custom scalar - use the underlying D type
+        enum sqlTypeName = sqlTypeName!(T.DType);
+    } else static if (is(T == string)) {
         enum sqlTypeName = "TEXT";
     } else static if (is(T == bool)) {
         enum sqlTypeName = "BOOLEAN";

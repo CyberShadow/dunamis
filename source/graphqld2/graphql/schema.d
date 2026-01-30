@@ -7,6 +7,8 @@ import std.meta;
 import std.traits;
 import std.typecons : Nullable;
 
+import graphqld2.core.types : isCustomScalar;
+
 // ============================================================================
 // GraphQL Type Mapping
 // ============================================================================
@@ -24,28 +26,44 @@ template graphqlTypeName(T) {
 }
 
 /// Map D types to GraphQL base type names (without nullability suffix)
+///
+/// Recognizes:
+/// - Built-in GraphQL scalars: int→Int, string→String, bool→Boolean, float/double→Float
+/// - Custom scalars (types satisfying isCustomScalar)
+/// - Aggregate types (structs with _typeName, emitted as GraphQL types)
+/// - Arrays of the above
+///
+/// Everything else is a compile error - use a CustomScalar for unsupported primitives.
 template graphqlBaseTypeName(T) {
-    static if (is(T == string)) {
+    static if (isCustomScalar!T) {
+        // Custom scalar - use its declared name
+        enum graphqlBaseTypeName = T.name;
+    } else static if (is(T == string)) {
+        // GraphQL String
         enum graphqlBaseTypeName = "String";
     } else static if (is(T == bool)) {
+        // GraphQL Boolean
         enum graphqlBaseTypeName = "Boolean";
-    } else static if (is(T == int) || is(T == short) || is(T == byte)) {
+    } else static if (is(T == int)) {
+        // GraphQL Int (32-bit signed)
         enum graphqlBaseTypeName = "Int";
-    } else static if (is(T == long)) {
-        // GraphQL Int is 32-bit; use Int64 for 64-bit integers
-        enum graphqlBaseTypeName = "Int64";
     } else static if (is(T == float) || is(T == double)) {
+        // GraphQL Float
         enum graphqlBaseTypeName = "Float";
     } else static if (is(T == Nullable!U, U)) {
         // Unwrap Nullable
         enum graphqlBaseTypeName = graphqlBaseTypeName!U;
     } else static if (is(T == E[], E)) {
+        // Array type
         enum graphqlBaseTypeName = "[" ~ graphqlTypeName!E ~ "]";
     } else static if (__traits(hasMember, T, "_typeName")) {
-        // Entity type - reference by name
+        // Entity/aggregate type - reference by name
         enum graphqlBaseTypeName = T._typeName;
     } else {
-        enum graphqlBaseTypeName = T.stringof;
+        // Unsupported type - require explicit CustomScalar
+        static assert(false,
+            "No GraphQL type mapping for `" ~ T.stringof ~ "`. " ~
+            "Use a CustomScalar to define how this type should be represented in GraphQL.");
     }
 }
 
@@ -294,30 +312,53 @@ string generateQuerySDL(Query)() {
     return result;
 }
 
-/// Check if any field in an entity uses a custom scalar type
-private template usesCustomScalar(string scalarName, Entity) {
-    enum usesCustomScalar = () {
-        foreach (field; getEntityFields!Entity) {
-            if (field.graphqlType.length >= scalarName.length) {
-                // Check if the type contains the scalar name
-                import std.algorithm : canFind;
-                if (field.graphqlType.canFind(scalarName)) {
-                    return true;
+/// Collect custom scalar names from an entity's column types
+private template getCustomScalarNames(Entity) {
+    enum getCustomScalarNames = () {
+        string[] names;
+        static foreach (member; __traits(allMembers, Entity)) {{
+            static if (member.length > 10 && member[0..10] == "_colField_") {
+                alias FieldMeta = __traits(getMember, Entity, member);
+                static if (isCustomScalar!(FieldMeta.type)) {
+                    // Add if not already present
+                    bool found = false;
+                    foreach (n; names) {
+                        if (n == FieldMeta.type.name) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        names ~= FieldMeta.type.name;
+                    }
                 }
             }
-        }
-        return false;
+        }}
+        return names;
     }();
 }
 
-/// Check if any entity uses a custom scalar
-private template anyEntityUsesScalar(string scalarName, Entities...) {
-    static if (Entities.length == 0) {
-        enum anyEntityUsesScalar = false;
-    } else {
-        enum anyEntityUsesScalar = usesCustomScalar!(scalarName, Entities[0])
-            || anyEntityUsesScalar!(scalarName, Entities[1..$]);
-    }
+/// Collect all custom scalar names from multiple entities
+private template getAllCustomScalarNames(Entities...) {
+    enum getAllCustomScalarNames = () {
+        string[] allNames;
+        static foreach (Entity; Entities) {
+            foreach (name; getCustomScalarNames!Entity) {
+                // Add if not already present
+                bool found = false;
+                foreach (n; allNames) {
+                    if (n == name) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    allNames ~= name;
+                }
+            }
+        }
+        return allNames;
+    }();
 }
 
 /// Generate complete GraphQL schema SDL by discovering all types from Query
@@ -327,9 +368,12 @@ template generateSchemaSDL(Query) {
     enum generateSchemaSDL = () {
         string result;
 
-        // Declare custom scalars if used
-        static if (anyEntityUsesScalar!("Int64", AllTypes)) {
-            result ~= "scalar Int64\n\n";
+        // Declare custom scalars
+        foreach (scalarName; getAllCustomScalarNames!AllTypes) {
+            result ~= "scalar " ~ scalarName ~ "\n";
+        }
+        static if (getAllCustomScalarNames!AllTypes.length > 0) {
+            result ~= "\n";
         }
 
         // Generate Query type
@@ -351,21 +395,33 @@ template generateSchemaSDL(Query) {
 // ============================================================================
 
 unittest {
-    // Test graphqlTypeName (includes "!" for non-nullable)
+    import graphqld2.core.types : CustomScalar;
+    import std.conv : to;
+
+    // Test built-in GraphQL scalars
     static assert(graphqlTypeName!string == "String!");
     static assert(graphqlTypeName!int == "Int!");
-    static assert(graphqlTypeName!long == "Int64!");  // 64-bit uses Int64, not Int
     static assert(graphqlTypeName!bool == "Boolean!");
     static assert(graphqlTypeName!float == "Float!");
+    static assert(graphqlTypeName!double == "Float!");
     static assert(graphqlTypeName!(string[]) == "[String!]!");
 
     // Test Nullable types (no "!" suffix)
     static assert(graphqlTypeName!(Nullable!string) == "String");
     static assert(graphqlTypeName!(Nullable!int) == "Int");
-    static assert(graphqlTypeName!(Nullable!long) == "Int64");
 
     // Test base type names (without "!")
     static assert(graphqlBaseTypeName!string == "String");
-    static assert(graphqlBaseTypeName!long == "Int64");
+    static assert(graphqlBaseTypeName!int == "Int");
     static assert(graphqlBaseTypeName!(Nullable!string) == "String");
+
+    // Test custom scalars
+    alias Int64 = CustomScalar!(long, "Int64", (long v) => v.to!string, (string s) => s.to!long);
+    static assert(isCustomScalar!Int64);
+    static assert(graphqlTypeName!Int64 == "Int64!");
+    static assert(graphqlBaseTypeName!Int64 == "Int64");
+    static assert(graphqlTypeName!(Nullable!Int64) == "Int64");
+
+    // Verify unsupported types would error (can't test static assert failure directly)
+    // graphqlTypeName!long would fail: "No GraphQL type mapping for `long`..."
 }

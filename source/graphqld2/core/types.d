@@ -214,6 +214,110 @@ string[] decodeCompositeKey(Ref r) {
 }
 
 // ============================================================================
+// Custom Scalar Support
+// ============================================================================
+
+/// A custom GraphQL scalar type.
+///
+/// Custom scalars wrap a D type and provide serialization/deserialization
+/// to/from strings for GraphQL transport.
+///
+/// Example:
+/// ---
+/// alias Int64 = CustomScalar!(
+///     long, "Int64",
+///     (long v) => v.to!string,
+///     (string s) => s.to!long
+/// );
+///
+/// struct Entity {
+///     mixin Col!("bigValue", Int64);
+/// }
+/// ---
+struct CustomScalar(
+    _DType,
+    string _name,
+    alias _serialize,
+    alias _deserialize
+) {
+    /// The underlying D type
+    alias DType = _DType;
+
+    /// The GraphQL scalar name
+    enum name = _name;
+
+    /// Serialize to string
+    alias serialize = _serialize;
+
+    /// Deserialize from string
+    alias deserialize = _deserialize;
+
+    /// The wrapped value
+    DType value;
+
+    /// Implicit conversion to underlying type
+    alias value this;
+
+    /// Constructor from underlying type
+    this(DType v) {
+        value = v;
+    }
+
+    /// Serialize this value
+    string toString() const {
+        return serialize(value);
+    }
+
+    /// Deserialize from string
+    static typeof(this) fromString(string s) {
+        return typeof(this)(deserialize(s));
+    }
+}
+
+/// Check if a type is a CustomScalar.
+///
+/// Example:
+/// ---
+/// static assert(isCustomScalar!Int64);
+/// static assert(!isCustomScalar!long);
+/// ---
+template isCustomScalar(T) {
+    enum isCustomScalar = is(typeof({
+        // Must have a name
+        enum string n = T.name;
+        // Must have underlying DType
+        alias D = T.DType;
+        // Must have serialize/deserialize
+        string s = T.serialize(D.init);
+        D v = T.deserialize("");
+    }));
+}
+
+unittest {
+    // Test CustomScalar
+    alias TestScalar = CustomScalar!(
+        int, "TestInt",
+        (int v) => v.to!string,
+        (string s) => s.to!int
+    );
+
+    static assert(isCustomScalar!TestScalar);
+    static assert(!isCustomScalar!int);
+    static assert(!isCustomScalar!string);
+
+    static assert(TestScalar.name == "TestInt");
+    static assert(is(TestScalar.DType == int));
+
+    auto val = TestScalar(42);
+    assert(val.value == 42);
+    assert(val == 42);  // implicit conversion
+    assert(val.toString() == "42");
+
+    auto parsed = TestScalar.fromString("123");
+    assert(parsed.value == 123);
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

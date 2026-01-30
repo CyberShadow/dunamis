@@ -877,14 +877,14 @@ unittest {
 }
 
 unittest {
-    import graphqld2.relational.demo : DemoEntity;
+    import graphqld2.relational.demo : DemoEntity, Int64;
 
-    // Test DemoEntity convenience (includes id column)
+    // Test DemoEntity convenience (includes id column with Int64 type)
     struct Comment {
         mixin DemoEntity!"comments";
     }
     static assert(Comment._table == "comments");
-    static assert(is(Comment._colField_id.type == long));
+    static assert(is(Comment._colField_id.type == Int64));
 
     // Test DemoEntity with custom ID type
     struct UuidEntity {
