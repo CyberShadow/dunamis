@@ -507,12 +507,12 @@ unittest {
     foreach (f; userFields) {
         if (f.name == "firstName") {
             hasFirstName = true;
-            assert(f.graphqlType == "String");
+            assert(f.graphqlType == "String!");  // Non-nullable column
             assert(f.kind == FieldKind.column);
         }
         if (f.name == "posts") {
             hasPosts = true;
-            assert(f.graphqlType == "[Post!]");
+            assert(f.graphqlType == "[Post!]!");  // Non-nullable list of non-nullable items
             assert(f.kind == FieldKind.hasMany);
         }
     }
@@ -533,7 +533,7 @@ unittest {
     foreach (f; queryFields) {
         if (f.name == "users") {
             hasUsers = true;
-            assert(f.graphqlType == "[User!]");
+            assert(f.graphqlType == "[User!]!");  // Non-nullable list of non-nullable items
         }
     }
     assert(hasUsers, "Query should have users field");
