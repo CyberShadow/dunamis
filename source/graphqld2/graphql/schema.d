@@ -70,6 +70,7 @@ template graphqlTypeName(T) {
 /// - Built-in GraphQL scalars: int→Int, string→String, bool→Boolean, float/double→Float
 /// - Custom scalars (types satisfying isCustomScalar)
 /// - Aggregate types (structs with _typeName, emitted as GraphQL types)
+/// - Input types (structs without _typeName, used as computed field arguments)
 /// - Arrays of the above
 ///
 /// Everything else is a compile error - use a CustomScalar for unsupported primitives.
@@ -98,6 +99,9 @@ template graphqlBaseTypeName(T) {
     } else static if (__traits(hasMember, T, "_typeName")) {
         // Entity/aggregate type - reference by name
         enum graphqlBaseTypeName = T._typeName;
+    } else static if (is(T == struct)) {
+        // Input type struct - use struct name
+        enum graphqlBaseTypeName = T.stringof;
     } else {
         // Unsupported type - require explicit CustomScalar
         static assert(false,
@@ -467,6 +471,237 @@ template getQueryFields(Query) {
 }
 
 // ============================================================================
+// Input Type Detection
+// ============================================================================
+
+/// Check if a type is a struct that should be treated as a GraphQL input type.
+/// Input types are structs that:
+/// - Are not entities (no _typeName member from Entity mixin)
+/// - Are not Nullable wrappers
+/// - Are not built-in types (string, int, etc.)
+template isInputType(T) {
+    static if (is(T == struct)) {
+        // Must not be an entity (entities have _typeName)
+        static if (__traits(hasMember, T, "_typeName")) {
+            enum isInputType = false;
+        }
+        // Must not be a Nullable wrapper
+        else static if (is(T == Nullable!U, U)) {
+            enum isInputType = false;
+        }
+        // Must not be a custom scalar
+        else static if (isCustomScalar!T) {
+            enum isInputType = false;
+        }
+        else {
+            enum isInputType = true;
+        }
+    } else {
+        enum isInputType = false;
+    }
+}
+
+/// Field information for input type fields
+struct InputFieldInfo {
+    string name;
+    string graphqlType;
+    bool hasDefault;
+    string defaultValue;
+}
+
+/// Extract fields from an input type struct
+template getInputTypeFields(T) if (isInputType!T) {
+    enum getInputTypeFields = () {
+        InputFieldInfo[] fields;
+
+        static foreach (member; __traits(allMembers, T)) {{
+            static if (!isInternalHelper!member) {
+                alias MemberType = typeof(__traits(getMember, T, member));
+
+                // Skip non-field members (functions, etc.)
+                static if (!is(MemberType == function) && !is(MemberType == void)) {
+                    // Check for default value by seeing if the field is initialized
+                    // In D, we can check FieldNameTuple and use .init
+                    enum hasInit = __traits(compiles, { auto v = __traits(getMember, T.init, member); });
+
+                    static if (hasInit) {
+                        // Determine GraphQL type based on D type
+                        // Nullable!(Nullable!T) → T (three-state, same GraphQL repr as Nullable!T)
+                        // Nullable!T → T (optional, absent = null)
+                        // T → T! (required)
+                        static if (is(MemberType == Nullable!(Nullable!U), U)) {
+                            // Three-state: absent/null/value - GraphQL type is nullable
+                            enum gqlType = graphqlInputTypeName!U;
+                        } else static if (is(MemberType == Nullable!U, U)) {
+                            // Two-state: null/value (absent = null) - GraphQL type is nullable
+                            enum gqlType = graphqlInputTypeName!U;
+                        } else {
+                            // Required non-null
+                            enum gqlType = graphqlInputTypeName!MemberType ~ "!";
+                        }
+
+                        fields ~= InputFieldInfo(member, gqlType, false, "");
+                    }
+                }
+            }
+        }}
+
+        return fields;
+    }();
+}
+
+/// Map D types to GraphQL input type names.
+/// Similar to graphqlBaseTypeName but handles input type structs.
+template graphqlInputTypeName(T) {
+    static if (isCustomScalar!T) {
+        enum graphqlInputTypeName = T.name;
+    } else static if (is(T == string)) {
+        enum graphqlInputTypeName = "String";
+    } else static if (is(T == bool)) {
+        enum graphqlInputTypeName = "Boolean";
+    } else static if (is(T == int)) {
+        enum graphqlInputTypeName = "Int";
+    } else static if (is(T == float) || is(T == double)) {
+        enum graphqlInputTypeName = "Float";
+    } else static if (is(T == Nullable!U, U)) {
+        enum graphqlInputTypeName = graphqlInputTypeName!U;
+    } else static if (is(T == E[], E)) {
+        // Array type - elements are non-null by default in input
+        enum graphqlInputTypeName = "[" ~ graphqlInputTypeName!E ~ "!]";
+    } else static if (isInputType!T) {
+        // Input type struct - use struct name as type name
+        enum graphqlInputTypeName = T.stringof;
+    } else static if (__traits(hasMember, T, "_typeName")) {
+        // Entity reference in input (e.g., for ID references)
+        enum graphqlInputTypeName = T._typeName;
+    } else {
+        static assert(false,
+            "No GraphQL input type mapping for `" ~ T.stringof ~ "`. " ~
+            "Use a CustomScalar or define it as an input type struct.");
+    }
+}
+
+/// Unwrap Nullable layers to get the base type
+template UnwrapNullable(T) {
+    static if (is(T == Nullable!U, U)) {
+        alias UnwrapNullable = UnwrapNullable!U;
+    } else {
+        alias UnwrapNullable = T;
+    }
+}
+
+/// Helper to extract input types from function parameters (iterative)
+template getInputTypesFromParamsImpl(size_t idx, Params...) {
+    static if (idx >= Params.length) {
+        alias getInputTypesFromParamsImpl = AliasSeq!();
+    } else {
+        alias P = Params[idx];
+        alias Unwrapped = UnwrapNullable!P;
+        alias Rest = getInputTypesFromParamsImpl!(idx + 1, Params);
+
+        static if (isInputType!Unwrapped) {
+            alias getInputTypesFromParamsImpl = AliasSeq!(Unwrapped, Rest);
+        } else {
+            alias getInputTypesFromParamsImpl = Rest;
+        }
+    }
+}
+
+/// Extract input types from computed field arguments (skip first Expr!Entity param)
+template getInputTypesFromArguments(alias member) {
+    alias Params = Parameters!member;
+    // Skip first parameter (index 0), start from index 1
+    static if (Params.length > 1) {
+        alias getInputTypesFromArguments = getInputTypesFromParamsImpl!(1, Params);
+    } else {
+        alias getInputTypesFromArguments = AliasSeq!();
+    }
+}
+
+/// Helper to get input types from struct fields (iterative)
+template getNestedInputTypesImpl(T, size_t idx, Members...) {
+    static if (idx >= Members.length) {
+        alias getNestedInputTypesImpl = AliasSeq!();
+    } else {
+        enum member = Members[idx];
+        alias Rest = getNestedInputTypesImpl!(T, idx + 1, Members);
+
+        static if (isInternalHelper!member) {
+            alias getNestedInputTypesImpl = Rest;
+        } else static if (__traits(compiles, typeof(__traits(getMember, T, member)))) {
+            alias MemberType = typeof(__traits(getMember, T, member));
+
+            static if (!is(MemberType == function) && !is(MemberType == void)) {
+                alias Unwrapped = UnwrapNullable!MemberType;
+
+                static if (isInputType!Unwrapped) {
+                    alias getNestedInputTypesImpl = AliasSeq!(Unwrapped, Rest);
+                } else {
+                    alias getNestedInputTypesImpl = Rest;
+                }
+            } else {
+                alias getNestedInputTypesImpl = Rest;
+            }
+        } else {
+            alias getNestedInputTypesImpl = Rest;
+        }
+    }
+}
+
+/// Get nested input types from an input type's fields
+template getNestedInputTypes(T) if (isInputType!T) {
+    alias getNestedInputTypes = getNestedInputTypesImpl!(T, 0, __traits(allMembers, T));
+}
+
+/// Helper to collect input types from entity members (iterative)
+template getInputTypesFromEntityImpl(Entity, size_t idx, Members...) {
+    static if (idx >= Members.length) {
+        alias getInputTypesFromEntityImpl = AliasSeq!();
+    } else {
+        enum member = Members[idx];
+        alias Rest = getInputTypesFromEntityImpl!(Entity, idx + 1, Members);
+
+        static if (isInternalHelper!member) {
+            alias getInputTypesFromEntityImpl = Rest;
+        } else static if (__traits(compiles, isComputedField!(Entity, member, __traits(getMember, Entity, member)))) {
+            static if (isComputedField!(Entity, member, __traits(getMember, Entity, member))) {
+                alias fn = __traits(getMember, Entity, member);
+                alias InputTypes = getInputTypesFromArguments!fn;
+                alias getInputTypesFromEntityImpl = AliasSeq!(InputTypes, Rest);
+            } else {
+                alias getInputTypesFromEntityImpl = Rest;
+            }
+        } else {
+            alias getInputTypesFromEntityImpl = Rest;
+        }
+    }
+}
+
+/// Collect all input types from an entity's computed fields
+template getInputTypesFromEntity(Entity) {
+    alias getInputTypesFromEntity = getInputTypesFromEntityImpl!(Entity, 0, __traits(allMembers, Entity));
+}
+
+/// Helper to collect input types from multiple entities
+template getInputTypesFromEntitiesImpl(Entities...) {
+    static if (Entities.length == 0) {
+        alias getInputTypesFromEntitiesImpl = AliasSeq!();
+    } else {
+        alias First = getInputTypesFromEntity!(Entities[0]);
+        alias Rest = getInputTypesFromEntitiesImpl!(Entities[1..$]);
+        alias getInputTypesFromEntitiesImpl = AliasSeq!(First, Rest);
+    }
+}
+
+/// Collect all input types from all entities in the schema
+template getAllInputTypes(Query) {
+    alias AllEntityTypes = getAllEntityTypes!Query;
+    alias AllInputTypes = getInputTypesFromEntitiesImpl!AllEntityTypes;
+    // Note: uniqueTypes is defined later in the file, but should work due to D's template instantiation order
+    alias getAllInputTypes = uniqueTypes!AllInputTypes;
+}
+
+// ============================================================================
 // Type Discovery
 // ============================================================================
 
@@ -631,6 +866,22 @@ string generateQuerySDL(Query)() {
     return result;
 }
 
+/// Generate GraphQL SDL for an input type
+string generateInputTypeSDL(T)() if (isInputType!T) {
+    string result = "input " ~ T.stringof ~ " {\n";
+
+    foreach (field; getInputTypeFields!T) {
+        result ~= "  " ~ field.name ~ ": " ~ field.graphqlType;
+        if (field.hasDefault) {
+            result ~= " = " ~ field.defaultValue;
+        }
+        result ~= "\n";
+    }
+
+    result ~= "}\n";
+    return result;
+}
+
 /// Collect custom scalar names from an entity's column types
 private template getCustomScalarNames(Entity) {
     enum getCustomScalarNames = () {
@@ -683,6 +934,7 @@ private template getAllCustomScalarNames(Entities...) {
 /// Generate complete GraphQL schema SDL by discovering all types from Query
 template generateSchemaSDL(Query) {
     alias AllTypes = getAllEntityTypes!Query;
+    alias AllInputTypes = getAllInputTypes!Query;
 
     enum generateSchemaSDL = () {
         string result;
@@ -702,6 +954,12 @@ template generateSchemaSDL(Query) {
         // Generate each discovered entity type
         static foreach (Entity; AllTypes) {
             result ~= generateTypeSDL!Entity();
+            result ~= "\n";
+        }
+
+        // Generate input types (discovered from computed field arguments)
+        static foreach (InputType; AllInputTypes) {
+            result ~= generateInputTypeSDL!InputType();
             result ~= "\n";
         }
 

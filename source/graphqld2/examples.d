@@ -23,6 +23,19 @@ struct Query {
 }
 
 // ============================================================================
+// Input Types - Structs used as computed field arguments
+// ============================================================================
+
+/// Example input type for formatting options
+struct FormatOptions {
+    import std.typecons : Nullable;
+
+    string prefix;                           // Required: String!
+    Nullable!string suffix;                  // Optional (absent = null): String
+    Nullable!(Nullable!bool) uppercase;      // Three-state (absent/null/value): Boolean
+}
+
+// ============================================================================
 // Domain Model - Demonstrates business logic with relationships
 // ============================================================================
 
@@ -54,6 +67,13 @@ struct User {
     @GqlDescription("A personalized greeting")
     static auto greeting(RefExpr!User u, string prefix, string suffix = "!") {
         return prefix ~ " " ~ u.firstName ~ suffix;
+    }
+
+    /// Computed field with struct argument - demonstrates input type generation
+    @GqlDescription("Formatted name with options")
+    static auto formattedName(RefExpr!User u, FormatOptions options) {
+        // For now, just use prefix - full implementation would handle all options
+        return options.prefix ~ u.firstName;
     }
 }
 
@@ -569,6 +589,8 @@ type User {
   fullName: String!
   """A personalized greeting"""
   greeting(prefix: String!, suffix: String = "!"): String!
+  """Formatted name with options"""
+  formattedName(options: FormatOptions!): String!
 }
 
 type Post {
@@ -587,6 +609,12 @@ type Comment {
   post: Post!
   author: User!
   html: String!
+}
+
+input FormatOptions {
+  prefix: String!
+  suffix: String
+  uppercase: Boolean
 }
 
 EOF";
