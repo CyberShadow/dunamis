@@ -238,25 +238,107 @@ T extractValue(T)(Value val, T defaultValue = T.init) {
             return T.init;  // null
         }
         return T(extractValue!U(val));
+    } else static if (isInputType!T) {
+        return extractInputObject!T(val);
     } else {
         static assert(false, "Unsupported argument type: " ~ T.stringof);
     }
+}
+
+/// Extract an input object from a GraphQL object Value node
+T extractInputObject(T)(Value val) if (isInputType!T) {
+    import graphql.ast : ValueEnum;
+
+    if (val is null) {
+        throw new CompilerException("Missing required input object of type " ~ T.stringof);
+    }
+
+    if (val.ruleSelection != ValueEnum.O) {
+        throw new CompilerException(
+            "Expected object for input type " ~ T.stringof ~ ", got " ~ val.ruleSelection.to!string
+        );
+    }
+
+    T result;
+
+    // Iterate over GraphQL object fields and set corresponding struct fields
+    void processObjectValues(ObjectValues vals) {
+        if (vals is null) return;
+
+        string fieldName = vals.name.value;
+        if (fieldName !is null && vals.val !is null) {
+            // Get the Value from ValueOrVariable
+            Value fieldVal = vals.val.val;
+
+            // Set the corresponding struct field
+            setInputField!T(result, fieldName, fieldVal);
+        }
+
+        // Process remaining fields (linked list)
+        if (vals.follow !is null) {
+            processObjectValues(vals.follow);
+        }
+    }
+
+    if (val.obj !is null && val.obj.vals !is null) {
+        processObjectValues(val.obj.vals);
+    }
+
+    return result;
+}
+
+/// Set a field in an input object struct from a GraphQL Value
+void setInputField(T)(ref T obj, string fieldName, Value val) if (isInputType!T) {
+    // Use compile-time introspection to find and set the matching field
+    static foreach (member; __traits(allMembers, T)) {{
+        static if (!isInternalHelper!member) {
+            alias MemberType = typeof(__traits(getMember, T, member));
+            static if (!is(MemberType == function) && !is(MemberType == void)) {
+                if (fieldName == member) {
+                    __traits(getMember, obj, member) = extractValue!MemberType(val);
+                    return;
+                }
+            }
+        }
+    }}
+    // Unknown field - ignore (GraphQL validation should catch this)
 }
 
 // ============================================================================
 // Computed Field Invocation
 // ============================================================================
 
-/// Check if a type is a supported scalar argument type
+/// Check if a type is a supported argument type (scalars or input objects)
 template isSupportedArgType(T) {
     static if (is(T == string) || is(T == long) || is(T == int) ||
                is(T == double) || is(T == float) || is(T == bool)) {
         enum isSupportedArgType = true;
     } else static if (is(T == Nullable!U, U)) {
         enum isSupportedArgType = isSupportedArgType!U;
+    } else static if (isInputType!T) {
+        // Input object - check all fields are supported
+        enum isSupportedArgType = allInputFieldsSupported!T;
     } else {
         enum isSupportedArgType = false;
     }
+}
+
+/// Check if all fields of an input type are supported
+template allInputFieldsSupported(T) if (isInputType!T) {
+    enum allInputFieldsSupported = () {
+        static foreach (member; __traits(allMembers, T)) {{
+            static if (!isInternalHelper!member) {
+                alias MemberType = typeof(__traits(getMember, T, member));
+                static if (!is(MemberType == function) && !is(MemberType == void)) {
+                    alias Unwrapped = UnwrapNullable!MemberType;
+                    if (!isSupportedArgType!Unwrapped) {
+                        return false;
+                    }
+                }
+            }
+        }}
+        return true;
+    }();
 }
 
 /// Check if all argument types of a function are supported
@@ -782,4 +864,121 @@ unittest {
     assert(posts[0]["title"].str == "Hello");
     assert(posts[1]["title"].str == "World");
     assert(posts[2]["title"].str == "Test");
+}
+
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import graphqld2.core;
+    import graphqld2.relational.schema;
+    import graphqld2.relational.demo;
+    import graphqld2.relational.eval_context;
+
+    // Test input objects as computed field arguments
+
+    // Define an input type (plain struct)
+    static struct NameFormat {
+        string prefix;
+        string suffix;
+    }
+
+    static struct User {
+        mixin DemoEntity!"users";
+        mixin Col!("firstName", string);
+        mixin Col!("lastName", string);
+
+        // Computed field that takes an input object
+        static auto formattedName(Expr!User u, NameFormat format) {
+            return format.prefix ~ firstName(u) ~ " " ~ lastName(u) ~ format.suffix;
+        }
+    }
+
+    alias DB = MockDB!();
+
+    static struct Query {
+        mixin Table!(DB, User, "users");
+    }
+
+    auto db = new DB();
+    db.setTableData("users", `[
+        {"id": 1, "first_name": "Alice", "last_name": "Smith"},
+        {"id": 2, "first_name": "Bob", "last_name": "Jones"}
+    ]`);
+
+    // Query with input object argument
+    auto query = compileQuery!Query(`{
+        users {
+            formattedName(format: {prefix: "Mr. ", suffix: "!"})
+        }
+    }`, db);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query));
+
+    auto users = result["users"].array;
+    assert(users.length == 2);
+    assert(users[0]["formattedName"].str == "Mr. Alice Smith!");
+    assert(users[1]["formattedName"].str == "Mr. Bob Jones!");
+}
+
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import graphqld2.core;
+    import graphqld2.relational.schema;
+    import graphqld2.relational.demo;
+    import graphqld2.relational.eval_context;
+
+    // Test nested input objects
+
+    // Inner input type
+    static struct Decoration {
+        string left;
+        string right;
+    }
+
+    // Outer input type containing inner
+    static struct NameStyle {
+        string separator;
+        Decoration decoration;
+    }
+
+    static struct User {
+        mixin DemoEntity!"users";
+        mixin Col!("firstName", string);
+        mixin Col!("lastName", string);
+
+        // Computed field with nested input object
+        static auto styledName(Expr!User u, NameStyle style) {
+            return style.decoration.left ~ firstName(u) ~ style.separator ~ lastName(u) ~ style.decoration.right;
+        }
+    }
+
+    alias DB = MockDB!();
+
+    static struct Query {
+        mixin Table!(DB, User, "users");
+    }
+
+    auto db = new DB();
+    db.setTableData("users", `[
+        {"id": 1, "first_name": "Alice", "last_name": "Smith"}
+    ]`);
+
+    // Query with nested input object
+    auto query = compileQuery!Query(`{
+        users {
+            styledName(style: {
+                separator: " - ",
+                decoration: {left: "[", right: "]"}
+            })
+        }
+    }`, db);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query));
+
+    auto users = result["users"].array;
+    assert(users.length == 1);
+    assert(users[0]["styledName"].str == "[Alice - Smith]");
 }
