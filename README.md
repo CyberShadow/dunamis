@@ -76,7 +76,8 @@ This is an acceptable trade-off for most CRUD applications.
                  ▼
 ┌─────────────────────────────────────┐
 │         GraphQL Layer               │
-│  - Schema generation (planned)      │
+│  - Schema SDL generation            │
+│  - SQL DDL generation               │
 │  - Query parsing (planned)          │
 └─────────────────────────────────────┘
 ```
@@ -88,6 +89,13 @@ The Executor is data-source agnostic. Data sources travel with expressions - roo
 ```d
 import graphqld2.core;
 import graphqld2.relational;
+import graphqld2.graphql;
+
+// Schema definition - the Query type defines root entry points
+struct Query {
+    mixin Table!(User, "users");
+    mixin Table!(Post, "posts");
+}
 
 // Entity definitions with mixins
 struct User {
@@ -106,6 +114,7 @@ struct Post {
     mixin Entity!"posts";
     mixin Col!("title", string);
     mixin Col!("body_", string, "body");
+    mixin Col!("authorId", ForeignKey!User);  // Type-safe FK column
     mixin BelongsTo!("author", User, "author_id");
     mixin HasMany!("comments", Comment, "post_id");
 }
@@ -113,10 +122,11 @@ struct Post {
 struct Comment {
     mixin Entity!"comments";
     mixin Col!("body_", string, "body");
+    mixin Col!("postId", ForeignKey!Post);
     mixin BelongsTo!("author", User, "author_id");
 }
 
-// Usage
+// Usage - query from root
 auto db = new MockDataFetcher();
 auto executor = new Executor();
 
@@ -126,9 +136,25 @@ auto query = map!(
         "title", Post.title(p),
         "author", User.fullName(Post.author(p))
     )
-)(getByIds!Post([1, 2], db));
+)(Query.posts(db));  // Entry point from Query root
 
 auto result = executor.execute(query);
+
+// Generate GraphQL schema from D types
+pragma(msg, generateSchemaSDL!Query);
+// Output:
+// type Query {
+//   users: [User!]!
+//   posts: [Post!]!
+// }
+// type User { ... }
+// type Post { ... }
+
+// Generate SQL DDL
+pragma(msg, generateDDL!Query);
+// Output:
+// CREATE TABLE users ( ... );
+// CREATE TABLE posts ( ... FOREIGN KEY (author_id) REFERENCES users(id) );
 ```
 
 The above generates a single SQL query with JOINs:
@@ -178,6 +204,8 @@ SELECT * FROM layer1;
 - `use()` combinator for per-element computation
 - Operator overloading (`~`, `==`, etc.)
 - Entity definition mixins (`Entity`, `Col`, `BelongsTo`, `HasMany`)
+- `Table` mixin for Query root entry points
+- `ForeignKey!Entity` type for type-safe FK columns
 - QueryNode-based SQL planning
 - JOINs for belongsTo relationships
 - Child queries (CTEs) for hasMany relationships
@@ -185,9 +213,10 @@ SELECT * FROM layer1;
 - Data-source agnostic Executor
 - MockDataFetcher for testing
 - DebugSqlFetcher for SQL inspection
+- GraphQL schema generation (`generateSchemaSDL!Query`)
+- SQL DDL generation (`generateDDL!Query`)
 
 **Not yet implemented:**
-- GraphQL schema generation from types
 - GraphQL query parsing
 - Response serialization
 - Real database DataFetcher (PostgreSQL, etc.)
@@ -201,6 +230,12 @@ dub test
 
 # With SQL debug output
 dub test -d=sql
+
+# Show generated GraphQL schema
+dub test -d=graphql
+
+# Show generated SQL DDL
+dub test -d=ddl
 ```
 
 ## Future Directions
