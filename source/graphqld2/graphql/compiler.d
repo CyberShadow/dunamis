@@ -28,6 +28,7 @@ alias GraphQLResult = Expr!JSONValue;
 /// fields and generate the appropriate expressions. The result is an Expr
 /// tree that can be executed by the Executor.
 ///
+/// Accepts either a Schema type (created with Schema!(Query, Mutation)) or a raw Query type.
 /// The Query type should have Table mixins that bind to a static data source.
 ///
 /// Example:
@@ -38,14 +39,15 @@ alias GraphQLResult = Expr!JSONValue;
 ///     mixin Table!(myDB, User, "users");
 /// }
 ///
-/// void main() {
-///     myDB = new MyDB(connectionString);
-///     auto query = compileQuery!Query(`{ users { firstName, lastName } }`);
-///     auto result = executor.execute(query);
-/// }
+/// // Using raw Query type
+/// auto query = compileQuery!Query(`{ users { firstName } }`);
+///
+/// // Using Schema type
+/// alias MySchema = Schema!(Query);
+/// auto query = compileQuery!MySchema(`{ users { firstName } }`);
 /// ---
-GraphQLResult compileQuery(Query)(string queryString) {
-    return compileQuery!Query(queryString, JSONValue.emptyObject);
+GraphQLResult compileQuery(alias SchemaOrQuery)(string queryString) {
+    return compileQuery!SchemaOrQuery(queryString, JSONValue.emptyObject);
 }
 
 /// Compiles a GraphQL query string with variables into an executable Expr tree.
@@ -59,7 +61,7 @@ GraphQLResult compileQuery(Query)(string queryString) {
 ///     }
 /// `, variables);
 /// ---
-GraphQLResult compileQuery(Query)(string queryString, JSONValue variables) {
+GraphQLResult compileQuery(alias SchemaOrQuery)(string queryString, JSONValue variables) {
     // Parse the GraphQL query
     auto lexer = Lexer(queryString);
     auto parser = Parser(lexer);
@@ -71,8 +73,15 @@ GraphQLResult compileQuery(Query)(string queryString, JSONValue variables) {
         throw new CompilerException("No operation found in query");
     }
 
+    // Extract Query type from Schema if needed
+    static if (isSchema!SchemaOrQuery) {
+        alias QueryType = SchemaOrQuery.Query;
+    } else {
+        alias QueryType = SchemaOrQuery;
+    }
+
     // Compile the root selection set with variables
-    return compileRootSelectionSet!Query(op.ss, variables);
+    return compileRootSelectionSet!QueryType(op.ss, variables);
 }
 
 /// Exception thrown during query compilation
@@ -1244,4 +1253,44 @@ unittest {
     auto users = result["users"].array;
     assert(users.length == 1);
     assert(users[0]["formattedName"].str == "Dr. Alice Smith, PhD");
+}
+
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import graphqld2.core;
+    import graphqld2.relational.schema;
+    import graphqld2.relational.demo;
+    import graphqld2.relational.eval_context;
+
+    // Test compileQuery with Schema type (rather than raw Query type)
+
+    static struct User {
+        mixin DemoEntity!"users";
+        mixin Col!("firstName", string);
+    }
+
+    static MockDB!() db;
+
+    static struct Query {
+        mixin Table!(db, User, "users");
+    }
+
+    // Create Schema from Query
+    alias MySchema = graphqld2.graphql.schema.Schema!(Query);
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "first_name": "Alice"}
+    ]`);
+
+    // Compile using Schema type instead of raw Query
+    auto query = compileQuery!MySchema(`{ users { firstName } }`);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query));
+
+    auto users = result["users"].array;
+    assert(users.length == 1);
+    assert(users[0]["firstName"].str == "Alice");
 }

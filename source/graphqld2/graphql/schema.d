@@ -11,6 +11,58 @@ import graphqld2.core.types : isCustomScalar;
 import graphqld2.core.expr : Expr, ExprResultType, isExpr;
 
 // ============================================================================
+// Schema Template
+// ============================================================================
+
+/// Schema template bundling Query and optional Mutation types.
+/// This is the primary entry point for schema operations.
+///
+/// Example:
+/// ---
+/// struct Query {
+///     mixin Table!(db, User, "users");
+/// }
+///
+/// struct Mutation {
+///     static User createUser(CreateUserInput input) { ... }
+/// }
+///
+/// // With mutations
+/// alias MySchema = Schema!(Query, Mutation);
+///
+/// // Without mutations (Mutation defaults to empty)
+/// alias MySchema = Schema!(Query);
+///
+/// // Usage
+/// pragma(msg, generateSchemaSDL!MySchema);
+/// auto query = compileQuery!MySchema(`{ users { name } }`);
+/// ---
+template Schema(QueryType, MutationType = void) {
+    alias Query = QueryType;
+
+    static if (is(MutationType == void)) {
+        // Empty mutation type when not provided
+        struct Mutation {}
+        enum hasMutations = false;
+    } else {
+        alias Mutation = MutationType;
+        enum hasMutations = true;
+    }
+
+    // Marker to identify Schema instantiations
+    enum _isSchema = true;
+}
+
+/// Check if a type is a Schema instantiation
+template isSchema(alias T) {
+    static if (__traits(compiles, T._isSchema) && T._isSchema) {
+        enum isSchema = true;
+    } else {
+        enum isSchema = false;
+    }
+}
+
+// ============================================================================
 // GraphQL UDAs
 // ============================================================================
 
@@ -931,10 +983,22 @@ private template getAllCustomScalarNames(Entities...) {
     }();
 }
 
-/// Generate complete GraphQL schema SDL by discovering all types from Query
-template generateSchemaSDL(Query) {
-    alias AllTypes = getAllEntityTypes!Query;
-    alias AllInputTypes = getAllInputTypes!Query;
+/// Generate complete GraphQL schema SDL.
+/// Accepts either a Schema type or a raw Query type (for backwards compatibility).
+template generateSchemaSDL(alias SchemaOrQuery) {
+    // Determine if we have a Schema or raw Query type
+    static if (isSchema!SchemaOrQuery) {
+        alias QueryType = SchemaOrQuery.Query;
+        alias MutationType = SchemaOrQuery.Mutation;
+        enum hasMutations = SchemaOrQuery.hasMutations;
+    } else {
+        alias QueryType = SchemaOrQuery;
+        struct MutationType {}
+        enum hasMutations = false;
+    }
+
+    alias AllTypes = getAllEntityTypes!QueryType;
+    alias AllInputTypes = getAllInputTypes!QueryType;
 
     enum generateSchemaSDL = () {
         string result;
@@ -948,7 +1012,7 @@ template generateSchemaSDL(Query) {
         }
 
         // Generate Query type
-        result ~= generateQuerySDL!Query();
+        result ~= generateQuerySDL!QueryType();
         result ~= "\n";
 
         // Generate each discovered entity type
@@ -1127,4 +1191,57 @@ unittest {
 
     // Plain field should exist without annotations
     assert(sdl.canFind("plain: String!"), "plain field should exist in SDL");
+}
+
+// Test Schema template
+unittest {
+    import graphqld2.relational.demo : DemoEntity;
+    import graphqld2.relational.schema : Col, Table, getAll;
+    import graphqld2.relational.eval_context : MockDB;
+
+    static struct User {
+        mixin DemoEntity!"users";
+        mixin Col!("name", string);
+    }
+
+    static MockDB!() db;
+
+    static struct MyQuery {
+        mixin Table!(db, User, "users");
+    }
+
+    // Schema without mutations
+    alias MySchema = Schema!(MyQuery);
+
+    // Verify Schema properties
+    static assert(isSchema!MySchema);
+    static assert(is(MySchema.Query == MyQuery));
+    static assert(!MySchema.hasMutations);
+
+    // generateSchemaSDL should work with Schema
+    enum sdlFromSchema = generateSchemaSDL!MySchema;
+    enum sdlFromQuery = generateSchemaSDL!MyQuery;
+
+    // Both should produce identical output
+    static assert(sdlFromSchema == sdlFromQuery, "Schema and Query should generate same SDL");
+
+    // Verify SDL contains expected content
+    import std.algorithm : canFind;
+    static assert(sdlFromSchema.canFind("type Query"));
+    static assert(sdlFromSchema.canFind("users: [User!]!"));
+    static assert(sdlFromSchema.canFind("type User"));
+}
+
+// Test isSchema with non-schema types
+unittest {
+    static struct NotASchema {
+        int x;
+    }
+
+    static struct AlsoNotASchema {
+        alias Query = int;  // Has Query but not Mutation
+    }
+
+    static assert(!isSchema!NotASchema);
+    static assert(!isSchema!int);
 }
