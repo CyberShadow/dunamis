@@ -13,6 +13,7 @@ import graphql.parser;
 
 import ae.utils.promise : Promise;
 import graphqld2.core;
+import graphqld2.core.expr : SequentialJsonObjectExpr, SingletonExpr, isExpr, ExprResultType, Expr, singleton;
 import graphqld2.core.optimize : OptimizeContext;
 import graphqld2.graphql.schema;
 
@@ -31,14 +32,19 @@ alias GraphQLResult = Expr!JSONValue;
 /// tree that can be executed by the Executor.
 ///
 /// Accepts either a Schema type (created with Schema!(Query, Mutation)) or a raw Query type.
-/// The Query type should have Table mixins that bind to a static data source.
+/// The Query type should have Table mixins that reference entities bound to a data source.
 ///
 /// Example:
 /// ---
 /// static MyDB myDB;
 ///
+/// struct User {
+///     mixin Entity!(myDB, "users");
+///     mixin Col!("firstName", string);
+/// }
+///
 /// struct Query {
-///     mixin Table!(myDB, User, "users");
+///     mixin Table!(User, "users");  // db derived from User._db
 /// }
 ///
 /// // Using raw Query type
@@ -592,8 +598,8 @@ T extractArg(T, alias Default)(Arguments args, string name, JSONValue variables)
 // Root Mutation Compilation
 // ============================================================================
 
-/// Compile the root selection set for mutations
-DynamicJsonObjectExpr compileRootMutationSet(Mutation)(SelectionSet ss, JSONValue variables) {
+/// Compile the root selection set for mutations (sequential execution)
+SequentialJsonObjectExpr compileRootMutationSet(Mutation)(SelectionSet ss, JSONValue variables) {
     auto selections = iterateSelections(ss);
 
     if (selections.length == 0) {
@@ -614,12 +620,17 @@ DynamicJsonObjectExpr compileRootMutationSet(Mutation)(SelectionSet ss, JSONValu
         throw new CompilerException("No fields in mutation selection set");
     }
 
-    return buildDynamicJsonObject(fieldNames, fieldExprs);
+    return new SequentialJsonObjectExpr(fieldNames, fieldExprs);
 }
 
-/// Compile a single mutation field
+/// Compile a single mutation field.
+/// Mutation fields are functions: (Expr!Mutation, Args...) -> Expr!ReturnType
 ExprBase compileRootMutationField(Mutation)(Field field, JSONValue variables) {
     auto fieldName = getFieldName(field);
+
+    // Create a singleton parent expression for the Mutation type
+    // Mutations ignore the parent but need it for the uniform field signature
+    auto parentExpr = singleton(Mutation.init);
 
     // Look up the mutation in Mutation type at compile time
     static foreach (member; __traits(allMembers, Mutation)) {{
@@ -630,8 +641,8 @@ ExprBase compileRootMutationField(Mutation)(Field field, JSONValue variables) {
                     enum gqlName = getGqlName!(fn, member);
 
                     if (fieldName == gqlName) {
-                        // Call the mutation and wrap result in expression
-                        return callMutation!(fn, Mutation)(field.args, field.ss, variables);
+                        // Call the mutation function with parent and extracted args
+                        return callMutationField!(fn, Mutation)(parentExpr, field.args, field.ss, variables);
                     }
                 }
             }
@@ -641,33 +652,66 @@ ExprBase compileRootMutationField(Mutation)(Field field, JSONValue variables) {
     throw new CompilerException("Unknown mutation: " ~ fieldName);
 }
 
-/// Expression that returns a pre-computed mutation result.
-/// Mutations execute at compile time and their result is stored.
-class MutationResultExpr : Expr!JSONValue {
-    private JSONValue _result;
+/// Call a mutation field function and handle the return type.
+/// Mutations return Expr!T which we may need to descend into with a selection set.
+ExprBase callMutationField(alias fn, Mutation)(Expr!Mutation parent, Arguments args, SelectionSet ss, JSONValue variables) {
+    import std.traits : Parameters, ReturnType, ParameterDefaults, ParameterIdentifierTuple;
+    import std.typecons : tuple;
+    import graphqld2.core.expr : toJsonValue, Expr, ExprResultType, isExpr;
 
-    this(JSONValue result) {
-        _result = result;
+    alias Params = Parameters!fn;
+    alias Return = ReturnType!fn;
+
+    // Verify return type is an Expr
+    static assert(isExpr!Return,
+        "Mutation " ~ __traits(identifier, fn) ~ " must return an Expr type, got " ~ Return.stringof);
+
+    alias ResultType = ExprResultType!Return;
+
+    // Extract arguments (skip first param which is parent)
+    static if (Params.length == 1) {
+        // Only parent, no additional args
+        auto resultExpr = fn(parent);
+    } else {
+        auto argTuple = mixin(() {
+            string code = "tuple(";
+            static foreach (i; 1 .. Params.length) {
+                code ~= (i > 1 ? ", " : "") ~
+                    "extractArg!(Params[" ~ i.stringof ~ "], ParameterDefaults!fn[" ~ i.stringof ~ "])" ~
+                    "(args, [ParameterIdentifierTuple!fn][" ~ i.stringof ~ "], variables)";
+            }
+            code ~= ")";
+            return code;
+        }());
+        auto resultExpr = fn(parent, argTuple.expand);
     }
 
-    override Promise!(JSONValue[]) eval(EvalContext ctx) {
-        import ae.utils.promise : resolve;
-        // Return the pre-computed result (single element array for batch model)
-        return resolve([_result]);
+    // Handle return type based on whether it's an entity, array of entities, or scalar
+    static if (__traits(hasMember, ResultType, "_typeName")) {
+        // Single entity type - requires selection set
+        if (ss is null) {
+            throw new CompilerException(
+                "Mutation returning " ~ ResultType._typeName ~ " requires a selection set");
+        }
+        return compileSelectionSetBody!ResultType(resultExpr, ss, variables);
+    } else static if (is(ResultType == Entity[], Entity) && __traits(hasMember, Entity, "_typeName")) {
+        // Array of entities - requires selection set, use MapExpr
+        if (ss is null) {
+            throw new CompilerException(
+                "Mutation returning [" ~ Entity._typeName ~ "] requires a selection set");
+        }
+        return compileMapExpr!Entity(resultExpr, ss, variables);
+    } else {
+        // Scalar type - convert to JSON
+        return wrapAsJsonExpr(resultExpr);
     }
+}
 
-    // optimize returns Expr!T in base class, no override needed
-    override Expr!JSONValue optimize(OptimizeContext ctx) {
-        return this;  // No optimization for mutation results
-    }
-
-    override ExprBase[] dependencies() {
-        return [];  // No dependencies
-    }
-
-    override void replaceDependency(size_t index, ExprBase newDep) {
-        // No dependencies to replace
-    }
+/// Wrap an expression to convert its result to JSONValue
+ExprBase wrapAsJsonExpr(E)(E expr) if (isExpr!E) {
+    import graphqld2.core.expr : use, toJsonValue, ExprResultType;
+    alias T = ExprResultType!E;
+    return use((T val) => toJsonValue(val), expr);
 }
 
 /// Helper to extract all arguments for a function and return as a tuple
@@ -924,9 +968,12 @@ unittest {
     import graphqld2.relational.demo;
     import graphqld2.relational.eval_context;
 
+    // Static data source instance - bound by alias in Entity mixin
+    static MockDB!() db;
+
     // Define test entities
     static struct User {
-        mixin DemoEntity!"users";
+        mixin DemoEntity!(db, "users");
         mixin Col!("firstName", string);
         mixin Col!("lastName", string);
 
@@ -935,11 +982,8 @@ unittest {
         }
     }
 
-    // Static data source instance - bound by alias in Table mixin
-    static MockDB!() db;
-
     static struct Query {
-        mixin Table!(db, User, "users");
+        mixin Table!(User, "users");
     }
 
     // Set up mock data
@@ -973,9 +1017,11 @@ unittest {
     import graphqld2.relational.demo;
     import graphqld2.relational.eval_context;
 
+    static MockDB!() db;
+
     // Test computed fields
     static struct User {
-        mixin DemoEntity!"users";
+        mixin DemoEntity!(db, "users");
         mixin Col!("firstName", string);
         mixin Col!("lastName", string);
 
@@ -984,10 +1030,8 @@ unittest {
         }
     }
 
-    static MockDB!() db;
-
     static struct Query {
-        mixin Table!(db, User, "users");
+        mixin Table!(User, "users");
     }
 
     db = new MockDB!();
@@ -1014,21 +1058,21 @@ unittest {
     import graphqld2.relational.eval_context;
 
     // Test nested hasMany relationships
+    static MockDB!() db;
+
     static struct Post {
-        mixin DemoEntity!"posts";
+        mixin DemoEntity!(db, "posts");
         mixin Col!("title", string);
     }
 
     static struct User {
-        mixin DemoEntity!"users";
+        mixin DemoEntity!(db, "users");
         mixin Col!("firstName", string);
         mixin HasMany!("posts", Post, "author_id");
     }
 
-    static MockDB!() db;
-
     static struct Query {
-        mixin Table!(db, User, "users");
+        mixin Table!(User, "users");
     }
 
     db = new MockDB!();
@@ -1071,8 +1115,10 @@ unittest {
     import graphqld2.relational.eval_context;
 
     // Test computed fields with arguments
+    static MockDB!() db;
+
     static struct User {
-        mixin DemoEntity!"users";
+        mixin DemoEntity!(db, "users");
         mixin Col!("firstName", string);
 
         // Computed field with required argument
@@ -1086,10 +1132,8 @@ unittest {
         }
     }
 
-    static MockDB!() db;
-
     static struct Query {
-        mixin Table!(db, User, "users");
+        mixin Table!(User, "users");
     }
 
     db = new MockDB!();
@@ -1136,21 +1180,21 @@ unittest {
     import graphqld2.relational.eval_context;
 
     // Test multiple root fields
+    static MockDB!() db;
+
     static struct Post {
-        mixin DemoEntity!"posts";
+        mixin DemoEntity!(db, "posts");
         mixin Col!("title", string);
     }
 
     static struct User {
-        mixin DemoEntity!"users";
+        mixin DemoEntity!(db, "users");
         mixin Col!("firstName", string);
     }
 
-    static MockDB!() db;
-
     static struct Query {
-        mixin Table!(db, User, "users");
-        mixin Table!(db, Post, "posts");
+        mixin Table!(User, "users");
+        mixin Table!(Post, "posts");
     }
 
     db = new MockDB!();
@@ -1203,8 +1247,10 @@ unittest {
         string suffix;
     }
 
+    static MockDB!() db;
+
     static struct User {
-        mixin DemoEntity!"users";
+        mixin DemoEntity!(db, "users");
         mixin Col!("firstName", string);
         mixin Col!("lastName", string);
 
@@ -1214,10 +1260,8 @@ unittest {
         }
     }
 
-    static MockDB!() db;
-
     static struct Query {
-        mixin Table!(db, User, "users");
+        mixin Table!(User, "users");
     }
 
     db = new MockDB!();
@@ -1264,8 +1308,10 @@ unittest {
         Decoration decoration;
     }
 
+    static MockDB!() db;
+
     static struct User {
-        mixin DemoEntity!"users";
+        mixin DemoEntity!(db, "users");
         mixin Col!("firstName", string);
         mixin Col!("lastName", string);
 
@@ -1275,10 +1321,8 @@ unittest {
         }
     }
 
-    static MockDB!() db;
-
     static struct Query {
-        mixin Table!(db, User, "users");
+        mixin Table!(User, "users");
     }
 
     db = new MockDB!();
@@ -1313,9 +1357,10 @@ unittest {
     import graphqld2.relational.eval_context;
 
     // Test GraphQL variables
+    static MockDB!() db;
 
     static struct User {
-        mixin DemoEntity!"users";
+        mixin DemoEntity!(db, "users");
         mixin Col!("firstName", string);
 
         // Computed field with arguments
@@ -1324,10 +1369,8 @@ unittest {
         }
     }
 
-    static MockDB!() db;
-
     static struct Query {
-        mixin Table!(db, User, "users");
+        mixin Table!(User, "users");
     }
 
     db = new MockDB!();
@@ -1374,8 +1417,10 @@ unittest {
         string suffix;
     }
 
+    static MockDB!() db;
+
     static struct User {
-        mixin DemoEntity!"users";
+        mixin DemoEntity!(db, "users");
         mixin Col!("firstName", string);
         mixin Col!("lastName", string);
 
@@ -1384,10 +1429,8 @@ unittest {
         }
     }
 
-    static MockDB!() db;
-
     static struct Query {
-        mixin Table!(db, User, "users");
+        mixin Table!(User, "users");
     }
 
     db = new MockDB!();
@@ -1428,16 +1471,15 @@ unittest {
     import graphqld2.relational.eval_context;
 
     // Test compileQuery with Schema type (rather than raw Query type)
+    static MockDB!() db;
 
     static struct User {
-        mixin DemoEntity!"users";
+        mixin DemoEntity!(db, "users");
         mixin Col!("firstName", string);
     }
 
-    static MockDB!() db;
-
     static struct Query {
-        mixin Table!(db, User, "users");
+        mixin Table!(User, "users");
     }
 
     // Create Schema from Query
@@ -1463,6 +1505,7 @@ unittest {
     import std.json;
     import ae.utils.promise.await : awaitSync;
     import graphqld2.core;
+    import graphqld2.core.expr : effect;
     import graphqld2.relational.schema;
     import graphqld2.relational.demo;
     import graphqld2.relational.eval_context;
@@ -1476,32 +1519,36 @@ unittest {
 
     static struct Mutation {
         // Simple mutation returning scalar
-        static string sayHello(string name) {
-            lastGreeting = "Hello, " ~ name ~ "!";
-            return lastGreeting;
+        static Expr!string sayHello(Expr!Mutation parent, string name) {
+            return effect(() {
+                lastGreeting = "Hello, " ~ name ~ "!";
+                return lastGreeting;
+            }, parent);
         }
 
         // Mutation with multiple arguments
-        static bool deleteItems(int count) {
-            deleteCount = count;
-            return true;
+        static Expr!bool deleteItems(Expr!Mutation parent, int count) {
+            return effect(() {
+                deleteCount = count;
+                return true;
+            }, parent);
         }
 
         // Mutation with optional argument
-        static string greet(string name, string greeting = "Hi") {
-            return greeting ~ " " ~ name;
+        static Expr!string greet(Expr!Mutation parent, string name, string greeting = "Hi") {
+            return effect(() => greeting ~ " " ~ name, parent);
         }
-    }
-
-    static struct User {
-        mixin DemoEntity!"users";
-        mixin Col!("name", string);
     }
 
     static MockDB!() db;
 
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("name", string);
+    }
+
     static struct Query {
-        mixin Table!(db, User, "users");
+        mixin Table!(User, "users");
     }
 
     // Create Schema with mutations
@@ -1540,6 +1587,7 @@ unittest {
     import std.json;
     import ae.utils.promise.await : awaitSync;
     import graphqld2.core;
+    import graphqld2.core.expr : effect;
     import graphqld2.relational.schema;
     import graphqld2.relational.demo;
     import graphqld2.relational.eval_context;
@@ -1555,21 +1603,23 @@ unittest {
     __gshared static CreateUserInput lastInput;
 
     static struct Mutation {
-        static string createUser(CreateUserInput input) {
-            lastInput = input;
-            return "Created user: " ~ input.name;
+        static Expr!string createUser(Expr!Mutation parent, CreateUserInput input) {
+            return effect(() {
+                lastInput = input;
+                return "Created user: " ~ input.name;
+            }, parent);
         }
-    }
-
-    static struct User {
-        mixin DemoEntity!"users";
-        mixin Col!("name", string);
     }
 
     static MockDB!() db;
 
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("name", string);
+    }
+
     static struct Query {
-        mixin Table!(db, User, "users");
+        mixin Table!(User, "users");
     }
 
     alias MySchema = Schema!(Query, Mutation);
@@ -1596,6 +1646,7 @@ unittest {
     import std.json;
     import ae.utils.promise.await : awaitSync;
     import graphqld2.core;
+    import graphqld2.core.expr : effect;
     import graphqld2.relational.schema;
     import graphqld2.relational.demo;
     import graphqld2.relational.eval_context;
@@ -1606,21 +1657,23 @@ unittest {
     __gshared static string lastMessage;
 
     static struct Mutation {
-        static string echo(string message) {
-            lastMessage = message;
-            return message;
+        static Expr!string echo(Expr!Mutation parent, string message) {
+            return effect(() {
+                lastMessage = message;
+                return message;
+            }, parent);
         }
-    }
-
-    static struct User {
-        mixin DemoEntity!"users";
-        mixin Col!("name", string);
     }
 
     static MockDB!() db;
 
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("name", string);
+    }
+
     static struct Query {
-        mixin Table!(db, User, "users");
+        mixin Table!(User, "users");
     }
 
     alias MySchema = Schema!(Query, Mutation);
@@ -1644,4 +1697,123 @@ unittest {
 
     assert(result["echo"].str == "Hello from variable!");
     assert(lastMessage == "Hello from variable!");
+}
+
+// Test mutation returning a single entity with selection set
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import graphqld2.core;
+    import graphqld2.core.expr : effect;
+    import graphqld2.relational.schema;
+    import graphqld2.relational.demo;
+    import graphqld2.relational.eval_context;
+    import graphqld2.graphql.schema : Schema;
+
+    static MockDB!() db;
+
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("name", string);
+        mixin Col!("email", string);
+    }
+
+    static struct Mutation {
+        // Mutation that creates a user and returns the entity
+        static Expr!User createUser(Expr!Mutation parent, string name, string email) {
+            return effect(() {
+                // In a real implementation, this would INSERT and return the new ID
+                // For testing, we'll just return an existing user
+                return User("User:1");
+            }, parent);
+        }
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    alias MySchema = Schema!(Query, Mutation);
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "name": "Alice", "email": "alice@example.com"},
+        {"id": 2, "name": "Bob", "email": "bob@example.com"}
+    ]`);
+
+    // Execute mutation with selection set on returned entity
+    auto mutation = compileQuery!MySchema(`
+        mutation {
+            createUser(name: "Charlie", email: "charlie@example.com") {
+                name
+                email
+            }
+        }
+    `);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(mutation));
+
+    // Verify the returned entity has the selected fields
+    assert(result["createUser"]["name"].str == "Alice");
+    assert(result["createUser"]["email"].str == "alice@example.com");
+}
+
+// Test mutation returning an array of entities with selection set
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import graphqld2.core;
+    import graphqld2.core.expr : effect;
+    import graphqld2.relational.schema;
+    import graphqld2.relational.demo;
+    import graphqld2.relational.eval_context;
+    import graphqld2.graphql.schema : Schema;
+
+    static MockDB!() db;
+
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("name", string);
+    }
+
+    static struct Mutation {
+        // Mutation that returns multiple entities
+        static Expr!(User[]) getActiveUsers(Expr!Mutation parent) {
+            return effect(() {
+                // Return array of user refs
+                return [User("User:1"), User("User:2")];
+            }, parent);
+        }
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    alias MySchema = Schema!(Query, Mutation);
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "name": "Alice"},
+        {"id": 2, "name": "Bob"}
+    ]`);
+
+    // Execute mutation with selection set on returned entities
+    auto mutation = compileQuery!MySchema(`
+        mutation {
+            getActiveUsers {
+                name
+            }
+        }
+    `);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(mutation));
+
+    // Verify the returned entities have the selected fields
+    auto users = result["getActiveUsers"].array;
+    assert(users.length == 2);
+    assert(users[0]["name"].str == "Alice");
+    assert(users[1]["name"].str == "Bob");
 }

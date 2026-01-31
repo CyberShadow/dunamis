@@ -5,6 +5,7 @@ import std.array;
 import std.conv;
 
 import graphqld2.core.types : AnyRef;
+import graphqld2.relational.eval_context : DataFetcher;
 
 // ============================================================================
 // Filter Types (for root queries)
@@ -59,6 +60,13 @@ class QueryNode {
 
     /// Root filter IDs (for byId/byIds filters)
     AnyRef[] rootFilterRefs;
+
+    /// DataFetcher for this query node (set during optimization from Entity._db)
+    DataFetcher dataFetcher;
+
+    /// MapExpr identity for looking up currentRefs at eval time
+    /// Used for mutation-returned entities where refs aren't known at optimization time
+    Object mapExpr;
 
     /// JOINs for belongsTo chains
     JoinInfo[] joins;

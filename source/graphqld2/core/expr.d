@@ -342,6 +342,36 @@ auto constant(T)(T value, ExprBase lengthSource) {
     return new ConstExpr!T(value, lengthSource);
 }
 
+/// Expression that returns a single constant value (singleton).
+/// Used for root-level values like Query/Mutation instances where there's no parent.
+class SingletonExpr(T) : Expr!T {
+    private T _value;
+
+    this(T value) {
+        _value = value;
+    }
+
+    override ExprBase[] dependencies() {
+        return [];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        // No dependencies
+    }
+
+    override Promise!(T[]) eval(EvalContext ctx) {
+        return resolve([_value]);
+    }
+
+    @property T value() { return _value; }
+}
+
+/// Create a singleton expression - a single constant value with no dependencies.
+/// Used for root-level values like Query/Mutation type instances.
+auto singleton(T)(T value) {
+    return new SingletonExpr!T(value);
+}
+
 // ============================================================================
 // Binary Operation Expression
 // ============================================================================
@@ -517,6 +547,90 @@ auto use(Fn, Exprs...)(Fn fn, Exprs exprs)
     if (Exprs.length >= 1 && allSatisfy!(isExpr, Exprs))
 {
     return new UseExpr!(Fn, Exprs)(exprs, fn);
+}
+
+// ============================================================================
+// EffectExpr: Deferred Side Effects
+// ============================================================================
+
+/// Expression that executes a side-effecting callable during evaluation.
+/// Used for mutations and other operations that should be deferred.
+/// The callable is called once per evaluation, regardless of batch size.
+/// Implements AnyRefEvaluable when T is an entity type (has nodeId).
+class EffectExpr(T, Fn) : Expr!T, AnyRefEvaluable {
+    private Fn _effect;
+    private ExprBase _lengthSource;
+
+    this(Fn effect, ExprBase lengthSource) {
+        _effect = effect;
+        _lengthSource = lengthSource;
+    }
+
+    override ExprBase[] dependencies() {
+        return _lengthSource !is null ? [_lengthSource] : [];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0 && _lengthSource !is null) {
+            _lengthSource = newDep;
+        }
+    }
+
+    override Expr!T optimize(OptimizeContext ctx) {
+        return this;  // Effects are not optimizable
+    }
+
+    override Promise!(T[]) eval(EvalContext ctx) {
+        // Execute the effect
+        auto result = _effect();
+
+        // Determine result count from length source or default to 1
+        if (_lengthSource !is null) {
+            return _lengthSource.evalResultLength(ctx).then((size_t count) {
+                T[] results = new T[count];
+                results[] = result;
+                return results;
+            });
+        } else {
+            return resolve([result]);
+        }
+    }
+
+    /// AnyRefEvaluable implementation - converts T to AnyRef
+    Promise!(AnyRef[]) evalAsAnyRef(EvalContext ctx) {
+        import std.algorithm : map;
+        import std.array : array;
+
+        static if (__traits(hasMember, T, "nodeId")) {
+            // T is an entity type with nodeId
+            return eval(ctx).then((T[] results) {
+                return results.map!(r => AnyRef(r.nodeId)).array;
+            });
+        } else static if (is(T == AnyRef)) {
+            return eval(ctx);
+        } else {
+            // Non-entity types can't be converted to AnyRef
+            // This should not be called for such types
+            return resolve(cast(AnyRef[])[]);
+        }
+    }
+}
+
+/// Create an effect expression - a deferred side-effecting operation.
+/// The callable is executed during eval(), not during expression construction.
+///
+/// Example:
+/// ---
+/// // In a mutation:
+/// static Expr!User createUser(Expr!Mutation parent, CreateUserInput input) {
+///     return effect(() => db.insert!User(input), parent);
+/// }
+/// ---
+auto effect(Fn)(Fn fn, ExprBase lengthSource = null)
+    if (is(ReturnType!Fn))
+{
+    alias T = ReturnType!Fn;
+    return new EffectExpr!(T, Fn)(fn, lengthSource);
 }
 
 // ============================================================================
@@ -853,6 +967,58 @@ class DynamicJsonObjectExpr : Expr!JSONValue {
                 }
             }
             return jsonResults;
+        });
+    }
+}
+
+/// JSON object expression that evaluates fields sequentially (for mutations).
+/// Unlike DynamicJsonObjectExpr which evaluates in parallel, this ensures
+/// each field completes before the next starts - required for mutation semantics.
+class SequentialJsonObjectExpr : Expr!JSONValue {
+    private string[] _names;
+    private ExprBase[] _exprs;
+
+    this(string[] names, ExprBase[] exprs) {
+        assert(names.length == exprs.length, "Names and exprs must have same length");
+        _names = names;
+        _exprs = exprs;
+    }
+
+    override ExprBase[] dependencies() {
+        return _exprs.dup;
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index < _exprs.length) {
+            _exprs[index] = newDep;
+        }
+    }
+
+    override Expr!JSONValue optimize(OptimizeContext ctx) {
+        foreach (ref expr; _exprs) {
+            expr = optimizeExpr(expr, ctx);
+        }
+        return this;
+    }
+
+    override Promise!(JSONValue[]) eval(EvalContext ctx) {
+        // Evaluate fields sequentially using recursive helper
+        // (avoids D's closure variable capture issues with foreach loops)
+        auto result = JSONValue.emptyObject;
+        return evalFieldsSequentially(ctx, 0, result);
+    }
+
+    private Promise!(JSONValue[]) evalFieldsSequentially(EvalContext ctx, size_t idx, JSONValue result) {
+        if (idx >= _exprs.length) {
+            return resolve([result]);
+        }
+
+        auto fieldName = _names[idx];
+        auto fieldExpr = _exprs[idx];
+
+        return evalToJson(fieldExpr, ctx).then((JSONValue[] fieldVals) {
+            result[fieldName] = fieldVals[0];
+            return evalFieldsSequentially(ctx, idx + 1, result);
         });
     }
 }

@@ -47,7 +47,23 @@ class PrefetchExpr : Expr!(AnyRef[]) {
     }
 
     override Promise!(AnyRef[][]) eval(EvalContext ctx) {
+        import graphqld2.relational.query_node : FilterType;
+
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+
+        // Set up fetcher from QueryNode if not already set (for mutation-returned entities)
+        if (relCtx.fetcher is null && _node.dataFetcher !is null) {
+            relCtx.fetcher = _node.dataFetcher;
+        }
+
+        // For mutation-returned entities: if this is a root node with no filter,
+        // get the refs from the MapExpr's currentRefs and use them as the filter
+        if (_node.isRoot && _node.rootFilter == FilterType.none && _node.mapExpr !is null) {
+            auto currentRefs = ctx.getCurrentRefs(_node.mapExpr);
+            if (currentRefs.length > 0) {
+                _node.setRootFilter(FilterType.byIds, currentRefs);
+            }
+        }
 
         // Fast-path: data already stored from a previous evaluation
         if (relCtx.getQueryResult(_node.id) !is null) {
