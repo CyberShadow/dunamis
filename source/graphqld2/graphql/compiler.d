@@ -656,7 +656,7 @@ SequentialJsonObjectExpr compileRootMutationSet(Mutation)(SelectionSet ss, JSONV
         if (sel.ruleSelection != SelectionEnum.Field) continue;
         auto field = sel.field;
         fieldNames ~= getOutputName(field);
-        fieldExprs ~= compileRootMutationField!Mutation(field, variables);
+        fieldExprs ~= compileRootField!Mutation(field, variables);
     }
 
     if (fieldNames.length == 0) {
@@ -666,25 +666,25 @@ SequentialJsonObjectExpr compileRootMutationSet(Mutation)(SelectionSet ss, JSONV
     return new SequentialJsonObjectExpr(fieldNames, fieldExprs);
 }
 
-/// Compile a single mutation field.
+/// Compile a single root field (works for both Query and Mutation).
 /// Every non-internal function member is assumed to be a field.
-ExprBase compileRootMutationField(Mutation)(Field field, JSONValue variables) {
+ExprBase compileRootField(Parent)(Field field, JSONValue variables) {
     auto fieldName = getFieldName(field);
-    auto parentExpr = singleton(Mutation.init);
+    auto parentExpr = singleton(Parent.init);
 
-    static foreach (member; __traits(allMembers, Mutation)) {{
+    static foreach (member; __traits(allMembers, Parent)) {{
         static if (!isInternalMember!member) {
-            alias memberSym = __traits(getMember, Mutation, member);
+            alias memberSym = __traits(getMember, Parent, member);
             static if (is(typeof(memberSym) == function)) {
                 enum gqlName = getGqlName!(memberSym, member);
                 if (fieldName == gqlName) {
-                    return callRootField!(memberSym, Mutation)(parentExpr, field.args, field.ss, variables);
+                    return callRootField!(memberSym, Parent)(parentExpr, field.args, field.ss, variables);
                 }
             }
         }
     }}
 
-    throw new CompilerException("Unknown mutation: " ~ fieldName);
+    throw new CompilerException("Unknown field: " ~ fieldName);
 }
 
 /// Call a root field function and handle the return type.
@@ -802,7 +802,7 @@ DynamicJsonObjectExpr compileRootSelectionSet(Query)(SelectionSet ss, JSONValue 
         if (sel.ruleSelection != SelectionEnum.Field) continue;
         auto field = sel.field;
         fieldNames ~= getOutputName(field);
-        fieldExprs ~= compileRootFieldExpr!Query(field, variables);
+        fieldExprs ~= compileRootField!Query(field, variables);
     }
 
     if (fieldNames.length == 0) {
@@ -810,27 +810,6 @@ DynamicJsonObjectExpr compileRootSelectionSet(Query)(SelectionSet ss, JSONValue 
     }
 
     return buildDynamicJsonObject(fieldNames, fieldExprs);
-}
-
-/// Compile a single root field expression (e.g., "users" from Query)
-/// Every non-internal function member is assumed to be a field.
-ExprBase compileRootFieldExpr(Query)(Field field, JSONValue variables) {
-    auto fieldName = getFieldName(field);
-    auto parentExpr = singleton(Query.init);
-
-    static foreach (member; __traits(allMembers, Query)) {{
-        static if (!isInternalMember!member) {
-            alias memberSym = __traits(getMember, Query, member);
-            static if (is(typeof(memberSym) == function)) {
-                enum gqlName = getGqlName!(memberSym, member);
-                if (fieldName == gqlName) {
-                    return callRootField!(memberSym, Query)(parentExpr, field.args, field.ss, variables);
-                }
-            }
-        }
-    }}
-
-    throw new CompilerException("Unknown root field: " ~ fieldName);
 }
 
 // ============================================================================

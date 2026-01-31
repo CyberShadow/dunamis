@@ -532,28 +532,48 @@ template getEntityFields(Entity) {
     }();
 }
 
-/// Extract root query fields from a Query type
-template getQueryFields(Query) {
-    enum getQueryFields = () {
+/// Extract root fields from a Query or Mutation type.
+/// Every non-internal function member is assumed to be a root field.
+template getRootFields(Parent) {
+    enum getRootFields = () {
         FieldInfo[] fields;
 
-        static foreach (member; __traits(allMembers, Query)) {{
-            // Check for table fields (_tableField_*)
-            static if (member.length > 12 && member[0..12] == "_tableField_") {
-                alias FieldMeta = __traits(getMember, Query, member);
-                // Root queries return non-nullable list of non-nullable items
-                fields ~= FieldInfo(
-                    FieldMeta.name,
-                    "[" ~ FieldMeta.entityType._typeName ~ "!]!",
-                    false,
-                    FieldKind.hasMany  // Root queries return arrays
-                );
+        static foreach (member; __traits(allMembers, Parent)) {{
+            static if (!isInternalMember!member) {
+                static if (is(typeof(__traits(getMember, Parent, member)) == function)) {
+                    alias fn = __traits(getMember, Parent, member);
+
+                    // Get UDAs
+                    enum isHidden = hasGqlHidden!fn;
+                    enum gqlFieldName = getGqlName!(fn, member);
+                    enum description = getGqlDescription!fn;
+                    enum deprecation = getGqlDeprecated!fn;
+
+                    // Get return type and arguments
+                    enum gqlType = rootFieldReturnType!fn;
+                    enum arguments = getRootFieldArguments!fn;
+
+                    fields ~= FieldInfo(
+                        gqlFieldName,
+                        gqlType,
+                        false,
+                        FieldKind.computed,
+                        isHidden,
+                        description,
+                        deprecation,
+                        arguments
+                    );
+                }
             }
         }}
 
         return fields;
     }();
 }
+
+/// Backwards compatibility aliases
+alias getQueryFields = getRootFields;
+alias getMutationFields = getRootFields;
 
 // ============================================================================
 // Input Type Detection
@@ -979,13 +999,12 @@ string generateQuerySDL(Query)() {
 }
 
 // ============================================================================
-// Mutation Return Type Extraction
+// Root Field Return Type Extraction
 // ============================================================================
 
-/// Get the GraphQL return type of a mutation
-/// Get the GraphQL return type of a mutation.
-/// Mutations return Expr!T, so we extract T and convert to GraphQL type.
-template mutationReturnType(alias member) {
+/// Get the GraphQL return type of a root field (Query or Mutation).
+/// Root fields return Expr!T, so we extract T and convert to GraphQL type.
+template rootFieldReturnType(alias member) {
     alias Return = ReturnType!(typeof(member));
 
     // Extract inner type from Expr!T
@@ -996,41 +1015,44 @@ template mutationReturnType(alias member) {
     }
 
     static if (is(ResultType == void)) {
-        // void mutations return Boolean (success/failure)
-        enum mutationReturnType = "Boolean";
+        // void returns Boolean (success/failure)
+        enum rootFieldReturnType = "Boolean";
     } else static if (is(ResultType == string)) {
-        enum mutationReturnType = "String!";
+        enum rootFieldReturnType = "String!";
     } else static if (is(ResultType == bool)) {
-        enum mutationReturnType = "Boolean!";
+        enum rootFieldReturnType = "Boolean!";
     } else static if (is(ResultType == int) || is(ResultType == long)) {
-        enum mutationReturnType = "Int!";
+        enum rootFieldReturnType = "Int!";
     } else static if (is(ResultType == float) || is(ResultType == double)) {
-        enum mutationReturnType = "Float!";
+        enum rootFieldReturnType = "Float!";
     } else static if (is(ResultType == Nullable!U, U)) {
         // Nullable - no "!" suffix
-        enum mutationReturnType = graphqlBaseTypeName!U;
+        enum rootFieldReturnType = graphqlBaseTypeName!U;
     } else static if (is(ResultType == E[], E)) {
-        enum mutationReturnType = "[" ~ graphqlTypeName!E ~ "]!";
+        enum rootFieldReturnType = "[" ~ graphqlTypeName!E ~ "]!";
     } else static if (__traits(hasMember, ResultType, "_typeName")) {
-        enum mutationReturnType = ResultType._typeName ~ "!";
+        enum rootFieldReturnType = ResultType._typeName ~ "!";
     } else static if (isCustomScalar!ResultType) {
-        enum mutationReturnType = ResultType.name ~ "!";
+        enum rootFieldReturnType = ResultType.name ~ "!";
     } else {
-        enum mutationReturnType = "Unknown";
+        enum rootFieldReturnType = "Unknown";
     }
 }
 
-/// Extract mutation arguments from a function.
-/// Skips the first parameter (Expr!Mutation parent).
-template getMutationArguments(alias member) {
+/// Backwards compatibility alias
+alias mutationReturnType = rootFieldReturnType;
+
+/// Extract root field arguments from a function.
+/// Skips the first parameter (Expr!Parent parent).
+template getRootFieldArguments(alias member) {
     alias Params = Parameters!member;
     alias Defaults = ParameterDefaults!member;
     enum string[] paramNames = [ParameterIdentifierTuple!member];
 
-    enum getMutationArguments = () {
+    enum getRootFieldArguments = () {
         ArgumentInfo[] args;
 
-        // Start from 1 to skip the parent Expr!Mutation parameter
+        // Start from 1 to skip the parent Expr parameter
         static foreach (i; 1 .. Params.length) {{
             alias P = Params[i];
 
@@ -1065,45 +1087,8 @@ template getMutationArguments(alias member) {
     }();
 }
 
-/// Extract mutation field information from a Mutation type.
-/// Every non-internal function member is assumed to be a mutation field.
-template getMutationFields(Mutation) {
-    enum getMutationFields = () {
-        FieldInfo[] fields;
-
-        static foreach (member; __traits(allMembers, Mutation)) {{
-            // Skip internal members
-            static if (!isInternalMember!member) {
-                static if (is(typeof(__traits(getMember, Mutation, member)) == function)) {
-                    alias fn = __traits(getMember, Mutation, member);
-
-                    // Get UDAs
-                    enum isHidden = hasGqlHidden!fn;
-                    enum gqlFieldName = getGqlName!(fn, member);
-                    enum description = getGqlDescription!fn;
-                    enum deprecation = getGqlDeprecated!fn;
-
-                    // Get return type and arguments
-                    enum gqlType = mutationReturnType!fn;
-                    enum arguments = getMutationArguments!fn;
-
-                    fields ~= FieldInfo(
-                        gqlFieldName,
-                        gqlType,
-                        false,
-                        FieldKind.computed,  // Mutations are like computed fields
-                        isHidden,
-                        description,
-                        deprecation,
-                        arguments
-                    );
-                }
-            }
-        }}
-
-        return fields;
-    }();
-}
+/// Backwards compatibility alias
+alias getMutationArguments = getRootFieldArguments;
 
 /// Generate GraphQL SDL for the Mutation type
 string generateMutationSDL(Mutation)() {
