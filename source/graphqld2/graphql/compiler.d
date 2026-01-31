@@ -799,37 +799,6 @@ auto extractAllArgs(alias fn)(Arguments args, JSONValue variables) {
     }
 }
 
-/// Call a mutation function and wrap the result in an expression
-ExprBase callMutation(alias fn, Mutation)(Arguments args, SelectionSet ss, JSONValue variables) {
-    import std.traits : Parameters, ReturnType;
-    import graphqld2.core.expr : toJsonValue;
-
-    alias Return = ReturnType!fn;
-
-    // Extract all arguments and call the function
-    auto argTuple = extractAllArgs!fn(args, variables);
-    static if (is(Return == void)) {
-        fn(argTuple.expand);
-        return new MutationResultExpr(JSONValue(true));
-    } else {
-        auto result = fn(argTuple.expand);
-
-        // Convert result to JSON expression
-        static if (__traits(hasMember, Return, "_typeName")) {
-            // Entity type - need nested selection
-            if (ss is null) {
-                throw new CompilerException("Mutation returning " ~ Return._typeName ~ " requires a selection set");
-            }
-            // For now, serialize the entity to JSON directly
-            // TODO: Support proper nested field selection for mutation results
-            return new MutationResultExpr(toJsonValue(result));
-        } else {
-            // Scalar type - convert directly to JSON
-            return new MutationResultExpr(toJsonValue(result));
-        }
-    }
-}
-
 // ============================================================================
 // Root Selection Set Compilation
 // ============================================================================
