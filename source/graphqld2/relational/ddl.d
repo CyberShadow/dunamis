@@ -232,15 +232,17 @@ unittest {
     import std.typecons : Nullable;
     import graphqld2.core.expr : Expr;
     import graphqld2.relational.schema : Col, BelongsTo, ForeignKey, belongsTo;
-    import graphqld2.relational.demo : DemoEntity;
+    import graphqld2.relational.demo : DemoEntity, MockDB;
+
+    static MockDB!() db;
 
     // Test nullable FK via Col + BelongsTo
     static struct Manager {
-        mixin DemoEntity!"managers";
+        mixin DemoEntity!(db, "managers");
     }
 
     static struct Employee {
-        mixin DemoEntity!"employees";
+        mixin DemoEntity!(db, "employees");
         mixin Col!("managerId", Nullable!(ForeignKey!Manager));  // nullable FK column
         mixin BelongsTo!("manager", "managerId");  // derives nullability from column
     }
@@ -270,15 +272,17 @@ unittest {
     import std.typecons : Nullable;
     import graphqld2.core.expr : Expr;
     import graphqld2.relational.schema : Col, BelongsTo, ForeignKey, belongsTo;
-    import graphqld2.relational.demo : DemoEntity;
+    import graphqld2.relational.demo : DemoEntity, MockDB;
+
+    static MockDB!() db;
 
     // Test required FK via Col + BelongsTo
     static struct Department {
-        mixin DemoEntity!"departments";
+        mixin DemoEntity!(db, "departments");
     }
 
     static struct Employee2 {
-        mixin DemoEntity!"employees2";
+        mixin DemoEntity!(db, "employees2");
         mixin Col!("departmentId", ForeignKey!Department);  // required FK column
         mixin BelongsTo!("department", "departmentId");  // derives from column
     }

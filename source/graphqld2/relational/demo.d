@@ -10,6 +10,9 @@ import std.conv : to;
 import graphqld2.core.types : CustomScalar;
 import graphqld2.relational.schema : Entity, PrimaryKey;
 
+// Re-export MockDB for convenience
+public import graphqld2.relational.eval_context : MockDB;
+
 // ============================================================================
 // Custom Scalars for Demo
 // ============================================================================
@@ -45,20 +48,22 @@ alias Int64 = CustomScalar!(
 ///
 /// Example:
 /// ---
+/// static MyDB db;
+///
 /// struct User {
-///     mixin DemoEntity!"users";           // ID is Int64
+///     mixin DemoEntity!(db, "users");           // ID is Int64
 ///     mixin Col!("email", string);
 /// }
 ///
 /// struct Item {
-///     mixin DemoEntity!("items", string); // ID is string (UUID)
+///     mixin DemoEntity!(db, "items", string);   // ID is string (UUID)
 /// }
 /// ---
-mixin template DemoEntity(string tableName, IdType = Int64, string typeName = "", string sourceId = "default") {
+mixin template DemoEntity(alias db, string tableName, IdType = Int64, string typeName = "") {
     import graphqld2.relational.schema : Entity, PrimaryKey, column;
     import graphqld2.core.expr : Expr;
 
-    mixin Entity!(tableName, typeName, sourceId);
+    mixin Entity!(db, tableName, typeName);
 
     /// Column metadata for the primary key (id)
     struct _colField_id {

@@ -19,12 +19,19 @@ import graphqld2.core.expr : Expr, ExprResultType, isExpr;
 ///
 /// Example:
 /// ---
+/// static MyDB db;
+///
+/// struct User {
+///     mixin Entity!(db, "users");
+///     mixin Col!("name", string);
+/// }
+///
 /// struct Query {
-///     mixin Table!(db, User, "users");
+///     mixin Table!(User, "users");  // db derived from User._db
 /// }
 ///
 /// struct Mutation {
-///     static User createUser(CreateUserInput input) { ... }
+///     static Expr!string createUser(Expr!Mutation parent, string name) { ... }
 /// }
 ///
 /// // With mutations
@@ -767,8 +774,8 @@ template getInputTypesFromMutationImpl(Mutation, size_t idx, Members...) {
             static if (isMutationField!(Mutation, member, __traits(getMember, Mutation, member))) {
                 alias fn = __traits(getMember, Mutation, member);
                 alias Params = Parameters!fn;
-                // Get input types from all parameters
-                alias InputTypes = getInputTypesFromParamsImpl!(0, Params);
+                // Get input types from parameters (skip first which is parent Expr!Mutation)
+                alias InputTypes = getInputTypesFromParamsImpl!(1, Params);
                 alias getInputTypesFromMutationImpl = AliasSeq!(InputTypes, Rest);
             } else {
                 alias getInputTypesFromMutationImpl = Rest;
@@ -957,22 +964,31 @@ string generateQuerySDL(Query)() {
 /// A mutation field is a static function that:
 /// - Does NOT take Expr!Entity as first parameter (unlike computed fields)
 /// - Returns a supported type (entity, scalar, or void for side-effect-only mutations)
+/// Check if a member is a mutation field.
+/// A mutation field is a static function that:
+/// - First param is Expr!Mutation (the parent, typically ignored)
+/// - Additional params are concrete argument types
+/// - Returns Expr!T where T is the result type
 template isMutationField(Mutation, string memberName, alias member) {
     static if (is(typeof(member) == function)) {
         alias Params = Parameters!member;
         alias Return = ReturnType!member;
 
-        // Check it's not a computed field (those take Expr!Entity as first param)
         static if (Params.length == 0) {
-            // No-arg mutation - valid if return type is supported
-            enum isMutationField = isSupportedMutationReturnType!Return;
-        } else static if (is(Params[0] : Expr!E, E)) {
-            // First param is Expr - this is a computed field, not a mutation
+            // No params - not a valid mutation (needs at least parent)
             enum isMutationField = false;
+        } else static if (is(Params[0] : Expr!M, M) && is(M == Mutation)) {
+            // First param is Expr!Mutation - this is a mutation field
+            // Check return type is Expr!T
+            static if (isExpr!Return) {
+                // All remaining params must be supported argument types
+                enum isMutationField = allMutationParamsSupported!(Params[1..$]);
+            } else {
+                enum isMutationField = false;
+            }
         } else {
-            // Regular function - check if all params and return type are supported
-            enum isMutationField = allMutationParamsSupported!Params &&
-                                   isSupportedMutationReturnType!Return;
+            // First param is not Expr!Mutation - not a mutation field
+            enum isMutationField = false;
         }
     } else {
         enum isMutationField = false;
@@ -1034,35 +1050,45 @@ template isSupportedMutationParamType(T) {
 }
 
 /// Get the GraphQL return type of a mutation
+/// Get the GraphQL return type of a mutation.
+/// Mutations return Expr!T, so we extract T and convert to GraphQL type.
 template mutationReturnType(alias member) {
     alias Return = ReturnType!(typeof(member));
 
-    static if (is(Return == void)) {
+    // Extract inner type from Expr!T
+    static if (is(Return : Expr!T, T)) {
+        alias ResultType = T;
+    } else {
+        alias ResultType = Return;  // Fallback
+    }
+
+    static if (is(ResultType == void)) {
         // void mutations return Boolean (success/failure)
         enum mutationReturnType = "Boolean";
-    } else static if (is(Return == string)) {
+    } else static if (is(ResultType == string)) {
         enum mutationReturnType = "String!";
-    } else static if (is(Return == bool)) {
+    } else static if (is(ResultType == bool)) {
         enum mutationReturnType = "Boolean!";
-    } else static if (is(Return == int) || is(Return == long)) {
+    } else static if (is(ResultType == int) || is(ResultType == long)) {
         enum mutationReturnType = "Int!";
-    } else static if (is(Return == float) || is(Return == double)) {
+    } else static if (is(ResultType == float) || is(ResultType == double)) {
         enum mutationReturnType = "Float!";
-    } else static if (is(Return == Nullable!U, U)) {
+    } else static if (is(ResultType == Nullable!U, U)) {
         // Nullable - no "!" suffix
         enum mutationReturnType = graphqlBaseTypeName!U;
-    } else static if (is(Return == E[], E)) {
+    } else static if (is(ResultType == E[], E)) {
         enum mutationReturnType = "[" ~ graphqlTypeName!E ~ "]!";
-    } else static if (__traits(hasMember, Return, "_typeName")) {
-        enum mutationReturnType = Return._typeName ~ "!";
-    } else static if (isCustomScalar!Return) {
-        enum mutationReturnType = Return.name ~ "!";
+    } else static if (__traits(hasMember, ResultType, "_typeName")) {
+        enum mutationReturnType = ResultType._typeName ~ "!";
+    } else static if (isCustomScalar!ResultType) {
+        enum mutationReturnType = ResultType.name ~ "!";
     } else {
         enum mutationReturnType = "Unknown";
     }
 }
 
-/// Extract mutation arguments from a function
+/// Extract mutation arguments from a function.
+/// Skips the first parameter (Expr!Mutation parent).
 template getMutationArguments(alias member) {
     alias Params = Parameters!member;
     alias Defaults = ParameterDefaults!member;
@@ -1071,7 +1097,8 @@ template getMutationArguments(alias member) {
     enum getMutationArguments = () {
         ArgumentInfo[] args;
 
-        static foreach (i; 0 .. Params.length) {{
+        // Start from 1 to skip the parent Expr!Mutation parameter
+        static foreach (i; 1 .. Params.length) {{
             alias P = Params[i];
 
             static if (is(Defaults[i] == void)) {
@@ -1395,11 +1422,13 @@ unittest {
 // Test @GqlHidden with actual Col mixin
 unittest {
     import std.algorithm : canFind;
-    import graphqld2.relational.demo : DemoEntity;  // Uses Int64 for id
+    import graphqld2.relational.demo : DemoEntity, MockDB;
     import graphqld2.relational.schema : Col;
 
+    static MockDB!() db;
+
     static struct User {
-        mixin DemoEntity!"users";
+        mixin DemoEntity!(db, "users");
         mixin Col!("name", string);
 
         @GqlHidden
@@ -1432,11 +1461,13 @@ unittest {
 // Test @GqlDescription and @GqlDeprecated UDAs
 unittest {
     import std.algorithm : canFind;
-    import graphqld2.relational.demo : DemoEntity;
+    import graphqld2.relational.demo : DemoEntity, MockDB;
     import graphqld2.relational.schema : Col;
 
+    static MockDB!() db;
+
     static struct Article {
-        mixin DemoEntity!"articles";
+        mixin DemoEntity!(db, "articles");
 
         @GqlDescription("The article title")
         mixin Col!("title", string);
@@ -1490,19 +1521,18 @@ unittest {
 
 // Test Schema template
 unittest {
-    import graphqld2.relational.demo : DemoEntity;
+    import graphqld2.relational.demo : DemoEntity, MockDB;
     import graphqld2.relational.schema : Col, Table, getAll;
-    import graphqld2.relational.eval_context : MockDB;
-
-    static struct User {
-        mixin DemoEntity!"users";
-        mixin Col!("name", string);
-    }
 
     static MockDB!() db;
 
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("name", string);
+    }
+
     static struct MyQuery {
-        mixin Table!(db, User, "users");
+        mixin Table!(User, "users");
     }
 
     // Schema without mutations
@@ -1544,13 +1574,14 @@ unittest {
 // Test mutation SDL generation
 unittest {
     import std.algorithm : canFind;
-    import graphqld2.relational.demo : DemoEntity;
+    import graphqld2.relational.demo : DemoEntity, MockDB;
     import graphqld2.relational.schema : Col, Table, getAll;
-    import graphqld2.relational.eval_context : MockDB;
+
+    static MockDB!() db;
 
     // Define an entity for mutation results
     static struct User {
-        mixin DemoEntity!"users";
+        mixin DemoEntity!(db, "users");
         mixin Col!("name", string);
     }
 
@@ -1561,33 +1592,34 @@ unittest {
     }
 
     // Mutation type with various mutation patterns
+    // Mutations take Expr!Mutation as first param (ignored) and return Expr!T
     static struct MyMutation {
+        import graphqld2.core.expr : effect;
+
         // Simple mutation returning entity
-        static User createUser(CreateUserInput input) {
-            return User.init;
+        static Expr!User createUser(Expr!MyMutation parent, CreateUserInput input) {
+            return effect(() => User.init, parent);
         }
 
         // Mutation returning scalar
-        static bool deleteUser(int id) {
-            return true;
+        static Expr!bool deleteUser(Expr!MyMutation parent, int id) {
+            return effect(() => true, parent);
         }
 
         // Mutation with optional parameter
-        static string greet(string name, string greeting = "Hello") {
-            return greeting ~ " " ~ name;
+        static Expr!string greet(Expr!MyMutation parent, string name, string greeting = "Hello") {
+            return effect(() => greeting ~ " " ~ name, parent);
         }
 
         @GqlDescription("Updates a user's profile")
         @GqlDeprecated("Use updateUserV2 instead")
-        static User updateUser(int id, CreateUserInput input) {
-            return User.init;
+        static Expr!User updateUser(Expr!MyMutation parent, int id, CreateUserInput input) {
+            return effect(() => User.init, parent);
         }
     }
 
-    static MockDB!() db;
-
     static struct MyQuery {
-        mixin Table!(db, User, "users");
+        mixin Table!(User, "users");
     }
 
     // Schema with mutations
@@ -1639,19 +1671,18 @@ unittest {
 // Test Schema without mutations generates no Mutation type
 unittest {
     import std.algorithm : canFind;
-    import graphqld2.relational.demo : DemoEntity;
+    import graphqld2.relational.demo : DemoEntity, MockDB;
     import graphqld2.relational.schema : Col, Table, getAll;
-    import graphqld2.relational.eval_context : MockDB;
-
-    static struct User {
-        mixin DemoEntity!"users";
-        mixin Col!("name", string);
-    }
 
     static MockDB!() db;
 
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("name", string);
+    }
+
     static struct MyQuery {
-        mixin Table!(db, User, "users");
+        mixin Table!(User, "users");
     }
 
     // Schema without mutations

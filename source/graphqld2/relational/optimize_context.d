@@ -33,6 +33,7 @@ class RelationalOptimizeContext {
         }
 
         auto node = new QueryNode(_nextNodeId++, typeName, table);
+        node.mapExpr = mapExpr;  // Store for looking up currentRefs at eval time
         _queryNodes[key] = node;
         return node;
     }
@@ -177,15 +178,17 @@ unittest {
     import graphqld2.relational.demo;
     import graphqld2.relational.eval_context;
 
+    static MockDB!() db;
+
     // Test: Optimized execution produces same results as naive
     static struct User {
-        mixin DemoEntity!"users";
+        mixin DemoEntity!(db, "users");
         mixin Col!("firstName", string);
         mixin Col!("lastName", string);
     }
 
-    auto fetcher = new MockDB!()();
-    fetcher.setTableData("users", `[
+    db = new MockDB!();
+    db.setTableData("users", `[
         {"id": 1, "first_name": "Alice", "last_name": "Smith"},
         {"id": 2, "first_name": "Bob", "last_name": "Jones"},
         {"id": 3, "first_name": "Carol", "last_name": "White"}
@@ -199,7 +202,7 @@ unittest {
                 "first", user.firstName,
                 "last", user.lastName
             )
-        )(getByIds!User([1, 2, 3], fetcher));
+        )(getByIds!User([1, 2, 3]));
     }
 
     auto naiveResult = awaitSync(executor.execute(makeQuery(), false));
@@ -220,12 +223,16 @@ unittest {
     import graphqld2.relational.schema;
     import graphqld2.relational.demo;
 
+    static MockDB!() db;
+
     // Test: QueryNode inspection - verify optimization creates correct nodes
     static struct User {
-        mixin DemoEntity!"users";
+        mixin DemoEntity!(db, "users");
         mixin Col!("firstName", string);
         mixin Col!("age", long);
     }
+
+    db = new MockDB!();
 
     auto query = map!(
         (Expr!User user) => jsonObject(
@@ -257,14 +264,16 @@ unittest {
     import graphqld2.relational.schema;
     import graphqld2.relational.demo;
 
+    static MockDB!() db;
+
     // Test: Nested hasMany creates linked QueryNodes
     static struct Post {
-        mixin DemoEntity!"posts";
+        mixin DemoEntity!(db, "posts");
         mixin Col!("title", string);
     }
 
     static struct User {
-        mixin DemoEntity!"users";
+        mixin DemoEntity!(db, "users");
         mixin Col!("firstName", string);
         mixin HasMany!("posts", Post, "author_id");
     }
@@ -311,14 +320,16 @@ unittest {
     import graphqld2.relational.demo;
     import graphqld2.relational.eval_context;
 
+    static MockDB!() db;
+
     // Test: BelongsTo creates JOINs (not separate QueryNodes)
     static struct User {
-        mixin DemoEntity!"users";
+        mixin DemoEntity!(db, "users");
         mixin Col!("firstName", string);
     }
 
     static struct Post {
-        mixin DemoEntity!"posts";
+        mixin DemoEntity!(db, "posts");
         mixin Col!("title", string);
         mixin Col!("authorId", ForeignKey!User);
         mixin BelongsTo!("author", "authorId");
@@ -328,12 +339,12 @@ unittest {
         }
     }
 
-    auto fetcher = new MockDB!()();
-    fetcher.setTableData("users", `[
+    db = new MockDB!();
+    db.setTableData("users", `[
         {"id": 1, "first_name": "Alice"},
         {"id": 2, "first_name": "Bob"}
     ]`);
-    fetcher.setTableData("posts", `[
+    db.setTableData("posts", `[
         {"id": 1, "author_id": 1, "title": "Hello"},
         {"id": 2, "author_id": 2, "title": "World"},
         {"id": 3, "author_id": 1, "title": "Again"}
@@ -347,7 +358,7 @@ unittest {
                 "title", post.title,
                 "authorName", post.authorName
             )
-        )(getByIds!Post([1, 2, 3], fetcher));
+        )(getByIds!Post([1, 2, 3]));
     }
 
     // Execute both ways

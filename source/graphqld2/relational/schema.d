@@ -23,56 +23,65 @@ import graphqld2.relational.query_node;
 /// Mixin to define a root query field that returns all entities of a type.
 /// Used in a Query struct to define the schema's entry points.
 ///
-/// The data source is bound by alias, so it must be a static/module-level variable.
-/// This avoids having to pass the data source through all compilation and execution.
+/// The data source is derived from the Entity's _db alias, which is set
+/// via the Entity mixin. This ensures consistency between the entity
+/// definition and query access.
 ///
 /// Example:
 /// ---
 /// // Module-level data source
 /// static MyDB myDB;
 ///
+/// struct User {
+///     mixin Entity!(myDB, "users");  // Entity owns the data source
+///     mixin Col!("email", string);
+/// }
+///
 /// struct Query {
-///     mixin Table!(myDB, User, "users");
-///     mixin Table!(myDB, Post, "posts");
+///     mixin Table!(User, "users");   // Derives db from User._db
+///     mixin Table!(Post, "posts");
 /// }
 ///
 /// void main() {
 ///     myDB = new MyDB(connectionString);
-///     auto query = map!(u => User.firstName(u))(Query.users());
+///     auto query = map!(u => User.email(u))(Query.users());
 /// }
 /// ---
-mixin template Table(alias db, Entity, string fieldName) {
+mixin template Table(Entity, string fieldName) {
     // Metadata for schema introspection (unique struct name per field)
     mixin("struct _tableField_" ~ fieldName ~ " {
         enum name = \"" ~ fieldName ~ "\";
         alias entityType = Entity;
     }");
 
-    // Method uses aliased data source directly - no parameter needed
+    // Method uses data source from Entity._db - no parameter needed
     mixin("static auto " ~ fieldName ~ "() {
-        return getAll!Entity(db);
+        return getAll!Entity();
     }");
 }
 
 /// Convenience mixin to define multiple table fields at once.
-/// Takes a data source alias and a sequence of entity types.
 /// Field names are derived from entity type names (lowercased + pluralized).
+/// Data source is derived from each entity's _db alias.
 ///
 /// Example:
 /// ---
 /// static MyDB myDB;
 ///
+/// struct User { mixin Entity!(myDB, "users"); }
+/// struct Post { mixin Entity!(myDB, "posts"); }
+///
 /// struct Query {
-///     mixin Tables!(myDB, User, Post, Comment);
+///     mixin Tables!(User, Post, Comment);
 ///     // Equivalent to:
-///     // mixin Table!(myDB, User, "users");
-///     // mixin Table!(myDB, Post, "posts");
-///     // mixin Table!(myDB, Comment, "comments");
+///     // mixin Table!(User, "users");
+///     // mixin Table!(Post, "posts");
+///     // mixin Table!(Comment, "comments");
 /// }
 /// ---
-mixin template Tables(alias db, Entities...) {
+mixin template Tables(Entities...) {
     static foreach (Entity; Entities) {
-        mixin Table!(db, Entity, defaultFieldName!Entity);
+        mixin Table!(Entity, defaultFieldName!Entity);
     }
 }
 
@@ -96,10 +105,15 @@ private template defaultFieldName(Entity) {
 /// The entity struct becomes a reference type - it holds a nodeId that identifies
 /// a specific row in the database. Schema metadata is static, nodeId is runtime.
 ///
+/// The data source is bound by alias, so it must be a static/module-level variable.
+/// This allows both Table queries and mutations to access the same data source.
+///
 /// Example:
 /// ---
+/// static MyDB db;
+///
 /// struct User {
-///     mixin Entity!"users";
+///     mixin Entity!(db, "users");
 ///     mixin Col!("id", long);
 ///     mixin PrimaryKey!"id";
 ///     mixin Col!("email", string);
@@ -107,22 +121,24 @@ private template defaultFieldName(Entity) {
 ///
 /// // Composite primary key
 /// struct OrderItem {
-///     mixin Entity!"order_items";
+///     mixin Entity!(db, "order_items");
 ///     mixin Col!("orderId", long);
 ///     mixin Col!("productId", long);
 ///     mixin PrimaryKey!("orderId", "productId");
 /// }
 /// ---
-mixin template Entity(string tableName, string typeName = "", string sourceId = "default") {
+mixin template Entity(alias db, string tableName, string typeName = "") {
     import std.string : indexOf;
 
     // Runtime state: the node ID that identifies this entity reference
     string nodeId;
 
+    // Data source (bound by alias for runtime access)
+    alias _db = db;
+
     // Schema metadata (compile-time)
     static immutable string _table = tableName;
     static immutable string _typeName = (typeName.length > 0) ? typeName : __traits(identifier, typeof(this));
-    static immutable string _sourceId = sourceId;
 
     /// Extract the local ID portion (after the colon)
     string localId() const {
@@ -529,23 +545,27 @@ interface RootExprInfo {
     DataFetcher dataFetcher();
 }
 
+/// Source ID for an entity - uses table name as unique identifier.
+/// This is used to key into RelationalEvalContext for multi-source scenarios.
+template entitySourceId(Entity) {
+    enum entitySourceId = Entity._table;
+}
+
 /// Root expression that returns specific entities by their IDs.
 /// Returns typed Entity[] for compile-time type safety.
+/// Uses Entity._db for data source access.
 class GetByIdsExpr(Entity) : Expr!(Entity[]), RootExprInfo {
     import graphqld2.core.optimize : ExprOptimizer;
 
     private Entity[] _entities;
-    private DataFetcher _fetcher;
 
     /// Construct from array of IDs (any type convertible to string)
-    this(IdType)(IdType[] ids, DataFetcher fetcher = null) {
+    this(IdType)(IdType[] ids) {
         _entities = ids.map!(id => Entity(Entity._typeName ~ ":" ~ id.to!string)).array;
-        _fetcher = fetcher;
     }
 
-    this(Entity[] entities, DataFetcher fetcher = null) {
+    this(Entity[] entities) {
         _entities = entities;
-        _fetcher = fetcher;
     }
 
     override ExprBase[] dependencies() {
@@ -557,18 +577,21 @@ class GetByIdsExpr(Entity) : Expr!(Entity[]), RootExprInfo {
     }
 
     override ExprOptimizer[] requestedOptimizers() {
-        if (_fetcher !is null) {
-            return _fetcher.requestedOptimizers();
+        // Get fetcher from Entity's data source
+        auto fetcher = Entity._db;
+        if (fetcher !is null) {
+            return fetcher.requestedOptimizers();
         }
         return [];
     }
 
     override Promise!(Entity[][]) eval(EvalContext ctx) {
-        // Set up RelationalEvalContext with fetcher if we have one
-        if (_fetcher !is null) {
-            auto relCtx = ctx.getSourceContext!RelationalEvalContext(Entity._sourceId);
+        // Set up RelationalEvalContext with fetcher from Entity._db
+        auto fetcher = Entity._db;
+        if (fetcher !is null) {
+            auto relCtx = ctx.getSourceContext!RelationalEvalContext();
             if (relCtx.fetcher is null) {
-                relCtx.fetcher = _fetcher;
+                relCtx.fetcher = fetcher;
             }
         }
         // At root level, there's always exactly 1 parent (queryRoot)
@@ -582,7 +605,7 @@ class GetByIdsExpr(Entity) : Expr!(Entity[]), RootExprInfo {
     AnyRef[] filterRefs() { return _entities.map!(e => AnyRef(e.nodeId)).array; }
     string entityTypeName() { return Entity._typeName; }
     string entityTable() { return Entity._table; }
-    DataFetcher dataFetcher() { return _fetcher; }
+    DataFetcher dataFetcher() { return Entity._db; }
 }
 
 /// Factory function to create GetByIdsExpr (works with any ID type)
@@ -590,14 +613,9 @@ auto getByIds(Entity, IdType)(IdType[] ids) {
     return new GetByIdsExpr!Entity(ids);
 }
 
-/// Factory function to create GetByIdsExpr with a data fetcher
-auto getByIds(Entity, IdType)(IdType[] ids, DataFetcher fetcher) {
-    return new GetByIdsExpr!Entity(ids, fetcher);
-}
-
 /// Factory function to create GetByIdsExpr for composite keys.
 /// Takes an array of key-part arrays, e.g. [[1, 100], [1, 101]] for orderId, productId.
-auto getByCompositeIds(Entity, IdType)(IdType[][] keyParts, DataFetcher fetcher = null) {
+auto getByCompositeIds(Entity, IdType)(IdType[][] keyParts) {
     import graphqld2.core.types : encodeCompositeKey;
 
     Entity[] entities;
@@ -608,19 +626,16 @@ auto getByCompositeIds(Entity, IdType)(IdType[][] keyParts, DataFetcher fetcher 
         }
         entities ~= Entity(Entity._typeName ~ ":" ~ encodeCompositeKey(strParts));
     }
-    return new GetByIdsExpr!Entity(entities, fetcher);
+    return new GetByIdsExpr!Entity(entities);
 }
 
 /// Root expression that fetches all entities of a type.
 /// Returns typed Entity[] for compile-time type safety.
+/// Uses Entity._db for data source access.
 class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo {
     import graphqld2.core.optimize : ExprOptimizer;
 
-    private DataFetcher _fetcher;
-
-    this(DataFetcher fetcher = null) {
-        _fetcher = fetcher;
-    }
+    this() {}
 
     override ExprBase[] dependencies() {
         return [];  // Root node
@@ -631,23 +646,26 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo {
     }
 
     override ExprOptimizer[] requestedOptimizers() {
-        if (_fetcher !is null) {
-            return _fetcher.requestedOptimizers();
+        auto fetcher = Entity._db;
+        if (fetcher !is null) {
+            return fetcher.requestedOptimizers();
         }
         return [];
     }
 
     override Promise!(Entity[][]) eval(EvalContext ctx) {
-        // Set up RelationalEvalContext with fetcher if we have one
-        if (_fetcher !is null) {
-            auto relCtx = ctx.getSourceContext!RelationalEvalContext(Entity._sourceId);
+        auto fetcher = Entity._db;
+
+        // Set up RelationalEvalContext with fetcher
+        if (fetcher !is null) {
+            auto relCtx = ctx.getSourceContext!RelationalEvalContext();
             if (relCtx.fetcher is null) {
-                relCtx.fetcher = _fetcher;
+                relCtx.fetcher = fetcher;
             }
         }
 
         // Fetch all IDs from data source, encode as entities with nodeIds
-        auto relCtx = ctx.getSourceContext!RelationalEvalContext(Entity._sourceId);
+        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
         auto ids = relCtx.fetchAllIds(Entity._table);
         auto entities = ids.map!(id => Entity(Entity._typeName ~ ":" ~ id.to!string)).array;
         // At root level, there's always exactly 1 parent (queryRoot)
@@ -659,17 +677,12 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo {
     AnyRef[] filterRefs() { return []; }
     string entityTypeName() { return Entity._typeName; }
     string entityTable() { return Entity._table; }
-    DataFetcher dataFetcher() { return _fetcher; }
+    DataFetcher dataFetcher() { return Entity._db; }
 }
 
 /// Factory function to create GetAllExpr
 auto getAll(Entity)() {
     return new GetAllExpr!Entity();
-}
-
-/// Factory function to create GetAllExpr with a data fetcher
-auto getAll(Entity)(DataFetcher fetcher) {
-    return new GetAllExpr!Entity(fetcher);
 }
 
 // ============================================================================
@@ -711,10 +724,15 @@ class ColumnAccessExpr(T, Entity) : Expr!T {
         }
 
         // Get the relational optimization context for this data source
-        auto relCtx = ctx.getSourceContext!RelationalOptimizeContext(Entity._sourceId);
+        auto relCtx = ctx.getSourceContext!RelationalOptimizeContext();
 
         // Get or create QueryNode for this MapExpr
         auto node = relCtx.getOrCreateNode(mapExpr, Entity._typeName, Entity._table);
+
+        // Set the data fetcher on the node (for mutation-returned entities that bypass GetByIdsExpr)
+        if (node.dataFetcher is null && Entity._db !is null) {
+            node.dataFetcher = Entity._db;
+        }
 
         // Configure the node based on collection type (if not already configured)
         if (node.rootFilter == FilterType.none && node.parent is null) {
@@ -778,9 +796,14 @@ class ColumnAccessExpr(T, Entity) : Expr!T {
         auto column = _column;
         auto input = _input;
 
+        // Ensure fetcher is set up from Entity's data source
+        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+        if (relCtx.fetcher is null && Entity._db !is null) {
+            relCtx.fetcher = Entity._db;
+        }
+
         // Get the entity refs from the input chain, then fetch column
         return evalRefAsAnyRef(input, ctx).then((AnyRef[] entityRefs) {
-            auto relCtx = ctx.getSourceContext!RelationalEvalContext(Entity._sourceId);
             if (relCtx.fetcher !is null) {
                 return relCtx.fetcher.fetchColumn!T(Entity._table, column, entityRefs);
             }
@@ -839,10 +862,15 @@ class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Child[]), HasManyInfo 
     override Promise!(Child[][]) eval(EvalContext ctx) {
         auto input = _input;
 
+        // Ensure fetcher is set up from Child entity's data source
+        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+        if (relCtx.fetcher is null && Child._db !is null) {
+            relCtx.fetcher = Child._db;
+        }
+
         // Get the parent refs from the input chain, then fetch children
         return evalRefAsAnyRef(input, ctx).then((AnyRef[] parentRefs) {
             // Naive path: fetch children directly
-            auto relCtx = ctx.getSourceContext!RelationalEvalContext(Child._sourceId);
             if (relCtx.fetcher !is null) {
                 auto children = relCtx.fetcher.fetchChildren(Child._table, Child._typeName, fk, parentRefs);
                 // Convert AnyRef[][] to Child[][]
@@ -929,6 +957,14 @@ class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultTyp
     override Promise!(ResultType[]) eval(EvalContext ctx) {
         auto input = _input;
 
+        // Ensure fetcher is set up from Child entity's data source
+        static if (!is(Child == void)) {
+            auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+            if (relCtx.fetcher is null && Child._db !is null) {
+                relCtx.fetcher = Child._db;
+            }
+        }
+
         // Get the child refs from the input chain, then fetch parent
         return evalRefAsAnyRef(input, ctx).then((AnyRef[] childRefs) {
             static if (is(Child == void)) {
@@ -936,7 +972,7 @@ class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultTyp
                 return childRefs.map!(_ => ResultType.init).array;
             } else {
                 // Naive path: fetch parent refs directly
-                auto relCtx = ctx.getSourceContext!RelationalEvalContext(Child._sourceId);
+                auto relCtx = ctx.getSourceContext!RelationalEvalContext();
                 if (relCtx.fetcher !is null) {
                     auto parentRefs = relCtx.fetcher.fetchBelongsTo(Child._table, fk, Parent._typeName, childRefs);
 
@@ -975,20 +1011,24 @@ class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultTyp
 // ============================================================================
 
 unittest {
+    import graphqld2.relational.demo : MockDB;
+
+    // Dummy db for compile-time tests
+    static MockDB!() db;
+
     // Test low-level Entity mixin (no id column)
     static struct User {
-        mixin Entity!"users";
+        mixin Entity!(db, "users");
         mixin Col!("id", long);
         mixin PrimaryKey!"id";
     }
     static assert(User._table == "users");
     static assert(User._typeName == "User");
-    static assert(User._sourceId == "default");
     static assert(is(User._colField_id.type == long));
 
     // Test Entity with custom type name
     static struct Post {
-        mixin Entity!("posts", "BlogPost");
+        mixin Entity!(db, "posts", "BlogPost");
         mixin Col!("id", long);
         mixin PrimaryKey!"id";
     }
@@ -998,18 +1038,20 @@ unittest {
 }
 
 unittest {
-    import graphqld2.relational.demo : DemoEntity, Int64;
+    import graphqld2.relational.demo : DemoEntity, Int64, MockDB;
+
+    static MockDB!() db;
 
     // Test DemoEntity convenience (includes id column with Int64 type)
     static struct Comment {
-        mixin DemoEntity!"comments";
+        mixin DemoEntity!(db, "comments");
     }
     static assert(Comment._table == "comments");
     static assert(is(Comment._colField_id.type == Int64));
 
     // Test DemoEntity with custom ID type
     static struct UuidEntity {
-        mixin DemoEntity!("items", string);
+        mixin DemoEntity!(db, "items", string);
     }
     static assert(is(UuidEntity._colField_id.type == string));
 }
@@ -1017,13 +1059,17 @@ unittest {
 // Test optimization creates QueryNode
 unittest {
     import std.json : parseJSON;
-    import graphqld2.relational.demo : DemoEntity;
+    import graphqld2.relational.demo : DemoEntity, MockDB;
+
+    static MockDB!() db;
 
     static struct User {
-        mixin DemoEntity!"users";
+        mixin DemoEntity!(db, "users");
         mixin Col!("firstName", string);
         mixin Col!("lastName", string);
     }
+
+    db = new MockDB!();
 
     // Build a simple query: map over users, get first + last name
     auto userRefs = getByIds!User([1, 2]);
@@ -1053,17 +1099,19 @@ unittest {
 unittest {
     import std.json : parseJSON;
     import ae.utils.promise.await : awaitSync;
-    import graphqld2.relational.demo : DemoEntity;
+    import graphqld2.relational.demo : DemoEntity, MockDB;
+
+    static MockDB!() db;
 
     // Entity with string ID (UUID-style)
     static struct Item {
-        mixin DemoEntity!("items", string);
+        mixin DemoEntity!(db, "items", string);
         mixin Col!("name", string);
     }
 
     // Set up mock data with string IDs
-    auto fetcher = new MockDB!()();
-    fetcher.setTableData("items", `[
+    db = new MockDB!();
+    db.setTableData("items", `[
         {"id": "uuid-abc", "name": "First Item"},
         {"id": "uuid-def", "name": "Second Item"}
     ]`);
@@ -1071,7 +1119,7 @@ unittest {
     // Query by string IDs
     auto query = map!(
         (Expr!Item item) => item.name
-    )(getByIds!Item(["uuid-abc", "uuid-def"], fetcher));
+    )(getByIds!Item(["uuid-abc", "uuid-def"]));
 
     auto executor = new Executor();
     auto result = awaitSync(executor.execute(query, true));
@@ -1085,26 +1133,28 @@ unittest {
 unittest {
     import std.json : parseJSON;
     import ae.utils.promise.await : awaitSync;
-    import graphqld2.relational.demo : DemoEntity;
+    import graphqld2.relational.demo : DemoEntity, MockDB;
+
+    static MockDB!() db;
 
     static struct Category {
-        mixin DemoEntity!("categories", string);
+        mixin DemoEntity!(db, "categories", string);
         mixin Col!("name", string);
     }
 
     static struct Product {
-        mixin DemoEntity!("products", string);
+        mixin DemoEntity!(db, "products", string);
         mixin Col!("name", string);
         mixin Col!("categoryId", ForeignKey!Category);
         mixin BelongsTo!("category", "categoryId");
     }
 
-    auto fetcher = new MockDB!()();
-    fetcher.setTableData("categories", `[
+    db = new MockDB!();
+    db.setTableData("categories", `[
         {"id": "cat-1", "name": "Electronics"},
         {"id": "cat-2", "name": "Books"}
     ]`);
-    fetcher.setTableData("products", `[
+    db.setTableData("products", `[
         {"id": "prod-a", "category_id": "cat-1", "name": "Phone"},
         {"id": "prod-b", "category_id": "cat-2", "name": "Novel"}
     ]`);
@@ -1114,7 +1164,7 @@ unittest {
             "name", prod.name,
             "categoryName", prod.category.name
         )
-    )(getByIds!Product(["prod-a", "prod-b"], fetcher));
+    )(getByIds!Product(["prod-a", "prod-b"]));
 
     auto executor = new Executor();
     auto result = awaitSync(executor.execute(query, true));
@@ -1131,10 +1181,13 @@ unittest {
     import std.json : parseJSON;
     import ae.utils.promise.await : awaitSync;
     import graphqld2.core.types : encodeCompositeKey;
+    import graphqld2.relational.demo : MockDB;
+
+    static MockDB!() db;
 
     // Entity with composite primary key (order_id + product_id)
     static struct OrderItem {
-        mixin Entity!"order_items";
+        mixin Entity!(db, "order_items");
 
         // Define the composite key columns
         mixin Col!("orderId", long);
@@ -1152,9 +1205,9 @@ unittest {
     static assert(OrderItem._typeName == "OrderItem");
 
     // Set up mock data
-    auto fetcher = new MockDB!()();
-    fetcher.setPrimaryKey("order_items", "order_id", "product_id");
-    fetcher.setTableData("order_items", `[
+    db = new MockDB!();
+    db.setPrimaryKey("order_items", "order_id", "product_id");
+    db.setTableData("order_items", `[
         {"order_id": 1, "product_id": 100, "quantity": 2, "price": "10.00"},
         {"order_id": 1, "product_id": 101, "quantity": 1, "price": "25.00"},
         {"order_id": 2, "product_id": 100, "quantity": 3, "price": "10.00"}
@@ -1171,7 +1224,7 @@ unittest {
             "quantity", item.quantity,
             "price", item.price
         )
-    )(new GetByIdsExpr!OrderItem(refs, fetcher));
+    )(new GetByIdsExpr!OrderItem(refs));
 
     auto executor = new Executor();
     auto result = awaitSync(executor.execute(query, true));
@@ -1187,18 +1240,21 @@ unittest {
 unittest {
     import std.json : parseJSON;
     import ae.utils.promise.await : awaitSync;
+    import graphqld2.relational.demo : MockDB;
+
+    static MockDB!() db;
 
     static struct OrderItem {
-        mixin Entity!"order_items";
+        mixin Entity!(db, "order_items");
         mixin Col!("orderId", long);
         mixin Col!("productId", long);
         mixin PrimaryKey!("orderId", "productId");
         mixin Col!("quantity", long);
     }
 
-    auto fetcher = new MockDB!()();
-    fetcher.setPrimaryKey("order_items", "order_id", "product_id");
-    fetcher.setTableData("order_items", `[
+    db = new MockDB!();
+    db.setPrimaryKey("order_items", "order_id", "product_id");
+    db.setTableData("order_items", `[
         {"order_id": 1, "product_id": 100, "quantity": 2},
         {"order_id": 1, "product_id": 101, "quantity": 1},
         {"order_id": 2, "product_id": 100, "quantity": 3}
@@ -1207,7 +1263,7 @@ unittest {
     // Use getByCompositeIds helper with array of key-parts
     auto query = map!(
         (Expr!OrderItem item) => item.quantity
-    )(getByCompositeIds!OrderItem([[1, 100], [2, 100]], fetcher));
+    )(getByCompositeIds!OrderItem([[1, 100], [2, 100]]));
 
     auto executor = new Executor();
     auto result = awaitSync(executor.execute(query, true));

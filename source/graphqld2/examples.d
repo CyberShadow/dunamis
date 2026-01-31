@@ -25,9 +25,9 @@ static DebugSqlDB!() db;
 /// The Query root - defines all entry points into the schema.
 /// This mirrors what a GraphQL schema's Query type would look like.
 struct Query {
-    mixin Table!(db, User, "users");
-    mixin Table!(db, Post, "posts");
-    mixin Table!(db, Comment, "comments");
+    mixin Table!(User, "users");
+    mixin Table!(Post, "posts");
+    mixin Table!(Comment, "comments");
 }
 
 
@@ -52,7 +52,7 @@ struct FormatOptions {
 struct User {
     import graphqld2.graphql : GqlDescription, GqlDeprecated;
 
-    mixin DemoEntity!"users";
+    mixin DemoEntity!(db, "users");
 
     @GqlDescription("The user's first name")
     mixin Col!("firstName", string);
@@ -90,7 +90,7 @@ struct User {
 struct Post {
     import graphqld2.graphql : GqlHidden, GqlName;
 
-    mixin DemoEntity!"posts";
+    mixin DemoEntity!(db, "posts");
     mixin Col!("title", string);
 
     @GqlName("body")  // D keyword conflict: body_ in D → body in GraphQL
@@ -146,7 +146,7 @@ struct Post {
 struct Comment {
     import graphqld2.graphql : GqlHidden, GqlName;
 
-    mixin DemoEntity!"comments";
+    mixin DemoEntity!(db, "comments");
 
     @GqlName("body")  // D keyword conflict: body_ in D → body in GraphQL
     mixin Col!("body_", string, "body");
@@ -221,7 +221,7 @@ unittest {
 
     auto query = map!(
         (RefExpr!Post p) => p.title
-    )(getByIds!Post([1, 2], db));
+    )(getByIds!Post([1, 2]));
 
     auto titles = awaitSync(executor.execute(query));
     assert(titles == ["Hello World", "D Programming"]);
@@ -254,7 +254,7 @@ unittest {
 
     auto query = map!(
         (RefExpr!Post p) => p.summary
-    )(getByIds!Post([1, 2], db));
+    )(getByIds!Post([1, 2]));
 
     auto summaries = awaitSync(executor.execute(query));
     assert(summaries[0].canFind("Hello World"));
@@ -277,7 +277,7 @@ unittest {
 
     auto query = map!(
         (RefExpr!Post p) => p.html
-    )(getByIds!Post([1], db));
+    )(getByIds!Post([1]));
 
     auto htmls = awaitSync(executor.execute(query));
 
@@ -310,7 +310,7 @@ unittest {
                 )
             )(user.posts)
         )
-    )(getByIds!User([1, 2], db));
+    )(getByIds!User([1, 2]));
 
     auto result = awaitSync(executor.execute(query));
 
@@ -352,7 +352,7 @@ unittest {
                 )
             )(user.comments)
         )
-    )(getByIds!User([1, 2], db));
+    )(getByIds!User([1, 2]));
 
     auto result = awaitSync(executor.execute(query));
 
@@ -577,7 +577,7 @@ unittest {
     // Uses opDispatch to call User.greeting with arguments
     auto query = map!(
         (RefExpr!User user) => user.greeting("Hello")  // Uses default suffix "!"
-    )(getByIds!User([1, 2], db));
+    )(getByIds!User([1, 2]));
 
     auto result = awaitSync(executor.execute(query));
 
