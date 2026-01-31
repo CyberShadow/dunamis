@@ -667,25 +667,34 @@ SequentialJsonObjectExpr compileRootMutationSet(Mutation)(SelectionSet ss, JSONV
 }
 
 /// Compile a single mutation field.
-/// Uses the same isRootField interface as Query fields.
+/// Every non-internal function member is assumed to be a field.
 ExprBase compileRootMutationField(Mutation)(Field field, JSONValue variables) {
     auto fieldName = getFieldName(field);
 
     // Create a singleton parent expression for the Mutation type
     auto parentExpr = singleton(Mutation.init);
 
-    // Look up the mutation in Mutation type at compile time
+    // Look up the mutation in Mutation type - every non-internal function is a field
     static foreach (member; __traits(allMembers, Mutation)) {{
-        static if (!isInternalHelper!member) {
-            static if (__traits(compiles, isRootField!(Mutation, member, __traits(getMember, Mutation, member)))) {
-                static if (isRootField!(Mutation, member, __traits(getMember, Mutation, member))) {
-                    alias fn = __traits(getMember, Mutation, member);
-                    enum gqlName = getGqlName!(fn, member);
+        static if (!isInternalMember!member) {
+            alias memberSym = __traits(getMember, Mutation, member);
+            static if (is(typeof(memberSym) == function)) {
+                enum gqlName = getGqlName!(memberSym, member);
 
-                    if (fieldName == gqlName) {
-                        // Call the root field function with parent and extracted args
-                        return callRootField!(fn, Mutation)(parentExpr, field.args, field.ss, variables);
-                    }
+                if (fieldName == gqlName) {
+                    // Verify signature: (Expr!Mutation, Args...) -> Expr!T
+                    alias Params = Parameters!memberSym;
+                    alias Return = ReturnType!memberSym;
+
+                    static assert(Params.length >= 1,
+                        "Mutation '" ~ member ~ "' must take Expr!" ~ Mutation.stringof ~ " as first parameter");
+                    static assert(is(Params[0] : Expr!M, M) && is(M == Mutation),
+                        "Mutation '" ~ member ~ "' first parameter must be Expr!" ~ Mutation.stringof ~
+                        ", got " ~ Params[0].stringof);
+                    static assert(isExpr!Return,
+                        "Mutation '" ~ member ~ "' must return an Expr type, got " ~ Return.stringof);
+
+                    return callRootField!(memberSym, Mutation)(parentExpr, field.args, field.ss, variables);
                 }
             }
         }
@@ -851,25 +860,34 @@ DynamicJsonObjectExpr compileRootSelectionSet(Query)(SelectionSet ss, JSONValue 
 }
 
 /// Compile a single root field expression (e.g., "users" from Query)
-/// Uses the unified isRootField interface - same logic as mutation fields.
+/// Every non-internal function member is assumed to be a field.
 ExprBase compileRootFieldExpr(Query)(Field field, JSONValue variables) {
     auto fieldName = getFieldName(field);
 
     // Create a singleton parent expression for the Query type
     auto parentExpr = singleton(Query.init);
 
-    // Look up the field in Query type using isRootField (same as mutations)
+    // Look up the field in Query type - every non-internal function is a field
     static foreach (member; __traits(allMembers, Query)) {{
-        static if (!isInternalHelper!member) {
-            static if (__traits(compiles, isRootField!(Query, member, __traits(getMember, Query, member)))) {
-                static if (isRootField!(Query, member, __traits(getMember, Query, member))) {
-                    alias fn = __traits(getMember, Query, member);
-                    enum gqlName = getGqlName!(fn, member);
+        static if (!isInternalMember!member) {
+            alias memberSym = __traits(getMember, Query, member);
+            static if (is(typeof(memberSym) == function)) {
+                enum gqlName = getGqlName!(memberSym, member);
 
-                    if (fieldName == gqlName) {
-                        // Call the root field function with parent and extracted args
-                        return callRootField!(fn, Query)(parentExpr, field.args, field.ss, variables);
-                    }
+                if (fieldName == gqlName) {
+                    // Verify signature: (Expr!Query, Args...) -> Expr!T
+                    alias Params = Parameters!memberSym;
+                    alias Return = ReturnType!memberSym;
+
+                    static assert(Params.length >= 1,
+                        "Field '" ~ member ~ "' must take Expr!" ~ Query.stringof ~ " as first parameter");
+                    static assert(is(Params[0] : Expr!Q, Q) && is(Q == Query),
+                        "Field '" ~ member ~ "' first parameter must be Expr!" ~ Query.stringof ~
+                        ", got " ~ Params[0].stringof);
+                    static assert(isExpr!Return,
+                        "Field '" ~ member ~ "' must return an Expr type, got " ~ Return.stringof);
+
+                    return callRootField!(memberSym, Query)(parentExpr, field.args, field.ss, variables);
                 }
             }
         }
@@ -1893,6 +1911,31 @@ unittest {
     // Verify isRootField detects the hand-written method
     static assert(isRootField!(Query, "scalarField", Query.scalarField),
         "isRootField should detect hand-written 'scalarField' method");
+}
+
+// Test that wrong signatures produce clear compile errors
+unittest {
+    import graphqld2.core.expr : Expr;
+    import graphqld2.graphql.schema : isRootField;
+
+    static struct Query {
+        // WRONG: Missing Expr!Query parameter - should not be detected as a field
+        static int badField1() { return 42; }
+
+        // WRONG: First param is not Expr!Query - should not be detected as a field
+        static int badField2(int x) { return x; }
+
+        // WRONG: Returns non-Expr type - should not be detected as a field
+        static int badField3(Expr!Query parent) { return 42; }
+    }
+
+    // Verify these are NOT detected as root fields
+    static assert(!isRootField!(Query, "badField1", Query.badField1),
+        "badField1 should not be detected (no params)");
+    static assert(!isRootField!(Query, "badField2", Query.badField2),
+        "badField2 should not be detected (wrong first param type)");
+    static assert(!isRootField!(Query, "badField3", Query.badField3),
+        "badField3 should not be detected (non-Expr return type)");
 }
 
 // Test getFieldName/getFieldAlias with aliased fields (verifies graphql-d AST handling)

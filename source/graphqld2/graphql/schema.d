@@ -368,16 +368,42 @@ string defaultValueToString(T)(T value) {
     }
 }
 
-/// Check if a member name is an internal mixin helper that should be skipped
-template isInternalHelper(string name) {
-    enum isInternalHelper =
-        // Internal Col mixin helpers
+/// Check if a member name is an internal member that should be skipped.
+/// This is used by schema generation to filter out mixin helper symbols.
+/// Note: Does NOT filter metadata like _colField_* or _tableField_* which are
+/// needed for schema introspection.
+template isInternalMember(string name) {
+    enum isInternalMember =
+        // Mixin helper symbols (not metadata)
         (name.length >= 5 && name[0..5] == "_Col_") ||
-        // Internal BelongsTo mixin helpers
         (name.length >= 11 && name[0..11] == "_BelongsTo_") ||
-        // Internal HasMany mixin helpers (if any)
-        (name.length >= 9 && name[0..9] == "_HasMany_");
+        (name.length >= 9 && name[0..9] == "_HasMany_") ||
+        // Entity internal fields (not GraphQL fields)
+        name == "_db" ||
+        name == "_table" ||
+        name == "_typeName" ||
+        name == "_primaryKey" ||
+        name == "nodeId" ||
+        name == "localId" ||
+        name == "isValid" ||
+        // D built-in methods
+        name == "toString" ||
+        name == "toHash" ||
+        name == "opEquals" ||
+        name == "opCmp" ||
+        name == "opAssign" ||
+        name == "factory" ||
+        // Module/compiler internals
+        name == "Monitor" ||
+        name == "__ctor" ||
+        name == "__dtor" ||
+        name == "__xdtor" ||
+        name == "__postblit" ||
+        name == "__xpostblit";
 }
+
+/// Backwards compatibility alias
+alias isInternalHelper = isInternalMember;
 
 /// Extract field information from an entity type
 template getEntityFields(Entity) {
