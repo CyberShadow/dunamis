@@ -11,7 +11,9 @@ import graphql.ast;
 import graphql.lexer;
 import graphql.parser;
 
+import ae.utils.promise : Promise;
 import graphqld2.core;
+import graphqld2.core.optimize : OptimizeContext;
 import graphqld2.graphql.schema;
 
 // ============================================================================
@@ -62,6 +64,8 @@ GraphQLResult compileQuery(alias SchemaOrQuery)(string queryString) {
 /// `, variables);
 /// ---
 GraphQLResult compileQuery(alias SchemaOrQuery)(string queryString, JSONValue variables) {
+    import graphql.ast : OperationTypeEnum;
+
     // Parse the GraphQL query
     auto lexer = Lexer(queryString);
     auto parser = Parser(lexer);
@@ -73,15 +77,36 @@ GraphQLResult compileQuery(alias SchemaOrQuery)(string queryString, JSONValue va
         throw new CompilerException("No operation found in query");
     }
 
-    // Extract Query type from Schema if needed
-    static if (isSchema!SchemaOrQuery) {
-        alias QueryType = SchemaOrQuery.Query;
-    } else {
-        alias QueryType = SchemaOrQuery;
+    // Determine operation type (default to Query for shorthand syntax)
+    bool isMutation = op.ot !is null && op.ot.ruleSelection == OperationTypeEnum.Mutation;
+    bool isSubscription = op.ot !is null && op.ot.ruleSelection == OperationTypeEnum.Sub;
+
+    if (isSubscription) {
+        throw new CompilerException("Subscriptions are not supported");
     }
 
-    // Compile the root selection set with variables
-    return compileRootSelectionSet!QueryType(op.ss, variables);
+    // Extract types from Schema if needed
+    static if (isSchema!SchemaOrQuery) {
+        alias QueryType = SchemaOrQuery.Query;
+        alias MutationType = SchemaOrQuery.Mutation;
+        enum hasMutations = SchemaOrQuery.hasMutations;
+    } else {
+        alias QueryType = SchemaOrQuery;
+        struct MutationType {}
+        enum hasMutations = false;
+    }
+
+    // Compile based on operation type
+    if (isMutation) {
+        static if (hasMutations) {
+            return compileRootMutationSet!MutationType(op.ss, variables);
+        } else {
+            throw new CompilerException("Mutation operations require a Schema with Mutation type");
+        }
+    } else {
+        // Query operation
+        return compileRootSelectionSet!QueryType(op.ss, variables);
+    }
 }
 
 /// Exception thrown during query compilation
@@ -567,6 +592,141 @@ T extractArg(T, alias Default)(Arguments args, string name, JSONValue variables)
             }
         }
         return extractValue!T(lookup.value);
+    }
+}
+
+// ============================================================================
+// Root Mutation Compilation
+// ============================================================================
+
+/// Compile the root selection set for mutations
+DynamicJsonObjectExpr compileRootMutationSet(Mutation)(SelectionSet ss, JSONValue variables) {
+    auto selections = iterateSelections(ss);
+
+    if (selections.length == 0) {
+        throw new CompilerException("Empty mutation selection set");
+    }
+
+    string[] fieldNames;
+    ExprBase[] fieldExprs;
+
+    foreach (sel; selections) {
+        if (sel.ruleSelection != SelectionEnum.Field) continue;
+        auto field = sel.field;
+        fieldNames ~= getOutputName(field);
+        fieldExprs ~= compileRootMutationField!Mutation(field, variables);
+    }
+
+    if (fieldNames.length == 0) {
+        throw new CompilerException("No fields in mutation selection set");
+    }
+
+    return buildDynamicJsonObject(fieldNames, fieldExprs);
+}
+
+/// Compile a single mutation field
+ExprBase compileRootMutationField(Mutation)(Field field, JSONValue variables) {
+    auto fieldName = getFieldName(field);
+
+    // Look up the mutation in Mutation type at compile time
+    static foreach (member; __traits(allMembers, Mutation)) {{
+        static if (!isInternalHelper!member) {
+            static if (__traits(compiles, isMutationField!(Mutation, member, __traits(getMember, Mutation, member)))) {
+                static if (isMutationField!(Mutation, member, __traits(getMember, Mutation, member))) {
+                    alias fn = __traits(getMember, Mutation, member);
+                    enum gqlName = getGqlName!(fn, member);
+
+                    if (fieldName == gqlName) {
+                        // Call the mutation and wrap result in expression
+                        return callMutation!(fn, Mutation)(field.args, field.ss, variables);
+                    }
+                }
+            }
+        }
+    }}
+
+    throw new CompilerException("Unknown mutation: " ~ fieldName);
+}
+
+/// Expression that returns a pre-computed mutation result.
+/// Mutations execute at compile time and their result is stored.
+class MutationResultExpr : Expr!JSONValue {
+    private JSONValue _result;
+
+    this(JSONValue result) {
+        _result = result;
+    }
+
+    override Promise!(JSONValue[]) eval(EvalContext ctx) {
+        import ae.utils.promise : resolve;
+        // Return the pre-computed result (single element array for batch model)
+        return resolve([_result]);
+    }
+
+    // optimize returns Expr!T in base class, no override needed
+    override Expr!JSONValue optimize(OptimizeContext ctx) {
+        return this;  // No optimization for mutation results
+    }
+
+    override ExprBase[] dependencies() {
+        return [];  // No dependencies
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        // No dependencies to replace
+    }
+}
+
+/// Call a mutation function and wrap the result in an expression
+ExprBase callMutation(alias fn, Mutation)(Arguments args, SelectionSet ss, JSONValue variables) {
+    import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple, ReturnType;
+    import graphqld2.core.expr : toJsonValue;
+
+    alias Params = Parameters!fn;
+    alias Defaults = ParameterDefaults!fn;
+    enum paramNames = [ParameterIdentifierTuple!fn];
+    alias Return = ReturnType!fn;
+
+    // Extract arguments and call the mutation
+    static if (Params.length == 0) {
+        auto result = fn();
+    } else static if (Params.length == 1) {
+        auto arg0 = extractArg!(Params[0], Defaults[0])(args, paramNames[0], variables);
+        auto result = fn(arg0);
+    } else static if (Params.length == 2) {
+        auto arg0 = extractArg!(Params[0], Defaults[0])(args, paramNames[0], variables);
+        auto arg1 = extractArg!(Params[1], Defaults[1])(args, paramNames[1], variables);
+        auto result = fn(arg0, arg1);
+    } else static if (Params.length == 3) {
+        auto arg0 = extractArg!(Params[0], Defaults[0])(args, paramNames[0], variables);
+        auto arg1 = extractArg!(Params[1], Defaults[1])(args, paramNames[1], variables);
+        auto arg2 = extractArg!(Params[2], Defaults[2])(args, paramNames[2], variables);
+        auto result = fn(arg0, arg1, arg2);
+    } else static if (Params.length == 4) {
+        auto arg0 = extractArg!(Params[0], Defaults[0])(args, paramNames[0], variables);
+        auto arg1 = extractArg!(Params[1], Defaults[1])(args, paramNames[1], variables);
+        auto arg2 = extractArg!(Params[2], Defaults[2])(args, paramNames[2], variables);
+        auto arg3 = extractArg!(Params[3], Defaults[3])(args, paramNames[3], variables);
+        auto result = fn(arg0, arg1, arg2, arg3);
+    } else {
+        static assert(false, "Mutations with more than 4 arguments not supported");
+    }
+
+    // Convert result to JSON expression
+    static if (is(Return == void)) {
+        // void mutations return true to indicate success
+        return new MutationResultExpr(JSONValue(true));
+    } else static if (__traits(hasMember, Return, "_typeName")) {
+        // Entity type - need nested selection
+        if (ss is null) {
+            throw new CompilerException("Mutation returning " ~ Return._typeName ~ " requires a selection set");
+        }
+        // For now, serialize the entity to JSON directly
+        // TODO: Support proper nested field selection for mutation results
+        return new MutationResultExpr(toJsonValue(result));
+    } else {
+        // Scalar type - convert directly to JSON
+        return new MutationResultExpr(toJsonValue(result));
     }
 }
 
@@ -1293,4 +1453,191 @@ unittest {
     auto users = result["users"].array;
     assert(users.length == 1);
     assert(users[0]["firstName"].str == "Alice");
+}
+
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import graphqld2.core;
+    import graphqld2.relational.schema;
+    import graphqld2.relational.demo;
+    import graphqld2.relational.eval_context;
+    import graphqld2.graphql.schema : Schema, isMutationField;
+
+    // Test mutation execution
+
+    // Track mutation calls for testing
+    __gshared static string lastGreeting;
+    __gshared static int deleteCount;
+
+    static struct Mutation {
+        // Simple mutation returning scalar
+        static string sayHello(string name) {
+            lastGreeting = "Hello, " ~ name ~ "!";
+            return lastGreeting;
+        }
+
+        // Mutation with multiple arguments
+        static bool deleteItems(int count) {
+            deleteCount = count;
+            return true;
+        }
+
+        // Mutation with optional argument
+        static string greet(string name, string greeting = "Hi") {
+            return greeting ~ " " ~ name;
+        }
+    }
+
+    static struct User {
+        mixin DemoEntity!"users";
+        mixin Col!("name", string);
+    }
+
+    static MockDB!() db;
+
+    static struct Query {
+        mixin Table!(db, User, "users");
+    }
+
+    // Create Schema with mutations
+    alias MySchema = Schema!(Query, Mutation);
+
+    db = new MockDB!();
+    db.setTableData("users", `[{"id": 1, "name": "Alice"}]`);
+
+    // Reset tracking variables
+    lastGreeting = "";
+    deleteCount = 0;
+
+    // Execute mutation
+    auto mutation = compileQuery!MySchema(`
+        mutation {
+            sayHello(name: "World")
+            deleteItems(count: 5)
+            greet(name: "Bob")
+        }
+    `);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(mutation));
+
+    // Verify mutation results
+    assert(result["sayHello"].str == "Hello, World!", "sayHello should return greeting");
+    assert(result["deleteItems"].boolean == true, "deleteItems should return true");
+    assert(result["greet"].str == "Hi Bob", "greet should use default greeting");
+
+    // Verify side effects occurred
+    assert(lastGreeting == "Hello, World!", "sayHello should have been called");
+    assert(deleteCount == 5, "deleteItems should have been called with count=5");
+}
+
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import graphqld2.core;
+    import graphqld2.relational.schema;
+    import graphqld2.relational.demo;
+    import graphqld2.relational.eval_context;
+    import graphqld2.graphql.schema : Schema;
+
+    // Test mutation with input object
+
+    static struct CreateUserInput {
+        string name;
+        string email;
+    }
+
+    __gshared static CreateUserInput lastInput;
+
+    static struct Mutation {
+        static string createUser(CreateUserInput input) {
+            lastInput = input;
+            return "Created user: " ~ input.name;
+        }
+    }
+
+    static struct User {
+        mixin DemoEntity!"users";
+        mixin Col!("name", string);
+    }
+
+    static MockDB!() db;
+
+    static struct Query {
+        mixin Table!(db, User, "users");
+    }
+
+    alias MySchema = Schema!(Query, Mutation);
+
+    db = new MockDB!();
+    db.setTableData("users", `[{"id": 1, "name": "Alice"}]`);
+
+    // Execute mutation with input object
+    auto mutation = compileQuery!MySchema(`
+        mutation {
+            createUser(input: {name: "Bob", email: "bob@example.com"})
+        }
+    `);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(mutation));
+
+    assert(result["createUser"].str == "Created user: Bob");
+    assert(lastInput.name == "Bob");
+    assert(lastInput.email == "bob@example.com");
+}
+
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import graphqld2.core;
+    import graphqld2.relational.schema;
+    import graphqld2.relational.demo;
+    import graphqld2.relational.eval_context;
+    import graphqld2.graphql.schema : Schema;
+
+    // Test mutation with variables
+
+    __gshared static string lastMessage;
+
+    static struct Mutation {
+        static string echo(string message) {
+            lastMessage = message;
+            return message;
+        }
+    }
+
+    static struct User {
+        mixin DemoEntity!"users";
+        mixin Col!("name", string);
+    }
+
+    static MockDB!() db;
+
+    static struct Query {
+        mixin Table!(db, User, "users");
+    }
+
+    alias MySchema = Schema!(Query, Mutation);
+
+    db = new MockDB!();
+    db.setTableData("users", `[{"id": 1, "name": "Alice"}]`);
+
+    // Execute mutation with variable
+    auto variables = JSONValue([
+        "msg": JSONValue("Hello from variable!")
+    ]);
+
+    auto mutation = compileQuery!MySchema(`
+        mutation Echo($msg: String!) {
+            echo(message: $msg)
+        }
+    `, variables);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(mutation));
+
+    assert(result["echo"].str == "Hello from variable!");
+    assert(lastMessage == "Hello from variable!");
 }

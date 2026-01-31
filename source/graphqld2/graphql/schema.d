@@ -753,6 +753,37 @@ template getAllInputTypes(Query) {
     alias getAllInputTypes = uniqueTypes!AllInputTypes;
 }
 
+/// Helper to get input types from mutation parameters (iterative)
+template getInputTypesFromMutationImpl(Mutation, size_t idx, Members...) {
+    static if (idx >= Members.length) {
+        alias getInputTypesFromMutationImpl = AliasSeq!();
+    } else {
+        enum member = Members[idx];
+        alias Rest = getInputTypesFromMutationImpl!(Mutation, idx + 1, Members);
+
+        static if (isInternalHelper!member) {
+            alias getInputTypesFromMutationImpl = Rest;
+        } else static if (__traits(compiles, isMutationField!(Mutation, member, __traits(getMember, Mutation, member)))) {
+            static if (isMutationField!(Mutation, member, __traits(getMember, Mutation, member))) {
+                alias fn = __traits(getMember, Mutation, member);
+                alias Params = Parameters!fn;
+                // Get input types from all parameters
+                alias InputTypes = getInputTypesFromParamsImpl!(0, Params);
+                alias getInputTypesFromMutationImpl = AliasSeq!(InputTypes, Rest);
+            } else {
+                alias getInputTypesFromMutationImpl = Rest;
+            }
+        } else {
+            alias getInputTypesFromMutationImpl = Rest;
+        }
+    }
+}
+
+/// Collect all input types from a Mutation type's parameters
+template getInputTypesFromMutation(Mutation) {
+    alias getInputTypesFromMutation = getInputTypesFromMutationImpl!(Mutation, 0, __traits(allMembers, Mutation));
+}
+
 // ============================================================================
 // Type Discovery
 // ============================================================================
@@ -918,6 +949,253 @@ string generateQuerySDL(Query)() {
     return result;
 }
 
+// ============================================================================
+// Mutation Field Detection
+// ============================================================================
+
+/// Check if a member is a mutation field.
+/// A mutation field is a static function that:
+/// - Does NOT take Expr!Entity as first parameter (unlike computed fields)
+/// - Returns a supported type (entity, scalar, or void for side-effect-only mutations)
+template isMutationField(Mutation, string memberName, alias member) {
+    static if (is(typeof(member) == function)) {
+        alias Params = Parameters!member;
+        alias Return = ReturnType!member;
+
+        // Check it's not a computed field (those take Expr!Entity as first param)
+        static if (Params.length == 0) {
+            // No-arg mutation - valid if return type is supported
+            enum isMutationField = isSupportedMutationReturnType!Return;
+        } else static if (is(Params[0] : Expr!E, E)) {
+            // First param is Expr - this is a computed field, not a mutation
+            enum isMutationField = false;
+        } else {
+            // Regular function - check if all params and return type are supported
+            enum isMutationField = allMutationParamsSupported!Params &&
+                                   isSupportedMutationReturnType!Return;
+        }
+    } else {
+        enum isMutationField = false;
+    }
+}
+
+/// Check if a return type is supported for mutations
+template isSupportedMutationReturnType(T) {
+    static if (is(T == void)) {
+        // void return for side-effect-only mutations
+        enum isSupportedMutationReturnType = true;
+    } else static if (is(T == string) || is(T == bool) || is(T == int) ||
+                      is(T == long) || is(T == float) || is(T == double)) {
+        // Scalar types
+        enum isSupportedMutationReturnType = true;
+    } else static if (is(T == Nullable!U, U)) {
+        // Nullable wrapper
+        enum isSupportedMutationReturnType = isSupportedMutationReturnType!U;
+    } else static if (is(T == E[], E)) {
+        // Array
+        enum isSupportedMutationReturnType = isSupportedMutationReturnType!E;
+    } else static if (__traits(hasMember, T, "_typeName")) {
+        // Entity type
+        enum isSupportedMutationReturnType = true;
+    } else static if (isCustomScalar!T) {
+        // Custom scalar
+        enum isSupportedMutationReturnType = true;
+    } else {
+        enum isSupportedMutationReturnType = false;
+    }
+}
+
+/// Check if all mutation parameters are supported types
+template allMutationParamsSupported(Params...) {
+    enum allMutationParamsSupported = () {
+        static foreach (P; Params) {
+            static if (!isSupportedMutationParamType!P) {
+                return false;
+            }
+        }
+        return true;
+    }();
+}
+
+/// Check if a type is supported as a mutation parameter
+template isSupportedMutationParamType(T) {
+    static if (is(T == string) || is(T == bool) || is(T == int) ||
+               is(T == long) || is(T == float) || is(T == double)) {
+        enum isSupportedMutationParamType = true;
+    } else static if (is(T == Nullable!U, U)) {
+        enum isSupportedMutationParamType = isSupportedMutationParamType!U;
+    } else static if (isInputType!T) {
+        enum isSupportedMutationParamType = true;
+    } else static if (isCustomScalar!T) {
+        enum isSupportedMutationParamType = true;
+    } else {
+        enum isSupportedMutationParamType = false;
+    }
+}
+
+/// Get the GraphQL return type of a mutation
+template mutationReturnType(alias member) {
+    alias Return = ReturnType!(typeof(member));
+
+    static if (is(Return == void)) {
+        // void mutations return Boolean (success/failure)
+        enum mutationReturnType = "Boolean";
+    } else static if (is(Return == string)) {
+        enum mutationReturnType = "String!";
+    } else static if (is(Return == bool)) {
+        enum mutationReturnType = "Boolean!";
+    } else static if (is(Return == int) || is(Return == long)) {
+        enum mutationReturnType = "Int!";
+    } else static if (is(Return == float) || is(Return == double)) {
+        enum mutationReturnType = "Float!";
+    } else static if (is(Return == Nullable!U, U)) {
+        // Nullable - no "!" suffix
+        enum mutationReturnType = graphqlBaseTypeName!U;
+    } else static if (is(Return == E[], E)) {
+        enum mutationReturnType = "[" ~ graphqlTypeName!E ~ "]!";
+    } else static if (__traits(hasMember, Return, "_typeName")) {
+        enum mutationReturnType = Return._typeName ~ "!";
+    } else static if (isCustomScalar!Return) {
+        enum mutationReturnType = Return.name ~ "!";
+    } else {
+        enum mutationReturnType = "Unknown";
+    }
+}
+
+/// Extract mutation arguments from a function
+template getMutationArguments(alias member) {
+    alias Params = Parameters!member;
+    alias Defaults = ParameterDefaults!member;
+    enum string[] paramNames = [ParameterIdentifierTuple!member];
+
+    enum getMutationArguments = () {
+        ArgumentInfo[] args;
+
+        static foreach (i; 0 .. Params.length) {{
+            alias P = Params[i];
+
+            static if (is(Defaults[i] == void)) {
+                // No default - required argument
+                args ~= ArgumentInfo(
+                    paramNames[i],
+                    graphqlTypeName!P,
+                    false,
+                    ""
+                );
+            } else {
+                // Has default - optional argument
+                static if (is(P == Nullable!U, U)) {
+                    args ~= ArgumentInfo(
+                        paramNames[i],
+                        graphqlBaseTypeName!U,
+                        true,
+                        "null"
+                    );
+                } else {
+                    args ~= ArgumentInfo(
+                        paramNames[i],
+                        graphqlBaseTypeName!P,
+                        true,
+                        defaultValueToString(Defaults[i])
+                    );
+                }
+            }
+        }}
+        return args;
+    }();
+}
+
+/// Extract mutation field information from a Mutation type
+template getMutationFields(Mutation) {
+    enum getMutationFields = () {
+        FieldInfo[] fields;
+
+        static foreach (member; __traits(allMembers, Mutation)) {{
+            // Skip internal helpers
+            static if (!isInternalHelper!member) {
+                static if (__traits(compiles, isMutationField!(Mutation, member, __traits(getMember, Mutation, member)))) {
+                    static if (isMutationField!(Mutation, member, __traits(getMember, Mutation, member))) {
+                        alias fn = __traits(getMember, Mutation, member);
+
+                        // Get UDAs
+                        enum isHidden = hasGqlHidden!fn;
+                        enum gqlFieldName = getGqlName!(fn, member);
+                        enum description = getGqlDescription!fn;
+                        enum deprecation = getGqlDeprecated!fn;
+
+                        // Get return type and arguments
+                        enum gqlType = mutationReturnType!fn;
+                        enum arguments = getMutationArguments!fn;
+
+                        fields ~= FieldInfo(
+                            gqlFieldName,
+                            gqlType,
+                            false,
+                            FieldKind.computed,  // Mutations are like computed fields
+                            isHidden,
+                            description,
+                            deprecation,
+                            arguments
+                        );
+                    }
+                }
+            }
+        }}
+
+        return fields;
+    }();
+}
+
+/// Generate GraphQL SDL for the Mutation type
+string generateMutationSDL(Mutation)() {
+    enum fields = getMutationFields!Mutation;
+
+    static if (fields.length == 0) {
+        return "";  // No mutations defined
+    } else {
+        string result = "type Mutation {\n";
+
+        foreach (field; fields) {
+            // Skip hidden fields
+            if (field.hidden) continue;
+
+            // Add description as doc string
+            if (field.description.length > 0) {
+                result ~= "  \"\"\"" ~ field.description ~ "\"\"\"\n";
+            }
+
+            // Field name
+            result ~= "  " ~ field.name;
+
+            // Add arguments if present
+            if (field.arguments.length > 0) {
+                result ~= "(";
+                foreach (i, arg; field.arguments) {
+                    if (i > 0) result ~= ", ";
+                    result ~= arg.name ~ ": " ~ arg.graphqlType;
+                    if (arg.hasDefault) {
+                        result ~= " = " ~ arg.defaultValue;
+                    }
+                }
+                result ~= ")";
+            }
+
+            // Return type
+            result ~= ": " ~ field.graphqlType;
+
+            // Add @deprecated directive if present
+            if (field.deprecation.length > 0) {
+                result ~= " @deprecated(reason: \"" ~ field.deprecation ~ "\")";
+            }
+
+            result ~= "\n";
+        }
+
+        result ~= "}\n";
+        return result;
+    }
+}
+
 /// Generate GraphQL SDL for an input type
 string generateInputTypeSDL(T)() if (isInputType!T) {
     string result = "input " ~ T.stringof ~ " {\n";
@@ -998,7 +1276,15 @@ template generateSchemaSDL(alias SchemaOrQuery) {
     }
 
     alias AllTypes = getAllEntityTypes!QueryType;
-    alias AllInputTypes = getAllInputTypes!QueryType;
+
+    // Collect input types from entities AND mutations
+    alias EntityInputTypes = getAllInputTypes!QueryType;
+    static if (hasMutations) {
+        alias MutationInputTypes = getInputTypesFromMutation!MutationType;
+        alias AllInputTypes = uniqueTypes!(AliasSeq!(EntityInputTypes, MutationInputTypes));
+    } else {
+        alias AllInputTypes = EntityInputTypes;
+    }
 
     enum generateSchemaSDL = () {
         string result;
@@ -1014,6 +1300,15 @@ template generateSchemaSDL(alias SchemaOrQuery) {
         // Generate Query type
         result ~= generateQuerySDL!QueryType();
         result ~= "\n";
+
+        // Generate Mutation type if present
+        static if (hasMutations) {
+            enum mutationSdl = generateMutationSDL!MutationType();
+            static if (mutationSdl.length > 0) {
+                result ~= mutationSdl;
+                result ~= "\n";
+            }
+        }
 
         // Generate each discovered entity type
         static foreach (Entity; AllTypes) {
@@ -1244,4 +1539,128 @@ unittest {
 
     static assert(!isSchema!NotASchema);
     static assert(!isSchema!int);
+}
+
+// Test mutation SDL generation
+unittest {
+    import std.algorithm : canFind;
+    import graphqld2.relational.demo : DemoEntity;
+    import graphqld2.relational.schema : Col, Table, getAll;
+    import graphqld2.relational.eval_context : MockDB;
+
+    // Define an entity for mutation results
+    static struct User {
+        mixin DemoEntity!"users";
+        mixin Col!("name", string);
+    }
+
+    // Input type for mutations
+    static struct CreateUserInput {
+        string name;
+        string email;
+    }
+
+    // Mutation type with various mutation patterns
+    static struct MyMutation {
+        // Simple mutation returning entity
+        static User createUser(CreateUserInput input) {
+            return User.init;
+        }
+
+        // Mutation returning scalar
+        static bool deleteUser(int id) {
+            return true;
+        }
+
+        // Mutation with optional parameter
+        static string greet(string name, string greeting = "Hello") {
+            return greeting ~ " " ~ name;
+        }
+
+        @GqlDescription("Updates a user's profile")
+        @GqlDeprecated("Use updateUserV2 instead")
+        static User updateUser(int id, CreateUserInput input) {
+            return User.init;
+        }
+    }
+
+    static MockDB!() db;
+
+    static struct MyQuery {
+        mixin Table!(db, User, "users");
+    }
+
+    // Schema with mutations
+    alias MySchema = Schema!(MyQuery, MyMutation);
+
+    // Verify Schema properties
+    static assert(isSchema!MySchema);
+    static assert(MySchema.hasMutations);
+    static assert(is(MySchema.Mutation == MyMutation));
+
+    // Check getMutationFields extracts fields correctly
+    enum mutationFields = getMutationFields!MyMutation;
+    static assert(mutationFields.length == 4, "Should have 4 mutation fields");
+
+    // Verify SDL generation
+    enum sdl = generateSchemaSDL!MySchema;
+
+    // Debug: print SDL
+    // pragma(msg, sdl);
+
+    // Should include Query type
+    static assert(sdl.canFind("type Query"));
+    static assert(sdl.canFind("users: [User!]!"));
+
+    // Should include Mutation type
+    static assert(sdl.canFind("type Mutation"));
+
+    // Check mutation signatures
+    static assert(sdl.canFind("createUser(input: CreateUserInput!): User!"),
+        "createUser mutation should have correct signature");
+    static assert(sdl.canFind("deleteUser(id: Int!): Boolean!"),
+        "deleteUser mutation should have correct signature");
+    static assert(sdl.canFind("greet(name: String!, greeting: String = "),
+        "greet mutation should have optional parameter");
+
+    // Check UDAs on mutations
+    static assert(sdl.canFind(`"""Updates a user's profile"""`),
+        "Should have description comment");
+    static assert(sdl.canFind(`@deprecated(reason: "Use updateUserV2 instead")`),
+        "Should have deprecation directive");
+
+    // Should include User entity type
+    static assert(sdl.canFind("type User"));
+
+    // Should include input type
+    static assert(sdl.canFind("input CreateUserInput"));
+}
+
+// Test Schema without mutations generates no Mutation type
+unittest {
+    import std.algorithm : canFind;
+    import graphqld2.relational.demo : DemoEntity;
+    import graphqld2.relational.schema : Col, Table, getAll;
+    import graphqld2.relational.eval_context : MockDB;
+
+    static struct User {
+        mixin DemoEntity!"users";
+        mixin Col!("name", string);
+    }
+
+    static MockDB!() db;
+
+    static struct MyQuery {
+        mixin Table!(db, User, "users");
+    }
+
+    // Schema without mutations
+    alias MySchema = Schema!(MyQuery);
+
+    enum sdl = generateSchemaSDL!MySchema;
+
+    // Should have Query but not Mutation
+    static assert(sdl.canFind("type Query"));
+    static assert(!sdl.canFind("type Mutation"),
+        "Schema without mutations should not have type Mutation");
 }

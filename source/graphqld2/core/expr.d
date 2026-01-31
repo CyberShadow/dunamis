@@ -697,7 +697,7 @@ auto map(alias fn, Coll)(Coll collection)
 // ============================================================================
 
 /// Convert a D value to JSONValue
-private JSONValue toJsonValue(T)(T value) {
+JSONValue toJsonValue(T)(T value) {
     static if (is(T == JSONValue)) {
         return value;
     } else static if (is(T == string)) {
