@@ -229,14 +229,16 @@ string[] decodeEntityCompositeKey(T)(T entity) if (__traits(hasMember, T, "local
 /// A custom GraphQL scalar type.
 ///
 /// Custom scalars wrap a D type and provide serialization/deserialization
-/// to/from strings for GraphQL transport.
+/// to/from JSONValue for GraphQL transport.
 ///
 /// Example:
 /// ---
+/// import std.json : JSONValue, JSONType;
+///
 /// alias Int64 = CustomScalar!(
 ///     long, "Int64",
-///     (long v) => v.to!string,
-///     (string s) => s.to!long
+///     (long v) => JSONValue(v),
+///     (JSONValue j) => j.type == JSONType.integer ? j.integer : j.str.to!long
 /// );
 ///
 /// struct Entity {
@@ -246,20 +248,22 @@ string[] decodeEntityCompositeKey(T)(T entity) if (__traits(hasMember, T, "local
 struct CustomScalar(
     _DType,
     string _name,
-    alias _serialize,
-    alias _deserialize
+    alias _toJson,
+    alias _fromJson
 ) {
+    import std.json : JSONValue;
+
     /// The underlying D type
     alias DType = _DType;
 
     /// The GraphQL scalar name
     enum name = _name;
 
-    /// Serialize to string
-    alias serialize = _serialize;
+    /// Serialize to JSONValue
+    alias toJson = _toJson;
 
-    /// Deserialize from string
-    alias deserialize = _deserialize;
+    /// Deserialize from JSONValue
+    alias fromJson = _fromJson;
 
     /// The wrapped value
     DType value;
@@ -272,14 +276,14 @@ struct CustomScalar(
         value = v;
     }
 
-    /// Serialize this value
-    string toString() const {
-        return serialize(value);
+    /// Serialize this value to JSON
+    JSONValue toJsonValue() const {
+        return toJson(value);
     }
 
-    /// Deserialize from string
-    static typeof(this) fromString(string s) {
-        return typeof(this)(deserialize(s));
+    /// Deserialize from JSONValue
+    static typeof(this) fromJsonValue(JSONValue json) {
+        return typeof(this)(fromJson(json));
     }
 }
 
@@ -291,23 +295,26 @@ struct CustomScalar(
 /// static assert(!isCustomScalar!long);
 /// ---
 template isCustomScalar(T) {
+    import std.json : JSONValue;
     enum isCustomScalar = is(typeof({
         // Must have a name
         enum string n = T.name;
         // Must have underlying DType
         alias D = T.DType;
-        // Must have serialize/deserialize
-        string s = T.serialize(D.init);
-        D v = T.deserialize("");
+        // Must have toJson/fromJson
+        JSONValue j = T.toJson(D.init);
+        D v = T.fromJson(JSONValue.init);
     }));
 }
 
 unittest {
+    import std.json : JSONValue, JSONType;
+
     // Test CustomScalar
     alias TestScalar = CustomScalar!(
         int, "TestInt",
-        (int v) => v.to!string,
-        (string s) => s.to!int
+        (int v) => JSONValue(v),
+        (JSONValue j) => cast(int) j.integer
     );
 
     static assert(isCustomScalar!TestScalar);
@@ -320,9 +327,9 @@ unittest {
     auto val = TestScalar(42);
     assert(val.value == 42);
     assert(val == 42);  // implicit conversion
-    assert(val.toString() == "42");
+    assert(val.toJsonValue() == JSONValue(42));
 
-    auto parsed = TestScalar.fromString("123");
+    auto parsed = TestScalar.fromJsonValue(JSONValue(123));
     assert(parsed.value == 123);
 }
 

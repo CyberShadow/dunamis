@@ -1360,6 +1360,7 @@ template generateSchemaSDL(alias SchemaOrQuery) {
 unittest {
     import graphqld2.core.types : CustomScalar;
     import std.conv : to;
+    import std.json : JSONValue, JSONType;
 
     // Test built-in GraphQL scalars
     static assert(graphqlTypeName!string == "String!");
@@ -1379,7 +1380,11 @@ unittest {
     static assert(graphqlBaseTypeName!(Nullable!string) == "String");
 
     // Test custom scalars
-    alias Int64 = CustomScalar!(long, "Int64", (long v) => v.to!string, (string s) => s.to!long);
+    alias Int64 = CustomScalar!(
+        long, "Int64",
+        (long v) => JSONValue(v),
+        (JSONValue j) => j.type == JSONType.integer ? j.integer : j.str.to!long
+    );
     static assert(isCustomScalar!Int64);
     static assert(graphqlTypeName!Int64 == "Int64!");
     static assert(graphqlBaseTypeName!Int64 == "Int64");

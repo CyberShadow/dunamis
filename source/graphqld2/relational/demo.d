@@ -6,6 +6,7 @@ module graphqld2.relational.demo;
 /// primitives in graphqld2.relational.schema.
 
 import std.conv : to;
+import std.json : JSONValue, JSONType;
 
 import graphqld2.core.types : CustomScalar;
 import graphqld2.relational.schema : Entity, PrimaryKey;
@@ -29,8 +30,8 @@ public import graphqld2.relational.eval_context : MockDB;
 /// ---
 alias Int64 = CustomScalar!(
     long, "Int64",
-    (long v) => v.to!string,
-    (string s) => s.to!long
+    (long v) => JSONValue(v),
+    (JSONValue j) => j.type == JSONType.integer ? j.integer : j.str.to!long
 );
 
 // ============================================================================

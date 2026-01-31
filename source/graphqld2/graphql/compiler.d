@@ -297,6 +297,32 @@ bool isNullValue(Value val) {
     return val is null || val.ruleSelection == ValueEnum.N;
 }
 
+/// Convert a GraphQL AST Value to JSONValue
+JSONValue valueToJson(Value val) {
+    import graphql.ast : ValueEnum;
+
+    if (val is null || val.ruleSelection == ValueEnum.N) {
+        return JSONValue(null);
+    }
+
+    switch (val.ruleSelection) {
+        case ValueEnum.T: return JSONValue(true);
+        case ValueEnum.F: return JSONValue(false);
+        case ValueEnum.N: return JSONValue(null);
+        case ValueEnum.INT: return JSONValue(val.tok.value.to!long);
+        case ValueEnum.FLOAT: return JSONValue(val.tok.value.to!double);
+        case ValueEnum.STR: return JSONValue(val.tok.value);
+        case ValueEnum.E: return JSONValue(val.tok.value);  // Enum as string
+        case ValueEnum.O: {
+            // Object value - TODO: implement if needed
+            JSONValue[string] obj;
+            return JSONValue(obj);
+        }
+        default:
+            throw new CompilerException("Unsupported value type: " ~ val.ruleSelection.to!string);
+    }
+}
+
 // ============================================================================
 // JSON Value Extraction (for variables)
 // ============================================================================
@@ -352,34 +378,8 @@ T extractValueFromJson(T)(JSONValue json) {
         }
         return T(extractValueFromJson!U(json));
     } else static if (isCustomScalar!T) {
-        // CustomScalar: extract as underlying type and wrap
-        alias DType = T.DType;
-        static if (is(DType == long)) {
-            if (json.type == JSONType.integer) {
-                return T(json.integer);
-            } else if (json.type == JSONType.string) {
-                return T(T.deserialize(json.str));
-            }
-            throw new CompilerException("Expected integer or string for " ~ T.name ~ ", got " ~ json.type.to!string);
-        } else static if (is(DType == int)) {
-            if (json.type == JSONType.integer) {
-                return T(cast(int) json.integer);
-            } else if (json.type == JSONType.string) {
-                return T(T.deserialize(json.str));
-            }
-            throw new CompilerException("Expected integer or string for " ~ T.name ~ ", got " ~ json.type.to!string);
-        } else static if (is(DType == string)) {
-            if (json.type == JSONType.string) {
-                return T(json.str);
-            }
-            throw new CompilerException("Expected string for " ~ T.name ~ ", got " ~ json.type.to!string);
-        } else {
-            // Fallback: use string deserialization
-            if (json.type == JSONType.string) {
-                return T(T.deserialize(json.str));
-            }
-            throw new CompilerException("Expected string for " ~ T.name ~ ", got " ~ json.type.to!string);
-        }
+        // CustomScalar handles its own JSON deserialization
+        return T.fromJsonValue(json);
     } else static if (isInputType!T) {
         return extractInputObjectFromJson!T(json);
     } else {
@@ -436,16 +436,8 @@ T extractValue(T)(Value val, T defaultValue = T.init) {
         }
         return T(extractValue!U(val));
     } else static if (isCustomScalar!T) {
-        // CustomScalar: extract as underlying type and wrap
-        alias DType = T.DType;
-        static if (is(DType == long) || is(DType == int)) {
-            return T(cast(DType) extractLong(val));
-        } else static if (is(DType == string)) {
-            return T(extractString(val));
-        } else {
-            // Fallback: use string deserialization
-            return T(T.deserialize(extractString(val)));
-        }
+        // CustomScalar handles its own JSON deserialization
+        return T.fromJsonValue(valueToJson(val));
     } else static if (isInputType!T) {
         return extractInputObject!T(val);
     } else {
