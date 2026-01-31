@@ -670,30 +670,14 @@ SequentialJsonObjectExpr compileRootMutationSet(Mutation)(SelectionSet ss, JSONV
 /// Every non-internal function member is assumed to be a field.
 ExprBase compileRootMutationField(Mutation)(Field field, JSONValue variables) {
     auto fieldName = getFieldName(field);
-
-    // Create a singleton parent expression for the Mutation type
     auto parentExpr = singleton(Mutation.init);
 
-    // Look up the mutation in Mutation type - every non-internal function is a field
     static foreach (member; __traits(allMembers, Mutation)) {{
         static if (!isInternalMember!member) {
             alias memberSym = __traits(getMember, Mutation, member);
             static if (is(typeof(memberSym) == function)) {
                 enum gqlName = getGqlName!(memberSym, member);
-
                 if (fieldName == gqlName) {
-                    // Verify signature: (Expr!Mutation, Args...) -> Expr!T
-                    alias Params = Parameters!memberSym;
-                    alias Return = ReturnType!memberSym;
-
-                    static assert(Params.length >= 1,
-                        "Mutation '" ~ member ~ "' must take Expr!" ~ Mutation.stringof ~ " as first parameter");
-                    static assert(is(Params[0] : Expr!M, M) && is(M == Mutation),
-                        "Mutation '" ~ member ~ "' first parameter must be Expr!" ~ Mutation.stringof ~
-                        ", got " ~ Params[0].stringof);
-                    static assert(isExpr!Return,
-                        "Mutation '" ~ member ~ "' must return an Expr type, got " ~ Return.stringof);
-
                     return callRootField!(memberSym, Mutation)(parentExpr, field.args, field.ss, variables);
                 }
             }
@@ -832,30 +816,14 @@ DynamicJsonObjectExpr compileRootSelectionSet(Query)(SelectionSet ss, JSONValue 
 /// Every non-internal function member is assumed to be a field.
 ExprBase compileRootFieldExpr(Query)(Field field, JSONValue variables) {
     auto fieldName = getFieldName(field);
-
-    // Create a singleton parent expression for the Query type
     auto parentExpr = singleton(Query.init);
 
-    // Look up the field in Query type - every non-internal function is a field
     static foreach (member; __traits(allMembers, Query)) {{
         static if (!isInternalMember!member) {
             alias memberSym = __traits(getMember, Query, member);
             static if (is(typeof(memberSym) == function)) {
                 enum gqlName = getGqlName!(memberSym, member);
-
                 if (fieldName == gqlName) {
-                    // Verify signature: (Expr!Query, Args...) -> Expr!T
-                    alias Params = Parameters!memberSym;
-                    alias Return = ReturnType!memberSym;
-
-                    static assert(Params.length >= 1,
-                        "Field '" ~ member ~ "' must take Expr!" ~ Query.stringof ~ " as first parameter");
-                    static assert(is(Params[0] : Expr!Q, Q) && is(Q == Query),
-                        "Field '" ~ member ~ "' first parameter must be Expr!" ~ Query.stringof ~
-                        ", got " ~ Params[0].stringof);
-                    static assert(isExpr!Return,
-                        "Field '" ~ member ~ "' must return an Expr type, got " ~ Return.stringof);
-
                     return callRootField!(memberSym, Query)(parentExpr, field.args, field.ss, variables);
                 }
             }
