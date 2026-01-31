@@ -794,18 +794,14 @@ template getInputTypesFromMutationImpl(Mutation, size_t idx, Members...) {
         enum member = Members[idx];
         alias Rest = getInputTypesFromMutationImpl!(Mutation, idx + 1, Members);
 
-        static if (isInternalHelper!member) {
+        static if (isInternalMember!member) {
             alias getInputTypesFromMutationImpl = Rest;
-        } else static if (__traits(compiles, isMutationField!(Mutation, member, __traits(getMember, Mutation, member)))) {
-            static if (isMutationField!(Mutation, member, __traits(getMember, Mutation, member))) {
-                alias fn = __traits(getMember, Mutation, member);
-                alias Params = Parameters!fn;
-                // Get input types from parameters (skip first which is parent Expr!Mutation)
-                alias InputTypes = getInputTypesFromParamsImpl!(1, Params);
-                alias getInputTypesFromMutationImpl = AliasSeq!(InputTypes, Rest);
-            } else {
-                alias getInputTypesFromMutationImpl = Rest;
-            }
+        } else static if (is(typeof(__traits(getMember, Mutation, member)) == function)) {
+            alias fn = __traits(getMember, Mutation, member);
+            alias Params = Parameters!fn;
+            // Get input types from parameters (skip first which is parent Expr!Mutation)
+            alias InputTypes = getInputTypesFromParamsImpl!(1, Params);
+            alias getInputTypesFromMutationImpl = AliasSeq!(InputTypes, Rest);
         } else {
             alias getInputTypesFromMutationImpl = Rest;
         }
@@ -983,116 +979,8 @@ string generateQuerySDL(Query)() {
 }
 
 // ============================================================================
-// Root Field Detection (for Query and Mutation)
+// Mutation Return Type Extraction
 // ============================================================================
-
-/// Check if a member is a root field (works for both Query and Mutation).
-/// A root field is a static function that:
-/// - First param is Expr!Parent (the parent type, typically ignored)
-/// - Additional params are concrete argument types
-/// - Returns Expr!T where T is the result type
-///
-/// This unified interface allows Query and Mutation to define fields the same way:
-/// ---
-/// struct Query {
-///     static auto users(Expr!Query parent) { return getAll!User(); }
-///     static auto numUsers(Expr!Query parent) { return count!User(); }
-/// }
-/// struct Mutation {
-///     static auto createUser(Expr!Mutation parent, string name) { return insert!User(...); }
-/// }
-/// ---
-template isRootField(Parent, string memberName, alias member) {
-    static if (is(typeof(member) == function)) {
-        alias Params = Parameters!member;
-        alias Return = ReturnType!member;
-
-        static if (Params.length == 0) {
-            // No params - not a valid root field (needs at least parent)
-            enum isRootField = false;
-        } else static if (is(Params[0] : Expr!M, M) && is(M == Parent)) {
-            // First param is Expr!Parent - this is a root field
-            // Check return type is Expr!T
-            static if (isExpr!Return) {
-                // All remaining params must be supported argument types
-                enum isRootField = allRootParamsSupported!(Params[1..$]);
-            } else {
-                enum isRootField = false;
-            }
-        } else {
-            // First param is not Expr!Parent - not a root field
-            enum isRootField = false;
-        }
-    } else {
-        enum isRootField = false;
-    }
-}
-
-/// Backwards compatibility alias
-alias isMutationField = isRootField;
-
-/// Check if a return type is supported for root fields
-template isSupportedRootReturnType(T) {
-    static if (is(T == void)) {
-        // void return for side-effect-only operations
-        enum isSupportedRootReturnType = true;
-    } else static if (is(T == string) || is(T == bool) || is(T == int) ||
-                      is(T == long) || is(T == float) || is(T == double)) {
-        // Scalar types
-        enum isSupportedRootReturnType = true;
-    } else static if (is(T == Nullable!U, U)) {
-        // Nullable wrapper
-        enum isSupportedRootReturnType = isSupportedRootReturnType!U;
-    } else static if (is(T == E[], E)) {
-        // Array
-        enum isSupportedRootReturnType = isSupportedRootReturnType!E;
-    } else static if (__traits(hasMember, T, "_typeName")) {
-        // Entity type
-        enum isSupportedRootReturnType = true;
-    } else static if (isCustomScalar!T) {
-        // Custom scalar
-        enum isSupportedRootReturnType = true;
-    } else {
-        enum isSupportedRootReturnType = false;
-    }
-}
-
-/// Backwards compatibility alias
-alias isSupportedMutationReturnType = isSupportedRootReturnType;
-
-/// Check if all root field parameters are supported types
-template allRootParamsSupported(Params...) {
-    enum allRootParamsSupported = () {
-        static foreach (P; Params) {
-            static if (!isSupportedRootParamType!P) {
-                return false;
-            }
-        }
-        return true;
-    }();
-}
-
-/// Backwards compatibility alias
-alias allMutationParamsSupported = allRootParamsSupported;
-
-/// Check if a type is supported as a root field parameter
-template isSupportedRootParamType(T) {
-    static if (is(T == string) || is(T == bool) || is(T == int) ||
-               is(T == long) || is(T == float) || is(T == double)) {
-        enum isSupportedRootParamType = true;
-    } else static if (is(T == Nullable!U, U)) {
-        enum isSupportedRootParamType = isSupportedRootParamType!U;
-    } else static if (isInputType!T) {
-        enum isSupportedRootParamType = true;
-    } else static if (isCustomScalar!T) {
-        enum isSupportedRootParamType = true;
-    } else {
-        enum isSupportedRootParamType = false;
-    }
-}
-
-/// Backwards compatibility alias
-alias isSupportedMutationParamType = isSupportedRootParamType;
 
 /// Get the GraphQL return type of a mutation
 /// Get the GraphQL return type of a mutation.
@@ -1177,39 +1065,38 @@ template getMutationArguments(alias member) {
     }();
 }
 
-/// Extract mutation field information from a Mutation type
+/// Extract mutation field information from a Mutation type.
+/// Every non-internal function member is assumed to be a mutation field.
 template getMutationFields(Mutation) {
     enum getMutationFields = () {
         FieldInfo[] fields;
 
         static foreach (member; __traits(allMembers, Mutation)) {{
-            // Skip internal helpers
-            static if (!isInternalHelper!member) {
-                static if (__traits(compiles, isMutationField!(Mutation, member, __traits(getMember, Mutation, member)))) {
-                    static if (isMutationField!(Mutation, member, __traits(getMember, Mutation, member))) {
-                        alias fn = __traits(getMember, Mutation, member);
+            // Skip internal members
+            static if (!isInternalMember!member) {
+                static if (is(typeof(__traits(getMember, Mutation, member)) == function)) {
+                    alias fn = __traits(getMember, Mutation, member);
 
-                        // Get UDAs
-                        enum isHidden = hasGqlHidden!fn;
-                        enum gqlFieldName = getGqlName!(fn, member);
-                        enum description = getGqlDescription!fn;
-                        enum deprecation = getGqlDeprecated!fn;
+                    // Get UDAs
+                    enum isHidden = hasGqlHidden!fn;
+                    enum gqlFieldName = getGqlName!(fn, member);
+                    enum description = getGqlDescription!fn;
+                    enum deprecation = getGqlDeprecated!fn;
 
-                        // Get return type and arguments
-                        enum gqlType = mutationReturnType!fn;
-                        enum arguments = getMutationArguments!fn;
+                    // Get return type and arguments
+                    enum gqlType = mutationReturnType!fn;
+                    enum arguments = getMutationArguments!fn;
 
-                        fields ~= FieldInfo(
-                            gqlFieldName,
-                            gqlType,
-                            false,
-                            FieldKind.computed,  // Mutations are like computed fields
-                            isHidden,
-                            description,
-                            deprecation,
-                            arguments
-                        );
-                    }
+                    fields ~= FieldInfo(
+                        gqlFieldName,
+                        gqlType,
+                        false,
+                        FieldKind.computed,  // Mutations are like computed fields
+                        isHidden,
+                        description,
+                        deprecation,
+                        arguments
+                    );
                 }
             }
         }}

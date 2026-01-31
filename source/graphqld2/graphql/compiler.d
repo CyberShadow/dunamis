@@ -1569,7 +1569,7 @@ unittest {
     import graphqld2.relational.schema;
     import graphqld2.relational.demo;
     import graphqld2.relational.eval_context;
-    import graphqld2.graphql.schema : Schema, isMutationField;
+    import graphqld2.graphql.schema : Schema;
 
     // Test mutation execution
 
@@ -1876,66 +1876,6 @@ unittest {
     assert(users.length == 2);
     assert(users[0]["name"].str == "Alice");
     assert(users[1]["name"].str == "Bob");
-}
-
-// Test that isRootField detects both Table-generated and hand-written methods
-unittest {
-    import graphqld2.core.expr : Expr;
-    import graphqld2.graphql.schema : isRootField;
-    import graphqld2.relational.schema;
-    import graphqld2.relational.demo;
-    import graphqld2.relational.eval_context;
-
-    static MockDB!() db;
-
-    static struct User {
-        mixin DemoEntity!(db, "users");
-        mixin Col!("name", string);
-    }
-
-    static struct Query {
-        // Table-generated method
-        mixin Table!(User, "users");
-
-        // Hand-written scalar method
-        static Expr!int scalarField(Expr!Query parent) {
-            import graphqld2.core.expr : constant;
-            return constant(42, parent);
-        }
-    }
-
-    // Verify isRootField detects the Table-generated method
-    static assert(isRootField!(Query, "users", Query.users),
-        "isRootField should detect Table-generated 'users' method");
-
-    // Verify isRootField detects the hand-written method
-    static assert(isRootField!(Query, "scalarField", Query.scalarField),
-        "isRootField should detect hand-written 'scalarField' method");
-}
-
-// Test that wrong signatures produce clear compile errors
-unittest {
-    import graphqld2.core.expr : Expr;
-    import graphqld2.graphql.schema : isRootField;
-
-    static struct Query {
-        // WRONG: Missing Expr!Query parameter - should not be detected as a field
-        static int badField1() { return 42; }
-
-        // WRONG: First param is not Expr!Query - should not be detected as a field
-        static int badField2(int x) { return x; }
-
-        // WRONG: Returns non-Expr type - should not be detected as a field
-        static int badField3(Expr!Query parent) { return 42; }
-    }
-
-    // Verify these are NOT detected as root fields
-    static assert(!isRootField!(Query, "badField1", Query.badField1),
-        "badField1 should not be detected (no params)");
-    static assert(!isRootField!(Query, "badField2", Query.badField2),
-        "badField2 should not be detected (wrong first param type)");
-    static assert(!isRootField!(Query, "badField3", Query.badField3),
-        "badField3 should not be detected (non-Expr return type)");
 }
 
 // Test getFieldName/getFieldAlias with aliased fields (verifies graphql-d AST handling)
