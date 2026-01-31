@@ -91,25 +91,14 @@ import graphqld2.core;
 import graphqld2.relational;
 import graphqld2.graphql;
 
-// Data source configuration (optional - defaults are fine for simple cases)
-enum myConfig = DBConfig(
-    pagination: true,   // Enable limit/offset parameters
-    filtering: true,    // Enable where parameter
-);
-alias MyDB = MockDB!myConfig;  // Or PostgresDB!myConfig for real DB
-
-// Schema definition - the Query type defines root entry points
-// Table mixin takes: DataSource, Entity, fieldName
-struct Query {
-    mixin Table!(MyDB, User, "users");
-    mixin Table!(MyDB, Post, "posts");
-}
+// Data source - static variable bound to entities via DemoEntity mixin
+static MockDB!() db;  // Or PostgresDB!() for real DB
 
 // Entity definitions with mixins
 // DemoEntity is a convenience wrapper that adds an `id` column automatically.
 // For full control, use the low-level Entity + Col + PrimaryKey mixins.
 struct User {
-    mixin DemoEntity!"users";
+    mixin DemoEntity!(db, "users");
 
     @GqlDescription("The user's first name")
     mixin Col!("firstName", string);
@@ -147,7 +136,7 @@ struct FormatOptions {
 }
 
 struct Post {
-    mixin DemoEntity!"posts";
+    mixin DemoEntity!(db, "posts");
     mixin Col!("title", string);
 
     @GqlName("body")  // D keyword conflict: body_ → body in GraphQL
@@ -164,7 +153,7 @@ struct Post {
 }
 
 struct Comment {
-    mixin DemoEntity!"comments";
+    mixin DemoEntity!(db, "comments");
 
     @GqlName("body")
     mixin Col!("body_", string, "body");
@@ -176,8 +165,15 @@ struct Comment {
     mixin BelongsTo!("author", "authorId");
 }
 
-// Usage - query from root
-auto db = new MyDB();
+// Schema definition - the Query type defines root entry points
+// Table mixin takes: Entity, fieldName (db is derived from Entity)
+struct Query {
+    mixin Table!(User, "users");
+    mixin Table!(Post, "posts");
+}
+
+// Usage - initialize db and query from root
+db = new MockDB!();  // Assign the static db variable
 auto executor = new Executor();
 
 // Query: { posts { title, author { fullName } } }
@@ -187,7 +183,7 @@ auto query = map!(
         "title", p.title,
         "author", p.author.fullName
     )
-)(Query.posts(db));  // Entry point from Query root
+)(Query.posts());  // Entry point from Query root (db bound via Entity)
 
 auto result = executor.execute(query);
 
@@ -300,16 +296,16 @@ Use `compileQuery` to compile GraphQL query strings at runtime:
 ```d
 import graphqld2.graphql : compileQuery;
 
-auto db = new MyDB();
+db = new MockDB!();  // Initialize the static db
 auto executor = new Executor();
 
-// Simple query
+// Simple query (db derived from Query → Entity → static db variable)
 auto query = compileQuery!Query(`{
     users {
         firstName
         posts { title }
     }
-}`, db);
+}`);
 
 auto result = executor.execute(query);
 // Returns: {"users": [{"firstName": "Alice", "posts": [...]}, ...]}
@@ -334,7 +330,7 @@ auto query = compileQuery!Query(`
             formattedName(format: $format)
         }
     }
-`, db, variables);
+`, variables);
 
 auto result = executor.execute(query);
 ```
@@ -345,7 +341,7 @@ auto result = executor.execute(query);
 auto query = compileQuery!Query(`{
     users { firstName }
     posts { title }
-}`, db);
+}`);
 
 auto result = executor.execute(query);
 // Returns: {"users": [...], "posts": [...]}
@@ -381,9 +377,10 @@ auto result = executor.execute(query);
   - Multiple root fields
   - Field arguments (scalars and input objects)
   - Variables (scalars and input objects)
+- Mutations with `CrudMutations` mixin (INSERT/UPDATE/DELETE)
+- `Schema!(Query, Mutation)` template for bundling query and mutation types
 
 **Not yet implemented:**
-- Mutations
 - Filtering/pagination (WHERE, LIMIT, OFFSET)
 - Polymorphism (GraphQL union/interface types)
 - Runtime introspection (`__schema`, `__type`, `__typename`)
