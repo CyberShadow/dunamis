@@ -2011,3 +2011,77 @@ unittest {
     assert(payload["clientMutationId"].str == "mutation-123");
     assert(payload["user"]["name"].str == "Alice");
 }
+
+// Test mutation payload returning Query type (full Postgraphile pattern)
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import graphqld2.core;
+    import graphqld2.core.expr : effect, constant, singleton;
+    import graphqld2.relational.schema;
+    import graphqld2.relational.demo;
+    import graphqld2.relational.eval_context;
+    import graphqld2.graphql.schema : Schema;
+
+    static MockDB!() db;
+
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("name", string);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    // Payload that includes access to the Query root
+    static struct CreateUserPayload {
+        static auto user(Expr!CreateUserPayload p) {
+            return effect(() => User("User:1"), p);
+        }
+
+        // Return the Query root - allows refetching any data after mutation
+        static auto query(Expr!CreateUserPayload p) {
+            return singleton(Query.init);
+        }
+    }
+
+    static struct Mutation {
+        static Expr!CreateUserPayload createUser(Expr!Mutation parent, string name) {
+            return effect(() => CreateUserPayload.init, parent);
+        }
+    }
+
+    alias MySchema = Schema!(Query, Mutation);
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "name": "Alice"},
+        {"id": 2, "name": "Bob"}
+    ]`);
+
+    // Execute mutation that refetches data via query field
+    auto mutation = compileQuery!MySchema(`
+        mutation {
+            createUser(name: "Charlie") {
+                user { name }
+                query {
+                    users { name }
+                }
+            }
+        }
+    `);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(mutation));
+
+    // Verify payload fields
+    auto payload = result["createUser"];
+    assert(payload["user"]["name"].str == "Alice");
+
+    // Verify we can query the full graph via the query field
+    auto users = payload["query"]["users"].array;
+    assert(users.length == 2);
+    assert(users[0]["name"].str == "Alice");
+    assert(users[1]["name"].str == "Bob");
+}
