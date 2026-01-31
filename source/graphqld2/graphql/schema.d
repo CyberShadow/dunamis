@@ -3,6 +3,7 @@ module graphqld2.graphql.schema;
 import std.algorithm;
 import std.array;
 import std.conv;
+import std.json : JSONValue;
 import std.meta;
 import std.traits;
 import std.typecons : Nullable;
@@ -155,6 +156,12 @@ template graphqlBaseTypeName(T) {
     } else static if (is(T == E[], E)) {
         // Array type
         enum graphqlBaseTypeName = "[" ~ graphqlTypeName!E ~ "]";
+    } else static if (is(T == JSONValue[string])) {
+        // Raw JSON object type - use JSON scalar
+        enum graphqlBaseTypeName = "JSON";
+    } else static if (is(T == JSONValue)) {
+        // Raw JSON value - use JSON scalar
+        enum graphqlBaseTypeName = "JSON";
     } else static if (__traits(hasMember, T, "_typeName")) {
         // Entity/aggregate type - reference by name
         enum graphqlBaseTypeName = T._typeName;
@@ -673,6 +680,12 @@ template graphqlInputTypeName(T) {
     } else static if (is(T == E[], E)) {
         // Array type - elements are non-null by default in input
         enum graphqlInputTypeName = "[" ~ graphqlInputTypeName!E ~ "!]";
+    } else static if (is(T == JSONValue[string])) {
+        // Raw JSON object type
+        enum graphqlInputTypeName = "JSON";
+    } else static if (is(T == JSONValue)) {
+        // Raw JSON value
+        enum graphqlInputTypeName = "JSON";
     } else static if (isInputType!T) {
         // Input type struct - use struct name as type name
         enum graphqlInputTypeName = T.stringof;

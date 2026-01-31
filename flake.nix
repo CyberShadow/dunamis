@@ -4,30 +4,58 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    # ae library with full psql implementation
-    ae = {
-      url = "github:CyberShadow/ae/11ce638e8d9639ab64a862a33be96da554dca3b4";
-      flake = false;
-    };
-    # graphqld parser
-    graphqld = {
-      url = "github:burner/graphqld/542374109b26018c9542631c90d1ba2acef32a8b";
-      flake = false;
-    };
   };
 
-  outputs = { self, nixpkgs, flake-utils, ae, graphqld }:
+  outputs = { self, nixpkgs, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
+
+        # Build the postgres integration test executable
+        postgresTestBin = pkgs.buildDubPackage {
+          pname = "graphqld2-postgres-test";
+          version = "0.0.1";
+          src = self;
+          dubLock = ./dub-lock.json;
+          dubBuildFlags = [ "--config=postgres-integration" ];
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out/bin
+            cp build/graphqld2 $out/bin/postgres_test
+            runHook postInstall
+          '';
+        };
       in {
         checks = {
-          # PostgreSQL integration test with HTTP server and curl
-          postgres-integration = pkgs.stdenv.mkDerivation {
-            name = "graphqld2-postgres-test";
+          # D unit tests via dub
+          unit-tests = pkgs.buildDubPackage {
+            pname = "graphqld2-unit-tests";
+            version = "0.0.1";
             src = self;
 
-            nativeBuildInputs = [ pkgs.postgresql pkgs.ldc pkgs.curl ];
+            dubLock = ./dub-lock.json;
+
+            # Run unit tests instead of building
+            buildPhase = ''
+              runHook preBuild
+              echo "=== Running D unit tests ==="
+              dub test --compiler=ldc2 --config=library
+              runHook postBuild
+            '';
+
+            installPhase = ''
+              touch $out
+            '';
+          };
+
+          # PostgreSQL integration test with HTTP server and curl
+          postgres-integration = pkgs.stdenv.mkDerivation {
+            name = "graphqld2-postgres-integration";
+
+            # No source needed - we use the pre-built binary
+            dontUnpack = true;
+
+            nativeBuildInputs = [ pkgs.postgresql pkgs.curl ];
 
             buildPhase = ''
               export HOME="$TMPDIR"
@@ -92,24 +120,8 @@
 
               export PGHOST="localhost"
 
-              echo "=== Building integration test ==="
-
-              # Set up import paths
-              mkdir -p "$TMPDIR/import"
-              cp -r ${ae} "$TMPDIR/import/ae"
-              cp -r ${graphqld}/source/graphql "$TMPDIR/import/graphql"
-
-              # Compile the integration test
-              ldc2 \
-                -i \
-                -I"$TMPDIR/import" \
-                -I"$src/source" \
-                -I"$src/integration" \
-                -of="$TMPDIR/postgres_test" \
-                "$src/integration/postgres_test.d"
-
               echo "=== Starting HTTP server ==="
-              "$TMPDIR/postgres_test" &
+              ${postgresTestBin}/bin/postgres_test &
               SERVER_PID=$!
 
               # Wait for server to be ready
@@ -221,7 +233,7 @@
           shellHook = ''
             echo "graphqld2 development shell"
             echo "Run 'dub test' for unit tests"
-            echo "Run 'nix flake check' for integration tests"
+            echo "Run 'nix flake check' for all tests (unit + integration)"
           '';
         };
       }

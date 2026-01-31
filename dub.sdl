@@ -3,22 +3,18 @@ description "GraphQL server with bulk data resolution"
 authors "Vladimir"
 license "MIT"
 
-targetType "library"
 targetPath "build"
 
 sourcePaths "source"
 
-dependency "graphqld:parser" path="../extern/graphqld"
+dependency "graphqld:parser" repository="git+https://github.com/vpanteleev-sym/graphqld.git" version="542374109b26018c9542631c90d1ba2acef32a8b"
+dependency "ae" repository="git+https://github.com/CyberShadow/ae.git" version="573324089882f307cd619d67f02bb4e11c1eb69c"
 
-// Default configuration uses dub.packages ae (works for all existing tests)
 configuration "library" {
-    dependency "ae" version="==0.0.3730"
-    excludedSourceFiles "source/graphqld2/postgres/*"
+    targetType "library"
 }
 
-// Integration tests with real PostgreSQL (requires local ae with full psql)
 configuration "postgres-integration" {
-    dependency "ae" path="../ae-container/ae"
     targetType "executable"
     mainSourceFile "integration/postgres_test.d"
     importPaths "integration"

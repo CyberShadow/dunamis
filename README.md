@@ -388,6 +388,7 @@ auto result = executor.execute(query);
 ## Running Tests
 
 ```bash
+# Unit tests
 dub test
 
 # With SQL debug output
@@ -399,12 +400,22 @@ dub test -d=graphql
 # Show generated SQL DDL
 dub test -d=ddl
 
-# PostgreSQL integration test (requires Nix)
+# All tests including PostgreSQL integration (requires Nix)
 nix flake check
 ```
 
-The PostgreSQL integration test spins up a real PostgreSQL instance, creates test tables,
-and runs GraphQL queries via HTTP to verify end-to-end functionality.
+The `nix flake check` command runs both unit tests and PostgreSQL integration tests.
+The integration test spins up a real PostgreSQL instance, creates test tables,
+starts an HTTP server, and runs GraphQL queries to verify end-to-end functionality.
+
+## Dependencies
+
+Dependencies are pinned in `dub-lock.json` for reproducible builds:
+
+- **ae** - Networking and async I/O library (pinned to GitHub commit)
+- **graphqld** - GraphQL parser (pinned to GitHub commit)
+
+The Nix flake uses these same versions via `buildDubPackage`.
 
 ## Future Directions
 

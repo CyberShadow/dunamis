@@ -1,22 +1,5 @@
 {
   "nodes": {
-    "ae": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1769878350,
-        "narHash": "sha256-mD0e3KRyoed8KQUgQbRk0M5d2jnJ/7GMIENhie1GD1g=",
-        "owner": "CyberShadow",
-        "repo": "ae",
-        "rev": "11ce638e8d9639ab64a862a33be96da554dca3b4",
-        "type": "github"
-      },
-      "original": {
-        "owner": "CyberShadow",
-        "repo": "ae",
-        "rev": "11ce638e8d9639ab64a862a33be96da554dca3b4",
-        "type": "github"
-      }
-    },
     "flake-utils": {
       "inputs": {
         "systems": "systems"
@@ -32,23 +15,6 @@
       "original": {
         "owner": "numtide",
         "repo": "flake-utils",
-        "type": "github"
-      }
-    },
-    "graphqld": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1768385599,
-        "narHash": "sha256-MNq/LU1GjuGfJZWDeyaZiKvDHi8KeJA19L5TVtcKzvM=",
-        "owner": "burner",
-        "repo": "graphqld",
-        "rev": "542374109b26018c9542631c90d1ba2acef32a8b",
-        "type": "github"
-      },
-      "original": {
-        "owner": "burner",
-        "repo": "graphqld",
-        "rev": "542374109b26018c9542631c90d1ba2acef32a8b",
         "type": "github"
       }
     },
@@ -70,9 +36,7 @@
     },
     "root": {
       "inputs": {
-        "ae": "ae",
         "flake-utils": "flake-utils",
-        "graphqld": "graphqld",
         "nixpkgs": "nixpkgs"
       }
     },

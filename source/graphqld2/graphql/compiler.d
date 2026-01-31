@@ -393,6 +393,15 @@ T extractValueFromJson(T)(JSONValue json) {
         return T.fromJsonValue(json);
     } else static if (isInputType!T) {
         return extractInputObjectFromJson!T(json);
+    } else static if (is(T == JSONValue[string])) {
+        // Raw JSON object - pass through directly
+        if (json.type != JSONType.object) {
+            throw new CompilerException("Expected object, got " ~ json.type.to!string);
+        }
+        return json.object;
+    } else static if (is(T == JSONValue)) {
+        // Raw JSONValue - pass through as-is
+        return json;
     } else {
         static assert(false, "Unsupported variable type: " ~ T.stringof);
     }
@@ -451,6 +460,16 @@ T extractValue(T)(Value val, T defaultValue = T.init) {
         return T.fromJsonValue(valueToJson(val));
     } else static if (isInputType!T) {
         return extractInputObject!T(val);
+    } else static if (is(T == JSONValue[string])) {
+        // Raw JSON object - convert Value to JSONValue.object
+        auto json = valueToJson(val);
+        if (json.type != JSONType.object) {
+            throw new CompilerException("Expected object, got " ~ json.type.to!string);
+        }
+        return json.object;
+    } else static if (is(T == JSONValue)) {
+        // Raw JSON value - convert Value to JSONValue
+        return valueToJson(val);
     } else {
         static assert(false, "Unsupported argument type: " ~ T.stringof);
     }
