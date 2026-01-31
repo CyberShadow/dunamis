@@ -28,18 +28,24 @@ alias GraphQLResult = Expr!JSONValue;
 /// fields and generate the appropriate expressions. The result is an Expr
 /// tree that can be executed by the Executor.
 ///
+/// The Query type should have Table mixins that bind to a static data source.
+///
 /// Example:
 /// ---
+/// static MyDB myDB;
+///
 /// struct Query {
-///     mixin Table!(MockDB!(), User, "users");
+///     mixin Table!(myDB, User, "users");
 /// }
 ///
-/// auto db = new MockDB!()();
-/// auto query = compileQuery!Query(`{ users { firstName, lastName } }`, db);
-/// auto result = executor.execute(query);
+/// void main() {
+///     myDB = new MyDB(connectionString);
+///     auto query = compileQuery!Query(`{ users { firstName, lastName } }`);
+///     auto result = executor.execute(query);
+/// }
 /// ---
-GraphQLResult compileQuery(Query, DataSource)(string queryString, DataSource db) {
-    return compileQuery!(Query, DataSource)(queryString, db, JSONValue.emptyObject);
+GraphQLResult compileQuery(Query)(string queryString) {
+    return compileQuery!Query(queryString, JSONValue.emptyObject);
 }
 
 /// Compiles a GraphQL query string with variables into an executable Expr tree.
@@ -51,9 +57,9 @@ GraphQLResult compileQuery(Query, DataSource)(string queryString, DataSource db)
 ///     query GetUsers($format: NameFormat!) {
 ///         users { formattedName(format: $format) }
 ///     }
-/// `, db, variables);
+/// `, variables);
 /// ---
-GraphQLResult compileQuery(Query, DataSource)(string queryString, DataSource db, JSONValue variables) {
+GraphQLResult compileQuery(Query)(string queryString, JSONValue variables) {
     // Parse the GraphQL query
     auto lexer = Lexer(queryString);
     auto parser = Parser(lexer);
@@ -66,7 +72,7 @@ GraphQLResult compileQuery(Query, DataSource)(string queryString, DataSource db,
     }
 
     // Compile the root selection set with variables
-    return compileRootSelectionSet!(Query, DataSource)(op.ss, db, variables);
+    return compileRootSelectionSet!Query(op.ss, variables);
 }
 
 /// Exception thrown during query compilation
@@ -560,7 +566,7 @@ T extractArg(T, alias Default)(Arguments args, string name, JSONValue variables)
 // ============================================================================
 
 /// Compile the root selection set (fields from Query type)
-DynamicJsonObjectExpr compileRootSelectionSet(Query, DataSource)(SelectionSet ss, DataSource db, JSONValue variables) {
+DynamicJsonObjectExpr compileRootSelectionSet(Query)(SelectionSet ss, JSONValue variables) {
     auto selections = iterateSelections(ss);
 
     if (selections.length == 0) {
@@ -574,7 +580,7 @@ DynamicJsonObjectExpr compileRootSelectionSet(Query, DataSource)(SelectionSet ss
         if (sel.ruleSelection != SelectionEnum.Field) continue;
         auto field = sel.field;
         fieldNames ~= getOutputName(field);
-        fieldExprs ~= compileRootFieldExpr!(Query, DataSource)(field, db, variables);
+        fieldExprs ~= compileRootFieldExpr!Query(field, variables);
     }
 
     if (fieldNames.length == 0) {
@@ -586,7 +592,7 @@ DynamicJsonObjectExpr compileRootSelectionSet(Query, DataSource)(SelectionSet ss
 
 /// Compile a single root field expression (e.g., "users" from Query)
 /// Returns the expression for this field's value (typically a MapExpr producing JSONValue[])
-ExprBase compileRootFieldExpr(Query, DataSource)(Field field, DataSource db, JSONValue variables) {
+ExprBase compileRootFieldExpr(Query)(Field field, JSONValue variables) {
     auto fieldName = getFieldName(field);
 
     // Look up the field in Query type at compile time
@@ -597,8 +603,8 @@ ExprBase compileRootFieldExpr(Query, DataSource)(Field field, DataSource db, JSO
 
             // Check if this is the field we're looking for
             if (fieldName == gqlName) {
-                // Get the root expression
-                auto rootExpr = __traits(getMember, Query, gqlName)(db);
+                // Get the root expression - data source is bound via alias in Table mixin
+                auto rootExpr = __traits(getMember, Query, gqlName)();
 
                 // Compile the nested selection set
                 if (field.ss !is null) {
@@ -756,21 +762,22 @@ unittest {
         }
     }
 
-    alias DB = MockDB!();
+    // Static data source instance - bound by alias in Table mixin
+    static MockDB!() db;
 
     static struct Query {
-        mixin Table!(DB, User, "users");
+        mixin Table!(db, User, "users");
     }
 
     // Set up mock data
-    auto db = new DB();
+    db = new MockDB!();
     db.setTableData("users", `[
         {"id": 1, "first_name": "Alice", "last_name": "Smith"},
         {"id": 2, "first_name": "Bob", "last_name": "Jones"}
     ]`);
 
-    // Compile a simple query
-    auto query = compileQuery!Query(`{ users { firstName, lastName } }`, db);
+    // Compile a simple query - no db parameter needed
+    auto query = compileQuery!Query(`{ users { firstName, lastName } }`);
 
     // Execute
     auto executor = new Executor();
@@ -804,18 +811,18 @@ unittest {
         }
     }
 
-    alias DB = MockDB!();
+    static MockDB!() db;
 
     static struct Query {
-        mixin Table!(DB, User, "users");
+        mixin Table!(db, User, "users");
     }
 
-    auto db = new DB();
+    db = new MockDB!();
     db.setTableData("users", `[
         {"id": 1, "first_name": "Alice", "last_name": "Smith"}
     ]`);
 
-    auto query = compileQuery!Query(`{ users { fullName } }`, db);
+    auto query = compileQuery!Query(`{ users { fullName } }`);
 
     auto executor = new Executor();
     auto result = awaitSync(executor.execute(query));
@@ -845,13 +852,13 @@ unittest {
         mixin HasMany!("posts", Post, "author_id");
     }
 
-    alias DB = MockDB!();
+    static MockDB!() db;
 
     static struct Query {
-        mixin Table!(DB, User, "users");
+        mixin Table!(db, User, "users");
     }
 
-    auto db = new DB();
+    db = new MockDB!();
     db.setTableData("users", `[
         {"id": 1, "first_name": "Alice"},
         {"id": 2, "first_name": "Bob"}
@@ -862,7 +869,7 @@ unittest {
         {"id": 3, "author_id": 2, "title": "Test"}
     ]`);
 
-    auto query = compileQuery!Query(`{ users { firstName, posts { title } } }`, db);
+    auto query = compileQuery!Query(`{ users { firstName, posts { title } } }`);
 
     auto executor = new Executor();
     auto result = awaitSync(executor.execute(query));
@@ -906,20 +913,20 @@ unittest {
         }
     }
 
-    alias DB = MockDB!();
+    static MockDB!() db;
 
     static struct Query {
-        mixin Table!(DB, User, "users");
+        mixin Table!(db, User, "users");
     }
 
-    auto db = new DB();
+    db = new MockDB!();
     db.setTableData("users", `[
         {"id": 1, "first_name": "Alice"},
         {"id": 2, "first_name": "Bob"}
     ]`);
 
     // Test with required argument
-    auto query1 = compileQuery!Query(`{ users { greeting(prefix: "Hello") } }`, db);
+    auto query1 = compileQuery!Query(`{ users { greeting(prefix: "Hello") } }`);
     auto executor = new Executor();
     auto result1 = awaitSync(executor.execute(query1));
 
@@ -929,7 +936,7 @@ unittest {
     assert(users1[1]["greeting"].str == "Hello Bob");
 
     // Test with optional argument using default
-    auto query2 = compileQuery!Query(`{ users { greetingWithSuffix(prefix: "Hi") } }`, db);
+    auto query2 = compileQuery!Query(`{ users { greetingWithSuffix(prefix: "Hi") } }`);
     auto result2 = awaitSync(executor.execute(query2));
 
     auto users2 = result2["users"].array;
@@ -938,7 +945,7 @@ unittest {
     assert(users2[1]["greetingWithSuffix"].str == "Hi Bob!");
 
     // Test with optional argument overridden
-    auto query3 = compileQuery!Query(`{ users { greetingWithSuffix(prefix: "Hey", suffix: "?") } }`, db);
+    auto query3 = compileQuery!Query(`{ users { greetingWithSuffix(prefix: "Hey", suffix: "?") } }`);
     auto result3 = awaitSync(executor.execute(query3));
 
     auto users3 = result3["users"].array;
@@ -966,14 +973,14 @@ unittest {
         mixin Col!("firstName", string);
     }
 
-    alias DB = MockDB!();
+    static MockDB!() db;
 
     static struct Query {
-        mixin Table!(DB, User, "users");
-        mixin Table!(DB, Post, "posts");
+        mixin Table!(db, User, "users");
+        mixin Table!(db, Post, "posts");
     }
 
-    auto db = new DB();
+    db = new MockDB!();
     db.setTableData("users", `[
         {"id": 1, "first_name": "Alice"},
         {"id": 2, "first_name": "Bob"}
@@ -988,7 +995,7 @@ unittest {
     auto query = compileQuery!Query(`{
         users { firstName }
         posts { title }
-    }`, db);
+    }`);
 
     auto executor = new Executor();
     auto result = awaitSync(executor.execute(query));
@@ -1034,13 +1041,13 @@ unittest {
         }
     }
 
-    alias DB = MockDB!();
+    static MockDB!() db;
 
     static struct Query {
-        mixin Table!(DB, User, "users");
+        mixin Table!(db, User, "users");
     }
 
-    auto db = new DB();
+    db = new MockDB!();
     db.setTableData("users", `[
         {"id": 1, "first_name": "Alice", "last_name": "Smith"},
         {"id": 2, "first_name": "Bob", "last_name": "Jones"}
@@ -1051,7 +1058,7 @@ unittest {
         users {
             formattedName(format: {prefix: "Mr. ", suffix: "!"})
         }
-    }`, db);
+    }`);
 
     auto executor = new Executor();
     auto result = awaitSync(executor.execute(query));
@@ -1095,13 +1102,13 @@ unittest {
         }
     }
 
-    alias DB = MockDB!();
+    static MockDB!() db;
 
     static struct Query {
-        mixin Table!(DB, User, "users");
+        mixin Table!(db, User, "users");
     }
 
-    auto db = new DB();
+    db = new MockDB!();
     db.setTableData("users", `[
         {"id": 1, "first_name": "Alice", "last_name": "Smith"}
     ]`);
@@ -1114,7 +1121,7 @@ unittest {
                 decoration: {left: "[", right: "]"}
             })
         }
-    }`, db);
+    }`);
 
     auto executor = new Executor();
     auto result = awaitSync(executor.execute(query));
@@ -1144,13 +1151,13 @@ unittest {
         }
     }
 
-    alias DB = MockDB!();
+    static MockDB!() db;
 
     static struct Query {
-        mixin Table!(DB, User, "users");
+        mixin Table!(db, User, "users");
     }
 
-    auto db = new DB();
+    db = new MockDB!();
     db.setTableData("users", `[
         {"id": 1, "first_name": "Alice"},
         {"id": 2, "first_name": "Bob"}
@@ -1168,7 +1175,7 @@ unittest {
                 greeting(prefix: $greetPrefix, suffix: $greetSuffix)
             }
         }
-    `, db, variables);
+    `, variables);
 
     auto executor = new Executor();
     auto result = awaitSync(executor.execute(query));
@@ -1204,13 +1211,13 @@ unittest {
         }
     }
 
-    alias DB = MockDB!();
+    static MockDB!() db;
 
     static struct Query {
-        mixin Table!(DB, User, "users");
+        mixin Table!(db, User, "users");
     }
 
-    auto db = new DB();
+    db = new MockDB!();
     db.setTableData("users", `[
         {"id": 1, "first_name": "Alice", "last_name": "Smith"}
     ]`);
@@ -1229,7 +1236,7 @@ unittest {
                 formattedName(format: $fmt)
             }
         }
-    `, db, variables);
+    `, variables);
 
     auto executor = new Executor();
     auto result = awaitSync(executor.execute(query));

@@ -23,33 +23,69 @@ import graphqld2.relational.query_node;
 /// Mixin to define a root query field that returns all entities of a type.
 /// Used in a Query struct to define the schema's entry points.
 ///
-/// The DataSource type parameter ties this table to a specific data source,
-/// allowing compile-time access to configuration (pagination, filtering, etc.).
+/// The data source is bound by alias, so it must be a static/module-level variable.
+/// This avoids having to pass the data source through all compilation and execution.
 ///
 /// Example:
 /// ---
-/// alias MyDB = MockDB!(DBConfig(pagination: true));
+/// // Module-level data source
+/// static MyDB myDB;
 ///
 /// struct Query {
-///     mixin Table!(MyDB, User, "users");
-///     mixin Table!(MyDB, Post, "posts");
+///     mixin Table!(myDB, User, "users");
+///     mixin Table!(myDB, Post, "posts");
 /// }
 ///
-/// auto db = new MyDB();
-/// auto query = map!(u => User.firstName(u))(Query.users(db));
+/// void main() {
+///     myDB = new MyDB(connectionString);
+///     auto query = map!(u => User.firstName(u))(Query.users());
+/// }
 /// ---
-mixin template Table(DataSource, Entity, string fieldName) {
+mixin template Table(alias db, Entity, string fieldName) {
     // Metadata for schema introspection (unique struct name per field)
     mixin("struct _tableField_" ~ fieldName ~ " {
         enum name = \"" ~ fieldName ~ "\";
         alias entityType = Entity;
-        alias dataSourceType = DataSource;
     }");
 
-    // Function takes the specific data source type
-    mixin("static auto " ~ fieldName ~ "(DataSource db) {
+    // Method uses aliased data source directly - no parameter needed
+    mixin("static auto " ~ fieldName ~ "() {
         return getAll!Entity(db);
     }");
+}
+
+/// Convenience mixin to define multiple table fields at once.
+/// Takes a data source alias and a sequence of entity types.
+/// Field names are derived from entity type names (lowercased + pluralized).
+///
+/// Example:
+/// ---
+/// static MyDB myDB;
+///
+/// struct Query {
+///     mixin Tables!(myDB, User, Post, Comment);
+///     // Equivalent to:
+///     // mixin Table!(myDB, User, "users");
+///     // mixin Table!(myDB, Post, "posts");
+///     // mixin Table!(myDB, Comment, "comments");
+/// }
+/// ---
+mixin template Tables(alias db, Entities...) {
+    static foreach (Entity; Entities) {
+        mixin Table!(db, Entity, defaultFieldName!Entity);
+    }
+}
+
+/// Derive default field name from entity type (lowercase + "s" suffix)
+private template defaultFieldName(Entity) {
+    enum defaultFieldName = () {
+        string name = Entity._typeName;
+        // Lowercase first character
+        if (name.length > 0 && name[0] >= 'A' && name[0] <= 'Z') {
+            return cast(char)(name[0] + 32) ~ name[1..$] ~ "s";
+        }
+        return name ~ "s";
+    }();
 }
 
 // ============================================================================

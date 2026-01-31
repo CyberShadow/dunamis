@@ -14,8 +14,9 @@ import graphqld2.relational;
 // Data Source Configuration
 // ============================================================================
 
-/// Default data source for this schema - uses DebugSqlDB!() for SQL inspection
-alias DB = DebugSqlDB!();
+/// Static data source instance - bound by alias in Table mixins.
+/// This is set by createMockDB() before running queries.
+static DebugSqlDB!() db;
 
 // ============================================================================
 // Schema Definition - Query root with all entry points
@@ -24,9 +25,9 @@ alias DB = DebugSqlDB!();
 /// The Query root - defines all entry points into the schema.
 /// This mirrors what a GraphQL schema's Query type would look like.
 struct Query {
-    mixin Table!(DB, User, "users");
-    mixin Table!(DB, Post, "posts");
-    mixin Table!(DB, Comment, "comments");
+    mixin Table!(db, User, "users");
+    mixin Table!(db, Post, "posts");
+    mixin Table!(db, Comment, "comments");
 }
 
 
@@ -183,8 +184,9 @@ struct Comment {
 // - Complex computed fields
 // - Custom query patterns (getByIds, etc.)
 
-/// Helper to create a mock database with sample data.
-/// Returns a DebugSqlDB!() that prints SQL when run with -d=sql
+/// Helper to create and set up the mock database with sample data.
+/// Sets the module-level `db` static variable for use by Query.
+/// Returns the same instance for legacy test compatibility.
 private DebugSqlDB!() createMockDB() {
     auto mock = new MockDB!()();
 
@@ -206,7 +208,9 @@ private DebugSqlDB!() createMockDB() {
         {"id": 103, "post_id": 2, "body": "I agree!", "author_id": 1}
     ]`);
 
-    return new DebugSqlDB!()(mock);
+    // Set the module-level static for Query to use
+    db = new DebugSqlDB!()(mock);
+    return db;
 }
 
 unittest {
@@ -382,7 +386,7 @@ unittest {
     import std.stdio : writeln;
     import graphqld2.graphql : compileQuery;
 
-    auto db = createMockDB();
+    createMockDB();  // Sets up the static db
     auto executor = new Executor();
 
     auto query = compileQuery!Query(`{
@@ -391,7 +395,7 @@ unittest {
             lastName
             email
         }
-    }`, db);
+    }`);
 
     auto result = awaitSync(executor.execute(query));
 
@@ -413,7 +417,7 @@ unittest {
     import std.stdio : writeln;
     import graphqld2.graphql : compileQuery;
 
-    auto db = createMockDB();
+    createMockDB();
     auto executor = new Executor();
 
     auto query = compileQuery!Query(`{
@@ -423,7 +427,7 @@ unittest {
                 title
             }
         }
-    }`, db);
+    }`);
 
     auto result = awaitSync(executor.execute(query));
 
@@ -447,7 +451,7 @@ unittest {
     import std.stdio : writeln;
     import graphqld2.graphql : compileQuery;
 
-    auto db = createMockDB();
+    createMockDB();
     auto executor = new Executor();
 
     auto query = compileQuery!Query(`{
@@ -460,7 +464,7 @@ unittest {
                 }
             }
         }
-    }`, db);
+    }`);
 
     auto result = awaitSync(executor.execute(query));
 
@@ -487,7 +491,7 @@ unittest {
     import std.stdio : writeln;
     import graphqld2.graphql : compileQuery;
 
-    auto db = createMockDB();
+    createMockDB();
     auto executor = new Executor();
 
     // User.greeting takes (prefix: String!, suffix: String = "!")
@@ -496,7 +500,7 @@ unittest {
             firstName
             greeting(prefix: "Hello")
         }
-    }`, db);
+    }`);
 
     auto result = awaitSync(executor.execute(query));
 
