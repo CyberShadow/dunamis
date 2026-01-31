@@ -957,75 +957,88 @@ string generateQuerySDL(Query)() {
 }
 
 // ============================================================================
-// Mutation Field Detection
+// Root Field Detection (for Query and Mutation)
 // ============================================================================
 
-/// Check if a member is a mutation field.
-/// A mutation field is a static function that:
-/// - Does NOT take Expr!Entity as first parameter (unlike computed fields)
-/// - Returns a supported type (entity, scalar, or void for side-effect-only mutations)
-/// Check if a member is a mutation field.
-/// A mutation field is a static function that:
-/// - First param is Expr!Mutation (the parent, typically ignored)
+/// Check if a member is a root field (works for both Query and Mutation).
+/// A root field is a static function that:
+/// - First param is Expr!Parent (the parent type, typically ignored)
 /// - Additional params are concrete argument types
 /// - Returns Expr!T where T is the result type
-template isMutationField(Mutation, string memberName, alias member) {
+///
+/// This unified interface allows Query and Mutation to define fields the same way:
+/// ---
+/// struct Query {
+///     static auto users(Expr!Query parent) { return getAll!User(); }
+///     static auto numUsers(Expr!Query parent) { return count!User(); }
+/// }
+/// struct Mutation {
+///     static auto createUser(Expr!Mutation parent, string name) { return insert!User(...); }
+/// }
+/// ---
+template isRootField(Parent, string memberName, alias member) {
     static if (is(typeof(member) == function)) {
         alias Params = Parameters!member;
         alias Return = ReturnType!member;
 
         static if (Params.length == 0) {
-            // No params - not a valid mutation (needs at least parent)
-            enum isMutationField = false;
-        } else static if (is(Params[0] : Expr!M, M) && is(M == Mutation)) {
-            // First param is Expr!Mutation - this is a mutation field
+            // No params - not a valid root field (needs at least parent)
+            enum isRootField = false;
+        } else static if (is(Params[0] : Expr!M, M) && is(M == Parent)) {
+            // First param is Expr!Parent - this is a root field
             // Check return type is Expr!T
             static if (isExpr!Return) {
                 // All remaining params must be supported argument types
-                enum isMutationField = allMutationParamsSupported!(Params[1..$]);
+                enum isRootField = allRootParamsSupported!(Params[1..$]);
             } else {
-                enum isMutationField = false;
+                enum isRootField = false;
             }
         } else {
-            // First param is not Expr!Mutation - not a mutation field
-            enum isMutationField = false;
+            // First param is not Expr!Parent - not a root field
+            enum isRootField = false;
         }
     } else {
-        enum isMutationField = false;
+        enum isRootField = false;
     }
 }
 
-/// Check if a return type is supported for mutations
-template isSupportedMutationReturnType(T) {
+/// Backwards compatibility alias
+alias isMutationField = isRootField;
+
+/// Check if a return type is supported for root fields
+template isSupportedRootReturnType(T) {
     static if (is(T == void)) {
-        // void return for side-effect-only mutations
-        enum isSupportedMutationReturnType = true;
+        // void return for side-effect-only operations
+        enum isSupportedRootReturnType = true;
     } else static if (is(T == string) || is(T == bool) || is(T == int) ||
                       is(T == long) || is(T == float) || is(T == double)) {
         // Scalar types
-        enum isSupportedMutationReturnType = true;
+        enum isSupportedRootReturnType = true;
     } else static if (is(T == Nullable!U, U)) {
         // Nullable wrapper
-        enum isSupportedMutationReturnType = isSupportedMutationReturnType!U;
+        enum isSupportedRootReturnType = isSupportedRootReturnType!U;
     } else static if (is(T == E[], E)) {
         // Array
-        enum isSupportedMutationReturnType = isSupportedMutationReturnType!E;
+        enum isSupportedRootReturnType = isSupportedRootReturnType!E;
     } else static if (__traits(hasMember, T, "_typeName")) {
         // Entity type
-        enum isSupportedMutationReturnType = true;
+        enum isSupportedRootReturnType = true;
     } else static if (isCustomScalar!T) {
         // Custom scalar
-        enum isSupportedMutationReturnType = true;
+        enum isSupportedRootReturnType = true;
     } else {
-        enum isSupportedMutationReturnType = false;
+        enum isSupportedRootReturnType = false;
     }
 }
 
-/// Check if all mutation parameters are supported types
-template allMutationParamsSupported(Params...) {
-    enum allMutationParamsSupported = () {
+/// Backwards compatibility alias
+alias isSupportedMutationReturnType = isSupportedRootReturnType;
+
+/// Check if all root field parameters are supported types
+template allRootParamsSupported(Params...) {
+    enum allRootParamsSupported = () {
         static foreach (P; Params) {
-            static if (!isSupportedMutationParamType!P) {
+            static if (!isSupportedRootParamType!P) {
                 return false;
             }
         }
@@ -1033,21 +1046,27 @@ template allMutationParamsSupported(Params...) {
     }();
 }
 
-/// Check if a type is supported as a mutation parameter
-template isSupportedMutationParamType(T) {
+/// Backwards compatibility alias
+alias allMutationParamsSupported = allRootParamsSupported;
+
+/// Check if a type is supported as a root field parameter
+template isSupportedRootParamType(T) {
     static if (is(T == string) || is(T == bool) || is(T == int) ||
                is(T == long) || is(T == float) || is(T == double)) {
-        enum isSupportedMutationParamType = true;
+        enum isSupportedRootParamType = true;
     } else static if (is(T == Nullable!U, U)) {
-        enum isSupportedMutationParamType = isSupportedMutationParamType!U;
+        enum isSupportedRootParamType = isSupportedRootParamType!U;
     } else static if (isInputType!T) {
-        enum isSupportedMutationParamType = true;
+        enum isSupportedRootParamType = true;
     } else static if (isCustomScalar!T) {
-        enum isSupportedMutationParamType = true;
+        enum isSupportedRootParamType = true;
     } else {
-        enum isSupportedMutationParamType = false;
+        enum isSupportedRootParamType = false;
     }
 }
+
+/// Backwards compatibility alias
+alias isSupportedMutationParamType = isSupportedRootParamType;
 
 /// Get the GraphQL return type of a mutation
 /// Get the GraphQL return type of a mutation.

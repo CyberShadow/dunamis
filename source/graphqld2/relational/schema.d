@@ -48,14 +48,17 @@ import graphqld2.relational.query_node;
 /// }
 /// ---
 mixin template Table(Entity, string fieldName) {
+    import graphqld2.core.expr : Expr;
+
     // Metadata for schema introspection (unique struct name per field)
     mixin("struct _tableField_" ~ fieldName ~ " {
         enum name = \"" ~ fieldName ~ "\";
         alias entityType = Entity;
     }");
 
-    // Method uses data source from Entity._db - no parameter needed
-    mixin("static auto " ~ fieldName ~ "() {
+    // Method follows unified root field signature: (Expr!Parent, Args...) -> Expr!T
+    // The parent parameter is ignored but required for uniform interface
+    mixin("static auto " ~ fieldName ~ "(Expr!(typeof(this)) parent) {
         return getAll!Entity();
     }");
 }

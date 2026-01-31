@@ -151,21 +151,32 @@ OperationDefinition findOperationInDefs(Definitions defs) @safe {
     return null;
 }
 
-/// Get field name from a Field AST node
+/// Get field name from a Field AST node.
+/// Note: graphql-d stores the alias in `name` and actual field name in `aka` when an alias is present.
 string getFieldName(Field field) @safe {
-    if (field is null || field.name is null || field.name.name is null) {
+    if (field is null || field.name is null) {
         return null;
     }
-    return field.name.name.tok.value;
+    // When there's an alias, aka contains the actual field name
+    if (field.name.aka !is null) {
+        return field.name.aka.tok.value;
+    }
+    // No alias, name contains the field name
+    if (field.name.name !is null) {
+        return field.name.name.tok.value;
+    }
+    return null;
 }
 
-/// Get alias (if any) from a Field AST node
+/// Get alias (if any) from a Field AST node.
+/// Note: graphql-d stores the alias in `name` when present.
 string getFieldAlias(Field field) @safe {
     if (field is null || field.name is null) {
         return null;
     }
+    // When there's an alias, name contains the alias and aka contains the field name
     if (field.name.aka !is null) {
-        return field.name.aka.tok.value;
+        return field.name.name !is null ? field.name.name.tok.value : null;
     }
     return null;
 }
@@ -656,25 +667,24 @@ SequentialJsonObjectExpr compileRootMutationSet(Mutation)(SelectionSet ss, JSONV
 }
 
 /// Compile a single mutation field.
-/// Mutation fields are functions: (Expr!Mutation, Args...) -> Expr!ReturnType
+/// Uses the same isRootField interface as Query fields.
 ExprBase compileRootMutationField(Mutation)(Field field, JSONValue variables) {
     auto fieldName = getFieldName(field);
 
     // Create a singleton parent expression for the Mutation type
-    // Mutations ignore the parent but need it for the uniform field signature
     auto parentExpr = singleton(Mutation.init);
 
     // Look up the mutation in Mutation type at compile time
     static foreach (member; __traits(allMembers, Mutation)) {{
         static if (!isInternalHelper!member) {
-            static if (__traits(compiles, isMutationField!(Mutation, member, __traits(getMember, Mutation, member)))) {
-                static if (isMutationField!(Mutation, member, __traits(getMember, Mutation, member))) {
+            static if (__traits(compiles, isRootField!(Mutation, member, __traits(getMember, Mutation, member)))) {
+                static if (isRootField!(Mutation, member, __traits(getMember, Mutation, member))) {
                     alias fn = __traits(getMember, Mutation, member);
                     enum gqlName = getGqlName!(fn, member);
 
                     if (fieldName == gqlName) {
-                        // Call the mutation function with parent and extracted args
-                        return callMutationField!(fn, Mutation)(parentExpr, field.args, field.ss, variables);
+                        // Call the root field function with parent and extracted args
+                        return callRootField!(fn, Mutation)(parentExpr, field.args, field.ss, variables);
                     }
                 }
             }
@@ -684,9 +694,10 @@ ExprBase compileRootMutationField(Mutation)(Field field, JSONValue variables) {
     throw new CompilerException("Unknown mutation: " ~ fieldName);
 }
 
-/// Call a mutation field function and handle the return type.
-/// Mutations return Expr!T which we may need to descend into with a selection set.
-ExprBase callMutationField(alias fn, Mutation)(Expr!Mutation parent, Arguments args, SelectionSet ss, JSONValue variables) {
+/// Call a root field function and handle the return type.
+/// Root fields return Expr!T which we may need to descend into with a selection set.
+/// Works for both Query and Mutation fields.
+ExprBase callRootField(alias fn, Parent)(Expr!Parent parent, Arguments args, SelectionSet ss, JSONValue variables) {
     import std.traits : Parameters, ReturnType, ParameterDefaults, ParameterIdentifierTuple;
     import std.typecons : tuple;
     import graphqld2.core.expr : toJsonValue, Expr, ExprResultType, isExpr;
@@ -696,7 +707,7 @@ ExprBase callMutationField(alias fn, Mutation)(Expr!Mutation parent, Arguments a
 
     // Verify return type is an Expr
     static assert(isExpr!Return,
-        "Mutation " ~ __traits(identifier, fn) ~ " must return an Expr type, got " ~ Return.stringof);
+        "Root field " ~ __traits(identifier, fn) ~ " must return an Expr type, got " ~ Return.stringof);
 
     alias ResultType = ExprResultType!Return;
 
@@ -723,14 +734,14 @@ ExprBase callMutationField(alias fn, Mutation)(Expr!Mutation parent, Arguments a
         // Single entity type - requires selection set
         if (ss is null) {
             throw new CompilerException(
-                "Mutation returning " ~ ResultType._typeName ~ " requires a selection set");
+                "Field returning " ~ ResultType._typeName ~ " requires a selection set");
         }
         return compileSelectionSetBody!ResultType(resultExpr, ss, variables);
     } else static if (is(ResultType == Entity[], Entity) && __traits(hasMember, Entity, "_typeName")) {
         // Array of entities - requires selection set, use MapExpr
         if (ss is null) {
             throw new CompilerException(
-                "Mutation returning [" ~ Entity._typeName ~ "] requires a selection set");
+                "Field returning [" ~ Entity._typeName ~ "] requires a selection set");
         }
         return compileMapExpr!Entity(resultExpr, ss, variables);
     } else {
@@ -840,26 +851,25 @@ DynamicJsonObjectExpr compileRootSelectionSet(Query)(SelectionSet ss, JSONValue 
 }
 
 /// Compile a single root field expression (e.g., "users" from Query)
-/// Returns the expression for this field's value (typically a MapExpr producing JSONValue[])
+/// Uses the unified isRootField interface - same logic as mutation fields.
 ExprBase compileRootFieldExpr(Query)(Field field, JSONValue variables) {
     auto fieldName = getFieldName(field);
 
-    // Look up the field in Query type at compile time
+    // Create a singleton parent expression for the Query type
+    auto parentExpr = singleton(Query.init);
+
+    // Look up the field in Query type using isRootField (same as mutations)
     static foreach (member; __traits(allMembers, Query)) {{
-        static if (member.length > 12 && member[0..12] == "_tableField_") {
-            alias FieldMeta = __traits(getMember, Query, member);
-            enum gqlName = FieldMeta.name;
+        static if (!isInternalHelper!member) {
+            static if (__traits(compiles, isRootField!(Query, member, __traits(getMember, Query, member)))) {
+                static if (isRootField!(Query, member, __traits(getMember, Query, member))) {
+                    alias fn = __traits(getMember, Query, member);
+                    enum gqlName = getGqlName!(fn, member);
 
-            // Check if this is the field we're looking for
-            if (fieldName == gqlName) {
-                // Get the root expression - data source is bound via alias in Table mixin
-                auto rootExpr = __traits(getMember, Query, gqlName)();
-
-                // Compile the nested selection set
-                if (field.ss !is null) {
-                    return compileMapExpr!(FieldMeta.entityType)(rootExpr, field.ss, variables);
-                } else {
-                    throw new CompilerException("Root field '" ~ fieldName ~ "' requires a selection set");
+                    if (fieldName == gqlName) {
+                        // Call the root field function with parent and extracted args
+                        return callRootField!(fn, Query)(parentExpr, field.args, field.ss, variables);
+                    }
                 }
             }
         }
@@ -1848,4 +1858,180 @@ unittest {
     assert(users.length == 2);
     assert(users[0]["name"].str == "Alice");
     assert(users[1]["name"].str == "Bob");
+}
+
+// Test that isRootField detects both Table-generated and hand-written methods
+unittest {
+    import graphqld2.core.expr : Expr;
+    import graphqld2.graphql.schema : isRootField;
+    import graphqld2.relational.schema;
+    import graphqld2.relational.demo;
+    import graphqld2.relational.eval_context;
+
+    static MockDB!() db;
+
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("name", string);
+    }
+
+    static struct Query {
+        // Table-generated method
+        mixin Table!(User, "users");
+
+        // Hand-written scalar method
+        static Expr!int scalarField(Expr!Query parent) {
+            import graphqld2.core.expr : constant;
+            return constant(42, parent);
+        }
+    }
+
+    // Verify isRootField detects the Table-generated method
+    static assert(isRootField!(Query, "users", Query.users),
+        "isRootField should detect Table-generated 'users' method");
+
+    // Verify isRootField detects the hand-written method
+    static assert(isRootField!(Query, "scalarField", Query.scalarField),
+        "isRootField should detect hand-written 'scalarField' method");
+}
+
+// Test getFieldName/getFieldAlias with aliased fields (verifies graphql-d AST handling)
+unittest {
+    import graphql.parser : Parser;
+    import graphql.lexer : Lexer;
+
+    // Test aliased field: "myAlias: actualField"
+    {
+        auto lexer = Lexer(`{ myAlias: actualField }`);
+        auto parser = Parser(lexer);
+        auto doc = parser.parseDocument();
+        auto field = doc.defs.def.op.ss.sel.sel.field;
+
+        assert(getFieldName(field) == "actualField", "Should extract actual field name");
+        assert(getFieldAlias(field) == "myAlias", "Should extract alias");
+        assert(getOutputName(field) == "myAlias", "Output name should be the alias");
+    }
+
+    // Test non-aliased field: "justAField"
+    {
+        auto lexer = Lexer(`{ justAField }`);
+        auto parser = Parser(lexer);
+        auto doc = parser.parseDocument();
+        auto field = doc.defs.def.op.ss.sel.sel.field;
+
+        assert(getFieldName(field) == "justAField", "Should extract field name");
+        assert(getFieldAlias(field) is null, "Should have no alias");
+        assert(getOutputName(field) == "justAField", "Output name should be the field name");
+    }
+}
+
+// Test scalar methods on Query root (not just Table fields)
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import graphqld2.core;
+    import graphqld2.core.expr : constant;
+    import graphqld2.relational.schema;
+    import graphqld2.relational.demo;
+    import graphqld2.relational.eval_context;
+    import graphqld2.graphql.schema : Schema;
+
+    static MockDB!() db;
+
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("name", string);
+    }
+
+    static struct Query {
+        // Table field - returns [User!]!
+        mixin Table!(User, "users");
+
+        // Scalar field - returns Int!
+        static auto userCount(Expr!Query parent) {
+            // In a real implementation, this would be COUNT(*) from users
+            return constant(42, parent);
+        }
+
+        // Scalar field with int argument - returns Int!
+        static auto userCountWithLimit(Expr!Query parent, int limit) {
+            // In a real implementation, this would be COUNT(*) LIMIT $1
+            return constant(limit < 42 ? limit : 42, parent);
+        }
+
+        // Scalar field returning string
+        static auto serverVersion(Expr!Query parent) {
+            return constant("1.0.0", parent);
+        }
+
+        // Scalar field with default argument
+        static auto greeting(Expr!Query parent, string name = "World") {
+            return constant("Hello, " ~ name ~ "!", parent);
+        }
+    }
+
+    alias MySchema = Schema!(Query);
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "name": "Alice"},
+        {"id": 2, "name": "Bob"}
+    ]`);
+
+    // Test scalar field without arguments
+    {
+        auto query = compileQuery!MySchema(`{
+            userCount
+            serverVersion
+        }`);
+
+        auto executor = new Executor();
+        auto result = awaitSync(executor.execute(query));
+
+        assert(result["userCount"].integer == 42);
+        assert(result["serverVersion"].str == "1.0.0");
+    }
+
+    // Test scalar field with arguments
+    {
+        auto query = compileQuery!MySchema(`{
+            limitedCount: userCountWithLimit(limit: 10)
+            fullCount: userCountWithLimit(limit: 100)
+        }`);
+
+        auto executor = new Executor();
+        auto result = awaitSync(executor.execute(query));
+
+        assert(result["limitedCount"].integer == 10);
+        assert(result["fullCount"].integer == 42);
+    }
+
+    // Test scalar field with default argument
+    {
+        auto query = compileQuery!MySchema(`{
+            defaultGreeting: greeting
+            customGreeting: greeting(name: "Alice")
+        }`);
+
+        auto executor = new Executor();
+        auto result = awaitSync(executor.execute(query));
+
+        assert(result["defaultGreeting"].str == "Hello, World!");
+        assert(result["customGreeting"].str == "Hello, Alice!");
+    }
+
+    // Test mixing scalar and table fields
+    {
+        auto query = compileQuery!MySchema(`{
+            userCount
+            users { name }
+        }`);
+
+        auto executor = new Executor();
+        auto result = awaitSync(executor.execute(query));
+
+        assert(result["userCount"].integer == 42);
+        assert(result["users"].array.length == 2);
+        assert(result["users"].array[0]["name"].str == "Alice");
+    }
 }
