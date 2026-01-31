@@ -96,7 +96,7 @@ enum myConfig = DBConfig(
     pagination: true,   // Enable limit/offset parameters
     filtering: true,    // Enable where parameter
 );
-alias MyDB = MockDB!myConfig;  // Or PostgreSQLDB!myConfig for real DB
+alias MyDB = MockDB!myConfig;  // Or PostgresDB!myConfig for real DB
 
 // Schema definition - the Query type defines root entry points
 // Table mixin takes: DataSource, Entity, fieldName
@@ -374,6 +374,7 @@ auto result = executor.execute(query);
 - Data-source agnostic Executor
 - MockDataFetcher for testing
 - DebugSqlFetcher for SQL inspection (with SQL push-down support)
+- PostgreSQL DataFetcher (`PostgresDB`) using `ae.net.db.psql`
 - GraphQL schema generation (`generateSchemaSDL!Query`)
 - SQL DDL generation (`generateDDL!Query`)
 - GraphQL query compilation (`compileQuery`) with:
@@ -383,8 +384,6 @@ auto result = executor.execute(query);
 
 **Not yet implemented:**
 - Mutations
-- Response serialization
-- Real database DataFetcher (PostgreSQL, etc.)
 - Filtering/pagination (WHERE, LIMIT, OFFSET)
 - Polymorphism (GraphQL union/interface types)
 - Runtime introspection (`__schema`, `__type`, `__typename`)
@@ -402,7 +401,13 @@ dub test -d=graphql
 
 # Show generated SQL DDL
 dub test -d=ddl
+
+# PostgreSQL integration test (requires Nix)
+nix flake check
 ```
+
+The PostgreSQL integration test spins up a real PostgreSQL instance, creates test tables,
+and runs GraphQL queries via HTTP to verify end-to-end functionality.
 
 ## Future Directions
 
@@ -410,7 +415,7 @@ dub test -d=ddl
 - **Plan caching** - Reuse optimized plans for repeated queries
 - **Pagination** - LIMIT/OFFSET/cursor support
 - **Async/parallel execution** - For independent fetches
-- **Real database adapters** - PostgreSQL, MySQL, SQLite
+- **Additional database adapters** - MySQL, SQLite
 
 ## Related Work
 

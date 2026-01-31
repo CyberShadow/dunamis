@@ -724,9 +724,10 @@ class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
     }
 
     override Expr!(R[]) optimize(OptimizeContext ctx) {
-        // Optimize children, but MapExpr itself stays unchanged
-        _collection = (cast(Expr!(Entity[])) _collection).optimize(ctx);
+        // Optimize body FIRST - this creates QueryNodes for column access
+        // Then optimize collection - it can find and use the same QueryNode
         _body = (cast(Expr!R) _body).optimize(ctx);
+        _collection = (cast(Expr!(Entity[])) _collection).optimize(ctx);
         return this;
     }
 

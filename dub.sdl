@@ -8,5 +8,18 @@ targetPath "build"
 
 sourcePaths "source"
 
-dependency "ae" version="==0.0.3730"
 dependency "graphqld:parser" path="../extern/graphqld"
+
+// Default configuration uses dub.packages ae (works for all existing tests)
+configuration "library" {
+    dependency "ae" version="==0.0.3730"
+    excludedSourceFiles "source/graphqld2/postgres/*"
+}
+
+// Integration tests with real PostgreSQL (requires local ae with full psql)
+configuration "postgres-integration" {
+    dependency "ae" path="../ae-container/ae"
+    targetType "executable"
+    mainSourceFile "integration/postgres_test.d"
+    importPaths "integration"
+}

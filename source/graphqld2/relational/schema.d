@@ -632,17 +632,27 @@ auto getByCompositeIds(Entity, IdType)(IdType[][] keyParts) {
 /// Root expression that fetches all entities of a type.
 /// Returns typed Entity[] for compile-time type safety.
 /// Uses Entity._db for data source access.
-class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo {
-    import graphqld2.core.optimize : ExprOptimizer;
+///
+/// In the optimized path, a PrefetchExpr is created during optimization
+/// and used during eval to ensure data is fetched before reading refs.
+class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
+    import graphqld2.core.optimize : ExprOptimizer, OptimizeContext;
+
+    private {
+        PrefetchExpr _prefetch;  // Set during optimization
+        int _queryNodeId = -1;   // QueryNode ID for optimized path
+    }
 
     this() {}
 
     override ExprBase[] dependencies() {
-        return [];  // Root node
+        return _prefetch !is null ? [_prefetch] : [];
     }
 
     override void replaceDependency(size_t index, ExprBase newDep) {
-        // No dependencies to replace
+        if (index == 0 && _prefetch !is null) {
+            _prefetch = cast(PrefetchExpr) newDep;
+        }
     }
 
     override ExprOptimizer[] requestedOptimizers() {
@@ -651,6 +661,31 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo {
             return fetcher.requestedOptimizers();
         }
         return [];
+    }
+
+    override Expr!(Entity[]) optimize(OptimizeContext ctx) {
+        // Try to find an existing QueryNode created by ColumnAccessExpr optimizations
+        // (body is optimized before collection in MapExpr)
+        auto fetcher = Entity._db;
+        if (fetcher is null) return this;
+
+        auto relCtx = ctx.getSourceContext!RelationalOptimizeContext();
+
+        // Look for a root node that matches our entity type and table
+        auto node = relCtx.findRootNode(Entity._typeName, Entity._table);
+
+        if (node is null) {
+            // No node found - we're in a context where column access doesn't use optimization
+            // (e.g., computed fields that don't access columns)
+            // Fall back to naive path
+            return this;
+        }
+
+        // Use the existing node's prefetch
+        _prefetch = relCtx.getPrefetchExpr(node);
+        _queryNodeId = node.id;
+
+        return this;
     }
 
     override Promise!(Entity[][]) eval(EvalContext ctx) {
@@ -664,7 +699,18 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo {
             }
         }
 
-        // Fetch all IDs from data source, encode as entities with nodeIds
+        // Optimized path: use PrefetchExpr to fetch data, then read refs
+        if (_prefetch !is null) {
+            return evalAs!(AnyRef[])(_prefetch, ctx).then((AnyRef[][] prefetchResults) {
+                // PrefetchExpr returns refs from the QueryResult
+                auto refs = prefetchResults.length > 0 ? prefetchResults[0] : [];
+                // Convert AnyRef to Entity - refs already have the full nodeId
+                auto entities = refs.map!(r => Entity(r.nodeId)).array;
+                return [entities];
+            });
+        }
+
+        // Fallback: naive path using fetchAllIds
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
         auto ids = relCtx.fetchAllIds(Entity._table);
         auto entities = ids.map!(id => Entity(Entity._typeName ~ ":" ~ id.to!string)).array;
@@ -678,6 +724,9 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo {
     string entityTypeName() { return Entity._typeName; }
     string entityTable() { return Entity._table; }
     DataFetcher dataFetcher() { return Entity._db; }
+
+    // MapExprInfo implementation (for QueryNode creation)
+    Object collection() { return this; }  // We are the root, return self as collection
 }
 
 /// Factory function to create GetAllExpr
