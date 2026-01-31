@@ -524,6 +524,7 @@ template allArgTypesSupported(alias fn) {
 /// Variables are resolved from the provided JSONValue map.
 auto callComputedField(alias fn, Entity)(Expr!Entity entityRef, Arguments args, JSONValue variables) {
     import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
+    import std.typecons : tuple;
 
     alias Params = Parameters!fn;
     alias Defaults = ParameterDefaults!fn;
@@ -532,29 +533,21 @@ auto callComputedField(alias fn, Entity)(Expr!Entity entityRef, Arguments args, 
     // Number of extra parameters (excluding first Expr!Entity parameter)
     enum numArgs = Params.length - 1;
 
-    // Extract each argument and call the function
+    // Extract arguments (starting from index 1, skipping entityRef)
     static if (numArgs == 0) {
         return fn(entityRef);
-    } else static if (numArgs == 1) {
-        auto arg0 = extractArg!(Params[1], Defaults[1])(args, paramNames[1], variables);
-        return fn(entityRef, arg0);
-    } else static if (numArgs == 2) {
-        auto arg0 = extractArg!(Params[1], Defaults[1])(args, paramNames[1], variables);
-        auto arg1 = extractArg!(Params[2], Defaults[2])(args, paramNames[2], variables);
-        return fn(entityRef, arg0, arg1);
-    } else static if (numArgs == 3) {
-        auto arg0 = extractArg!(Params[1], Defaults[1])(args, paramNames[1], variables);
-        auto arg1 = extractArg!(Params[2], Defaults[2])(args, paramNames[2], variables);
-        auto arg2 = extractArg!(Params[3], Defaults[3])(args, paramNames[3], variables);
-        return fn(entityRef, arg0, arg1, arg2);
-    } else static if (numArgs == 4) {
-        auto arg0 = extractArg!(Params[1], Defaults[1])(args, paramNames[1], variables);
-        auto arg1 = extractArg!(Params[2], Defaults[2])(args, paramNames[2], variables);
-        auto arg2 = extractArg!(Params[3], Defaults[3])(args, paramNames[3], variables);
-        auto arg3 = extractArg!(Params[4], Defaults[4])(args, paramNames[4], variables);
-        return fn(entityRef, arg0, arg1, arg2, arg3);
     } else {
-        static assert(false, "Computed fields with more than 4 arguments not supported");
+        auto argTuple = mixin(() {
+            string code = "tuple(";
+            static foreach (i; 1 .. Params.length) {
+                code ~= (i > 1 ? ", " : "") ~
+                    "extractArg!(Params[" ~ i.stringof ~ "], Defaults[" ~ i.stringof ~ "])" ~
+                    "(args, paramNames[" ~ i.stringof ~ "], variables)";
+            }
+            code ~= ")";
+            return code;
+        }());
+        return fn(entityRef, argTuple.expand);
     }
 }
 
@@ -677,56 +670,67 @@ class MutationResultExpr : Expr!JSONValue {
     }
 }
 
-/// Call a mutation function and wrap the result in an expression
-ExprBase callMutation(alias fn, Mutation)(Arguments args, SelectionSet ss, JSONValue variables) {
-    import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple, ReturnType;
-    import graphqld2.core.expr : toJsonValue;
+/// Helper to extract all arguments for a function and return as a tuple
+auto extractAllArgs(alias fn)(Arguments args, JSONValue variables) {
+    import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
+    import std.meta : staticMap, aliasSeqOf;
+    import std.range : iota;
+    import std.typecons : tuple;
 
     alias Params = Parameters!fn;
     alias Defaults = ParameterDefaults!fn;
     enum paramNames = [ParameterIdentifierTuple!fn];
-    alias Return = ReturnType!fn;
 
-    // Extract arguments and call the mutation
-    static if (Params.length == 0) {
-        auto result = fn();
-    } else static if (Params.length == 1) {
-        auto arg0 = extractArg!(Params[0], Defaults[0])(args, paramNames[0], variables);
-        auto result = fn(arg0);
-    } else static if (Params.length == 2) {
-        auto arg0 = extractArg!(Params[0], Defaults[0])(args, paramNames[0], variables);
-        auto arg1 = extractArg!(Params[1], Defaults[1])(args, paramNames[1], variables);
-        auto result = fn(arg0, arg1);
-    } else static if (Params.length == 3) {
-        auto arg0 = extractArg!(Params[0], Defaults[0])(args, paramNames[0], variables);
-        auto arg1 = extractArg!(Params[1], Defaults[1])(args, paramNames[1], variables);
-        auto arg2 = extractArg!(Params[2], Defaults[2])(args, paramNames[2], variables);
-        auto result = fn(arg0, arg1, arg2);
-    } else static if (Params.length == 4) {
-        auto arg0 = extractArg!(Params[0], Defaults[0])(args, paramNames[0], variables);
-        auto arg1 = extractArg!(Params[1], Defaults[1])(args, paramNames[1], variables);
-        auto arg2 = extractArg!(Params[2], Defaults[2])(args, paramNames[2], variables);
-        auto arg3 = extractArg!(Params[3], Defaults[3])(args, paramNames[3], variables);
-        auto result = fn(arg0, arg1, arg2, arg3);
-    } else {
-        static assert(false, "Mutations with more than 4 arguments not supported");
+    // Build a tuple of extracted arguments
+    template ExtractArg(size_t i) {
+        alias ExtractArg = extractArg!(Params[i], Defaults[i])(args, paramNames[i], variables);
     }
 
-    // Convert result to JSON expression
-    static if (is(Return == void)) {
-        // void mutations return true to indicate success
-        return new MutationResultExpr(JSONValue(true));
-    } else static if (__traits(hasMember, Return, "_typeName")) {
-        // Entity type - need nested selection
-        if (ss is null) {
-            throw new CompilerException("Mutation returning " ~ Return._typeName ~ " requires a selection set");
-        }
-        // For now, serialize the entity to JSON directly
-        // TODO: Support proper nested field selection for mutation results
-        return new MutationResultExpr(toJsonValue(result));
+    // Use static foreach to build the tuple
+    static if (Params.length == 0) {
+        return tuple();
     } else {
-        // Scalar type - convert directly to JSON
-        return new MutationResultExpr(toJsonValue(result));
+        return mixin(() {
+            string code = "tuple(";
+            static foreach (i; 0 .. Params.length) {
+                code ~= (i > 0 ? ", " : "") ~
+                    "extractArg!(Params[" ~ i.stringof ~ "], Defaults[" ~ i.stringof ~ "])" ~
+                    "(args, paramNames[" ~ i.stringof ~ "], variables)";
+            }
+            code ~= ")";
+            return code;
+        }());
+    }
+}
+
+/// Call a mutation function and wrap the result in an expression
+ExprBase callMutation(alias fn, Mutation)(Arguments args, SelectionSet ss, JSONValue variables) {
+    import std.traits : Parameters, ReturnType;
+    import graphqld2.core.expr : toJsonValue;
+
+    alias Return = ReturnType!fn;
+
+    // Extract all arguments and call the function
+    auto argTuple = extractAllArgs!fn(args, variables);
+    static if (is(Return == void)) {
+        fn(argTuple.expand);
+        return new MutationResultExpr(JSONValue(true));
+    } else {
+        auto result = fn(argTuple.expand);
+
+        // Convert result to JSON expression
+        static if (__traits(hasMember, Return, "_typeName")) {
+            // Entity type - need nested selection
+            if (ss is null) {
+                throw new CompilerException("Mutation returning " ~ Return._typeName ~ " requires a selection set");
+            }
+            // For now, serialize the entity to JSON directly
+            // TODO: Support proper nested field selection for mutation results
+            return new MutationResultExpr(toJsonValue(result));
+        } else {
+            // Scalar type - convert directly to JSON
+            return new MutationResultExpr(toJsonValue(result));
+        }
     }
 }
 
