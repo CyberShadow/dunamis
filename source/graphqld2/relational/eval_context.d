@@ -135,6 +135,30 @@ abstract class DataFetcher {
 
     /// Fetch a column as JSONValue array (type-erased).
     abstract JSONValue[] fetchColumnJson(string table, string column, AnyRef[] refs);
+
+    // =========================================================================
+    // Mutation methods (for INSERT/UPDATE/DELETE)
+    // =========================================================================
+
+    import graphqld2.relational.mutation : InsertInput, UpdateInput;
+
+    /// Execute INSERT and return the new row as QueryResult.
+    /// Default implementation returns empty result (no-op).
+    Promise!QueryResult executeInsert(string table, string typeName, InsertInput input) {
+        return resolve(new QueryResult());
+    }
+
+    /// Execute UPDATE and return updated rows as QueryResult.
+    /// Default implementation returns empty result (no-op).
+    Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input) {
+        return resolve(new QueryResult());
+    }
+
+    /// Execute DELETE and return count of deleted rows.
+    /// Default implementation returns 0 (no-op).
+    Promise!int executeDelete(string table, long[] ids) {
+        return resolve(0);
+    }
 }
 
 // ============================================================================
@@ -377,6 +401,10 @@ class RelationalEvalContext {
     /// Stored by PrefetchExpr after query execution, read by ProjectColumnExpr.
     private QueryResult[int] _queryResults;
 
+    /// Mutation results, keyed by entity type name.
+    /// Stored by InsertExpr/UpdateExpr, read by ColumnAccessExpr.
+    private QueryResult[string] _mutationResults;
+
     /// Store results from a QueryNode execution
     void storeQueryResult(int queryNodeId, QueryResult result) {
         _queryResults[queryNodeId] = result;
@@ -412,6 +440,25 @@ class RelationalEvalContext {
             return fetcher.fetchAllIds(table);
         }
         return [];
+    }
+
+    /// Store mutation result for later field access.
+    /// Called by InsertExpr/UpdateExpr after executing the mutation.
+    void storeMutationResult(string typeName, QueryResult result) {
+        _mutationResults[typeName] = result;
+    }
+
+    /// Get column values from mutation results.
+    /// Used by ColumnAccessExpr when evaluating fields on mutation results.
+    T[] getMutationColumnValues(T)(string typeName, string column, AnyRef[] refs) {
+        auto result = _mutationResults.get(typeName, null);
+        if (result is null) return refs.map!(_ => T.init).array;
+        return result.getColumn!T(column, refs);
+    }
+
+    /// Check if we have mutation results for a type
+    bool hasMutationResult(string typeName) {
+        return (typeName in _mutationResults) !is null;
     }
 }
 
@@ -717,6 +764,91 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
         } else {
             static assert(false, "Unsupported type: " ~ T.stringof);
         }
+    }
+
+    // =========================================================================
+    // Mutation methods (INSERT/UPDATE/DELETE)
+    // =========================================================================
+
+    private long[string] _nextId;  // Auto-increment ID per table
+
+    /// Execute INSERT into in-memory data.
+    override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input) {
+        // Get next ID
+        auto nextId = _nextId.get(table, 1);
+        _nextId[table] = nextId + 1;
+
+        // Build new row
+        auto newRow = JSONValue.emptyObject;
+        newRow["id"] = JSONValue(nextId);
+        foreach (col, val; input.values) {
+            newRow[col] = val;
+        }
+
+        // Ensure table exists
+        if (table !in _tableData) {
+            _tableData[table] = JSONValue.emptyArray;
+        }
+
+        // Append row
+        _tableData[table].array ~= newRow;
+
+        // Return as QueryResult
+        auto result = new QueryResult();
+        result.loadFromRows([newRow], typeName);
+        return resolve(result);
+    }
+
+    /// Execute UPDATE on in-memory data.
+    override Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input) {
+        JSONValue[] updatedRows;
+
+        if (table in _tableData) {
+            auto rows = _tableData[table].array;
+
+            // Find and update matching rows
+            foreach (ref row; rows) {
+                auto rowId = row["id"].integer;
+                if (input.ids.canFind(rowId)) {
+                    // Update columns
+                    foreach (col, val; input.values) {
+                        row[col] = val;
+                    }
+                    updatedRows ~= row;
+                }
+            }
+
+            // Store back
+            _tableData[table] = JSONValue(rows);
+        }
+
+        auto result = new QueryResult();
+        result.loadFromRows(updatedRows, typeName);
+        return resolve(result);
+    }
+
+    /// Execute DELETE on in-memory data.
+    override Promise!int executeDelete(string table, long[] ids) {
+        int deleteCount = 0;
+
+        if (table in _tableData) {
+            auto rows = _tableData[table].array;
+
+            // Filter out deleted rows
+            JSONValue[] remaining;
+            foreach (row; rows) {
+                auto rowId = row["id"].integer;
+                if (ids.canFind(rowId)) {
+                    deleteCount++;
+                } else {
+                    remaining ~= row;
+                }
+            }
+
+            _tableData[table] = JSONValue(remaining);
+        }
+
+        return resolve(deleteCount);
     }
 }
 

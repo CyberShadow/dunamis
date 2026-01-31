@@ -351,6 +351,35 @@ T extractValueFromJson(T)(JSONValue json) {
             return T.init;
         }
         return T(extractValueFromJson!U(json));
+    } else static if (isCustomScalar!T) {
+        // CustomScalar: extract as underlying type and wrap
+        alias DType = T.DType;
+        static if (is(DType == long)) {
+            if (json.type == JSONType.integer) {
+                return T(json.integer);
+            } else if (json.type == JSONType.string) {
+                return T(T.deserialize(json.str));
+            }
+            throw new CompilerException("Expected integer or string for " ~ T.name ~ ", got " ~ json.type.to!string);
+        } else static if (is(DType == int)) {
+            if (json.type == JSONType.integer) {
+                return T(cast(int) json.integer);
+            } else if (json.type == JSONType.string) {
+                return T(T.deserialize(json.str));
+            }
+            throw new CompilerException("Expected integer or string for " ~ T.name ~ ", got " ~ json.type.to!string);
+        } else static if (is(DType == string)) {
+            if (json.type == JSONType.string) {
+                return T(json.str);
+            }
+            throw new CompilerException("Expected string for " ~ T.name ~ ", got " ~ json.type.to!string);
+        } else {
+            // Fallback: use string deserialization
+            if (json.type == JSONType.string) {
+                return T(T.deserialize(json.str));
+            }
+            throw new CompilerException("Expected string for " ~ T.name ~ ", got " ~ json.type.to!string);
+        }
     } else static if (isInputType!T) {
         return extractInputObjectFromJson!T(json);
     } else {
@@ -406,6 +435,17 @@ T extractValue(T)(Value val, T defaultValue = T.init) {
             return T.init;  // null
         }
         return T(extractValue!U(val));
+    } else static if (isCustomScalar!T) {
+        // CustomScalar: extract as underlying type and wrap
+        alias DType = T.DType;
+        static if (is(DType == long) || is(DType == int)) {
+            return T(cast(DType) extractLong(val));
+        } else static if (is(DType == string)) {
+            return T(extractString(val));
+        } else {
+            // Fallback: use string deserialization
+            return T(T.deserialize(extractString(val)));
+        }
     } else static if (isInputType!T) {
         return extractInputObject!T(val);
     } else {

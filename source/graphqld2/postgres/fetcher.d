@@ -164,6 +164,90 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
         foreach (ref r; result) r = JSONValue(null);
         return result;
     }
+
+    // =========================================================================
+    // Mutation methods (INSERT/UPDATE/DELETE)
+    // =========================================================================
+
+    import graphqld2.relational.mutation : InsertInput, UpdateInput;
+    import graphqld2.postgres.sql : generateInsertSQL, generateUpdateSQL, generateDeleteSQL;
+
+    /// Execute INSERT and return the new row.
+    /// Values are embedded directly in the SQL (properly escaped).
+    override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input) {
+        auto sql = generateInsertSQL(table, input);
+        _cachedSQL = sql;
+
+        // No parameters needed - values are embedded in SQL
+        return _conn.prepare(sql).then((PreparedStatement stmt) {
+            return stmt.query().array();
+        }).then((PgSqlConnection.Row[] rows) {
+            return parseInsertResult(rows, typeName);
+        });
+    }
+
+    /// Execute UPDATE and return updated rows.
+    /// Values are embedded directly in the SQL (properly escaped).
+    override Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input) {
+        auto sql = generateUpdateSQL(table, input);
+        _cachedSQL = sql;
+
+        // No parameters needed - values are embedded in SQL
+        return _conn.prepare(sql).then((PreparedStatement stmt) {
+            return stmt.query().array();
+        }).then((PgSqlConnection.Row[] rows) {
+            return parseUpdateResult(rows, typeName);
+        });
+    }
+
+    /// Execute DELETE and return count of deleted rows.
+    /// IDs are embedded directly in the SQL.
+    override Promise!int executeDelete(string table, long[] ids) {
+        auto sql = generateDeleteSQL(table, ids);
+        _cachedSQL = sql;
+
+        // No parameters needed - IDs are embedded in SQL
+        return _conn.prepare(sql).then((PreparedStatement stmt) {
+            return stmt.query().array();
+        }).then((PgSqlConnection.Row[] rows) {
+            if (rows.length > 0) {
+                return rows[0].column!int(0);
+            }
+            return 0;
+        });
+    }
+
+    /// Parse INSERT result (single row JSON).
+    private QueryResult parseInsertResult(PgSqlConnection.Row[] rows, string typeName) {
+        auto result = new QueryResult();
+        if (rows.length == 0) {
+            return result;
+        }
+
+        auto jsonStr = rows[0].column!string(0);
+        auto jsonData = parseJSON(jsonStr);
+
+        // Single row - wrap in array for loadFromRows
+        result.loadFromRows([jsonData], typeName);
+        return result;
+    }
+
+    /// Parse UPDATE result (JSON array).
+    private QueryResult parseUpdateResult(PgSqlConnection.Row[] rows, string typeName) {
+        auto result = new QueryResult();
+        if (rows.length == 0) {
+            return result;
+        }
+
+        auto jsonStr = rows[0].column!string(0);
+        auto jsonData = parseJSON(jsonStr);
+
+        // json_agg returns an array
+        if (jsonData.type == JSONType.array) {
+            result.loadFromRows(jsonData.array, typeName);
+        }
+        return result;
+    }
 }
 
 /// Create a PostgresDB instance from connection parameters.

@@ -155,6 +155,46 @@
                 exit 1
               fi
 
+              # Test 2: Mutation - create user
+              echo ""
+              echo "Test 2: Mutation - create user"
+              RESULT=$(curl -s -X POST http://localhost:8080/graphql \
+                -H 'Content-Type: application/json' \
+                -d '{"query": "mutation { createUserWithName(firstName: \"Test\", lastName: \"User\") { firstName lastName } }"}')
+              echo "Response: $RESULT"
+
+              if echo "$RESULT" | grep -q "Test"; then
+                echo "✓ Found Test in response"
+              else
+                echo "✗ Test not found in response"
+                kill $SERVER_PID 2>/dev/null
+                exit 1
+              fi
+
+              if echo "$RESULT" | grep -q "User"; then
+                echo "✓ Found User in response"
+              else
+                echo "✗ User not found in response"
+                kill $SERVER_PID 2>/dev/null
+                exit 1
+              fi
+
+              # Test 3: Verify mutation persisted - query should now include new user
+              echo ""
+              echo "Test 3: Query to verify mutation persisted"
+              RESULT=$(curl -s -X POST http://localhost:8080/graphql \
+                -H 'Content-Type: application/json' \
+                -d '{"query": "{ users { firstName lastName } }"}')
+              echo "Response: $RESULT"
+
+              if echo "$RESULT" | grep -q "Test"; then
+                echo "✓ New user 'Test' found in query response"
+              else
+                echo "✗ New user 'Test' not found - mutation may not have persisted"
+                kill $SERVER_PID 2>/dev/null
+                exit 1
+              fi
+
               echo "=== Stopping server ==="
               kill $SERVER_PID 2>/dev/null
 

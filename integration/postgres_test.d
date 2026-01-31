@@ -31,10 +31,11 @@ import ae.sys.dataset : DataVec, joinToGC;
 import ae.utils.promise;
 
 import graphqld2.core;
-import graphqld2.graphql : compileQuery, generateSchemaSDL, GqlHidden;
+import graphqld2.graphql : compileQuery, generateSchemaSDL, GqlHidden, Schema;
 import graphqld2.postgres;
 import graphqld2.relational.schema;
 import graphqld2.relational.demo;
+import graphqld2.relational.mutation : insert, update, delete_;
 
 /// PostgreSQL data source
 static PostgresDB!() db;
@@ -65,6 +66,21 @@ struct Query {
     mixin Table!(Post, "posts");
 }
 
+struct Mutation {
+    // CRUD mutations for User
+    mixin CrudMutations!User;
+
+    // Custom mutation example
+    static auto createUserWithName(Expr!Mutation parent, string firstName, string lastName) {
+        return insert!User([
+            "first_name": JSONValue(firstName),
+            "last_name": JSONValue(lastName)
+        ]);
+    }
+}
+
+alias MySchema = Schema!(Query, Mutation);
+
 // ============================================================================
 // HTTP Server
 // ============================================================================
@@ -79,8 +95,11 @@ void handleGraphQL(HttpRequest request, HttpServerConnection conn) {
         auto query = json["query"].str;
         JSONValue variables = "variables" in json ? json["variables"] : JSONValue.emptyObject;
 
+        // Reset DB state for new query (clears accumulated QueryNodes)
+        db.reset();
+
         // Compile and execute query (uses static db bound via Entity mixins)
-        auto compiledQuery = compileQuery!Query(query, variables);
+        auto compiledQuery = compileQuery!MySchema(query, variables);
         auto executor = new Executor();
 
         executor.execute(compiledQuery).then((JSONValue result) {
@@ -118,7 +137,7 @@ void main() {
     writeln("====================================");
     writeln();
     writeln("Schema:");
-    writeln(generateSchemaSDL!Query);
+    writeln(generateSchemaSDL!MySchema);
     writeln();
 
     // Connect to PostgreSQL
@@ -156,9 +175,15 @@ void main() {
         writefln("HTTP server listening on http://localhost:%d", listenPort);
         writeln();
         writeln("Test with:");
+        writeln("  # Query");
         writeln("  curl -X POST http://localhost:8080/graphql \\");
         writeln("    -H 'Content-Type: application/json' \\");
         writeln("    -d '{\"query\": \"{ users { firstName lastName } }\"}'");
+        writeln();
+        writeln("  # Mutation");
+        writeln("  curl -X POST http://localhost:8080/graphql \\");
+        writeln("    -H 'Content-Type: application/json' \\");
+        writeln("    -d '{\"query\": \"mutation { createUserWithName(firstName: \\\"Test\\\", lastName: \\\"User\\\") { firstName lastName } }\"}'");
         writeln();
         writeln("Press Ctrl+C to stop.");
         return 0;

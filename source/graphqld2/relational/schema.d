@@ -853,6 +853,12 @@ class ColumnAccessExpr(T, Entity) : Expr!T {
 
         // Get the entity refs from the input chain, then fetch column
         return evalRefAsAnyRef(input, ctx).then((AnyRef[] entityRefs) {
+            // First, check for mutation results (mutations store their results here)
+            if (relCtx.hasMutationResult(Entity._typeName)) {
+                return relCtx.getMutationColumnValues!T(Entity._typeName, column, entityRefs);
+            }
+
+            // Otherwise, fetch from database
             if (relCtx.fetcher !is null) {
                 return relCtx.fetcher.fetchColumn!T(Entity._table, column, entityRefs);
             }
