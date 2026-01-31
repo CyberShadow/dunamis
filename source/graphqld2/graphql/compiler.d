@@ -702,8 +702,6 @@ ExprBase callRootField(alias fn, Parent)(Expr!Parent parent, Arguments args, Sel
     static assert(isExpr!Return,
         "Root field " ~ __traits(identifier, fn) ~ " must return an Expr type, got " ~ Return.stringof);
 
-    alias ResultType = ExprResultType!Return;
-
     // Extract arguments (skip first param which is parent)
     static if (Params.length == 1) {
         // Only parent, no additional args
@@ -722,25 +720,8 @@ ExprBase callRootField(alias fn, Parent)(Expr!Parent parent, Arguments args, Sel
         auto resultExpr = fn(parent, argTuple.expand);
     }
 
-    // Handle return type based on whether it's an entity, array of entities, or scalar
-    static if (__traits(hasMember, ResultType, "_typeName")) {
-        // Single entity type - requires selection set
-        if (ss is null) {
-            throw new CompilerException(
-                "Field returning " ~ ResultType._typeName ~ " requires a selection set");
-        }
-        return compileSelectionSetBody!ResultType(resultExpr, ss, variables);
-    } else static if (is(ResultType == Entity[], Entity) && __traits(hasMember, Entity, "_typeName")) {
-        // Array of entities - requires selection set, use MapExpr
-        if (ss is null) {
-            throw new CompilerException(
-                "Field returning [" ~ Entity._typeName ~ "] requires a selection set");
-        }
-        return compileMapExpr!Entity(resultExpr, ss, variables);
-    } else {
-        // Scalar type - convert to JSON
-        return wrapAsJsonExpr(resultExpr);
-    }
+    // Handle return type generically
+    return compileFieldResult(resultExpr, ss, variables);
 }
 
 /// Wrap an expression to convert its result to JSONValue
@@ -827,19 +808,21 @@ MapExpr!(Entity, DynamicJsonObjectExpr) compileMapExpr(Entity, Coll)(Coll collec
     )(collection);
 }
 
-/// Compile the body of a selection set (the fields to extract)
-DynamicJsonObjectExpr compileSelectionSetBody(Entity)(Expr!Entity entityRef, SelectionSet ss, JSONValue variables) {
+/// Compile the body of a selection set (the fields to extract).
+/// Works with any struct type that has field methods.
+DynamicJsonObjectExpr compileSelectionSetBody(T)(Expr!T ref_, SelectionSet ss, JSONValue variables) {
     auto selections = iterateSelections(ss);
     if (selections.length == 0) {
-        throw new CompilerException("Empty selection set for " ~ Entity._typeName);
+        throw new CompilerException("Empty selection set for " ~ T.stringof);
     }
 
     // Build field name/value pairs for jsonObject
-    return compileFieldsToJsonObject!Entity(entityRef, selections, variables);
+    return compileFieldsToJsonObject!T(ref_, selections, variables);
 }
 
-/// Compile selected fields into a jsonObject call
-DynamicJsonObjectExpr compileFieldsToJsonObject(Entity)(Expr!Entity entityRef, Selection[] selections, JSONValue variables) {
+/// Compile selected fields into a jsonObject call.
+/// Works with any struct type that has field methods.
+DynamicJsonObjectExpr compileFieldsToJsonObject(T)(Expr!T ref_, Selection[] selections, JSONValue variables) {
     // Collect field expressions
     ExprBase[] fieldExprs;
     string[] fieldNames;
@@ -851,7 +834,7 @@ DynamicJsonObjectExpr compileFieldsToJsonObject(Entity)(Expr!Entity entityRef, S
         auto outputName = getOutputName(field);
 
         fieldNames ~= outputName;
-        fieldExprs ~= compileFieldAccess!Entity(entityRef, field, variables);
+        fieldExprs ~= compileFieldAccess!T(ref_, field, variables);
     }
 
     // Build a dynamic JSON object using runtime construction
@@ -864,72 +847,86 @@ DynamicJsonObjectExpr buildDynamicJsonObject(string[] names, ExprBase[] exprs) {
     return new DynamicJsonObjectExpr(names, exprs);
 }
 
-/// Compile access to a single field
-ExprBase compileFieldAccess(Entity)(Expr!Entity entityRef, Field field, JSONValue variables) {
+/// Check if a member is a field method for type T.
+/// A field method takes Expr!T as first parameter and returns an Expr.
+template isFieldMethod(T, alias member) {
+    import std.traits : Parameters, ReturnType;
+    static if (is(typeof(member) == function)) {
+        alias Params = Parameters!member;
+        alias Return = ReturnType!member;
+        static if (Params.length >= 1 && is(Params[0] == Expr!T) && isExpr!Return) {
+            enum isFieldMethod = true;
+        } else {
+            enum isFieldMethod = false;
+        }
+    } else {
+        enum isFieldMethod = false;
+    }
+}
+
+/// Compile the result of a field method based on its return type.
+/// Handles scalars, structs (with selection sets), and arrays.
+/// Scalars are wrapped to convert to JSONValue.
+/// Structs/arrays of structs compile selection sets.
+ExprBase compileFieldResult(ResultExpr)(ResultExpr resultExpr, SelectionSet ss, JSONValue variables) {
+    import graphqld2.core.expr : ExprResultType;
+
+    alias ResultType = ExprResultType!ResultExpr;
+
+    // Arrays need element type inspection
+    static if (is(ResultType == E[], E)) {
+        static if (isCustomScalar!E || !is(E == struct)) {
+            // Array of scalars (custom or primitive) - wrap to JSON
+            return wrapAsJsonExpr(resultExpr);
+        } else {
+            // Array of structs - requires selection set
+            if (ss is null) {
+                throw new CompilerException(
+                    "Field returning [" ~ E.stringof ~ "] requires a selection set");
+            }
+            return compileMapExpr!E(resultExpr, ss, variables);
+        }
+    }
+    // Structs (non-CustomScalar) require selection sets
+    else static if (is(ResultType == struct) && !isCustomScalar!ResultType) {
+        if (ss is null) {
+            throw new CompilerException(
+                "Field returning " ~ ResultType.stringof ~ " requires a selection set");
+        }
+        return compileSelectionSetBody!ResultType(resultExpr, ss, variables);
+    }
+    // Scalars (primitives and CustomScalar) - wrap to JSON
+    else {
+        return wrapAsJsonExpr(resultExpr);
+    }
+}
+
+/// Compile access to a single field.
+/// Finds a method with signature (Expr!T, args...) -> Expr!U and calls it.
+ExprBase compileFieldAccess(T)(Expr!T ref_, Field field, JSONValue variables) {
     auto fieldName = getFieldName(field);
 
-    // Look up field in entity at compile time
-    // Check columns, relationships, and computed fields
-    static foreach (member; __traits(allMembers, Entity)) {{
-        // Skip internal mixin helper symbols (they conflict when multiple mixins are used)
-        static if (member.length >= 5 && member[0..5] == "_Col_") {
-            // Skip _Col_IsForeignKey, _Col_IsNullable, etc.
-        }
-        else static if (member.length >= 11 && member[0..11] == "_BelongsTo_") {
-            // Skip _BelongsTo_FkMeta, _BelongsTo_Parent, etc.
-        }
-        else static if (member.length > 10 && member[0..10] == "_colField_") {
-            alias FieldMeta = __traits(getMember, Entity, member);
-            enum gqlName = getGqlName!(FieldMeta, FieldMeta.name);
+    // Find a field method matching the GraphQL field name
+    static foreach (member; __traits(allMembers, T)) {{
+        static if (!isInternalMember!member) {
+            alias memberSym = __traits(getMember, T, member);
+            static if (isFieldMethod!(T, memberSym)) {
+                // Check for @GqlHidden
+                static if (!hasGqlHidden!memberSym) {
+                    enum gqlName = getGqlName!(memberSym, member);
 
-            if (fieldName == gqlName) {
-                // Column access
-                return __traits(getMember, Entity, FieldMeta.name)(entityRef);
-            }
-        }
-        else static if (member.length > 14 && member[0..14] == "_hasManyField_") {
-            alias FieldMeta = __traits(getMember, Entity, member);
-            enum gqlName = getGqlName!(FieldMeta, FieldMeta.name);
-
-            if (fieldName == gqlName) {
-                // HasMany relationship - compile nested selection
-                if (field.ss is null) {
-                    throw new CompilerException("Relationship field '" ~ fieldName ~ "' requires a selection set");
-                }
-                auto relExpr = __traits(getMember, Entity, FieldMeta.name)(entityRef);
-                return compileMapExpr!(FieldMeta.childType)(relExpr, field.ss, variables);
-            }
-        }
-        else static if (member.length > 16 && member[0..16] == "_belongsToField_") {
-            alias FieldMeta = __traits(getMember, Entity, member);
-            enum gqlName = getGqlName!(FieldMeta, FieldMeta.name);
-
-            if (fieldName == gqlName) {
-                // BelongsTo relationship - compile nested selection for single parent entity
-                if (field.ss is null) {
-                    throw new CompilerException("Relationship field '" ~ fieldName ~ "' requires a selection set");
-                }
-                auto relExpr = __traits(getMember, Entity, FieldMeta.name)(entityRef);
-                // BelongsTo returns Expr!ParentEntity (single entity), not a collection
-                return compileSelectionSetBody!(FieldMeta.parentType)(relExpr, field.ss, variables);
-            }
-        }
-        else static if (isComputedField!(Entity, member, __traits(getMember, Entity, member))) {
-            alias fn = __traits(getMember, Entity, member);
-            // Only support computed fields with scalar argument types
-            static if (allArgTypesSupported!fn) {
-                enum gqlName = getGqlName!(fn, member);
-
-                if (fieldName == gqlName) {
-                    // Computed field - call with arguments extracted from GraphQL
-                    return callComputedField!(fn, Entity)(entityRef, field.args, variables);
+                    if (fieldName == gqlName) {
+                        // Call the field method with arguments
+                        auto resultExpr = callComputedField!(memberSym, T)(ref_, field.args, variables);
+                        // Handle the result based on return type
+                        return compileFieldResult(resultExpr, field.ss, variables);
+                    }
                 }
             }
-            // Skip computed fields with unsupported argument types (e.g., input objects)
         }
     }}
 
-    throw new CompilerException("Unknown field '" ~ fieldName ~ "' on type " ~ Entity._typeName);
+    throw new CompilerException("Unknown field '" ~ fieldName ~ "' on type " ~ T.stringof);
 }
 
 // ============================================================================
@@ -1933,4 +1930,84 @@ unittest {
         assert(result["users"].array.length == 2);
         assert(result["users"].array[0]["name"].str == "Alice");
     }
+}
+
+// Test mutation returning custom payload type (Postgraphile pattern)
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import graphqld2.core;
+    import graphqld2.core.expr : effect, constant, singleton;
+    import graphqld2.relational.schema;
+    import graphqld2.relational.demo;
+    import graphqld2.relational.eval_context;
+    import graphqld2.graphql.schema : Schema;
+
+    static MockDB!() db;
+
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("name", string);
+    }
+
+    // Custom payload type with multiple fields
+    static struct CreateUserPayload {
+        // Return the created user
+        static auto user(Expr!CreateUserPayload p) {
+            // In reality, this would return the newly created user
+            // For testing, return a reference to user 1
+            return effect(() => User("User:1"), p);
+        }
+
+        // Return a success message
+        static auto message(Expr!CreateUserPayload p) {
+            return constant("User created successfully", p);
+        }
+
+        // Return the client mutation ID (GraphQL Relay pattern)
+        static auto clientMutationId(Expr!CreateUserPayload p) {
+            return constant("mutation-123", p);
+        }
+    }
+
+    static struct Mutation {
+        // Mutation returning a custom payload type
+        static Expr!CreateUserPayload createUser(Expr!Mutation parent, string name) {
+            return effect(() => CreateUserPayload.init, parent);
+        }
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    alias MySchema = Schema!(Query, Mutation);
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "name": "Alice"},
+        {"id": 2, "name": "Bob"}
+    ]`);
+
+    // Execute mutation with selection set on custom payload
+    auto mutation = compileQuery!MySchema(`
+        mutation {
+            createUser(name: "Charlie") {
+                message
+                clientMutationId
+                user {
+                    name
+                }
+            }
+        }
+    `);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(mutation));
+
+    // Verify payload fields
+    auto payload = result["createUser"];
+    assert(payload["message"].str == "User created successfully");
+    assert(payload["clientMutationId"].str == "mutation-123");
+    assert(payload["user"]["name"].str == "Alice");
 }

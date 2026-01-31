@@ -813,8 +813,13 @@ auto map(alias fn, Coll)(Coll collection)
 
 /// Convert a D value to JSONValue
 JSONValue toJsonValue(T)(T value) {
+    import graphqld2.core.types : isCustomScalar;
+
     static if (is(T == JSONValue)) {
         return value;
+    } else static if (isCustomScalar!T) {
+        // CustomScalar has its own toJson method
+        return T.toJson(value.value);
     } else static if (is(T == string)) {
         return JSONValue(value);
     } else static if (is(T == bool)) {
