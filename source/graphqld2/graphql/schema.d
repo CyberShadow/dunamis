@@ -341,6 +341,7 @@ string defaultValueToString(T)(T value) {
 /// This is used by schema generation to filter out mixin helper symbols
 /// and D built-in methods.
 template isInternalMember(string name) {
+    import std.algorithm : startsWith;
     enum isInternalMember =
         // Entity internal field (all metadata is in nodeId's type)
         name == "nodeId" ||
@@ -357,7 +358,9 @@ template isInternalMember(string name) {
         name == "__dtor" ||
         name == "__xdtor" ||
         name == "__postblit" ||
-        name == "__xpostblit";
+        name == "__xpostblit" ||
+        // Private members (used by mixins for internal aliases)
+        name.startsWith("_");
 }
 
 
@@ -985,8 +988,39 @@ string generateQuerySDL(Query)() {
     string result = "type Query {\n";
 
     foreach (field; getFields!Query) {
-        // graphqlType already includes "!" for non-nullable types
-        result ~= "  " ~ field.name ~ ": " ~ field.graphqlType ~ "\n";
+        // Skip hidden fields
+        if (field.hidden) continue;
+
+        // Add description as doc string
+        if (field.description.length > 0) {
+            result ~= "  \"\"\"" ~ field.description ~ "\"\"\"\n";
+        }
+
+        // Field name
+        result ~= "  " ~ field.name;
+
+        // Add arguments if present
+        if (field.arguments.length > 0) {
+            result ~= "(";
+            foreach (i, arg; field.arguments) {
+                if (i > 0) result ~= ", ";
+                result ~= arg.name ~ ": " ~ arg.graphqlType;
+                if (arg.hasDefault) {
+                    result ~= " = " ~ arg.defaultValue;
+                }
+            }
+            result ~= ")";
+        }
+
+        // Return type
+        result ~= ": " ~ field.graphqlType;
+
+        // Add @deprecated directive if present
+        if (field.deprecation.length > 0) {
+            result ~= " @deprecated(reason: \"" ~ field.deprecation ~ "\")";
+        }
+
+        result ~= "\n";
     }
 
     result ~= "}\n";

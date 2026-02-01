@@ -373,6 +373,85 @@ auto singleton(T)(T value) {
 }
 
 // ============================================================================
+// Entity Cast Expression
+// ============================================================================
+
+/// Expression that casts between compatible entity/struct types.
+/// Used by plugin infrastructure to forward fields between schema types.
+///
+/// For entity types (with nodeId): copies the nodeId to construct the target type.
+/// For non-entity types (Query, Mutation): uses default-initialized value.
+///
+/// Implements AnyRefEvaluable when To is an entity type (has nodeId).
+class EntityCastExpr(To, From) : Expr!To, AnyRefEvaluable {
+    private Expr!From _source;
+
+    this(Expr!From source) {
+        _source = source;
+    }
+
+    override ExprBase[] dependencies() {
+        return [_source];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0) {
+            _source = cast(Expr!From) newDep;
+        }
+    }
+
+    override Promise!(To[]) eval(EvalContext ctx) {
+        return _source.eval(ctx).then((From[] items) {
+            To[] result = new To[items.length];
+            foreach (i, from; items) {
+                static if (__traits(hasMember, From, "nodeId") && __traits(hasMember, To, "nodeId")) {
+                    // Entity types - copy nodeId
+                    result[i] = To(from.nodeId.id);
+                } else {
+                    // Non-entity types (Query, Mutation) - use default init
+                    result[i] = To.init;
+                }
+            }
+            return result;
+        });
+    }
+
+    override Expr!To optimize(OptimizeContext ctx) {
+        auto optimizedSource = _source.optimize(ctx);
+        if (optimizedSource !is _source) {
+            return new EntityCastExpr!(To, From)(optimizedSource);
+        }
+        return this;
+    }
+
+    /// Access the source expression
+    @property Expr!From source() { return _source; }
+
+    /// AnyRefEvaluable implementation - converts To entities to AnyRef
+    Promise!(AnyRef[]) evalAsAnyRef(EvalContext ctx) {
+        import std.algorithm : map;
+        import std.array : array;
+        import graphqld2.core.types : AnyRef;
+
+        static if (__traits(hasMember, To, "nodeId")) {
+            // To is an entity type with nodeId - extract .id for AnyRef
+            return eval(ctx).then((To[] results) {
+                return results.map!(r => AnyRef(r.nodeId.id)).array;
+            });
+        } else {
+            // Non-entity types can't be converted to AnyRef
+            assert(false, "EntityCastExpr.evalAsAnyRef called on non-entity type");
+        }
+    }
+}
+
+/// Cast an expression from one entity/struct type to another compatible type.
+/// Used by plugin infrastructure to forward fields between schema types.
+auto entityCast(To, From)(Expr!From source) {
+    return new EntityCastExpr!(To, From)(source);
+}
+
+// ============================================================================
 // Binary Operation Expression
 // ============================================================================
 
