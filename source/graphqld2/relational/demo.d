@@ -105,6 +105,7 @@ mixin template CrudMutations(Entity) {
     import std.format : format;
     import std.json : JSONValue;
     import graphqld2.core.expr : Expr;
+    import graphqld2.relational.demo : Int64;
     import graphqld2.relational.mutation : insert, update, delete_;
 
     // createEntity(input: {...}): Entity!
