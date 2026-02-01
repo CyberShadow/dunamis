@@ -397,153 +397,101 @@ template isInternalMember(string name) {
 }
 
 
-/// Extract field information from an entity type.
-/// Scans for methods with UDAs (@SqlColumn, @HasManyFK, @BelongsToFK) and computed fields.
-template getEntityFields(Entity) {
-    import std.traits : hasUDA, getUDAs, ReturnType;
+/// Extract field information from any type (Entity, Query, or Mutation).
+/// Scans for methods with relational UDAs and computed fields.
+///
+/// UDA-based classification:
+/// - @SqlColumn → column field (entities only)
+/// - @HasManyFK → hasMany relationship (entities only)
+/// - @BelongsToFK → belongsTo relationship (entities only)
+/// - @TableEntity → root table entry (Query/Mutation only)
+/// - No UDA → computed field (if valid signature)
+template getFields(T) {
+    import std.traits : hasUDA, getUDAs, ReturnType, Parameters;
     import std.meta : staticIndexOf;
     import graphqld2.relational.schema : SqlColumn, HasManyFK, BelongsToFK, PrimaryKeyAttr, NullableColumn;
-    import graphqld2.relational.schema : ForeignKeyRef, HasManyChild, BelongsToParent;
-    import graphqld2.relational.schema : hasForeignKeyRef, hasHasManyChild, hasBelongsToParent;
-    import graphqld2.relational.schema : extractHasManyChild, extractBelongsToParent;
+    import graphqld2.relational.schema : ForeignKeyRef, HasManyChild, BelongsToParent, TableEntity;
+    import graphqld2.relational.schema : hasForeignKeyRef, hasHasManyChild, hasBelongsToParent, hasTableEntity;
+    import graphqld2.relational.schema : extractHasManyChild, extractBelongsToParent, extractTableEntity;
     import graphqld2.core.expr : ExprResultType;
 
-    enum getEntityFields = () {
+    enum getFields = () {
         FieldInfo[] fields;
 
-        // Introspect all members looking for methods with UDAs
-        static foreach (member; __traits(allMembers, Entity)) {{
-            // Skip internal mixin helper symbols
-            static if (isInternalMember!member) {
-                // Skip
-            }
-            // Check for functions (regular field methods)
-            else static if (is(typeof(__traits(getMember, Entity, member)) == function)) {
-                alias fieldMethod = __traits(getMember, Entity, member);
-
-                // Get common UDAs
-                enum isHidden = hasGqlHidden!fieldMethod;
-                enum gqlFieldName = getGqlName!(fieldMethod, member);
-                enum description = getGqlDescription!fieldMethod;
-                enum deprecation = getGqlDeprecated!fieldMethod;
-
-                // Determine field type by checking UDAs
-                static if (hasUDA!(fieldMethod, SqlColumn)) {
-                    // Column field
-                    enum isPrimaryKey = hasUDA!(fieldMethod, PrimaryKeyAttr);
-                    enum isNullable = hasUDA!(fieldMethod, NullableColumn);
-                    enum isFk = hasForeignKeyRef!fieldMethod;
-
-                    static if (isPrimaryKey) {
-                        enum gqlType = "ID!";
-                    } else static if (isFk) {
-                        // FK column - hidden by default (users access via BelongsTo)
-                        // Get the column type from the method return type
-                        alias RetType = ExprResultType!(ReturnType!fieldMethod);
-                        static if (isNullable) {
-                            enum gqlType = graphqlBaseTypeName!RetType;
-                        } else {
-                            enum gqlType = graphqlTypeName!RetType;
-                        }
-                    } else {
-                        // Regular column
-                        alias RetType = ExprResultType!(ReturnType!fieldMethod);
-                        static if (isNullable) {
-                            enum gqlType = graphqlBaseTypeName!RetType;
-                        } else {
-                            enum gqlType = graphqlTypeName!RetType;
-                        }
-                    }
-
-                    fields ~= FieldInfo(
-                        gqlFieldName,
-                        gqlType,
-                        isNullable,
-                        isHidden,
-                        description,
-                        deprecation
-                    );
-                }
-                else static if (hasUDA!(fieldMethod, HasManyFK)) {
-                    // HasMany field
-                    alias ChildType = extractHasManyChild!fieldMethod;
-                    enum gqlType = "[" ~ EntityID!ChildType.typeName ~ "!]!";
-
-                    fields ~= FieldInfo(
-                        gqlFieldName,
-                        gqlType,
-                        false,
-                        isHidden,
-                        description,
-                        deprecation
-                    );
-                }
-                else static if (hasUDA!(fieldMethod, BelongsToFK)) {
-                    // BelongsTo field
-                    alias ParentType = extractBelongsToParent!fieldMethod;
-                    enum isNullable = hasUDA!(fieldMethod, NullableColumn);
-
-                    static if (isNullable) {
-                        enum gqlType = EntityID!ParentType.typeName;
-                    } else {
-                        enum gqlType = EntityID!ParentType.typeName ~ "!";
-                    }
-
-                    fields ~= FieldInfo(
-                        gqlFieldName,
-                        gqlType,
-                        isNullable,
-                        isHidden,
-                        description,
-                        deprecation
-                    );
-                }
-                // Check for computed fields (no UDA, but valid field method signature)
-                else static if (isComputedField!(Entity, member, fieldMethod)) {
-                    // Get return type and arguments
-                    enum gqlType = computedFieldReturnType!fieldMethod;
-                    enum arguments = getComputedFieldArguments!fieldMethod;
-
-                    fields ~= FieldInfo(
-                        gqlFieldName,
-                        gqlType,
-                        false,  // computed fields are non-nullable by default
-                        isHidden,
-                        description,
-                        deprecation,
-                        arguments
-                    );
-                }
-            }
-        }}
-
-        return fields;
-    }();
-}
-
-/// Extract root fields from a Query or Mutation type.
-/// Scans for methods with @TableEntity UDA (from Table mixin) and other function members.
-template getRootFields(Parent) {
-    import std.traits : hasUDA;
-    import graphqld2.relational.schema : TableEntity, hasTableEntity, extractTableEntity;
-
-    enum getRootFields = () {
-        FieldInfo[] fields;
-
-        static foreach (member; __traits(allMembers, Parent)) {{
+        static foreach (member; __traits(allMembers, T)) {{
             static if (!isInternalMember!member) {
-                // Check for function members
-                static if (is(typeof(__traits(getMember, Parent, member)) == function)) {
-                    alias fn = __traits(getMember, Parent, member);
+                static if (is(typeof(__traits(getMember, T, member)) == function)) {
+                    alias fn = __traits(getMember, T, member);
 
-                    // Get UDAs
+                    // Get common UDAs
                     enum isHidden = hasGqlHidden!fn;
                     enum gqlFieldName = getGqlName!(fn, member);
                     enum description = getGqlDescription!fn;
                     enum deprecation = getGqlDeprecated!fn;
 
-                    // Check if it's a Table field (has @TableEntity UDA)
-                    static if (hasTableEntity!fn) {
+                    // Check for relational UDAs first
+                    static if (hasUDA!(fn, SqlColumn)) {
+                        // Column field (entities)
+                        enum isPrimaryKey = hasUDA!(fn, PrimaryKeyAttr);
+                        enum isNullable = hasUDA!(fn, NullableColumn);
+                        enum isFk = hasForeignKeyRef!fn;
+
+                        static if (isPrimaryKey) {
+                            enum gqlType = "ID!";
+                        } else {
+                            alias RetType = ExprResultType!(ReturnType!fn);
+                            static if (isNullable) {
+                                enum gqlType = graphqlBaseTypeName!RetType;
+                            } else {
+                                enum gqlType = graphqlTypeName!RetType;
+                            }
+                        }
+
+                        fields ~= FieldInfo(
+                            gqlFieldName,
+                            gqlType,
+                            isNullable,
+                            isHidden,
+                            description,
+                            deprecation
+                        );
+                    }
+                    else static if (hasUDA!(fn, HasManyFK)) {
+                        // HasMany relationship (entities)
+                        alias ChildType = extractHasManyChild!fn;
+                        enum gqlType = "[" ~ EntityID!ChildType.typeName ~ "!]!";
+
+                        fields ~= FieldInfo(
+                            gqlFieldName,
+                            gqlType,
+                            false,
+                            isHidden,
+                            description,
+                            deprecation
+                        );
+                    }
+                    else static if (hasUDA!(fn, BelongsToFK)) {
+                        // BelongsTo relationship (entities)
+                        alias ParentType = extractBelongsToParent!fn;
+                        enum isNullable = hasUDA!(fn, NullableColumn);
+
+                        static if (isNullable) {
+                            enum gqlType = EntityID!ParentType.typeName;
+                        } else {
+                            enum gqlType = EntityID!ParentType.typeName ~ "!";
+                        }
+
+                        fields ~= FieldInfo(
+                            gqlFieldName,
+                            gqlType,
+                            isNullable,
+                            isHidden,
+                            description,
+                            deprecation
+                        );
+                    }
+                    else static if (hasTableEntity!fn) {
+                        // Table entry point (Query/Mutation)
                         alias EntityType = extractTableEntity!fn;
                         enum gqlType = "[" ~ EntityID!EntityType.typeName ~ "!]!";
 
@@ -555,10 +503,11 @@ template getRootFields(Parent) {
                             description,
                             deprecation
                         );
-                    } else {
-                        // Other function members (Mutation methods, etc.)
-                        enum gqlType = rootFieldReturnType!fn;
-                        enum arguments = getRootFieldArguments!fn;
+                    }
+                    else static if (isValidFieldMethod!(T, fn)) {
+                        // Computed field or mutation method (no relational UDA)
+                        enum gqlType = computedFieldReturnType!fn;
+                        enum arguments = getComputedFieldArguments!fn;
 
                         fields ~= FieldInfo(
                             gqlFieldName,
@@ -570,6 +519,8 @@ template getRootFields(Parent) {
                             arguments
                         );
                     }
+                    // Methods that don't match any pattern are silently skipped
+                    // (e.g., helper methods, wrong signature)
                 }
             }
         }}
@@ -577,6 +528,48 @@ template getRootFields(Parent) {
         return fields;
     }();
 }
+
+/// Check if a method is a valid GraphQL field method for type T.
+/// Valid field methods:
+/// - Take Expr!T as first parameter
+/// - Return an Expr type
+/// - Are NOT mixin-generated (no @SqlColumn, @HasManyFK, @BelongsToFK, @TableEntity)
+template isValidFieldMethod(T, alias fn) {
+    import std.traits : hasUDA, Parameters, ReturnType;
+    import graphqld2.relational.schema : SqlColumn, HasManyFK, BelongsToFK, TableEntity;
+
+    static if (is(typeof(fn) == function)) {
+        alias Params = Parameters!fn;
+        alias Return = ReturnType!fn;
+
+        static if (Params.length >= 1) {
+            // First parameter must be Expr!T
+            static if (is(Params[0] : Expr!E, E) && is(E == T)) {
+                // Return type must be an Expr
+                static if (isExpr!Return) {
+                    // Must not have relational UDAs (those are handled separately)
+                    enum hasMixinUda = hasUDA!(fn, SqlColumn) ||
+                                       hasUDA!(fn, HasManyFK) ||
+                                       hasUDA!(fn, BelongsToFK) ||
+                                       hasUDA!(fn, TableEntity);
+                    enum isValidFieldMethod = !hasMixinUda;
+                } else {
+                    enum isValidFieldMethod = false;
+                }
+            } else {
+                enum isValidFieldMethod = false;
+            }
+        } else {
+            enum isValidFieldMethod = false;
+        }
+    } else {
+        enum isValidFieldMethod = false;
+    }
+}
+
+/// Aliases for backward compatibility and clarity
+alias getEntityFields = getFields;
+alias getRootFields = getFields;
 
 // ============================================================================
 // Input Type Detection
