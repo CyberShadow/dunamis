@@ -383,9 +383,6 @@ string defaultValueToString(T)(T value) {
 /// and D built-in methods.
 template isInternalMember(string name) {
     enum isInternalMember =
-        // Mixin helper symbols
-        (name.length >= 5 && name[0..5] == "_Col_") ||
-        (name.length >= 11 && name[0..11] == "_BelongsTo_") ||
         // Entity internal fields (not GraphQL fields)
         name == "_db" ||
         name == "_table" ||
