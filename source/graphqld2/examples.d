@@ -731,7 +731,7 @@ unittest {
 unittest {
     import graphqld2.graphql;
 
-    enum queryFields = getQueryFields!Query;
+    enum queryFields = getRootFields!Query;
 
     // Should have: users, posts, comments
     assert(queryFields.length == 3);

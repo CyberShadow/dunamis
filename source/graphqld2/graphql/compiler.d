@@ -433,7 +433,7 @@ T extractInputObjectFromJson(T)(JSONValue json) if (isInputType!T) {
 
     // Set each field from the JSON object
     static foreach (member; __traits(allMembers, T)) {{
-        static if (!isInternalHelper!member) {
+        static if (!isInternalMember!member) {
             alias MemberType = typeof(__traits(getMember, T, member));
             static if (!is(MemberType == function) && !is(MemberType == void)) {
                 if (member in json.object) {
@@ -533,7 +533,7 @@ T extractInputObject(T)(Value val) if (isInputType!T) {
 void setInputField(T)(ref T obj, string fieldName, Value val) if (isInputType!T) {
     // Use compile-time introspection to find and set the matching field
     static foreach (member; __traits(allMembers, T)) {{
-        static if (!isInternalHelper!member) {
+        static if (!isInternalMember!member) {
             alias MemberType = typeof(__traits(getMember, T, member));
             static if (!is(MemberType == function) && !is(MemberType == void)) {
                 if (fieldName == member) {
@@ -569,7 +569,7 @@ template isSupportedArgType(T) {
 template allInputFieldsSupported(T) if (isInputType!T) {
     enum allInputFieldsSupported = () {
         static foreach (member; __traits(allMembers, T)) {{
-            static if (!isInternalHelper!member) {
+            static if (!isInternalMember!member) {
                 alias MemberType = typeof(__traits(getMember, T, member));
                 static if (!is(MemberType == function) && !is(MemberType == void)) {
                     alias Unwrapped = UnwrapNullable!MemberType;

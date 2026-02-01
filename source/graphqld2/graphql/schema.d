@@ -379,15 +379,13 @@ string defaultValueToString(T)(T value) {
 }
 
 /// Check if a member name is an internal member that should be skipped.
-/// This is used by schema generation to filter out mixin helper symbols.
-/// Note: Does NOT filter metadata like _colField_* or _tableField_* which are
-/// needed for schema introspection.
+/// This is used by schema generation to filter out mixin helper symbols
+/// and D built-in methods.
 template isInternalMember(string name) {
     enum isInternalMember =
-        // Mixin helper symbols (not metadata)
+        // Mixin helper symbols
         (name.length >= 5 && name[0..5] == "_Col_") ||
         (name.length >= 11 && name[0..11] == "_BelongsTo_") ||
-        (name.length >= 9 && name[0..9] == "_HasMany_") ||
         // Entity internal fields (not GraphQL fields)
         name == "_db" ||
         name == "_table" ||
@@ -412,8 +410,6 @@ template isInternalMember(string name) {
         name == "__xpostblit";
 }
 
-/// Backwards compatibility alias
-alias isInternalHelper = isInternalMember;
 
 /// Extract field information from an entity type.
 /// Scans for methods with UDAs (@SqlColumn, @HasManyFK, @BelongsToFK) and computed fields.
@@ -432,7 +428,7 @@ template getEntityFields(Entity) {
         // Introspect all members looking for methods with UDAs
         static foreach (member; __traits(allMembers, Entity)) {{
             // Skip internal mixin helper symbols
-            static if (isInternalHelper!member) {
+            static if (isInternalMember!member) {
                 // Skip
             }
             // Check for functions (regular field methods)
@@ -602,10 +598,6 @@ template getRootFields(Parent) {
     }();
 }
 
-/// Backwards compatibility aliases
-alias getQueryFields = getRootFields;
-alias getMutationFields = getRootFields;
-
 // ============================================================================
 // Input Type Detection
 // ============================================================================
@@ -651,7 +643,7 @@ template getInputTypeFields(T) if (isInputType!T) {
         InputFieldInfo[] fields;
 
         static foreach (member; __traits(allMembers, T)) {{
-            static if (!isInternalHelper!member) {
+            static if (!isInternalMember!member) {
                 alias MemberType = typeof(__traits(getMember, T, member));
 
                 // Skip non-field members (functions, etc.)
@@ -768,7 +760,7 @@ template getNestedInputTypesImpl(T, size_t idx, Members...) {
         enum member = Members[idx];
         alias Rest = getNestedInputTypesImpl!(T, idx + 1, Members);
 
-        static if (isInternalHelper!member) {
+        static if (isInternalMember!member) {
             alias getNestedInputTypesImpl = Rest;
         } else static if (__traits(compiles, typeof(__traits(getMember, T, member)))) {
             alias MemberType = typeof(__traits(getMember, T, member));
@@ -803,7 +795,7 @@ template getInputTypesFromEntityImpl(Entity, size_t idx, Members...) {
         enum member = Members[idx];
         alias Rest = getInputTypesFromEntityImpl!(Entity, idx + 1, Members);
 
-        static if (isInternalHelper!member) {
+        static if (isInternalMember!member) {
             alias getInputTypesFromEntityImpl = Rest;
         } else static if (__traits(compiles, isComputedField!(Entity, member, __traits(getMember, Entity, member)))) {
             static if (isComputedField!(Entity, member, __traits(getMember, Entity, member))) {
@@ -1051,7 +1043,7 @@ string generateTypeSDL(Entity)() {
 string generateQuerySDL(Query)() {
     string result = "type Query {\n";
 
-    foreach (field; getQueryFields!Query) {
+    foreach (field; getRootFields!Query) {
         // graphqlType already includes "!" for non-nullable types
         result ~= "  " ~ field.name ~ ": " ~ field.graphqlType ~ "\n";
     }
@@ -1101,9 +1093,6 @@ template rootFieldReturnType(alias member) {
     }
 }
 
-/// Backwards compatibility alias
-alias mutationReturnType = rootFieldReturnType;
-
 /// Extract root field arguments from a function.
 /// Skips the first parameter (Expr!Parent parent).
 template getRootFieldArguments(alias member) {
@@ -1149,12 +1138,9 @@ template getRootFieldArguments(alias member) {
     }();
 }
 
-/// Backwards compatibility alias
-alias getMutationArguments = getRootFieldArguments;
-
 /// Generate GraphQL SDL for the Mutation type
 string generateMutationSDL(Mutation)() {
-    enum fields = getMutationFields!Mutation;
+    enum fields = getRootFields!Mutation;
 
     static if (fields.length == 0) {
         return "";  // No mutations defined
@@ -1622,8 +1608,8 @@ unittest {
     static assert(MySchema.hasMutations);
     static assert(is(MySchema.Mutation == MyMutation));
 
-    // Check getMutationFields extracts fields correctly
-    enum mutationFields = getMutationFields!MyMutation;
+    // Check getRootFields extracts fields correctly
+    enum mutationFields = getRootFields!MyMutation;
     static assert(mutationFields.length == 4, "Should have 4 mutation fields");
 
     // Verify SDL generation
