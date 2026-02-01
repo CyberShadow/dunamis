@@ -872,6 +872,7 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
 class DebugSqlDB(DBConfig config = defaultDBConfig) : DataFetcher {
     import std.stdio : writeln;
     import graphqld2.relational.sql_optimizer : toSQL, CapturingSqlOptimizer;
+    import graphqld2.relational.sql_dialect : SqlDialect;
     import graphqld2.core.optimize : ExprOptimizer;
 
     /// Configuration accessible at compile time
@@ -881,10 +882,12 @@ class DebugSqlDB(DBConfig config = defaultDBConfig) : DataFetcher {
     private QueryNode[] _executedNodes;
     private string _cachedSQL;  // Cached to avoid duplicate debug output
     private CapturingSqlOptimizer _sqlOptimizer;
+    private SqlDialect _dialect;
 
-    this(DataFetcher delegate_) {
+    this(DataFetcher delegate_, SqlDialect dialect) {
         _delegate = delegate_;
-        _sqlOptimizer = new CapturingSqlOptimizer();
+        _dialect = dialect;
+        _sqlOptimizer = new CapturingSqlOptimizer(dialect);
     }
 
     /// Return the CapturingSqlOptimizer to enable SQL push-down
@@ -937,7 +940,7 @@ class DebugSqlDB(DBConfig config = defaultDBConfig) : DataFetcher {
     void reset() {
         _executedNodes = [];
         _cachedSQL = "";
-        _sqlOptimizer = new CapturingSqlOptimizer();
+        _sqlOptimizer = new CapturingSqlOptimizer(_dialect);
     }
 
     override Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult) {

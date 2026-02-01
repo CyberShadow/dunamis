@@ -15,6 +15,7 @@ import graphqld2.core.expr : ExprBase;
 import graphqld2.relational.eval_context;
 import graphqld2.relational.query_node;
 import graphqld2.relational.sql_optimizer;
+import graphqld2.mysql.dialect : mysqlDialect;
 import graphqld2.mysql.sql;
 
 /// MySQL data fetcher using ae.net.db.mysql.
@@ -32,24 +33,9 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
     private QueryResult[int] _cachedResults;  // Store child results from CTE query (by node ID)
     private QueryResult[string] _cachedResultsByType;  // Also index by type name for fetchChildren
 
-    private bool _initialized = false;
-
     this(MySqlConnection conn) {
         _conn = conn;
-        _sqlOptimizer = new SqlOptimizer();
-    }
-
-    /// Initialize MySQL session settings.
-    /// Called automatically before first query.
-    private Promise!void ensureInitialized() {
-        if (_initialized) {
-            return resolve();
-        }
-        _initialized = true;
-
-        // Enable PIPES_AS_CONCAT to allow || for string concatenation
-        // This matches PostgreSQL/SQLite behavior for computed fields
-        return _conn.query("SET sql_mode = 'PIPES_AS_CONCAT'").array().then((rows) {});
+        _sqlOptimizer = new SqlOptimizer(mysqlDialect());
     }
 
     /// Return the SqlOptimizer to enable SQL push-down
@@ -66,7 +52,7 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
     void reset() {
         _executedNodes = [];
         _cachedSQL = "";
-        _sqlOptimizer = new SqlOptimizer();
+        _sqlOptimizer = new SqlOptimizer(mysqlDialect());
         _cachedResults.clear();
         _cachedResultsByType.clear();
     }
@@ -86,42 +72,39 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
             return resolve(new QueryResult());
         }
 
-        // Ensure session is initialized, then execute query
-        return ensureInitialized().then(() {
-            // Root node: generate CTE for entire tree (including all children)
-            auto allNodes = node.allNodesInTree();
-            _executedNodes = allNodes;
+        // Root node: generate CTE for entire tree (including all children)
+        auto allNodes = node.allNodesInTree();
+        _executedNodes = allNodes;
 
-            // Generate the full CTE query for entire node tree
-            auto sql = graphqld2.mysql.sql.toSQL(allNodes, _sqlOptimizer);
+        // Generate the full CTE query for entire node tree
+        auto sql = graphqld2.mysql.sql.toSQL(allNodes, _sqlOptimizer);
 
-            // Substitute IDs if needed
-            if (node.rootFilter == FilterType.byId || node.rootFilter == FilterType.byIds) {
-                auto idValues = node.rootFilterRefs.map!(r => r.localId).array;
-                sql = sql.replace("{{IDS}}", idValues.join(","));
-            } else {
-                // No filter - remove the placeholder
-                sql = sql.replace("{{IDS}}", "");
-            }
+        // Substitute IDs if needed
+        if (node.rootFilter == FilterType.byId || node.rootFilter == FilterType.byIds) {
+            auto idValues = node.rootFilterRefs.map!(r => r.localId).array;
+            sql = sql.replace("{{IDS}}", idValues.join(","));
+        } else {
+            // No filter - remove the placeholder
+            sql = sql.replace("{{IDS}}", "");
+        }
 
-            _cachedSQL = sql;
+        _cachedSQL = sql;
 
-            debug(sql) {
-                import std.stdio : writefln, writeln;
-                writefln("MySQLDB: Generating SQL for %d nodes:", allNodes.length);
-                foreach (n; allNodes) {
-                    writefln("  - node %d: %s (%s)", n.id, n.typeName, n.table);
-                    if (!n.isRoot) {
-                        writefln("    parent: %s, FK: %s", n.parentTypeName, n.parentFk);
-                    }
+        debug(sql) {
+            import std.stdio : writefln, writeln;
+            writefln("MySQLDB: Generating SQL for %d nodes:", allNodes.length);
+            foreach (n; allNodes) {
+                writefln("  - node %d: %s (%s)", n.id, n.typeName, n.table);
+                if (!n.isRoot) {
+                    writefln("    parent: %s, FK: %s", n.parentTypeName, n.parentFk);
                 }
-                writeln("MySQLDB: Generated SQL:");
-                writeln(sql);
             }
+            writeln("MySQLDB: Generated SQL:");
+            writeln(sql);
+        }
 
-            // Execute query using text protocol
-            return _conn.query(sql).array();
-        }).then((MySqlConnection.Row[] rows) {
+        // Execute query using text protocol
+        return _conn.query(sql).array().then((MySqlConnection.Row[] rows) {
             return parseQueryResult(rows, _executedNodes);
         });
     }
@@ -221,10 +204,8 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
         auto columns = input.columns;  // Capture for closure
 
-        // Ensure initialized, then execute INSERT and fetch the inserted row as JSON
-        return ensureInitialized().then(() {
-            return _conn.query(insertSql).array();
-        }).then((MySqlConnection.Row[] _) {
+        // Execute INSERT and fetch the inserted row as JSON
+        return _conn.query(insertSql).array().then((MySqlConnection.Row[] _) {
             // Fetch the inserted row using LAST_INSERT_ID()
             auto selectSql = generateSelectLastInsertSQL(table, columns);
             return _conn.query(selectSql).array();
@@ -246,10 +227,8 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
         _cachedSQL = updateSql;
 
-        // Ensure initialized, then execute UPDATE and fetch the updated rows as JSON
-        return ensureInitialized().then(() {
-            return _conn.query(updateSql).array();
-        }).then((MySqlConnection.Row[] _) {
+        // Execute UPDATE and fetch the updated rows as JSON
+        return _conn.query(updateSql).array().then((MySqlConnection.Row[] _) {
             // Fetch the updated rows
             auto selectSql = generateSelectUpdatedSQL(table, ids, columns);
             return _conn.query(selectSql).array();
@@ -263,13 +242,11 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
         auto deleteSql = generateDeleteSQL(table, ids);
         _cachedSQL = deleteSql;
 
-        // Ensure initialized, then execute DELETE
-        return ensureInitialized().then(() {
-            auto result = _conn.query(deleteSql);
-            return result.array().then((MySqlConnection.Row[] _) {
-                // Return affected rows count
-                return cast(int)result.affectedRows;
-            });
+        // Execute DELETE
+        auto result = _conn.query(deleteSql);
+        return result.array().then((MySqlConnection.Row[] _) {
+            // Return affected rows count
+            return cast(int)result.affectedRows;
         });
     }
 

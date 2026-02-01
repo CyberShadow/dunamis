@@ -16,6 +16,7 @@ import graphqld2.relational.eval_context : RelationalEvalContext, QueryResult;
 import graphqld2.relational.query_node;
 import graphqld2.relational.schema;
 import graphqld2.relational.project;
+import graphqld2.relational.sql_dialect;
 
 // ============================================================================
 // SQL Literal Generation
@@ -94,6 +95,14 @@ class SqlOptimizer : ExprOptimizer {
 
     /// Next computed column alias counter
     private int _nextComputedAlias = 0;
+
+    /// SQL dialect for database-specific SQL generation
+    protected SqlDialect _dialect;
+
+    /// Create a SqlOptimizer with a specific dialect
+    this(SqlDialect dialect) {
+        _dialect = dialect;
+    }
 
     /// Optimize an expression tree, applying SQL push-down where possible.
     /// This should be called AFTER the standard optimizer has run.
@@ -195,9 +204,8 @@ class SqlOptimizer : ExprOptimizer {
             return null;
         }
 
-        // Build the SQL expression
-        auto sqlOp = toSqlOp(binOp.operator);
-        auto sqlExpr = "(" ~ leftSql.get ~ " " ~ sqlOp ~ " " ~ rightSql.get ~ ")";
+        // Build the SQL expression using dialect-specific formatting
+        auto sqlExpr = _dialect.binaryOp(binOp.operator, leftSql.get, rightSql.get);
 
         // Create computed column alias
         auto alias_ = "computed_" ~ (_nextComputedAlias++).to!string;
@@ -298,8 +306,7 @@ class SqlOptimizer : ExprOptimizer {
             auto leftSql = tryGetSqlExpr(binOp.left, queryNodeId);
             auto rightSql = tryGetSqlExpr(binOp.right, queryNodeId);
             if (!leftSql.isNull && !rightSql.isNull) {
-                auto sqlOp = toSqlOp(binOp.operator);
-                return Nullable!string("(" ~ leftSql.get ~ " " ~ sqlOp ~ " " ~ rightSql.get ~ ")");
+                return Nullable!string(_dialect.binaryOp(binOp.operator, leftSql.get, rightSql.get));
             }
         }
 
@@ -362,6 +369,11 @@ class SqlOptimizer : ExprOptimizer {
 class CapturingSqlOptimizer : SqlOptimizer {
     /// Original expressions keyed by computed column alias
     private ExprBase[string] _originalExprs;
+
+    /// Create a CapturingSqlOptimizer with a specific dialect
+    this(SqlDialect dialect) {
+        super(dialect);
+    }
 
     /// Override to capture original expression before replacement
     override protected ExprBase tryPushDownBinaryOp(ExprBase expr, BinaryOpInfo binOp, OptimizeContext ctx) {
@@ -590,7 +602,14 @@ unittest {
 
 unittest {
     // Test SqlOptimizer creation
-    auto optimizer = new SqlOptimizer();
+    // Use a simple test dialect
+    static class TestDialect : SqlDialect {
+        override string binaryOp(string op, string leftSql, string rightSql) {
+            return "(" ~ leftSql ~ " " ~ op ~ " " ~ rightSql ~ ")";
+        }
+        override string name() { return "Test"; }
+    }
+    auto optimizer = new SqlOptimizer(new TestDialect());
     assert(optimizer !is null);
     assert(!optimizer.hasComputedColumns(0));
 }
@@ -623,9 +642,15 @@ unittest {
     // Wrap in a UseExpr so we can test replacement
     auto wrapper = use((string s) => s, concat2);
 
-    // Run SQL optimizer
+    // Run SQL optimizer with test dialect
+    static class TestDialect : SqlDialect {
+        override string binaryOp(string op, string leftSql, string rightSql) {
+            return "(" ~ leftSql ~ " " ~ op ~ " " ~ rightSql ~ ")";
+        }
+        override string name() { return "Test"; }
+    }
     auto ctx = new OptimizeContext();
-    auto sqlOpt = new SqlOptimizer();
+    auto sqlOpt = new SqlOptimizer(new TestDialect());
     sqlOpt.optimize(wrapper, ctx);
 
     // Check that computed columns were created

@@ -9,10 +9,35 @@ import ae.utils.promise.await : awaitSync;
 
 import graphqld2.core;
 import graphqld2.relational;
+import graphqld2.relational.sql_dialect : SqlDialect;
 
 // ============================================================================
 // Data Source Configuration
 // ============================================================================
+
+/// Simple test dialect for examples - uses PostgreSQL-compatible SQL
+private class TestDialect : SqlDialect {
+    override string binaryOp(string op, string leftSql, string rightSql) {
+        string sqlOp = op;
+        switch (op) {
+            case "~": sqlOp = "||"; break;   // String concatenation
+            case "==": sqlOp = "="; break;   // Equality
+            case "!=": sqlOp = "<>"; break;  // Inequality
+            case "&&": sqlOp = "AND"; break; // Logical and
+            case "||": sqlOp = "OR"; break;  // Logical or
+            default: break;
+        }
+        return "(" ~ leftSql ~ " " ~ sqlOp ~ " " ~ rightSql ~ ")";
+    }
+    override string name() { return "Test"; }
+}
+
+/// Singleton test dialect instance
+private SqlDialect testDialect() {
+    __gshared TestDialect instance;
+    if (instance is null) instance = new TestDialect();
+    return instance;
+}
 
 /// Static data source instance - bound by alias in Table mixins.
 /// This is set by createMockDB() before running queries.
@@ -209,7 +234,7 @@ private DebugSqlDB!() createMockDB() {
     ]`);
 
     // Set the module-level static for Query to use
-    db = new DebugSqlDB!()(mock);
+    db = new DebugSqlDB!()(mock, testDialect());
     return db;
 }
 
@@ -532,7 +557,15 @@ unittest {
     auto optimized = query.optimize(optCtx);
 
     // Phase 2: SQL push-down (replaces BinaryOpExprs with ProjectComputedExprs)
-    auto sqlOpt = new SqlOptimizer();
+    // Use a simple test dialect for unit tests
+    static class TestDialect : SqlDialect {
+        override string binaryOp(string op, string leftSql, string rightSql) {
+            if (op == "~") return "(" ~ leftSql ~ " || " ~ rightSql ~ ")";
+            return "(" ~ leftSql ~ " " ~ op ~ " " ~ rightSql ~ ")";
+        }
+        override string name() { return "Test"; }
+    }
+    auto sqlOpt = new SqlOptimizer(new TestDialect());
     sqlOpt.optimize(optimized, optCtx);
 
     // Get the relational optimization context

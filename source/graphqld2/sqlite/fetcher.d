@@ -15,6 +15,7 @@ import graphqld2.core.expr : ExprBase;
 import graphqld2.relational.eval_context;
 import graphqld2.relational.query_node;
 import graphqld2.relational.sql_optimizer;
+import graphqld2.sqlite.dialect : sqliteDialect;
 import graphqld2.sqlite.sql;
 
 /// SQLite data fetcher using ae.sys.sqlite3.
@@ -36,12 +37,12 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
     this(SQLite db) {
         _db = db;
-        _sqlOptimizer = new SqlOptimizer();
+        _sqlOptimizer = new SqlOptimizer(sqliteDialect());
     }
 
     this(string filename) {
         _db = new SQLite(filename);
-        _sqlOptimizer = new SqlOptimizer();
+        _sqlOptimizer = new SqlOptimizer(sqliteDialect());
     }
 
     /// Return the SqlOptimizer to enable SQL push-down
@@ -58,7 +59,7 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
     void reset() {
         _executedNodes = [];
         _cachedSQL = "";
-        _sqlOptimizer = new SqlOptimizer();
+        _sqlOptimizer = new SqlOptimizer(sqliteDialect());
         _cachedResults.clear();
         _cachedResultsByType.clear();
     }

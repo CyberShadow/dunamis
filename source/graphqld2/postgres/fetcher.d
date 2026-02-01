@@ -17,6 +17,7 @@ import graphqld2.core.expr : ExprBase;
 import graphqld2.relational.eval_context;
 import graphqld2.relational.query_node;
 import graphqld2.relational.sql_optimizer;
+import graphqld2.postgres.dialect : postgresDialect;
 
 /// PostgreSQL data fetcher using ae.net.db.psql.
 /// Executes SQL generated from QueryNodes against a PostgreSQL database.
@@ -35,7 +36,7 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
     this(PgSqlConnection conn) {
         _conn = conn;
-        _sqlOptimizer = new SqlOptimizer();
+        _sqlOptimizer = new SqlOptimizer(postgresDialect());
     }
 
     /// Return the SqlOptimizer to enable SQL push-down
@@ -52,7 +53,7 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
     void reset() {
         _executedNodes = [];
         _cachedSQL = "";
-        _sqlOptimizer = new SqlOptimizer();
+        _sqlOptimizer = new SqlOptimizer(postgresDialect());
         _cachedResults.clear();
         _cachedResultsByType.clear();
     }
