@@ -387,7 +387,6 @@ template isInternalMember(string name) {
         name == "_db" ||
         name == "_table" ||
         name == "_typeName" ||
-        name == "_primaryKey" ||
         name == "nodeId" ||
         name == "localId" ||
         name == "isValid" ||

@@ -9,7 +9,7 @@ import std.conv : to;
 import std.json : JSONValue, JSONType;
 
 import graphqld2.core.types : CustomScalar;
-import graphqld2.relational.schema : Entity, PrimaryKey;
+import graphqld2.relational.schema : Entity;
 
 // Re-export MockDB for convenience
 public import graphqld2.relational.eval_context : MockDB;
@@ -61,7 +61,7 @@ alias Int64 = CustomScalar!(
 /// }
 /// ---
 mixin template DemoEntity(alias db, string tableName, IdType = Int64, string typeName = "") {
-    import graphqld2.relational.schema : Entity, PrimaryKey, column, SqlColumn, PrimaryKeyAttr;
+    import graphqld2.relational.schema : Entity, column, SqlColumn, PrimaryKeyAttr;
     import graphqld2.core.expr : Expr;
 
     mixin Entity!(db, tableName, typeName);
@@ -71,8 +71,6 @@ mixin template DemoEntity(alias db, string tableName, IdType = Int64, string typ
     static auto id(Expr!(typeof(this)) e) {
         return e.column!(IdType, typeof(this))("id");
     }
-
-    mixin PrimaryKey!"id";
 }
 
 // ============================================================================

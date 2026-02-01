@@ -384,17 +384,15 @@ private template defaultFieldName(Entity) {
 ///
 /// struct User {
 ///     mixin Entity!(db, "users");
-///     mixin Col!("id", long);
-///     mixin PrimaryKey!"id";
+///     @PrimaryKeyAttr mixin Col!("id", long);
 ///     mixin Col!("email", string);
 /// }
 ///
 /// // Composite primary key
 /// struct OrderItem {
 ///     mixin Entity!(db, "order_items");
-///     mixin Col!("orderId", long);
-///     mixin Col!("productId", long);
-///     mixin PrimaryKey!("orderId", "productId");
+///     @PrimaryKeyAttr mixin Col!("orderId", long);
+///     @PrimaryKeyAttr mixin Col!("productId", long);
 /// }
 /// ---
 mixin template Entity(alias db, string tableName, string typeName = "") {
@@ -423,31 +421,6 @@ mixin template Entity(alias db, string tableName, string typeName = "") {
 
     /// For debugging
     string toString() const { return nodeId; }
-}
-
-// ============================================================================
-// Primary Key Mixin
-// ============================================================================
-
-/// Marks one or more columns as the primary key.
-/// The column(s) must be defined via Col mixin.
-///
-/// Example:
-/// ---
-/// mixin Col!("id", long);
-/// mixin PrimaryKey!"id";
-///
-/// // Composite key
-/// mixin Col!("orderId", long);
-/// mixin Col!("productId", long);
-/// mixin PrimaryKey!("orderId", "productId");
-/// ---
-mixin template PrimaryKey(columnNames...) {
-    static assert(columnNames.length > 0, "PrimaryKey requires at least one column name");
-
-    struct _primaryKey {
-        static immutable string[] columns = [columnNames];
-    }
 }
 
 // ============================================================================
@@ -1336,24 +1309,24 @@ unittest {
     // Test low-level Entity mixin (no id column)
     static struct User {
         mixin Entity!(db, "users");
-        mixin Col!("id", long);
-        mixin PrimaryKey!"id";
+        @PrimaryKeyAttr mixin Col!("id", long);
     }
     static assert(User._table == "users");
     static assert(User._typeName == "User");
-    // Check that the id method has @SqlColumn UDA
+    // Check that the id method has @SqlColumn and @PrimaryKeyAttr UDAs
     static assert(hasUDA!(User.id, SqlColumn));
+    static assert(hasUDA!(User.id, PrimaryKeyAttr));
     static assert(getUDAs!(User.id, SqlColumn)[0].name == "id");
 
     // Test Entity with custom type name
     static struct Post {
         mixin Entity!(db, "posts", "BlogPost");
-        mixin Col!("id", long);
-        mixin PrimaryKey!"id";
+        @PrimaryKeyAttr mixin Col!("id", long);
     }
     static assert(Post._table == "posts");
     static assert(Post._typeName == "BlogPost");
     static assert(hasUDA!(Post.id, SqlColumn));
+    static assert(hasUDA!(Post.id, PrimaryKeyAttr));
 }
 
 unittest {
@@ -1511,18 +1484,18 @@ unittest {
     static struct OrderItem {
         mixin Entity!(db, "order_items");
 
-        // Define the composite key columns
-        mixin Col!("orderId", long);
-        mixin Col!("productId", long);
-        mixin PrimaryKey!("orderId", "productId");
+        // Define the composite key columns with @PrimaryKeyAttr
+        @PrimaryKeyAttr mixin Col!("orderId", long);
+        @PrimaryKeyAttr mixin Col!("productId", long);
 
         // Other columns
         mixin Col!("quantity", long);
         mixin Col!("price", string);  // Use string for decimal
     }
 
-    // Verify composite key metadata
-    static assert(OrderItem._primaryKey.columns == ["orderId", "productId"]);
+    // Verify composite key via UDAs
+    static assert(hasUDA!(OrderItem.orderId, PrimaryKeyAttr));
+    static assert(hasUDA!(OrderItem.productId, PrimaryKeyAttr));
     static assert(OrderItem._table == "order_items");
     static assert(OrderItem._typeName == "OrderItem");
 
@@ -1568,9 +1541,8 @@ unittest {
 
     static struct OrderItem {
         mixin Entity!(db, "order_items");
-        mixin Col!("orderId", long);
-        mixin Col!("productId", long);
-        mixin PrimaryKey!("orderId", "productId");
+        @PrimaryKeyAttr mixin Col!("orderId", long);
+        @PrimaryKeyAttr mixin Col!("productId", long);
         mixin Col!("quantity", long);
     }
 

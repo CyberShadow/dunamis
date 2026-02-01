@@ -23,23 +23,6 @@ struct ColumnDef {
     string foreignKeyColumn; // Empty if not a FK
 }
 
-/// Get primary key column names from entity
-template getPrimaryKeyColumns(Entity) {
-    static if (__traits(hasMember, Entity, "_primaryKey")) {
-        enum getPrimaryKeyColumns = Entity._primaryKey.columns;
-    } else {
-        enum string[] getPrimaryKeyColumns = [];
-    }
-}
-
-/// Check if a column name is part of the primary key
-bool isInPrimaryKey(string colName, const string[] pkColumns) {
-    foreach (pk; pkColumns) {
-        if (pk == colName) return true;
-    }
-    return false;
-}
-
 /// Get the base D type name for SQL mapping
 template getDTypeName(T) {
     static if (isCustomScalar!T) {
@@ -80,7 +63,6 @@ template getColumnDefs(Entity) {
     enum getColumnDefs = () {
         ColumnDef[] columns;
         bool[string] seenColumns;
-        enum pkColumns = getPrimaryKeyColumns!Entity;
 
         // Collect all columns from methods with @SqlColumn UDA
         static foreach (member; __traits(allMembers, Entity)) {{
@@ -92,9 +74,8 @@ template getColumnDefs(Entity) {
                     enum columnName = getUDAs!(fieldMethod, SqlColumn)[0].name;
 
                     if (columnName !in seenColumns) {
-                        // Check if primary key
-                        enum bool isPK = hasUDA!(fieldMethod, PrimaryKeyAttr) ||
-                                        isInPrimaryKey(member, pkColumns);
+                        // Check if primary key (via @PrimaryKeyAttr UDA)
+                        enum bool isPK = hasUDA!(fieldMethod, PrimaryKeyAttr);
 
                         // Check if nullable
                         enum bool isNullable = hasUDA!(fieldMethod, NullableColumn);
@@ -143,8 +124,14 @@ template generateCreateTable(Dialect, Entity) {
         string result = "CREATE TABLE " ~ Entity._table ~ " (\n";
 
         enum columns = getColumnDefs!Entity;
-        enum pkColumns = getPrimaryKeyColumns!Entity;
-        enum bool isCompositePK = pkColumns.length > 1;
+
+        // Count primary key columns to detect composite keys
+        size_t pkCount = 0;
+        foreach (col; columns) {
+            if (col.isPrimaryKey)
+                pkCount++;
+        }
+        bool isCompositePK = pkCount > 1;
 
         string[] colDefs;
         string[] pkColNames;
