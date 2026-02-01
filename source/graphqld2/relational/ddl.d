@@ -65,64 +65,65 @@ template getDTypeName(T) {
     }
 }
 
-/// Extract column definitions from an entity type
+/// Extract column definitions from an entity type.
+/// Scans for methods with @SqlColumn UDA.
 template getColumnDefs(Entity) {
+    import std.traits : hasUDA, getUDAs, ReturnType;
+    import std.meta : staticIndexOf;
+    import graphqld2.relational.schema : SqlColumn, PrimaryKeyAttr, NullableColumn;
+    import graphqld2.relational.schema : ForeignKeyRef, hasForeignKeyRef, extractForeignKeyRef;
+    import graphqld2.relational.schema : BelongsToFK, hasBelongsToFK, getBelongsToFK;
+    import graphqld2.relational.schema : BelongsToParent, hasBelongsToParent, extractBelongsToParent;
+    import graphqld2.relational.schema : getSqlColumn;
+    import graphqld2.core.expr : ExprResultType;
+
     enum getColumnDefs = () {
         ColumnDef[] columns;
         bool[string] seenColumns;
         enum pkColumns = getPrimaryKeyColumns!Entity;
 
-        // Collect all columns from Col mixins
+        // Collect all columns from methods with @SqlColumn UDA
         static foreach (member; __traits(allMembers, Entity)) {{
-            static if (member.length > 10 && member[0..10] == "_colField_") {
-                alias FieldMeta = __traits(getMember, Entity, member);
-                if (FieldMeta.column !in seenColumns) {
-                    static if (__traits(hasMember, FieldMeta, "isPrimaryKey")) {
-                        enum bool isPK = isInPrimaryKey(FieldMeta.name, pkColumns) || FieldMeta.isPrimaryKey;
-                    } else {
-                        enum bool isPK = isInPrimaryKey(FieldMeta.name, pkColumns);
-                    }
+            static if (is(typeof(__traits(getMember, Entity, member)) == function)) {
+                alias fieldMethod = __traits(getMember, Entity, member);
 
-                    static if (FieldMeta.isForeignKey) {
-                        columns ~= ColumnDef(
-                            FieldMeta.column,
-                            getDTypeName!(FieldMeta.type),
-                            isPK ? false : FieldMeta.isNullable,
-                            isPK,
-                            FieldMeta.referencedEntity._table,
-                            FieldMeta.referencedColumn
-                        );
-                    } else {
-                        columns ~= ColumnDef(
-                            FieldMeta.column,
-                            getDTypeName!(FieldMeta.type),
-                            isPK ? false : FieldMeta.isNullable,
-                            isPK,
-                            "",
-                            ""
-                        );
-                    }
-                    seenColumns[FieldMeta.column] = true;
-                }
-            }
-        }}
+                // Check for @SqlColumn UDA (indicates a column field)
+                static if (hasUDA!(fieldMethod, SqlColumn)) {
+                    enum columnName = getUDAs!(fieldMethod, SqlColumn)[0].name;
 
-        // Also check BelongsTo for FK columns not defined via Col
-        static foreach (member; __traits(allMembers, Entity)) {{
-            static if (member.length > 16 && member[0..16] == "_belongsToField_") {
-                alias FieldMeta = __traits(getMember, Entity, member);
-                if (FieldMeta.foreignKey !in seenColumns) {
-                    static if (__traits(hasMember, FieldMeta.parentType, "_colField_id")) {
-                        alias ParentIdCol = __traits(getMember, FieldMeta.parentType, "_colField_id");
-                        columns ~= ColumnDef(
-                            FieldMeta.foreignKey,
-                            getDTypeName!(ParentIdCol.type),
-                            FieldMeta.nullable,
-                            false,
-                            FieldMeta.parentType._table,
-                            "id"
-                        );
-                        seenColumns[FieldMeta.foreignKey] = true;
+                    if (columnName !in seenColumns) {
+                        // Check if primary key
+                        enum bool isPK = hasUDA!(fieldMethod, PrimaryKeyAttr) ||
+                                        isInPrimaryKey(member, pkColumns);
+
+                        // Check if nullable
+                        enum bool isNullable = hasUDA!(fieldMethod, NullableColumn);
+
+                        // Get the D type from method return type
+                        alias ColType = ExprResultType!(ReturnType!fieldMethod);
+
+                        // Check if FK column
+                        static if (hasForeignKeyRef!fieldMethod) {
+                            alias FkEntity = extractForeignKeyRef!fieldMethod;
+                            columns ~= ColumnDef(
+                                columnName,
+                                getDTypeName!ColType,
+                                isPK ? false : isNullable,
+                                isPK,
+                                FkEntity._table,
+                                "id"  // Default FK column
+                            );
+                        } else {
+                            columns ~= ColumnDef(
+                                columnName,
+                                getDTypeName!ColType,
+                                isPK ? false : isNullable,
+                                isPK,
+                                "",
+                                ""
+                            );
+                        }
+                        seenColumns[columnName] = true;
                     }
                 }
             }

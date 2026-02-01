@@ -61,22 +61,13 @@ alias Int64 = CustomScalar!(
 /// }
 /// ---
 mixin template DemoEntity(alias db, string tableName, IdType = Int64, string typeName = "") {
-    import graphqld2.relational.schema : Entity, PrimaryKey, column;
+    import graphqld2.relational.schema : Entity, PrimaryKey, column, SqlColumn, PrimaryKeyAttr;
     import graphqld2.core.expr : Expr;
 
     mixin Entity!(db, tableName, typeName);
 
-    /// Column metadata for the primary key (id)
-    struct _colField_id {
-        enum name = "id";
-        enum column = "id";
-        alias type = IdType;
-        enum isForeignKey = false;
-        enum isNullable = false;
-        enum isPrimaryKey = true;
-    }
-
-    /// ID accessor - reads the id column
+    /// ID accessor with UDAs - reads the id column
+    @SqlColumn("id") @PrimaryKeyAttr
     static auto id(Expr!(typeof(this)) e) {
         return e.column!(IdType, typeof(this))("id");
     }

@@ -698,7 +698,7 @@ SequentialJsonObjectExpr compileRootMutationSet(Mutation)(SelectionSet ss, JSONV
 }
 
 /// Compile a single root field (works for both Query and Mutation).
-/// Every non-internal function member is assumed to be a field.
+/// Scans for function members with matching GraphQL name.
 ExprBase compileRootField(Parent)(Field field, JSONValue variables) {
     auto fieldName = getFieldName(field);
     auto parentExpr = singleton(Parent.init);
