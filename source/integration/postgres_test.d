@@ -25,6 +25,7 @@ import std.stdio;
 import std.string : strip, replace;
 
 import ae.net.asockets : socketManager;
+import ae.net.sync : ThreadAnchor;
 import ae.net.db.psql : PgSqlConnection;
 import ae.net.http.server : HttpServer, HttpServerConnection;
 import ae.net.http.common : HttpRequest, HttpStatusCode;
@@ -225,8 +226,12 @@ void main() {
     writefln("Connecting to PostgreSQL at %s:%d/%s...", host, port, database);
 
     shared bool serverReady = false;
-    shared bool testsComplete = false;
     shared int exitCode = 1;
+    __gshared HttpServer server;
+    __gshared PgSqlConnection pgConn;
+
+    // Create thread anchor to allow test thread to run code in main thread's event loop
+    auto mainThread = new ThreadAnchor();
 
     // Start test runner thread - it will wait for server to be ready
     auto testThread = new Thread({
@@ -252,26 +257,34 @@ void main() {
             exitCode = 1;
         }
 
-        testsComplete = true;
+        // Schedule cleanup in main thread's event loop
+        mainThread.runAsync({
+            if (server !is null) {
+                server.close();
+            }
+            if (pgConn !is null) {
+                pgConn.disconnect("Tests complete");
+            }
+        });
     });
     testThread.start();
 
     // Run setup in a fiber so we can use await()
     async({
-        auto conn = connect(host, port, database, user, password).await();
+        pgConn = connect(host, port, database, user, password).await();
         writeln("Connected.");
         writeln();
 
         // Initialize DB wrapper
-        db = new PostgresDB!()(conn);
+        db = new PostgresDB!()(pgConn);
 
         // Setup schema using await
-        setupDatabase(conn);
+        setupDatabase(pgConn);
         writeln();
 
         // Start HTTP server
         writeln("Starting HTTP server on port 8080...");
-        auto server = startServer();
+        server = startServer();
         writeln("Server started.");
         writeln();
 
@@ -279,14 +292,16 @@ void main() {
         serverReady = true;
     }).except((Exception e) {
         writefln("Error: %s", e.msg);
-        testsComplete = true;
+        // Schedule cleanup on error too
+        mainThread.runAsync({
+            if (server !is null) server.close();
+            if (pgConn !is null) pgConn.disconnect("Error during setup");
+        });
         exitCode = 1;
     });
 
-    // Run event loop until tests complete
-    while (!testsComplete) {
-        socketManager.loop();
-    }
+    // Run event loop - will exit when all connections are closed
+    socketManager.loop();
 
     testThread.join();
 
