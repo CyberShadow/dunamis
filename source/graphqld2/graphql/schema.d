@@ -483,8 +483,16 @@ template getFields(T) {
                             arguments
                         );
                     }
-                    // Methods that don't match any pattern are silently skipped
-                    // (e.g., helper methods, wrong signature)
+                    else static if (!isHidden) {
+                        // Static method that doesn't conform and isn't hidden - compile error
+                        static assert(false,
+                            "Method '" ~ member ~ "' in " ~ T.stringof ~
+                            " is not a valid GraphQL field. " ~
+                            "Valid fields must take Expr!" ~ T.stringof ~ " as first parameter " ~
+                            "and return an Expr type. " ~
+                            "Add @GqlHidden to exclude this method from the schema.");
+                    }
+                    // @GqlHidden methods that don't conform are silently skipped
                 }
             }
         }}
