@@ -539,10 +539,6 @@ template isValidFieldMethod(T, alias fn) {
     }
 }
 
-/// Aliases for backward compatibility and clarity
-alias getEntityFields = getFields;
-alias getRootFields = getFields;
-
 // ============================================================================
 // Input Type Detection
 // ============================================================================
@@ -944,7 +940,7 @@ template getAllEntityTypes(Query) {
 string generateTypeSDL(Entity)() {
     string result = "type " ~ EntityID!Entity.typeName ~ " {\n";
 
-    foreach (field; getEntityFields!Entity) {
+    foreach (field; getFields!Entity) {
         // Skip hidden fields
         if (field.hidden) continue;
 
@@ -988,7 +984,7 @@ string generateTypeSDL(Entity)() {
 string generateQuerySDL(Query)() {
     string result = "type Query {\n";
 
-    foreach (field; getRootFields!Query) {
+    foreach (field; getFields!Query) {
         // graphqlType already includes "!" for non-nullable types
         result ~= "  " ~ field.name ~ ": " ~ field.graphqlType ~ "\n";
     }
@@ -1085,7 +1081,7 @@ template getRootFieldArguments(alias member) {
 
 /// Generate GraphQL SDL for the Mutation type
 string generateMutationSDL(Mutation)() {
-    enum fields = getRootFields!Mutation;
+    enum fields = getFields!Mutation;
 
     static if (fields.length == 0) {
         return "";  // No mutations defined
@@ -1358,8 +1354,8 @@ unittest {
         mixin Col!("passwordHash", string);
     }
 
-    // Check that getEntityFields detects hidden field
-    enum fields = getEntityFields!User;
+    // Check that getFields detects hidden field
+    enum fields = getFields!User;
     static assert(fields.length == 3);
 
     // Find the passwordHash field and verify it's hidden
@@ -1402,8 +1398,8 @@ unittest {
         mixin Col!("plain", string);  // No annotations
     }
 
-    // Check that getEntityFields extracts description and deprecation
-    enum fields = getEntityFields!Article;
+    // Check that getFields extracts description and deprecation
+    enum fields = getFields!Article;
 
     bool foundTitle = false;
     bool foundBody = false;
@@ -1553,8 +1549,8 @@ unittest {
     static assert(MySchema.hasMutations);
     static assert(is(MySchema.Mutation == MyMutation));
 
-    // Check getRootFields extracts fields correctly
-    enum mutationFields = getRootFields!MyMutation;
+    // Check getFields extracts fields correctly
+    enum mutationFields = getFields!MyMutation;
     static assert(mutationFields.length == 4, "Should have 4 mutation fields");
 
     // Verify SDL generation

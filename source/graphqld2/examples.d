@@ -703,7 +703,7 @@ unittest {
     import graphqld2.graphql;
 
     // Test User type fields
-    enum userFields = getEntityFields!User;
+    enum userFields = getFields!User;
 
     // Should have: id, firstName, lastName, email, posts, comments
     assert(userFields.length >= 6);
@@ -729,7 +729,7 @@ unittest {
 unittest {
     import graphqld2.graphql;
 
-    enum queryFields = getRootFields!Query;
+    enum queryFields = getFields!Query;
 
     // Should have: users, posts, comments
     assert(queryFields.length == 3);
