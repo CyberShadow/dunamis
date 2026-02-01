@@ -92,7 +92,8 @@ import graphqld2.relational;
 import graphqld2.graphql;
 
 // Data source - static variable bound to entities via DemoEntity mixin
-static MockDB!() db;  // Or PostgresDB!() for real DB
+// Options: MockDB (testing), PostgresDB, SQLiteDB, MySQLDB
+static MockDB!() db;
 
 // Entity definitions with mixins
 // DemoEntity is a convenience wrapper that adds an `id` column automatically.
@@ -363,14 +364,16 @@ auto result = executor.execute(query);
 - QueryNode-based SQL planning
 - JOINs for belongsTo relationships
 - Child queries (CTEs) for hasMany relationships
-- Computed fields with SQL push-down (concatenation becomes `||` in SQL)
+- Computed fields with SQL push-down (dialect-aware: `||` for PostgreSQL/SQLite, `CONCAT()` for MySQL)
 - Computed fields in GraphQL schema (static functions taking `RefExpr!Entity`)
 - Field arguments for computed fields (with defaults, introspected from D function signatures)
 - Input types auto-generated from struct arguments (with `Nullable!(Nullable!T)` for three-state fields)
 - Data-source agnostic Executor
-- MockDataFetcher for testing
-- DebugSqlFetcher for SQL inspection (with SQL push-down support)
-- PostgreSQL DataFetcher (`PostgresDB`) using `ae.net.db.psql`
+- MockDB for testing (in-memory data)
+- DebugSqlDB for SQL inspection (wraps another fetcher, prints generated SQL)
+- PostgresDB using `ae.net.db.psql`
+- SQLiteDB using `ae.sys.sqlite3`
+- MySQLDB using `ae.net.db.mysql`
 - GraphQL schema generation (`generateSchemaSDL!Query`)
 - SQL DDL generation (`generateDDL!Query`)
 - GraphQL query compilation (`compileQuery`) with:
@@ -400,12 +403,17 @@ dub test -d=graphql
 # Show generated SQL DDL
 dub test -d=ddl
 
-# All tests including PostgreSQL integration (requires Nix)
+# All tests including database integration tests (requires Nix)
 nix flake check
 ```
 
-The `nix flake check` command runs both unit tests and PostgreSQL integration tests.
-The integration test spins up a real PostgreSQL instance, creates test tables,
+The `nix flake check` command runs:
+- Unit tests
+- PostgreSQL integration tests (spins up a real PostgreSQL instance)
+- SQLite integration tests (uses in-memory database)
+- MySQL integration tests (spins up a MariaDB instance)
+
+Each integration test creates tables via DDL generation, seeds data via mutations,
 starts an HTTP server, and runs GraphQL queries to verify end-to-end functionality.
 
 ## Dependencies
@@ -419,11 +427,11 @@ The Nix flake uses these same versions via `buildDubPackage`.
 
 ## Future Directions
 
+- **Filtering/pagination** - WHERE clauses, LIMIT/OFFSET/cursor support
 - **Expression deduplication** - Grafast-style peer analysis
 - **Plan caching** - Reuse optimized plans for repeated queries
-- **Pagination** - LIMIT/OFFSET/cursor support
 - **Async/parallel execution** - For independent fetches
-- **Additional database adapters** - MySQL, SQLite
+- **Runtime introspection** - `__schema`, `__type`, `__typename` queries
 
 ## Related Work
 
