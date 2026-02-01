@@ -52,23 +52,14 @@ template Schema(QueryType, MutationType = void) {
     static if (is(MutationType == void)) {
         // Empty mutation type when not provided
         struct Mutation {}
-        enum hasMutations = false;
     } else {
         alias Mutation = MutationType;
-        enum hasMutations = true;
     }
-
-    // Marker to identify Schema instantiations
-    enum _isSchema = true;
 }
 
-/// Check if a type is a Schema instantiation
+/// Check if a type is a Schema (has Query and Mutation members)
 template isSchema(alias T) {
-    static if (__traits(compiles, T._isSchema) && T._isSchema) {
-        enum isSchema = true;
-    } else {
-        enum isSchema = false;
-    }
+    enum isSchema = __traits(hasMember, T, "Query") && __traits(hasMember, T, "Mutation");
 }
 
 // ============================================================================
@@ -1157,18 +1148,16 @@ template generateSchemaSDL(alias SchemaOrQuery) {
     static if (isSchema!SchemaOrQuery) {
         alias QueryType = SchemaOrQuery.Query;
         alias MutationType = SchemaOrQuery.Mutation;
-        enum hasMutations = SchemaOrQuery.hasMutations;
     } else {
         alias QueryType = SchemaOrQuery;
         struct MutationType {}
-        enum hasMutations = false;
     }
 
     alias AllTypes = getAllEntityTypes!QueryType;
 
-    // Collect input types from entities AND mutations
+    // Collect input types from entities AND mutations (if any)
     alias EntityInputTypes = getAllInputTypes!QueryType;
-    static if (hasMutations) {
+    static if (getFields!MutationType.length > 0) {
         alias MutationInputTypes = getInputTypesFromMutation!MutationType;
         alias AllInputTypes = uniqueTypes!(AliasSeq!(EntityInputTypes, MutationInputTypes));
     } else {
@@ -1190,13 +1179,11 @@ template generateSchemaSDL(alias SchemaOrQuery) {
         result ~= generateObjectTypeSDL!QueryType("Query");
         result ~= "\n";
 
-        // Generate Mutation type if present
-        static if (hasMutations) {
-            enum mutationSdl = generateObjectTypeSDL!MutationType("Mutation");
-            static if (mutationSdl.length > 0) {
-                result ~= mutationSdl;
-                result ~= "\n";
-            }
+        // Generate Mutation type if it has fields
+        enum mutationSdl = generateObjectTypeSDL!MutationType("Mutation");
+        static if (mutationSdl.length > 0) {
+            result ~= mutationSdl;
+            result ~= "\n";
         }
 
         // Generate each discovered entity type
@@ -1408,7 +1395,7 @@ unittest {
     // Verify Schema properties
     static assert(isSchema!MySchema);
     static assert(is(MySchema.Query == MyQuery));
-    static assert(!MySchema.hasMutations);
+    static assert(getFields!(MySchema.Mutation).length == 0);  // No mutation fields
 
     // generateSchemaSDL should work with Schema
     enum sdlFromSchema = generateSchemaSDL!MySchema;
@@ -1494,7 +1481,7 @@ unittest {
 
     // Verify Schema properties
     static assert(isSchema!MySchema);
-    static assert(MySchema.hasMutations);
+    static assert(getFields!(MySchema.Mutation).length > 0);  // Has mutation fields
     static assert(is(MySchema.Mutation == MyMutation));
 
     // Check getFields extracts fields correctly

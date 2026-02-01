@@ -290,8 +290,6 @@ unittest {
     template IdentityPlugin(alias S) if (isSchema!S) {
         alias Query = S.Query;
         alias Mutation = S.Mutation;
-        enum _isSchema = true;
-        enum hasMutations = S.hasMutations;
     }
 
     alias TransformedSchema = IdentityPlugin!BaseSchema;
@@ -384,8 +382,6 @@ unittest {
 
         alias Query = ExtendedQuery;
         alias Mutation = S.Mutation;
-        enum _isSchema = true;
-        enum hasMutations = S.hasMutations;
     }
 
     alias WithVersion = AddVersionPlugin!BaseSchema;
@@ -429,8 +425,6 @@ unittest {
         }
         alias Query = ExtendedQuery;
         alias Mutation = S.Mutation;
-        enum _isSchema = true;
-        enum hasMutations = S.hasMutations;
     }
 
     // Plugin 2: Adds health check field using CopyFields
@@ -444,8 +438,6 @@ unittest {
         }
         alias Query = ExtendedQuery;
         alias Mutation = S.Mutation;
-        enum _isSchema = true;
-        enum hasMutations = S.hasMutations;
     }
 
     // Compose plugins: Schema -> AddVersion -> AddHealth
@@ -527,8 +519,6 @@ unittest {
         }
         alias Query = ExtendedQuery;
         alias Mutation = S.Mutation;
-        enum _isSchema = true;
-        enum hasMutations = S.hasMutations;
     }
 
     alias ExtendedSchema = AddConstantPlugin!BaseSchema;
@@ -593,8 +583,6 @@ unittest {
 
         alias Query = PaginatedQuery;
         alias Mutation = S.Mutation;
-        enum _isSchema = true;
-        enum hasMutations = S.hasMutations;
     }
 
     alias PaginatedSchema = MockPaginationPlugin!BaseSchema;
@@ -668,8 +656,6 @@ unittest {
         }
         alias Query = ExtendedQuery;
         alias Mutation = S.Mutation;
-        enum _isSchema = true;
-        enum hasMutations = S.hasMutations;
     }
 
     alias ExtendedSchema = ForwardingPlugin!BaseSchema;

@@ -95,16 +95,14 @@ GraphQLResult compileQuery(alias SchemaOrQuery)(string queryString, JSONValue va
     static if (isSchema!SchemaOrQuery) {
         alias QueryType = SchemaOrQuery.Query;
         alias MutationType = SchemaOrQuery.Mutation;
-        enum hasMutations = SchemaOrQuery.hasMutations;
     } else {
         alias QueryType = SchemaOrQuery;
         struct MutationType {}
-        enum hasMutations = false;
     }
 
     // Compile based on operation type
     if (isMutation) {
-        static if (hasMutations) {
+        static if (getFields!MutationType.length > 0) {
             return compileRootMutationSet!MutationType(op.ss, variables);
         } else {
             throw new CompilerException("Mutation operations require a Schema with Mutation type");
