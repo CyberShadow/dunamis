@@ -247,44 +247,8 @@ template getGqlDeprecated(alias member) {
 }
 
 // ============================================================================
-// Computed Field Detection
+// Computed Field Type Extraction
 // ============================================================================
-
-/// Check if a member is a computed field for the given Entity.
-/// A computed field is a static function that:
-/// - Takes Expr!Entity as first parameter
-/// - Returns an Expr type
-/// - Does NOT have mixin-generated UDAs (@SqlColumn, @HasManyFK, @BelongsToFK)
-template isComputedField(Entity, string memberName, alias member) {
-    import std.traits : hasUDA;
-    import graphqld2.relational.schema : SqlColumn, HasManyFK, BelongsToFK;
-
-    static if (is(typeof(member) == function)) {
-        alias Params = Parameters!member;
-        alias Return = ReturnType!member;
-        static if (Params.length >= 1) {
-            // First parameter must be Expr!Entity
-            static if (is(Params[0] : Expr!E, E) && is(E == Entity)) {
-                // Return type must be an Expr
-                static if (isExpr!Return) {
-                    // Exclude mixin-generated accessors (they have specific UDAs)
-                    enum hasMixinUda = hasUDA!(member, SqlColumn) ||
-                                       hasUDA!(member, HasManyFK) ||
-                                       hasUDA!(member, BelongsToFK);
-                    enum isComputedField = !hasMixinUda;
-                } else {
-                    enum isComputedField = false;
-                }
-            } else {
-                enum isComputedField = false;
-            }
-        } else {
-            enum isComputedField = false;
-        }
-    } else {
-        enum isComputedField = false;
-    }
-}
 
 /// Get the GraphQL return type of a computed field
 template computedFieldReturnType(alias member) {
@@ -770,8 +734,8 @@ template getInputTypesFromEntityImpl(Entity, size_t idx, Members...) {
 
         static if (isInternalMember!member) {
             alias getInputTypesFromEntityImpl = Rest;
-        } else static if (__traits(compiles, isComputedField!(Entity, member, __traits(getMember, Entity, member)))) {
-            static if (isComputedField!(Entity, member, __traits(getMember, Entity, member))) {
+        } else static if (__traits(compiles, isValidFieldMethod!(Entity, __traits(getMember, Entity, member)))) {
+            static if (isValidFieldMethod!(Entity, __traits(getMember, Entity, member))) {
                 alias fn = __traits(getMember, Entity, member);
                 alias InputTypes = getInputTypesFromArguments!fn;
                 alias getInputTypesFromEntityImpl = AliasSeq!(InputTypes, Rest);
