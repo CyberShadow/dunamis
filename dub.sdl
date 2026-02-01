@@ -8,10 +8,11 @@ targetPath "build"
 sourcePaths "source"
 
 dependency "graphqld:parser" repository="git+https://github.com/vpanteleev-sym/graphqld.git" version="542374109b26018c9542631c90d1ba2acef32a8b"
-dependency "ae" repository="git+https://github.com/CyberShadow/ae.git" version="573324089882f307cd619d67f02bb4e11c1eb69c"
+dependency "ae" repository="git+https://github.com/CyberShadow/ae.git" version="85f44a586afccdaf652a60489dc3604b23dba893"
 
-# Exclude sqlite module from main package (available via graphqld2:sqlite subpackage)
+# Exclude sqlite and mysql modules from main package (available via subpackages)
 excludedSourceFiles "source/graphqld2/sqlite/*"
+excludedSourceFiles "source/graphqld2/mysql/*"
 
 # Exclude integration tests from library build
 excludedSourceFiles "source/integration/*"
@@ -32,7 +33,15 @@ configuration "sqlite-integration" {
     sourceFiles "source/integration/test_framework.d" "source/integration/tests.d" "source/integration/schema.d" "source/integration/test_runner.d"
     # Include sqlite sources directly for integration test
     sourceFiles "source/graphqld2/sqlite/ddl.d" "source/graphqld2/sqlite/fetcher.d" "source/graphqld2/sqlite/sql.d" "source/graphqld2/sqlite/package.d"
-    dependency "ae:sqlite" repository="git+https://github.com/CyberShadow/ae.git" version="573324089882f307cd619d67f02bb4e11c1eb69c"
+    dependency "ae:sqlite" repository="git+https://github.com/CyberShadow/ae.git" version="85f44a586afccdaf652a60489dc3604b23dba893"
+}
+
+configuration "mysql-integration" {
+    targetType "executable"
+    mainSourceFile "source/integration/mysql_test.d"
+    sourceFiles "source/integration/test_framework.d" "source/integration/tests.d" "source/integration/schema.d" "source/integration/test_runner.d"
+    # Include mysql sources directly for integration test
+    sourceFiles "source/graphqld2/mysql/ddl.d" "source/graphqld2/mysql/fetcher.d" "source/graphqld2/mysql/sql.d" "source/graphqld2/mysql/connection.d" "source/graphqld2/mysql/package.d"
 }
 
 # SQLite subpackage - for users who want sqlite support
@@ -43,9 +52,26 @@ subPackage {
     # Include both sqlite sources and main package sources
     sourcePaths "source"
 
-    # Only build the sqlite module
+    # Exclude other database backends and integration tests
     excludedSourceFiles "source/integration/*"
+    excludedSourceFiles "source/graphqld2/mysql/*"
 
     dependency "graphqld:parser" repository="git+https://github.com/vpanteleev-sym/graphqld.git" version="542374109b26018c9542631c90d1ba2acef32a8b"
-    dependency "ae:sqlite" repository="git+https://github.com/CyberShadow/ae.git" version="573324089882f307cd619d67f02bb4e11c1eb69c"
+    dependency "ae:sqlite" repository="git+https://github.com/CyberShadow/ae.git" version="85f44a586afccdaf652a60489dc3604b23dba893"
+}
+
+# MySQL subpackage - for users who want mysql support
+subPackage {
+    name "mysql"
+    targetType "library"
+
+    # Include both mysql sources and main package sources
+    sourcePaths "source"
+
+    # Exclude other database backends and integration tests
+    excludedSourceFiles "source/integration/*"
+    excludedSourceFiles "source/graphqld2/sqlite/*"
+
+    dependency "graphqld:parser" repository="git+https://github.com/vpanteleev-sym/graphqld.git" version="542374109b26018c9542631c90d1ba2acef32a8b"
+    dependency "ae" repository="git+https://github.com/CyberShadow/ae.git" version="85f44a586afccdaf652a60489dc3604b23dba893"
 }

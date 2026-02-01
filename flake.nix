@@ -41,6 +41,21 @@
             runHook postInstall
           '';
         };
+
+        # Build the mysql integration test executable
+        mysqlTestBin = pkgs.buildDubPackage {
+          pname = "graphqld2-mysql-test";
+          version = "0.0.1";
+          src = self;
+          dubLock = ./dub-lock.json;
+          dubBuildFlags = [ "--config=mysql-integration" ];
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out/bin
+            cp build/graphqld2 $out/bin/mysql_test
+            runHook postInstall
+          '';
+        };
       in {
         checks = {
           # D unit tests via dub
@@ -114,12 +129,67 @@
               touch $out
             '';
           };
+
+          # MySQL integration tests
+          mysql-integration = pkgs.stdenv.mkDerivation {
+            name = "graphqld2-mysql-integration";
+            dontUnpack = true;
+            nativeBuildInputs = [ pkgs.mariadb ];
+
+            buildPhase = ''
+              export HOME="$TMPDIR"
+              export MYSQL_HOME="$TMPDIR/mysql"
+              export MYSQL_DATADIR="$MYSQL_HOME/data"
+              export MYSQL_SOCKET="$MYSQL_HOME/mysql.sock"
+              export MYSQL_HOST="localhost"
+              export MYSQL_TCP_PORT="3306"
+              export MYSQL_USER="root"
+              export MYSQL_DATABASE="testdb"
+              export MYSQL_PWD=""
+
+              mkdir -p "$MYSQL_HOME"
+
+              # Initialize MySQL/MariaDB data directory
+              mysql_install_db --datadir="$MYSQL_DATADIR" --auth-root-authentication-method=normal
+
+              # Start MySQL server
+              mysqld --datadir="$MYSQL_DATADIR" \
+                     --socket="$MYSQL_SOCKET" \
+                     --port="$MYSQL_TCP_PORT" \
+                     --skip-networking=0 \
+                     --bind-address="127.0.0.1" &
+              MYSQL_PID=$!
+
+              # Wait for MySQL to start
+              for i in $(seq 1 30); do
+                if mysqladmin --socket="$MYSQL_SOCKET" ping &>/dev/null; then
+                  break
+                fi
+                sleep 1
+              done
+
+              # Create test database
+              mysql --socket="$MYSQL_SOCKET" -u root -e "CREATE DATABASE IF NOT EXISTS $MYSQL_DATABASE;"
+
+              # Run tests
+              ${mysqlTestBin}/bin/mysql_test
+
+              # Cleanup
+              kill $MYSQL_PID 2>/dev/null || true
+              wait $MYSQL_PID 2>/dev/null || true
+            '';
+
+            installPhase = ''
+              touch $out
+            '';
+          };
         };
 
         devShells.default = pkgs.mkShell {
           buildInputs = [
             pkgs.ldc
             pkgs.postgresql
+            pkgs.mariadb
             pkgs.curl
             pkgs.sqlite
           ];
