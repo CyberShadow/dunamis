@@ -9,7 +9,7 @@ import std.conv : to;
 import std.json : JSONValue, JSONType;
 
 import graphqld2.core.types : CustomScalar;
-import graphqld2.relational.schema : Entity;
+import graphqld2.relational.schema : Entity, EntityID;
 
 // Re-export MockDB for convenience
 public import graphqld2.relational.eval_context : MockDB;
@@ -97,12 +97,14 @@ mixin template CrudMutations(Entity) {
     import graphqld2.relational.demo : Int64;
     import graphqld2.relational.mutation : insert, update, delete_;
 
+    import graphqld2.relational.schema : EntityID;
+
     // createEntity(input: {...}): Entity!
     mixin(format(
         `static auto create%s(Expr!(typeof(this)) parent, JSONValue[string] input) {
             return insert!%s(input);
         }`,
-        Entity._typeName, Entity.stringof
+        EntityID!Entity.typeName, Entity.stringof
     ));
 
     // updateEntity(id: Int64!, input: {...}): Entity
@@ -110,7 +112,7 @@ mixin template CrudMutations(Entity) {
         `static auto update%s(Expr!(typeof(this)) parent, Int64 id, JSONValue[string] input) {
             return update!%s([id.value], input).single();
         }`,
-        Entity._typeName, Entity.stringof
+        EntityID!Entity.typeName, Entity.stringof
     ));
 
     // deleteEntity(id: Int64!): Boolean!
@@ -118,7 +120,7 @@ mixin template CrudMutations(Entity) {
         `static auto delete%s(Expr!(typeof(this)) parent, Int64 id) {
             return delete_!%s([id.value]);
         }`,
-        Entity._typeName, Entity.stringof
+        EntityID!Entity.typeName, Entity.stringof
     ));
 }
 
@@ -140,7 +142,7 @@ unittest {
     import ae.utils.promise.await : awaitSync;
     import graphqld2.core : Executor;
     import graphqld2.core.eval : EvalContext;
-    import graphqld2.relational.schema : Col;
+    import graphqld2.relational.schema : Col, isValid;
     import graphqld2.relational.mutation : insert, update, delete_;
 
     // Test entity

@@ -10,6 +10,7 @@ import std.typecons : Nullable;
 
 import graphqld2.core.types : isCustomScalar;
 import graphqld2.core.expr : Expr, ExprResultType, isExpr;
+import graphqld2.relational.schema : EntityID;
 
 // ============================================================================
 // Schema Template
@@ -162,9 +163,9 @@ template graphqlBaseTypeName(T) {
     } else static if (is(T == JSONValue)) {
         // Raw JSON value - use JSON scalar
         enum graphqlBaseTypeName = "JSON";
-    } else static if (__traits(hasMember, T, "_typeName")) {
-        // Entity/aggregate type - reference by name
-        enum graphqlBaseTypeName = T._typeName;
+    } else static if (__traits(hasMember, T, "nodeId")) {
+        // Entity type - reference by type name from nodeId metadata
+        enum graphqlBaseTypeName = EntityID!T.typeName;
     } else static if (is(T == struct)) {
         // Input type struct - use struct name
         enum graphqlBaseTypeName = T.stringof;
@@ -383,13 +384,8 @@ string defaultValueToString(T)(T value) {
 /// and D built-in methods.
 template isInternalMember(string name) {
     enum isInternalMember =
-        // Entity internal fields (not GraphQL fields)
-        name == "_db" ||
-        name == "_table" ||
-        name == "_typeName" ||
+        // Entity internal field (all metadata is in nodeId's type)
         name == "nodeId" ||
-        name == "localId" ||
-        name == "isValid" ||
         // D built-in methods
         name == "toString" ||
         name == "toHash" ||
@@ -478,7 +474,7 @@ template getEntityFields(Entity) {
                 else static if (hasUDA!(fieldMethod, HasManyFK)) {
                     // HasMany field
                     alias ChildType = extractHasManyChild!fieldMethod;
-                    enum gqlType = "[" ~ ChildType._typeName ~ "!]!";
+                    enum gqlType = "[" ~ EntityID!ChildType.typeName ~ "!]!";
 
                     fields ~= FieldInfo(
                         gqlFieldName,
@@ -496,9 +492,9 @@ template getEntityFields(Entity) {
                     enum isNullable = hasUDA!(fieldMethod, NullableColumn);
 
                     static if (isNullable) {
-                        enum gqlType = ParentType._typeName;
+                        enum gqlType = EntityID!ParentType.typeName;
                     } else {
-                        enum gqlType = ParentType._typeName ~ "!";
+                        enum gqlType = EntityID!ParentType.typeName ~ "!";
                     }
 
                     fields ~= FieldInfo(
@@ -559,7 +555,7 @@ template getRootFields(Parent) {
                     // Check if it's a Table field (has @TableEntity UDA)
                     static if (hasTableEntity!fn) {
                         alias EntityType = extractTableEntity!fn;
-                        enum gqlType = "[" ~ EntityType._typeName ~ "!]!";
+                        enum gqlType = "[" ~ EntityID!EntityType.typeName ~ "!]!";
 
                         fields ~= FieldInfo(
                             gqlFieldName,
@@ -701,9 +697,9 @@ template graphqlInputTypeName(T) {
     } else static if (isInputType!T) {
         // Input type struct - use struct name as type name
         enum graphqlInputTypeName = T.stringof;
-    } else static if (__traits(hasMember, T, "_typeName")) {
+    } else static if (__traits(hasMember, T, "nodeId")) {
         // Entity reference in input (e.g., for ID references)
-        enum graphqlInputTypeName = T._typeName;
+        enum graphqlInputTypeName = EntityID!T.typeName;
     } else {
         static assert(false,
             "No GraphQL input type mapping for `" ~ T.stringof ~ "`. " ~
@@ -993,7 +989,7 @@ template getAllEntityTypes(Query) {
 
 /// Generate GraphQL SDL for an entity type
 string generateTypeSDL(Entity)() {
-    string result = "type " ~ Entity._typeName ~ " {\n";
+    string result = "type " ~ EntityID!Entity.typeName ~ " {\n";
 
     foreach (field; getEntityFields!Entity) {
         // Skip hidden fields
@@ -1080,8 +1076,8 @@ template rootFieldReturnType(alias member) {
         enum rootFieldReturnType = graphqlBaseTypeName!U;
     } else static if (is(ResultType == E[], E)) {
         enum rootFieldReturnType = "[" ~ graphqlTypeName!E ~ "]!";
-    } else static if (__traits(hasMember, ResultType, "_typeName")) {
-        enum rootFieldReturnType = ResultType._typeName ~ "!";
+    } else static if (__traits(hasMember, ResultType, "nodeId")) {
+        enum rootFieldReturnType = EntityID!ResultType.typeName ~ "!";
     } else static if (isCustomScalar!ResultType) {
         enum rootFieldReturnType = ResultType.name ~ "!";
     } else {

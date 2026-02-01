@@ -358,7 +358,7 @@ mixin template Tables(Entities...) {
 /// Derive default field name from entity type (lowercase + "s" suffix)
 private template defaultFieldName(Entity) {
     enum defaultFieldName = () {
-        string name = Entity._typeName;
+        string name = EntityID!Entity.typeName;
         // Lowercase first character
         if (name.length > 0 && name[0] >= 'A' && name[0] <= 'Z') {
             return cast(char)(name[0] + 32) ~ name[1..$] ~ "s";
@@ -366,12 +366,46 @@ private template defaultFieldName(Entity) {
         return name ~ "s";
     }();
 }
+// ============================================================================
+// Entity Reference Type
+// ============================================================================
+
+/// Runtime entity reference with compile-time metadata.
+/// The struct carries both the ID string and type-level metadata (db, table, typeName).
+struct EntityRef(alias _db, string _tableName, string _typeName) {
+    /// Data source (compile-time alias)
+    alias db = _db;
+
+    /// SQL table name (compile-time)
+    enum table = _tableName;
+
+    /// GraphQL type name (compile-time)
+    enum typeName = _typeName;
+
+    /// Runtime ID string (format: "TypeName:localId")
+    string id;
+
+    /// Construct from ID string
+    this(string id) { this.id = id; }
+
+    /// For debugging
+    string toString() const { return id; }
+}
+
+/// Extract entity metadata type from any entity struct.
+/// Usage: EntityID!User.table, EntityID!User.typeName, EntityID!User.db
+alias EntityID(Entity) = typeof(Entity.init.nodeId);
+
+/// Check if an entity reference is valid (has non-empty ID).
+/// Works via UFCS: entity.isValid()
+bool isValid(E)(E entity) if (is(typeof(E.init.nodeId))) {
+    return entity.nodeId.id.length > 0;
+}
 
 // ============================================================================
-// Entity Mixin (Low-level)
+// Entity Mixin
 // ============================================================================
 
-/// Low-level mixin to define an entity (table mapping).
 /// The entity struct becomes a reference type - it holds a nodeId that identifies
 /// a specific row in the database. Schema metadata is static, nodeId is runtime.
 ///
@@ -396,31 +430,19 @@ private template defaultFieldName(Entity) {
 /// }
 /// ---
 mixin template Entity(alias db, string tableName, string typeName = "") {
-    import std.string : indexOf;
+    import graphqld2.relational.schema : EntityRef;
 
-    // Runtime state: the node ID that identifies this entity reference
-    string nodeId;
+    /// Entity reference with compile-time metadata and runtime ID
+    static if (typeName.length > 0)
+        EntityRef!(db, tableName, typeName) nodeId;
+    else
+        EntityRef!(db, tableName, __traits(identifier, typeof(this))) nodeId;
 
-    // Data source (bound by alias for runtime access)
-    alias _db = db;
-
-    // Schema metadata (compile-time)
-    static immutable string _table = tableName;
-    static immutable string _typeName = (typeName.length > 0) ? typeName : __traits(identifier, typeof(this));
-
-    /// Extract the local ID portion (after the colon)
-    string localId() const {
-        auto sep = nodeId.indexOf(':');
-        return sep >= 0 ? nodeId[sep + 1 .. $] : "";
-    }
-
-    /// Check if this is a valid (non-empty) reference
-    bool isValid() const {
-        return nodeId.length > 0;
-    }
+    /// Construct from ID string
+    this(string id) { nodeId = typeof(nodeId)(id); }
 
     /// For debugging
-    string toString() const { return nodeId; }
+    string toString() const { return nodeId.toString(); }
 }
 
 // ============================================================================
@@ -782,12 +804,12 @@ interface RootExprInfo {
 /// Source ID for an entity - uses table name as unique identifier.
 /// This is used to key into RelationalEvalContext for multi-source scenarios.
 template entitySourceId(Entity) {
-    enum entitySourceId = Entity._table;
+    enum entitySourceId = EntityID!Entity.table;
 }
 
 /// Root expression that returns specific entities by their IDs.
 /// Returns typed Entity[] for compile-time type safety.
-/// Uses Entity._db for data source access.
+/// Uses EntityID!Entity.db for data source access.
 class GetByIdsExpr(Entity) : Expr!(Entity[]), RootExprInfo {
     import graphqld2.core.optimize : ExprOptimizer;
 
@@ -795,7 +817,7 @@ class GetByIdsExpr(Entity) : Expr!(Entity[]), RootExprInfo {
 
     /// Construct from array of IDs (any type convertible to string)
     this(IdType)(IdType[] ids) {
-        _entities = ids.map!(id => Entity(Entity._typeName ~ ":" ~ id.to!string)).array;
+        _entities = ids.map!(id => Entity(EntityID!Entity.typeName ~ ":" ~ id.to!string)).array;
     }
 
     this(Entity[] entities) {
@@ -812,7 +834,7 @@ class GetByIdsExpr(Entity) : Expr!(Entity[]), RootExprInfo {
 
     override ExprOptimizer[] requestedOptimizers() {
         // Get fetcher from Entity's data source
-        auto fetcher = Entity._db;
+        auto fetcher = EntityID!Entity.db;
         if (fetcher !is null) {
             return fetcher.requestedOptimizers();
         }
@@ -820,8 +842,8 @@ class GetByIdsExpr(Entity) : Expr!(Entity[]), RootExprInfo {
     }
 
     override Promise!(Entity[][]) eval(EvalContext ctx) {
-        // Set up RelationalEvalContext with fetcher from Entity._db
-        auto fetcher = Entity._db;
+        // Set up RelationalEvalContext with fetcher from EntityID!Entity.db
+        auto fetcher = EntityID!Entity.db;
         if (fetcher !is null) {
             auto relCtx = ctx.getSourceContext!RelationalEvalContext();
             if (relCtx.fetcher is null) {
@@ -836,10 +858,10 @@ class GetByIdsExpr(Entity) : Expr!(Entity[]), RootExprInfo {
 
     // RootExprInfo implementation
     FilterType filterType() { return FilterType.byIds; }
-    AnyRef[] filterRefs() { return _entities.map!(e => AnyRef(e.nodeId)).array; }
-    string entityTypeName() { return Entity._typeName; }
-    string entityTable() { return Entity._table; }
-    DataFetcher dataFetcher() { return Entity._db; }
+    AnyRef[] filterRefs() { return _entities.map!(e => AnyRef(e.nodeId.id)).array; }
+    string entityTypeName() { return EntityID!Entity.typeName; }
+    string entityTable() { return EntityID!Entity.table; }
+    DataFetcher dataFetcher() { return EntityID!Entity.db; }
 }
 
 /// Factory function to create GetByIdsExpr (works with any ID type)
@@ -858,14 +880,14 @@ auto getByCompositeIds(Entity, IdType)(IdType[][] keyParts) {
         foreach (p; parts) {
             strParts ~= p.to!string;
         }
-        entities ~= Entity(Entity._typeName ~ ":" ~ encodeCompositeKey(strParts));
+        entities ~= Entity(EntityID!Entity.typeName ~ ":" ~ encodeCompositeKey(strParts));
     }
     return new GetByIdsExpr!Entity(entities);
 }
 
 /// Root expression that fetches all entities of a type.
 /// Returns typed Entity[] for compile-time type safety.
-/// Uses Entity._db for data source access.
+/// Uses EntityID!Entity.db for data source access.
 ///
 /// In the optimized path, a PrefetchExpr is created during optimization
 /// and used during eval to ensure data is fetched before reading refs.
@@ -890,7 +912,7 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
     }
 
     override ExprOptimizer[] requestedOptimizers() {
-        auto fetcher = Entity._db;
+        auto fetcher = EntityID!Entity.db;
         if (fetcher !is null) {
             return fetcher.requestedOptimizers();
         }
@@ -900,13 +922,13 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
     override Expr!(Entity[]) optimize(OptimizeContext ctx) {
         // Try to find an existing QueryNode created by ColumnAccessExpr optimizations
         // (body is optimized before collection in MapExpr)
-        auto fetcher = Entity._db;
+        auto fetcher = EntityID!Entity.db;
         if (fetcher is null) return this;
 
         auto relCtx = ctx.getSourceContext!RelationalOptimizeContext();
 
         // Look for a root node that matches our entity type and table
-        auto node = relCtx.findRootNode(Entity._typeName, Entity._table);
+        auto node = relCtx.findRootNode(EntityID!Entity.typeName, EntityID!Entity.table);
 
         if (node is null) {
             // No node found - we're in a context where column access doesn't use optimization
@@ -923,7 +945,7 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
     }
 
     override Promise!(Entity[][]) eval(EvalContext ctx) {
-        auto fetcher = Entity._db;
+        auto fetcher = EntityID!Entity.db;
 
         // Set up RelationalEvalContext with fetcher
         if (fetcher !is null) {
@@ -946,8 +968,8 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
 
         // Fallback: naive path using fetchAllIds
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-        auto ids = relCtx.fetchAllIds(Entity._table);
-        auto entities = ids.map!(id => Entity(Entity._typeName ~ ":" ~ id.to!string)).array;
+        auto ids = relCtx.fetchAllIds(EntityID!Entity.table);
+        auto entities = ids.map!(id => Entity(EntityID!Entity.typeName ~ ":" ~ id.to!string)).array;
         // At root level, there's always exactly 1 parent (queryRoot)
         return resolve([entities]);
     }
@@ -955,9 +977,9 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
     // RootExprInfo implementation
     FilterType filterType() { return FilterType.all; }
     AnyRef[] filterRefs() { return []; }
-    string entityTypeName() { return Entity._typeName; }
-    string entityTable() { return Entity._table; }
-    DataFetcher dataFetcher() { return Entity._db; }
+    string entityTypeName() { return EntityID!Entity.typeName; }
+    string entityTable() { return EntityID!Entity.table; }
+    DataFetcher dataFetcher() { return EntityID!Entity.db; }
 
     // MapExprInfo implementation (for QueryNode creation)
     Object collection() { return this; }  // We are the root, return self as collection
@@ -1010,11 +1032,11 @@ class ColumnAccessExpr(T, Entity) : Expr!T {
         auto relCtx = ctx.getSourceContext!RelationalOptimizeContext();
 
         // Get or create QueryNode for this MapExpr
-        auto node = relCtx.getOrCreateNode(mapExpr, Entity._typeName, Entity._table);
+        auto node = relCtx.getOrCreateNode(mapExpr, EntityID!Entity.typeName, EntityID!Entity.table);
 
         // Set the data fetcher on the node (for mutation-returned entities that bypass GetByIdsExpr)
-        if (node.dataFetcher is null && Entity._db !is null) {
-            node.dataFetcher = Entity._db;
+        if (node.dataFetcher is null && EntityID!Entity.db !is null) {
+            node.dataFetcher = EntityID!Entity.db;
         }
 
         // Configure the node based on collection type (if not already configured)
@@ -1081,20 +1103,20 @@ class ColumnAccessExpr(T, Entity) : Expr!T {
 
         // Ensure fetcher is set up from Entity's data source
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-        if (relCtx.fetcher is null && Entity._db !is null) {
-            relCtx.fetcher = Entity._db;
+        if (relCtx.fetcher is null && EntityID!Entity.db !is null) {
+            relCtx.fetcher = EntityID!Entity.db;
         }
 
         // Get the entity refs from the input chain, then fetch column
         return evalRefAsAnyRef(input, ctx).then((AnyRef[] entityRefs) {
             // First, check for mutation results (mutations store their results here)
-            if (relCtx.hasMutationResult(Entity._typeName)) {
-                return relCtx.getMutationColumnValues!T(Entity._typeName, column, entityRefs);
+            if (relCtx.hasMutationResult(EntityID!Entity.typeName)) {
+                return relCtx.getMutationColumnValues!T(EntityID!Entity.typeName, column, entityRefs);
             }
 
             // Otherwise, fetch from database
             if (relCtx.fetcher !is null) {
-                return relCtx.fetcher.fetchColumn!T(Entity._table, column, entityRefs);
+                return relCtx.fetcher.fetchColumn!T(EntityID!Entity.table, column, entityRefs);
             }
 
             // Fallback to empty results
@@ -1153,15 +1175,15 @@ class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Child[]), HasManyInfo 
 
         // Ensure fetcher is set up from Child entity's data source
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-        if (relCtx.fetcher is null && Child._db !is null) {
-            relCtx.fetcher = Child._db;
+        if (relCtx.fetcher is null && EntityID!Child.db !is null) {
+            relCtx.fetcher = EntityID!Child.db;
         }
 
         // Get the parent refs from the input chain, then fetch children
         return evalRefAsAnyRef(input, ctx).then((AnyRef[] parentRefs) {
             // Naive path: fetch children directly
             if (relCtx.fetcher !is null) {
-                auto children = relCtx.fetcher.fetchChildren(Child._table, Child._typeName, fk, parentRefs);
+                auto children = relCtx.fetcher.fetchChildren(EntityID!Child.table, EntityID!Child.typeName, fk, parentRefs);
                 // Convert AnyRef[][] to Child[][]
                 return children.map!(group => group.map!(r => Child(r.nodeId)).array).array;
             }
@@ -1175,11 +1197,11 @@ class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Child[]), HasManyInfo 
 
     // HasManyInfo implementation
     @property ExprBase inputExpr() { return _input; }
-    @property string childTable() { return Child._table; }
-    @property string childTypeName() { return Child._typeName; }
+    @property string childTable() { return EntityID!Child.table; }
+    @property string childTypeName() { return EntityID!Child.typeName; }
     @property string fkColumn() { return fk; }
     static if (!is(Parent == void)) {
-        @property string parentTypeName() { return Parent._typeName; }
+        @property string parentTypeName() { return EntityID!Parent.typeName; }
     } else {
         @property string parentTypeName() { return ""; }
     }
@@ -1233,10 +1255,10 @@ class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultTyp
         return this.eval(ctx).then((ResultType[] results) {
             static if (is(ResultType == Parent)) {
                 // Direct conversion from entity to AnyRef via nodeId
-                return results.map!(r => AnyRef(r.nodeId)).array;
+                return results.map!(r => AnyRef(r.nodeId.id)).array;
             } else static if (is(ResultType == Nullable!Parent)) {
                 // Handle nullable - convert valid refs, use AnyRef.init for null
-                return results.map!(r => r.isNull ? AnyRef.init : AnyRef(r.get.nodeId)).array;
+                return results.map!(r => r.isNull ? AnyRef.init : AnyRef(r.get.nodeId.id)).array;
             } else {
                 static assert(false, "Unexpected ResultType in BelongsToAccessExpr");
             }
@@ -1249,8 +1271,8 @@ class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultTyp
         // Ensure fetcher is set up from Child entity's data source
         static if (!is(Child == void)) {
             auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-            if (relCtx.fetcher is null && Child._db !is null) {
-                relCtx.fetcher = Child._db;
+            if (relCtx.fetcher is null && EntityID!Child.db !is null) {
+                relCtx.fetcher = EntityID!Child.db;
             }
         }
 
@@ -1263,7 +1285,7 @@ class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultTyp
                 // Naive path: fetch parent refs directly
                 auto relCtx = ctx.getSourceContext!RelationalEvalContext();
                 if (relCtx.fetcher !is null) {
-                    auto parentRefs = relCtx.fetcher.fetchBelongsTo(Child._table, fk, Parent._typeName, childRefs);
+                    auto parentRefs = relCtx.fetcher.fetchBelongsTo(EntityID!Child.table, fk, EntityID!Parent.typeName, childRefs);
 
                     static if (is(ResultType == Parent)) {
                         // Convert AnyRef[] to Parent[] via nodeId
@@ -1286,12 +1308,12 @@ class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultTyp
     // For base class interface (runtime type checking)
     @property ExprBase inputExpr() { return _input; }
     static if (!is(Child == void)) {
-        @property string childTable() { return Child._table; }
+        @property string childTable() { return EntityID!Child.table; }
     } else {
         @property string childTable() { return ""; }
     }
-    @property string parentTable() { return Parent._table; }
-    @property string parentTypeName() { return Parent._typeName; }
+    @property string parentTable() { return EntityID!Parent.table; }
+    @property string parentTypeName() { return EntityID!Parent.typeName; }
     @property string fkColumn() { return fk; }
 }
 
@@ -1311,8 +1333,8 @@ unittest {
         mixin Entity!(db, "users");
         @PrimaryKeyAttr mixin Col!("id", long);
     }
-    static assert(User._table == "users");
-    static assert(User._typeName == "User");
+    static assert(EntityID!User.table == "users");
+    static assert(EntityID!User.typeName == "User");
     // Check that the id method has @SqlColumn and @PrimaryKeyAttr UDAs
     static assert(hasUDA!(User.id, SqlColumn));
     static assert(hasUDA!(User.id, PrimaryKeyAttr));
@@ -1323,8 +1345,8 @@ unittest {
         mixin Entity!(db, "posts", "BlogPost");
         @PrimaryKeyAttr mixin Col!("id", long);
     }
-    static assert(Post._table == "posts");
-    static assert(Post._typeName == "BlogPost");
+    static assert(EntityID!Post.table == "posts");
+    static assert(EntityID!Post.typeName == "BlogPost");
     static assert(hasUDA!(Post.id, SqlColumn));
     static assert(hasUDA!(Post.id, PrimaryKeyAttr));
 }
@@ -1339,7 +1361,7 @@ unittest {
     static struct Comment {
         mixin DemoEntity!(db, "comments");
     }
-    static assert(Comment._table == "comments");
+    static assert(EntityID!Comment.table == "comments");
     // Check UDAs on the id field
     static assert(hasUDA!(Comment.id, SqlColumn));
     static assert(hasUDA!(Comment.id, PrimaryKeyAttr));
@@ -1496,8 +1518,8 @@ unittest {
     // Verify composite key via UDAs
     static assert(hasUDA!(OrderItem.orderId, PrimaryKeyAttr));
     static assert(hasUDA!(OrderItem.productId, PrimaryKeyAttr));
-    static assert(OrderItem._table == "order_items");
-    static assert(OrderItem._typeName == "OrderItem");
+    static assert(EntityID!OrderItem.table == "order_items");
+    static assert(EntityID!OrderItem.typeName == "OrderItem");
 
     // Set up mock data
     db = new MockDB!();

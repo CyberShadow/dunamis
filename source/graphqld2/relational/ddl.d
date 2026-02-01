@@ -8,6 +8,7 @@ import std.array;
 import std.format : format;
 
 import graphqld2.core.types : isCustomScalar;
+import graphqld2.relational.schema : EntityID;
 
 // ============================================================================
 // Column Info Extraction
@@ -91,7 +92,7 @@ template getColumnDefs(Entity) {
                                 getDTypeName!ColType,
                                 isPK ? false : isNullable,
                                 isPK,
-                                FkEntity._table,
+                                EntityID!FkEntity.table,
                                 "id"  // Default FK column
                             );
                         } else {
@@ -121,7 +122,7 @@ template getColumnDefs(Entity) {
 /// Generate CREATE TABLE statement for an entity using the given dialect.
 template generateCreateTable(Dialect, Entity) {
     enum generateCreateTable = () {
-        string result = "CREATE TABLE " ~ Entity._table ~ " (\n";
+        string result = "CREATE TABLE " ~ EntityID!Entity.table ~ " (\n";
 
         enum columns = getColumnDefs!Entity;
 
@@ -197,8 +198,8 @@ template generateForeignKeys(Dialect, Entity) {
             foreach (col; columns) {
                 if (col.foreignKeyTable.length > 0) {
                     result ~= format("ALTER TABLE %s ADD CONSTRAINT %s_fk%d FOREIGN KEY (%s) REFERENCES %s(%s);\n",
-                        Entity._table,
-                        Entity._table,
+                        EntityID!Entity.table,
+                        EntityID!Entity.table,
                         fkIndex++,
                         col.name,
                         col.foreignKeyTable,

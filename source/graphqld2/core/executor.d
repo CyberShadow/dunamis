@@ -67,16 +67,28 @@ class Executor {
 // Tests
 // ============================================================================
 
-/// Dummy entity type for tests
-private struct TestEntity {
-    string nodeId;
-    enum _typeName = "Test";
+/// Minimal EntityRef for testing (no db alias needed)
+private struct TestEntityRef(string _typeName) {
+    import std.string : indexOf;
+
+    enum typeName = _typeName;
+    string id;
+    this(string id) { this.id = id; }
+    string toString() const { return id; }
 
     string localId() const {
-        import std.string : indexOf;
-        auto sep = nodeId.indexOf(':');
-        return sep >= 0 ? nodeId[sep + 1 .. $] : "";
+        auto sep = id.indexOf(':');
+        return sep >= 0 ? id[sep + 1 .. $] : "";
     }
+}
+
+/// Dummy entity type for tests
+private struct TestEntity {
+    TestEntityRef!"Test" nodeId;
+    this(string id) { nodeId = typeof(nodeId)(id); }
+    string toString() const { return nodeId.toString(); }
+
+    string localId() const { return nodeId.localId(); }
 }
 
 /// Helper: expression that returns a fixed array of entities.
@@ -98,7 +110,7 @@ unittest {
 
     auto collection = new MockCollectionExpr!TestEntity([TestEntity("Test:1"), TestEntity("Test:2")]);
     auto query = map!(
-        (Expr!TestEntity item) => use((TestEntity e) => e.nodeId, item)
+        (Expr!TestEntity item) => use((TestEntity e) => e.nodeId.id, item)
     )(collection);
 
     auto result = awaitSync(executor.execute(query));

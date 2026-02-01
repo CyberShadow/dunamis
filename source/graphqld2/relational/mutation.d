@@ -12,6 +12,7 @@ import graphqld2.core.expr;
 import graphqld2.core.eval;
 import graphqld2.core.optimize : OptimizeContext;
 import graphqld2.relational.eval_context;
+import graphqld2.relational.schema : EntityID;
 
 // ============================================================================
 // Mutation Input Types
@@ -75,8 +76,8 @@ class InsertExpr(Entity) : Expr!Entity, AnyRefEvaluable {
 
     this(InsertInput input) {
         _input = input;
-        _table = Entity._table;
-        _typeName = Entity._typeName;
+        _table = EntityID!Entity.table;
+        _typeName = EntityID!Entity.typeName;
     }
 
     override ExprBase[] dependencies() {
@@ -95,7 +96,7 @@ class InsertExpr(Entity) : Expr!Entity, AnyRefEvaluable {
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
 
         // Ensure fetcher is available
-        auto fetcher = Entity._db;
+        auto fetcher = EntityID!Entity.db;
         if (fetcher is null) {
             return resolve(cast(Entity[])[]);
         }
@@ -120,7 +121,7 @@ class InsertExpr(Entity) : Expr!Entity, AnyRefEvaluable {
     Promise!(AnyRef[]) evalAsAnyRef(EvalContext ctx) {
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
 
-        auto fetcher = Entity._db;
+        auto fetcher = EntityID!Entity.db;
         if (fetcher is null) {
             return resolve(cast(AnyRef[])[]);
         }
@@ -156,8 +157,8 @@ class UpdateExpr(Entity) : Expr!(Entity[]) {
 
     this(UpdateInput input) {
         _input = input;
-        _table = Entity._table;
-        _typeName = Entity._typeName;
+        _table = EntityID!Entity.table;
+        _typeName = EntityID!Entity.typeName;
     }
 
     override ExprBase[] dependencies() {
@@ -175,7 +176,7 @@ class UpdateExpr(Entity) : Expr!(Entity[]) {
     override Promise!(Entity[][]) eval(EvalContext ctx) {
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
 
-        auto fetcher = Entity._db;
+        auto fetcher = EntityID!Entity.db;
         if (fetcher is null) {
             return resolve([cast(Entity[])[]]);
         }
@@ -216,8 +217,8 @@ class DeleteExpr(Entity) : Expr!bool {
 
     this(long[] ids) {
         _ids = ids;
-        _table = Entity._table;
-        _typeName = Entity._typeName;
+        _table = EntityID!Entity.table;
+        _typeName = EntityID!Entity.typeName;
     }
 
     override ExprBase[] dependencies() {
@@ -235,7 +236,7 @@ class DeleteExpr(Entity) : Expr!bool {
     override Promise!(bool[]) eval(EvalContext ctx) {
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
 
-        auto fetcher = Entity._db;
+        auto fetcher = EntityID!Entity.db;
         if (fetcher is null) {
             return resolve([false]);
         }
@@ -302,7 +303,7 @@ class SingleExpr(T) : Expr!T, AnyRefEvaluable {
                 if (arr.length > 0) {
                     // T must have nodeId (entity type)
                     static if (__traits(hasMember, T, "nodeId")) {
-                        refs ~= AnyRef(arr[0].nodeId);
+                        refs ~= AnyRef(arr[0].nodeId.id);
                     } else {
                         refs ~= AnyRef.init;
                     }

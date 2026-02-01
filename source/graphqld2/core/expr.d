@@ -602,9 +602,9 @@ class EffectExpr(T, Fn) : Expr!T, AnyRefEvaluable {
         import std.array : array;
 
         static if (__traits(hasMember, T, "nodeId")) {
-            // T is an entity type with nodeId
+            // T is an entity type with nodeId - extract .id for AnyRef
             return eval(ctx).then((T[] results) {
-                return results.map!(r => AnyRef(r.nodeId)).array;
+                return results.map!(r => AnyRef(r.nodeId.id)).array;
             });
         } else static if (is(T == AnyRef)) {
             return eval(ctx);
@@ -746,7 +746,7 @@ class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
             foreach (group; collectionResults) {
                 lengths ~= group.length;
                 foreach (e; group) {
-                    flatRefs ~= AnyRef(e.nodeId);
+                    flatRefs ~= AnyRef(e.nodeId.id);
                 }
             }
 
@@ -1098,21 +1098,35 @@ private Promise!(JSONValue[]) evalToJson(ExprBase expr, EvalContext ctx) {
 
 import ae.utils.promise.await : awaitSync;
 
+/// Minimal EntityRef for testing (no db alias needed)
+private struct TestEntityRef(string _typeName) {
+    import std.string : indexOf;
+
+    enum typeName = _typeName;
+    string id;
+    this(string id) { this.id = id; }
+    string toString() const { return id; }
+
+    string localId() const {
+        auto sep = id.indexOf(':');
+        return sep >= 0 ? id[sep + 1 .. $] : "";
+    }
+}
+
 /// Dummy entity type for tests (with Entity-like structure)
 private struct TestEntity {
     import std.string : indexOf;
 
-    string nodeId;
-    enum _typeName = "Test";
+    TestEntityRef!"Test" nodeId;
+    this(string id) { nodeId = typeof(nodeId)(id); }
+    string toString() const { return nodeId.toString(); }
 
-    string localId() const {
-        auto sep = nodeId.indexOf(':');
-        return sep >= 0 ? nodeId[sep + 1 .. $] : "";
-    }
+    string localId() const { return nodeId.localId(); }
 
+    // Runtime typeName extraction (from nodeId string, not compile-time)
     string typeName() const {
-        auto sep = nodeId.indexOf(':');
-        return sep >= 0 ? nodeId[0 .. sep] : nodeId;
+        auto sep = nodeId.id.indexOf(':');
+        return sep >= 0 ? nodeId.id[0 .. sep] : nodeId.id;
     }
 }
 
@@ -1135,7 +1149,7 @@ unittest {
     auto collection = new MockCollectionExpr!TestEntity([TestEntity("Test:1"), TestEntity("Test:2")]);
 
     auto query = map!(
-        (Expr!TestEntity item) => use((TestEntity e) => e.nodeId, item)
+        (Expr!TestEntity item) => use((TestEntity e) => e.nodeId.id, item)
     )(collection);
 
     auto ctx = new EvalContext();
@@ -1152,7 +1166,7 @@ unittest {
 
     auto query = map!(
         (Expr!TestEntity item) => jsonObject(
-            "id", use((TestEntity e) => e.nodeId, item),
+            "id", use((TestEntity e) => e.nodeId.id, item),
             "type", use((TestEntity e) => e.typeName, item)
         )
     )(collection);
@@ -1173,7 +1187,7 @@ unittest {
     auto collection = new MockCollectionExpr!TestEntity([TestEntity("Test:1"), TestEntity("Test:2")]);
 
     auto query = map!(
-        (Expr!TestEntity item) => use((TestEntity e) => e.typeName, item) ~ ":" ~ use((TestEntity e) => e.nodeId, item)
+        (Expr!TestEntity item) => use((TestEntity e) => e.typeName, item) ~ ":" ~ use((TestEntity e) => e.nodeId.id, item)
     )(collection);
 
     auto ctx = new EvalContext();
