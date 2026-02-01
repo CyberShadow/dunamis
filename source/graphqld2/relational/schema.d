@@ -373,6 +373,8 @@ private template defaultFieldName(Entity) {
 /// Runtime entity reference with compile-time metadata.
 /// The struct carries both the ID string and type-level metadata (db, table, typeName).
 struct EntityRef(alias _db, string _tableName, string _typeName) {
+    import std.string : indexOf;
+
     /// Data source (compile-time alias)
     alias db = _db;
 
@@ -387,6 +389,12 @@ struct EntityRef(alias _db, string _tableName, string _typeName) {
 
     /// Construct from ID string
     this(string id) { this.id = id; }
+
+    /// Extract the local ID portion (after the colon)
+    string localId() const {
+        auto sep = id.indexOf(':');
+        return sep >= 0 ? id[sep + 1 .. $] : "";
+    }
 
     /// For debugging
     string toString() const { return id; }
@@ -991,6 +999,70 @@ auto getAll(Entity)() {
 }
 
 // ============================================================================
+// Entity Creation and Decoding Utilities
+// ============================================================================
+
+/// Create an Entity with its nodeId set from a long ID
+Entity makeEntity(Entity)(long id) {
+    return Entity(EntityID!Entity.typeName ~ ":" ~ id.to!string);
+}
+
+/// Create an Entity with its nodeId set from a string ID
+Entity makeEntity(Entity)(string id) {
+    return Entity(EntityID!Entity.typeName ~ ":" ~ id);
+}
+
+/// Create an Entity with its nodeId set from multiple key values (composite key)
+Entity makeCompositeEntity(Entity)(string[] keyValues) {
+    import graphqld2.core.types : encodeCompositeKey;
+    return Entity(EntityID!Entity.typeName ~ ":" ~ encodeCompositeKey(keyValues));
+}
+
+/// Convenience overload for two-part composite keys
+Entity makeCompositeEntity(Entity, T1, T2)(T1 val1, T2 val2) {
+    return makeCompositeEntity!Entity([val1.to!string, val2.to!string]);
+}
+
+/// Convenience overload for three-part composite keys
+Entity makeCompositeEntity(Entity, T1, T2, T3)(T1 val1, T2 val2, T3 val3) {
+    return makeCompositeEntity!Entity([val1.to!string, val2.to!string, val3.to!string]);
+}
+
+/// Decode an entity's nodeId to a long (assumes ID portion is numeric)
+/// Works with AnyRef (has localId method) and entities (have nodeId.localId)
+long decodeAsLong(T)(T entity) {
+    static if (__traits(hasMember, T, "localId")) {
+        // AnyRef or similar with direct localId method
+        return entity.localId.to!long;
+    } else static if (__traits(hasMember, T, "nodeId") && __traits(hasMember, typeof(T.init.nodeId), "localId")) {
+        // Entity with nodeId struct that has localId
+        return entity.nodeId.localId.to!long;
+    } else {
+        static assert(false, "Type " ~ T.stringof ~ " has no localId accessor");
+    }
+}
+
+/// Decode multiple entities to long IDs
+long[] decodeAsLongs(T)(T[] entities) {
+    return entities.map!(e => decodeAsLong(e)).array;
+}
+
+/// Decode an entity's localId as composite key parts
+/// Works with AnyRef (has localId method) and entities (have nodeId.localId)
+string[] decodeEntityCompositeKey(T)(T entity) {
+    import graphqld2.core.types : decodeCompositeKey;
+    static if (__traits(hasMember, T, "localId")) {
+        // AnyRef or similar with direct localId method
+        return decodeCompositeKey(entity.localId);
+    } else static if (__traits(hasMember, T, "nodeId") && __traits(hasMember, typeof(T.init.nodeId), "localId")) {
+        // Entity with nodeId struct that has localId
+        return decodeCompositeKey(entity.nodeId.localId);
+    } else {
+        static assert(false, "Type " ~ T.stringof ~ " has no localId accessor");
+    }
+}
+
+// ============================================================================
 // Column Access Expression
 // ============================================================================
 
@@ -1587,4 +1659,65 @@ unittest {
     assert(result.length == 2);
     assert(result[0] == 2);  // order 1, product 100 -> quantity 2
     assert(result[1] == 3);  // order 2, product 100 -> quantity 3
+}
+
+// Test makeEntity and decodeAsLong
+unittest {
+    import graphqld2.core.types : AnyRef;
+    import graphqld2.relational.demo : DemoEntity, MockDB;
+
+    static MockDB!() db;
+
+    static struct User {
+        mixin DemoEntity!(db, "users");
+    }
+
+    // Test makeEntity with long ID
+    auto user1 = makeEntity!User(42);
+    assert(user1.nodeId.id == "User:42");
+    static assert(is(typeof(user1) == User));
+
+    // Test makeEntity with string ID
+    auto user2 = makeEntity!User("abc-123");
+    assert(user2.nodeId.id == "User:abc-123");
+
+    // Test decodeAsLong with entity
+    assert(decodeAsLong(user1) == 42);
+
+    // Test decodeAsLong with AnyRef
+    assert(decodeAsLong(AnyRef("User:123")) == 123);
+
+    // Test decodeAsLongs
+    auto users = [makeEntity!User(1), makeEntity!User(2), makeEntity!User(3)];
+    assert(decodeAsLongs(users) == [1, 2, 3]);
+}
+
+// Test makeCompositeEntity and decodeEntityCompositeKey
+unittest {
+    import graphqld2.core.types : AnyRef;
+    import graphqld2.relational.demo : MockDB;
+
+    static MockDB!() db;
+
+    static struct OrderItem {
+        mixin Entity!(db, "order_items");
+        @PrimaryKeyAttr mixin Col!("orderId", long);
+        @PrimaryKeyAttr mixin Col!("productId", long);
+    }
+
+    // Test makeCompositeEntity with typed values
+    auto item1 = makeCompositeEntity!(OrderItem, int, int)(100, 200);
+    assert(item1.nodeId.id == "OrderItem:100,200");
+    assert(item1.nodeId.localId == "100,200");
+    static assert(is(typeof(item1) == OrderItem));
+
+    // Test makeCompositeEntity with string array
+    auto item2 = makeCompositeEntity!OrderItem(["order-1", "prod-2"]);
+    assert(item2.nodeId.id == "OrderItem:order-1,prod-2");
+
+    // Test decodeEntityCompositeKey with entity
+    assert(decodeEntityCompositeKey(item1) == ["100", "200"]);
+
+    // Test decodeEntityCompositeKey with AnyRef
+    assert(decodeEntityCompositeKey(AnyRef("OrderItem:100,200")) == ["100", "200"]);
 }
