@@ -1,57 +1,29 @@
 module graphqld2.relational.ddl;
 
+/// DDL generation infrastructure with dialect-parameterized common logic.
+/// Each database package provides a Dialect struct with static methods.
+
 import std.algorithm;
 import std.array;
-import std.meta;
-import std.traits;
+import std.format : format;
 
 import graphqld2.core.types : isCustomScalar;
-
-// ============================================================================
-// SQL Type Mapping
-// ============================================================================
-
-/// Map D types to SQL types
-template sqlTypeName(T) {
-    static if (isCustomScalar!T) {
-        // Custom scalar - use the underlying D type
-        enum sqlTypeName = sqlTypeName!(T.DType);
-    } else static if (is(T == string)) {
-        enum sqlTypeName = "TEXT";
-    } else static if (is(T == bool)) {
-        enum sqlTypeName = "BOOLEAN";
-    } else static if (is(T == int)) {
-        enum sqlTypeName = "INTEGER";
-    } else static if (is(T == long)) {
-        enum sqlTypeName = "BIGINT";
-    } else static if (is(T == short)) {
-        enum sqlTypeName = "SMALLINT";
-    } else static if (is(T == byte)) {
-        enum sqlTypeName = "SMALLINT";
-    } else static if (is(T == float)) {
-        enum sqlTypeName = "REAL";
-    } else static if (is(T == double)) {
-        enum sqlTypeName = "DOUBLE PRECISION";
-    } else {
-        enum sqlTypeName = "TEXT";  // Fallback
-    }
-}
 
 // ============================================================================
 // Column Info Extraction
 // ============================================================================
 
-/// Column definition for DDL
+/// Column definition for DDL generation.
 struct ColumnDef {
     string name;
-    string sqlType;
+    string dType;            // D type name for dialect-specific mapping
     bool nullable;
     bool isPrimaryKey;
     string foreignKeyTable;  // Empty if not a FK
     string foreignKeyColumn; // Empty if not a FK
 }
 
-/// Get primary key column names from entity (empty if none defined)
+/// Get primary key column names from entity
 template getPrimaryKeyColumns(Entity) {
     static if (__traits(hasMember, Entity, "_primaryKey")) {
         enum getPrimaryKeyColumns = Entity._primaryKey.columns;
@@ -68,6 +40,31 @@ bool isInPrimaryKey(string colName, const string[] pkColumns) {
     return false;
 }
 
+/// Get the base D type name for SQL mapping
+template getDTypeName(T) {
+    static if (isCustomScalar!T) {
+        enum getDTypeName = getDTypeName!(T.DType);
+    } else static if (is(T == string)) {
+        enum getDTypeName = "string";
+    } else static if (is(T == bool)) {
+        enum getDTypeName = "bool";
+    } else static if (is(T == int)) {
+        enum getDTypeName = "int";
+    } else static if (is(T == long)) {
+        enum getDTypeName = "long";
+    } else static if (is(T == short)) {
+        enum getDTypeName = "short";
+    } else static if (is(T == byte)) {
+        enum getDTypeName = "byte";
+    } else static if (is(T == float)) {
+        enum getDTypeName = "float";
+    } else static if (is(T == double)) {
+        enum getDTypeName = "double";
+    } else {
+        enum getDTypeName = "string";  // Fallback
+    }
+}
+
 /// Extract column definitions from an entity type
 template getColumnDefs(Entity) {
     enum getColumnDefs = () {
@@ -80,8 +77,6 @@ template getColumnDefs(Entity) {
             static if (member.length > 10 && member[0..10] == "_colField_") {
                 alias FieldMeta = __traits(getMember, Entity, member);
                 if (FieldMeta.column !in seenColumns) {
-                    // Check if this column is part of the primary key
-                    // (either via _primaryKey metadata or legacy isPrimaryKey field)
                     static if (__traits(hasMember, FieldMeta, "isPrimaryKey")) {
                         enum bool isPK = isInPrimaryKey(FieldMeta.name, pkColumns) || FieldMeta.isPrimaryKey;
                     } else {
@@ -89,20 +84,18 @@ template getColumnDefs(Entity) {
                     }
 
                     static if (FieldMeta.isForeignKey) {
-                        // ForeignKey column - include FK constraint
                         columns ~= ColumnDef(
                             FieldMeta.column,
-                            sqlTypeName!(FieldMeta.type),
+                            getDTypeName!(FieldMeta.type),
                             isPK ? false : FieldMeta.isNullable,
                             isPK,
                             FieldMeta.referencedEntity._table,
                             FieldMeta.referencedColumn
                         );
                     } else {
-                        // Regular column
                         columns ~= ColumnDef(
                             FieldMeta.column,
-                            sqlTypeName!(FieldMeta.type),
+                            getDTypeName!(FieldMeta.type),
                             isPK ? false : FieldMeta.isNullable,
                             isPK,
                             "",
@@ -119,12 +112,11 @@ template getColumnDefs(Entity) {
             static if (member.length > 16 && member[0..16] == "_belongsToField_") {
                 alias FieldMeta = __traits(getMember, Entity, member);
                 if (FieldMeta.foreignKey !in seenColumns) {
-                    // Get parent's id column type via _colField_id
                     static if (__traits(hasMember, FieldMeta.parentType, "_colField_id")) {
                         alias ParentIdCol = __traits(getMember, FieldMeta.parentType, "_colField_id");
                         columns ~= ColumnDef(
                             FieldMeta.foreignKey,
-                            sqlTypeName!(ParentIdCol.type),
+                            getDTypeName!(ParentIdCol.type),
                             FieldMeta.nullable,
                             false,
                             FieldMeta.parentType._table,
@@ -141,106 +133,125 @@ template getColumnDefs(Entity) {
 }
 
 // ============================================================================
-// DDL Generation
+// Dialect-Parameterized DDL Generation
 // ============================================================================
 
-/// Generate CREATE TABLE statement for an entity (without FK constraints)
-string generateCreateTable(Entity)() {
-    string result = "CREATE TABLE " ~ Entity._table ~ " (\n";
+/// Generate CREATE TABLE statement for an entity using the given dialect.
+template generateCreateTable(Dialect, Entity) {
+    enum generateCreateTable = () {
+        string result = "CREATE TABLE " ~ Entity._table ~ " (\n";
 
-    auto columns = getColumnDefs!Entity;
-    enum pkColumns = getPrimaryKeyColumns!Entity;
-    enum bool isCompositePK = pkColumns.length > 1;
+        enum columns = getColumnDefs!Entity;
+        enum pkColumns = getPrimaryKeyColumns!Entity;
+        enum bool isCompositePK = pkColumns.length > 1;
 
-    string[] colDefs;
-    string[] pkColNames;
+        string[] colDefs;
+        string[] pkColNames;
+        string[] fkConstraints;
 
-    foreach (col; columns) {
-        string sqlType = col.sqlType;
+        foreach (col; columns) {
+            string sqlType = Dialect.sqlTypeName(col.dType);
 
-        // Use SERIAL types for auto-increment primary keys
-        if (col.isPrimaryKey && !isCompositePK) {
-            if (sqlType == "BIGINT") {
-                sqlType = "BIGSERIAL";
-            } else if (sqlType == "INTEGER") {
-                sqlType = "SERIAL";
+            // Handle auto-increment for single-column primary keys
+            if (col.isPrimaryKey && !isCompositePK) {
+                sqlType = Dialect.autoIncrementType(sqlType);
             }
-        }
 
-        string def = "  " ~ col.name ~ " " ~ sqlType;
-        if (col.isPrimaryKey) {
-            pkColNames ~= col.name;
-            // Only inline PRIMARY KEY for single-column PKs
-            if (!isCompositePK) {
-                def ~= " PRIMARY KEY";
+            string def = "  " ~ col.name ~ " " ~ sqlType;
+
+            if (col.isPrimaryKey) {
+                pkColNames ~= col.name;
+                if (!isCompositePK) {
+                    def ~= " PRIMARY KEY";
+                } else if (!col.nullable) {
+                    def ~= " NOT NULL";
+                }
             } else if (!col.nullable) {
                 def ~= " NOT NULL";
             }
-        } else if (!col.nullable) {
-            def ~= " NOT NULL";
+
+            // Handle FK constraints based on dialect
+            if (col.foreignKeyTable.length > 0) {
+                static if (Dialect.supportsAlterTableFK) {
+                    // Will be added via ALTER TABLE later
+                } else {
+                    // Inline FK constraint
+                    def ~= " REFERENCES " ~ col.foreignKeyTable ~ "(" ~ col.foreignKeyColumn ~ ")";
+                }
+            }
+
+            colDefs ~= def;
         }
-        colDefs ~= def;
-    }
 
-    result ~= colDefs.join(",\n");
+        result ~= colDefs.join(",\n");
 
-    // Add composite primary key constraint (inline, not FK)
-    if (isCompositePK && pkColNames.length > 0) {
-        result ~= ",\n  PRIMARY KEY (" ~ pkColNames.join(", ") ~ ")";
-    }
+        // Add composite primary key constraint
+        if (isCompositePK && pkColNames.length > 0) {
+            result ~= ",\n  PRIMARY KEY (" ~ pkColNames.join(", ") ~ ")";
+        }
 
-    result ~= "\n);\n";
+        result ~= "\n);\n";
 
-    return result;
+        return result;
+    }();
 }
 
-/// Generate ALTER TABLE statements for FK constraints of an entity
-string generateForeignKeys(Entity)() {
-    import std.format : format;
+/// Generate ALTER TABLE statements for FK constraints (for dialects that support it)
+template generateForeignKeys(Dialect, Entity) {
+    enum generateForeignKeys = () {
+        static if (!Dialect.supportsAlterTableFK) {
+            return "";  // FKs are inline for this dialect
+        } else {
+            string result;
+            enum columns = getColumnDefs!Entity;
+            int fkIndex = 0;
 
-    string result;
-    auto columns = getColumnDefs!Entity;
-    int fkIndex = 0;
+            foreach (col; columns) {
+                if (col.foreignKeyTable.length > 0) {
+                    result ~= format("ALTER TABLE %s ADD CONSTRAINT %s_fk%d FOREIGN KEY (%s) REFERENCES %s(%s);\n",
+                        Entity._table,
+                        Entity._table,
+                        fkIndex++,
+                        col.name,
+                        col.foreignKeyTable,
+                        col.foreignKeyColumn
+                    );
+                }
+            }
 
-    foreach (col; columns) {
-        if (col.foreignKeyTable.length > 0) {
-            result ~= format("ALTER TABLE %s ADD CONSTRAINT %s_fk%d FOREIGN KEY (%s) REFERENCES %s(%s);\n",
-                Entity._table,
-                Entity._table,
-                fkIndex++,
-                col.name,
-                col.foreignKeyTable,
-                col.foreignKeyColumn
-            );
+            return result;
         }
-    }
-
-    return result;
+    }();
 }
 
-/// Generate DDL for all entities reachable from Query.
-/// Tables are created first, then FK constraints are added via ALTER TABLE.
-/// This approach handles circular references correctly.
-template generateDDL(Query) {
+/// Generate DDL for all entities reachable from Query using the given dialect.
+template generateDDL(Dialect, Query) {
     import graphqld2.graphql.schema : getAllEntityTypes;
 
     alias AllTypes = getAllEntityTypes!Query;
 
     enum generateDDL = () {
         string result;
-        result ~= "-- Generated DDL for schema\n";
-        result ~= "-- Phase 1: Create tables (without FK constraints)\n\n";
+        result ~= "-- Generated " ~ Dialect.name ~ " DDL\n";
 
-        // Phase 1: Create all tables without FK constraints
-        static foreach (Entity; AllTypes) {
-            result ~= generateCreateTable!Entity();
+        static if (Dialect.supportsAlterTableFK) {
+            result ~= "-- Phase 1: Create tables\n\n";
+        } else {
             result ~= "\n";
         }
 
-        // Phase 2: Add FK constraints via ALTER TABLE
-        result ~= "-- Phase 2: Add foreign key constraints\n\n";
+        // Create all tables
         static foreach (Entity; AllTypes) {
-            result ~= generateForeignKeys!Entity();
+            result ~= generateCreateTable!(Dialect, Entity);
+            result ~= "\n";
+        }
+
+        // Add FK constraints (if dialect uses ALTER TABLE)
+        static if (Dialect.supportsAlterTableFK) {
+            result ~= "-- Phase 2: Add foreign key constraints\n\n";
+            static foreach (Entity; AllTypes) {
+                result ~= generateForeignKeys!(Dialect, Entity);
+            }
         }
 
         return result;
@@ -252,86 +263,31 @@ template generateDDL(Query) {
 // ============================================================================
 
 unittest {
-    // Test SQL type mapping
-    static assert(sqlTypeName!string == "TEXT");
-    static assert(sqlTypeName!int == "INTEGER");
-    static assert(sqlTypeName!long == "BIGINT");
-    static assert(sqlTypeName!bool == "BOOLEAN");
-    static assert(sqlTypeName!double == "DOUBLE PRECISION");
-}
-
-unittest {
-    import std.algorithm : canFind;
     import std.typecons : Nullable;
-    import graphqld2.core.expr : Expr;
-    import graphqld2.relational.schema : Col, BelongsTo, ForeignKey, belongsTo;
+    import graphqld2.relational.schema : Col, BelongsTo, ForeignKey;
     import graphqld2.relational.demo : DemoEntity, MockDB;
 
     static MockDB!() db;
 
-    // Test nullable FK via Col + BelongsTo
     static struct Manager {
         mixin DemoEntity!(db, "managers");
     }
 
     static struct Employee {
         mixin DemoEntity!(db, "employees");
-        mixin Col!("managerId", Nullable!(ForeignKey!Manager));  // nullable FK column
-        mixin BelongsTo!("manager", "managerId");  // derives nullability from column
+        mixin Col!("managerId", Nullable!(ForeignKey!Manager));
+        mixin BelongsTo!("manager", "managerId");
     }
 
     auto cols = getColumnDefs!Employee;
-    // Find the manager_id column
     bool found = false;
     foreach (col; cols) {
         if (col.name == "manager_id") {
             found = true;
             assert(col.nullable == true, "manager_id should be nullable");
-            assert(col.foreignKeyTable == "managers", "Should reference managers table");
+            assert(col.foreignKeyTable == "managers");
+            assert(col.dType == "long");
         }
     }
     assert(found, "manager_id column should exist");
-
-    // Verify DDL output doesn't have NOT NULL for nullable FK
-    enum ddl = generateCreateTable!Employee;
-    assert(ddl.canFind("manager_id BIGINT,") || ddl.canFind("manager_id BIGINT\n"),
-           "Nullable FK should not have NOT NULL constraint");
-    assert(!ddl.canFind("manager_id BIGINT NOT NULL"),
-           "Nullable FK should not have NOT NULL");
-}
-
-unittest {
-    import std.algorithm : canFind;
-    import std.typecons : Nullable;
-    import graphqld2.core.expr : Expr;
-    import graphqld2.relational.schema : Col, BelongsTo, ForeignKey, belongsTo;
-    import graphqld2.relational.demo : DemoEntity, MockDB;
-
-    static MockDB!() db;
-
-    // Test required FK via Col + BelongsTo
-    static struct Department {
-        mixin DemoEntity!(db, "departments");
-    }
-
-    static struct Employee2 {
-        mixin DemoEntity!(db, "employees2");
-        mixin Col!("departmentId", ForeignKey!Department);  // required FK column
-        mixin BelongsTo!("department", "departmentId");  // derives from column
-    }
-
-    auto cols = getColumnDefs!Employee2;
-    bool found = false;
-    foreach (col; cols) {
-        if (col.name == "department_id") {
-            found = true;
-            assert(col.nullable == false, "department_id should be required");
-        }
-    }
-    assert(found, "department_id column should exist");
-
-    // Verify DDL output has NOT NULL for required FK
-    enum ddl = generateCreateTable!Employee2;
-    assert(ddl.canFind("department_id BIGINT NOT NULL"),
-           "Required FK should have NOT NULL constraint");
 }

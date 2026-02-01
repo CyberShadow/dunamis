@@ -17,7 +17,6 @@ import ae.net.db.psql : PgSqlConnection;
 import ae.utils.promise.await : async, await;
 
 import graphqld2.postgres;
-import graphqld2.relational.ddl : generateDDL;
 
 import integration.schema;
 import integration.test_runner;

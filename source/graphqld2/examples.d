@@ -714,23 +714,24 @@ unittest {
 }
 
 // ============================================================================
-// SQL DDL Generation Tests
+// SQL DDL Generation Tests (PostgreSQL)
 // ============================================================================
 
 unittest {
     import std.stdio : writeln;
+    import graphqld2.postgres.ddl : generateDDL;
 
     // Generate DDL for all tables
     enum ddl = generateDDL!Query;
 
     debug(ddl) {
-        writeln("\n=== Generated SQL DDL ===");
+        writeln("\n=== Generated PostgreSQL DDL ===");
         writeln(ddl);
     }
 
     enum expected = q"EOF
--- Generated DDL for schema
--- Phase 1: Create tables (without FK constraints)
+-- Generated PostgreSQL DDL
+-- Phase 1: Create tables
 
 CREATE TABLE users (
   id BIGSERIAL PRIMARY KEY,
@@ -764,6 +765,8 @@ EOF";
 
 // Test individual table DDL
 unittest {
+    import graphqld2.postgres.ddl : generateCreateTable;
+
     enum usersDDL = generateCreateTable!User;
 
     enum expected = q"EOF
@@ -790,11 +793,11 @@ unittest {
         if (col.name == "id") {
             hasId = true;
             assert(col.isPrimaryKey);
-            assert(col.sqlType == "BIGINT");
+            assert(col.dType == "long");
         }
         if (col.name == "first_name") {
             hasFirstName = true;
-            assert(col.sqlType == "TEXT");
+            assert(col.dType == "string");
             assert(!col.nullable);
         }
     }

@@ -2,5 +2,6 @@ module graphqld2.postgres;
 
 public {
     import graphqld2.postgres.connection;
+    import graphqld2.postgres.ddl;
     import graphqld2.postgres.fetcher;
 }
