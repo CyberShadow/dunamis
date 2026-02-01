@@ -31,7 +31,7 @@ configuration "sqlite-integration" {
     mainSourceFile "source/integration/sqlite_test.d"
     sourceFiles "source/integration/test_framework.d" "source/integration/tests.d" "source/integration/schema.d" "source/integration/test_runner.d"
     # Include sqlite sources directly for integration test
-    sourceFiles "source/graphqld2/sqlite/fetcher.d" "source/graphqld2/sqlite/sql.d" "source/graphqld2/sqlite/package.d"
+    sourceFiles "source/graphqld2/sqlite/ddl.d" "source/graphqld2/sqlite/fetcher.d" "source/graphqld2/sqlite/sql.d" "source/graphqld2/sqlite/package.d"
     dependency "ae:sqlite" repository="git+https://github.com/CyberShadow/ae.git" version="573324089882f307cd619d67f02bb4e11c1eb69c"
 }
 

@@ -5,7 +5,10 @@
  */
 module integration.sqlite_test;
 
+import std.algorithm;
+import std.array;
 import std.stdio;
+import std.string : strip;
 
 import ae.net.sync : ThreadAnchor;
 import ae.sys.sqlite3 : SQLite;
@@ -40,18 +43,18 @@ class SQLiteTestRunner : IntegrationTestRunner!(db, MySchema) {
         sqlite = new SQLite(":memory:");
         db = new SQLiteDB!()(sqlite);
 
-        writeln("Creating schema...");
-        sqlite.exec("CREATE TABLE users (
-            id INTEGER PRIMARY KEY,
-            first_name TEXT NOT NULL,
-            last_name TEXT NOT NULL
-        )");
+        writeln("Creating schema from DDL generator...");
 
-        sqlite.exec("CREATE TABLE posts (
-            id INTEGER PRIMARY KEY,
-            title TEXT NOT NULL,
-            author_id INTEGER NOT NULL REFERENCES users(id)
-        )");
+        // Generate DDL at compile time
+        enum ddl = generateDDL!(Query);
+        debug(sql) writeln(ddl);
+
+        // Execute each statement
+        foreach (statement; ddl.splitter(";\n").filter!(s => s.strip.length > 0)) {
+            auto sql = statement.strip ~ ";";
+            debug(sql) writefln("  Executing: %s", sql);
+            sqlite.exec(sql);
+        }
 
         writeln("Schema created.");
         writeln();
