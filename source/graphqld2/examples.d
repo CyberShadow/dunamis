@@ -730,7 +730,7 @@ unittest {
 
     enum expected = q"EOF
 -- Generated DDL for schema
--- Tables are ordered by dependency (referenced tables first)
+-- Phase 1: Create tables (without FK constraints)
 
 CREATE TABLE users (
   id BIGSERIAL PRIMARY KEY,
@@ -743,19 +743,21 @@ CREATE TABLE posts (
   id BIGSERIAL PRIMARY KEY,
   title TEXT NOT NULL,
   body TEXT NOT NULL,
-  author_id BIGINT NOT NULL,
-  FOREIGN KEY (author_id) REFERENCES users(id)
+  author_id BIGINT NOT NULL
 );
 
 CREATE TABLE comments (
   id BIGSERIAL PRIMARY KEY,
   body TEXT NOT NULL,
   post_id BIGINT NOT NULL,
-  author_id BIGINT NOT NULL,
-  FOREIGN KEY (post_id) REFERENCES posts(id),
-  FOREIGN KEY (author_id) REFERENCES users(id)
+  author_id BIGINT NOT NULL
 );
 
+-- Phase 2: Add foreign key constraints
+
+ALTER TABLE posts ADD CONSTRAINT posts_fk0 FOREIGN KEY (author_id) REFERENCES users(id);
+ALTER TABLE comments ADD CONSTRAINT comments_fk0 FOREIGN KEY (post_id) REFERENCES posts(id);
+ALTER TABLE comments ADD CONSTRAINT comments_fk1 FOREIGN KEY (author_id) REFERENCES users(id);
 EOF";
     assert(ddl == expected, "Generated DDL does not match expected:\n---ACTUAL---\n" ~ ddl ~ "\n---EXPECTED---\n" ~ expected);
 }

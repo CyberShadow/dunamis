@@ -144,7 +144,7 @@ template getColumnDefs(Entity) {
 // DDL Generation
 // ============================================================================
 
-/// Generate CREATE TABLE statement for an entity
+/// Generate CREATE TABLE statement for an entity (without FK constraints)
 string generateCreateTable(Entity)() {
     string result = "CREATE TABLE " ~ Entity._table ~ " (\n";
 
@@ -153,7 +153,6 @@ string generateCreateTable(Entity)() {
     enum bool isCompositePK = pkColumns.length > 1;
 
     string[] colDefs;
-    string[] constraints;
     string[] pkColNames;
 
     foreach (col; columns) {
@@ -181,122 +180,67 @@ string generateCreateTable(Entity)() {
             def ~= " NOT NULL";
         }
         colDefs ~= def;
-
-        // Add foreign key constraint
-        if (col.foreignKeyTable.length > 0) {
-            constraints ~= "  FOREIGN KEY (" ~ col.name ~ ") REFERENCES " ~
-                          col.foreignKeyTable ~ "(" ~ col.foreignKeyColumn ~ ")";
-        }
-    }
-
-    // Add composite primary key constraint
-    if (isCompositePK && pkColNames.length > 0) {
-        constraints = ["  PRIMARY KEY (" ~ pkColNames.join(", ") ~ ")"] ~ constraints;
     }
 
     result ~= colDefs.join(",\n");
-    if (constraints.length > 0) {
-        result ~= ",\n" ~ constraints.join(",\n");
+
+    // Add composite primary key constraint (inline, not FK)
+    if (isCompositePK && pkColNames.length > 0) {
+        result ~= ",\n  PRIMARY KEY (" ~ pkColNames.join(", ") ~ ")";
     }
+
     result ~= "\n);\n";
 
     return result;
 }
 
-/// Get FK dependencies for an entity (returns table names it depends on)
-template getEntityDependencies(Entity) {
-    enum getEntityDependencies = () {
-        string[] deps;
-        static foreach (member; __traits(allMembers, Entity)) {{
-            static if (member.length > 10 && member[0..10] == "_colField_") {
-                alias FieldMeta = __traits(getMember, Entity, member);
-                static if (FieldMeta.isForeignKey) {
-                    deps ~= FieldMeta.referencedEntity._table;
-                }
-            }
-        }}
-        return deps;
-    }();
-}
+/// Generate ALTER TABLE statements for FK constraints of an entity
+string generateForeignKeys(Entity)() {
+    import std.format : format;
 
-/// Topologically sort entities by FK dependencies (referenced tables first)
-template sortEntitiesByDependency(AllTypes...) {
-    alias sortEntitiesByDependency = impl!();
+    string result;
+    auto columns = getColumnDefs!Entity;
+    int fkIndex = 0;
 
-    template impl(size_t[] order = []) {
-        static if (order.length == AllTypes.length) {
-            // Done - return types in sorted order
-            alias impl = reorder!(order);
-        } else {
-            // Find next entity with all dependencies satisfied
-            enum nextIdx = findNext!(order);
-            static assert(nextIdx != -1, "Circular FK dependency detected");
-            alias impl = impl!(order ~ nextIdx);
+    foreach (col; columns) {
+        if (col.foreignKeyTable.length > 0) {
+            result ~= format("ALTER TABLE %s ADD CONSTRAINT %s_fk%d FOREIGN KEY (%s) REFERENCES %s(%s);\n",
+                Entity._table,
+                Entity._table,
+                fkIndex++,
+                col.name,
+                col.foreignKeyTable,
+                col.foreignKeyColumn
+            );
         }
     }
 
-    template reorder(size_t[] order) {
-        import std.meta : AliasSeq;
-        static if (order.length == 0) {
-            alias reorder = AliasSeq!();
-        } else {
-            alias reorder = AliasSeq!(AllTypes[order[0]], reorder!(order[1..$]));
-        }
-    }
-
-    template findNext(size_t[] alreadyOrdered) {
-        enum findNext = () {
-            // Get table names already in order
-            string[] orderedTables;
-            static foreach (idx; alreadyOrdered) {
-                orderedTables ~= AllTypes[idx]._table;
-            }
-
-            // Find first entity not yet ordered whose deps are all satisfied
-            static foreach (i, Entity; AllTypes) {{
-                // Check if already ordered
-                bool alreadyDone = false;
-                static foreach (idx; alreadyOrdered) {
-                    if (i == idx) alreadyDone = true;
-                }
-
-                if (!alreadyDone) {
-                    // Check if all dependencies are satisfied
-                    enum deps = getEntityDependencies!Entity;
-                    bool allDepsSatisfied = true;
-                    static foreach (dep; deps) {{
-                        bool depFound = false;
-                        foreach (t; orderedTables) {
-                            if (t == dep) depFound = true;
-                        }
-                        if (!depFound) allDepsSatisfied = false;
-                    }}
-
-                    if (allDepsSatisfied) {
-                        return cast(int) i;
-                    }
-                }
-            }}
-            return -1;
-        }();
-    }
+    return result;
 }
 
-/// Generate CREATE TABLE statements for all entities reachable from Query
+/// Generate DDL for all entities reachable from Query.
+/// Tables are created first, then FK constraints are added via ALTER TABLE.
+/// This approach handles circular references correctly.
 template generateDDL(Query) {
     import graphqld2.graphql.schema : getAllEntityTypes;
 
     alias AllTypes = getAllEntityTypes!Query;
-    alias SortedTypes = sortEntitiesByDependency!AllTypes;
 
     enum generateDDL = () {
         string result;
         result ~= "-- Generated DDL for schema\n";
-        result ~= "-- Tables are ordered by dependency (referenced tables first)\n\n";
+        result ~= "-- Phase 1: Create tables (without FK constraints)\n\n";
 
-        static foreach (Entity; SortedTypes) {
+        // Phase 1: Create all tables without FK constraints
+        static foreach (Entity; AllTypes) {
             result ~= generateCreateTable!Entity();
             result ~= "\n";
+        }
+
+        // Phase 2: Add FK constraints via ALTER TABLE
+        result ~= "-- Phase 2: Add foreign key constraints\n\n";
+        static foreach (Entity; AllTypes) {
+            result ~= generateForeignKeys!Entity();
         }
 
         return result;
