@@ -940,92 +940,56 @@ template getAllEntityTypes(Query) {
 // ============================================================================
 
 /// Generate GraphQL SDL for an entity type
-string generateTypeSDL(Entity)() {
-    string result = "type " ~ EntityID!Entity.typeName ~ " {\n";
+/// Generate GraphQL SDL for any object type (entity, Query, or Mutation).
+string generateObjectTypeSDL(T)(string typeName) {
+    enum fields = getFields!T;
 
-    foreach (field; getFields!Entity) {
-        // Skip hidden fields
-        if (field.hidden) continue;
+    static if (fields.length == 0) {
+        return "";  // No fields defined
+    } else {
+        string result = "type " ~ typeName ~ " {\n";
 
-        // Add description as doc string
-        if (field.description.length > 0) {
-            result ~= "  \"\"\"" ~ field.description ~ "\"\"\"\n";
-        }
+        foreach (field; fields) {
+            // Skip hidden fields
+            if (field.hidden) continue;
 
-        // Field name
-        result ~= "  " ~ field.name;
-
-        // Add arguments if present
-        if (field.arguments.length > 0) {
-            result ~= "(";
-            foreach (i, arg; field.arguments) {
-                if (i > 0) result ~= ", ";
-                result ~= arg.name ~ ": " ~ arg.graphqlType;
-                if (arg.hasDefault) {
-                    result ~= " = " ~ arg.defaultValue;
-                }
+            // Add description as doc string
+            if (field.description.length > 0) {
+                result ~= "  \"\"\"" ~ field.description ~ "\"\"\"\n";
             }
-            result ~= ")";
+
+            // Field name
+            result ~= "  " ~ field.name;
+
+            // Add arguments if present
+            if (field.arguments.length > 0) {
+                result ~= "(";
+                foreach (i, arg; field.arguments) {
+                    if (i > 0) result ~= ", ";
+                    result ~= arg.name ~ ": " ~ arg.graphqlType;
+                    if (arg.hasDefault) {
+                        result ~= " = " ~ arg.defaultValue;
+                    }
+                }
+                result ~= ")";
+            }
+
+            // Return type
+            result ~= ": " ~ field.graphqlType;
+
+            // Add @deprecated directive if present
+            if (field.deprecation.length > 0) {
+                result ~= " @deprecated(reason: \"" ~ field.deprecation ~ "\")";
+            }
+
+            result ~= "\n";
         }
 
-        // Return type
-        result ~= ": " ~ field.graphqlType;
-
-        // Add @deprecated directive if present
-        if (field.deprecation.length > 0) {
-            result ~= " @deprecated(reason: \"" ~ field.deprecation ~ "\")";
-        }
-
-        result ~= "\n";
+        result ~= "}\n";
+        return result;
     }
-
-    result ~= "}\n";
-    return result;
 }
 
-/// Generate GraphQL SDL for the Query type
-string generateQuerySDL(Query)() {
-    string result = "type Query {\n";
-
-    foreach (field; getFields!Query) {
-        // Skip hidden fields
-        if (field.hidden) continue;
-
-        // Add description as doc string
-        if (field.description.length > 0) {
-            result ~= "  \"\"\"" ~ field.description ~ "\"\"\"\n";
-        }
-
-        // Field name
-        result ~= "  " ~ field.name;
-
-        // Add arguments if present
-        if (field.arguments.length > 0) {
-            result ~= "(";
-            foreach (i, arg; field.arguments) {
-                if (i > 0) result ~= ", ";
-                result ~= arg.name ~ ": " ~ arg.graphqlType;
-                if (arg.hasDefault) {
-                    result ~= " = " ~ arg.defaultValue;
-                }
-            }
-            result ~= ")";
-        }
-
-        // Return type
-        result ~= ": " ~ field.graphqlType;
-
-        // Add @deprecated directive if present
-        if (field.deprecation.length > 0) {
-            result ~= " @deprecated(reason: \"" ~ field.deprecation ~ "\")";
-        }
-
-        result ~= "\n";
-    }
-
-    result ~= "}\n";
-    return result;
-}
 
 // ============================================================================
 // Root Field Return Type Extraction
@@ -1111,56 +1075,6 @@ template getRootFieldArguments(alias member) {
         }}
         return args;
     }();
-}
-
-/// Generate GraphQL SDL for the Mutation type
-string generateMutationSDL(Mutation)() {
-    enum fields = getFields!Mutation;
-
-    static if (fields.length == 0) {
-        return "";  // No mutations defined
-    } else {
-        string result = "type Mutation {\n";
-
-        foreach (field; fields) {
-            // Skip hidden fields
-            if (field.hidden) continue;
-
-            // Add description as doc string
-            if (field.description.length > 0) {
-                result ~= "  \"\"\"" ~ field.description ~ "\"\"\"\n";
-            }
-
-            // Field name
-            result ~= "  " ~ field.name;
-
-            // Add arguments if present
-            if (field.arguments.length > 0) {
-                result ~= "(";
-                foreach (i, arg; field.arguments) {
-                    if (i > 0) result ~= ", ";
-                    result ~= arg.name ~ ": " ~ arg.graphqlType;
-                    if (arg.hasDefault) {
-                        result ~= " = " ~ arg.defaultValue;
-                    }
-                }
-                result ~= ")";
-            }
-
-            // Return type
-            result ~= ": " ~ field.graphqlType;
-
-            // Add @deprecated directive if present
-            if (field.deprecation.length > 0) {
-                result ~= " @deprecated(reason: \"" ~ field.deprecation ~ "\")";
-            }
-
-            result ~= "\n";
-        }
-
-        result ~= "}\n";
-        return result;
-    }
 }
 
 /// Generate GraphQL SDL for an input type
@@ -1273,12 +1187,12 @@ template generateSchemaSDL(alias SchemaOrQuery) {
         }
 
         // Generate Query type
-        result ~= generateQuerySDL!QueryType();
+        result ~= generateObjectTypeSDL!QueryType("Query");
         result ~= "\n";
 
         // Generate Mutation type if present
         static if (hasMutations) {
-            enum mutationSdl = generateMutationSDL!MutationType();
+            enum mutationSdl = generateObjectTypeSDL!MutationType("Mutation");
             static if (mutationSdl.length > 0) {
                 result ~= mutationSdl;
                 result ~= "\n";
@@ -1287,7 +1201,7 @@ template generateSchemaSDL(alias SchemaOrQuery) {
 
         // Generate each discovered entity type
         static foreach (Entity; AllTypes) {
-            result ~= generateTypeSDL!Entity();
+            result ~= generateObjectTypeSDL!Entity(EntityID!Entity.typeName);
             result ~= "\n";
         }
 
@@ -1406,7 +1320,7 @@ unittest {
     assert(foundPasswordHash, "passwordHash field should exist");
 
     // Verify SDL doesn't include hidden field
-    enum sdl = generateTypeSDL!User;
+    enum sdl = generateObjectTypeSDL!User(EntityID!User.typeName);
     assert(sdl.canFind("name:"), "SDL should include name field");
     assert(!sdl.canFind("passwordHash"), "SDL should NOT include passwordHash field");
 }
@@ -1459,7 +1373,7 @@ unittest {
     assert(foundTitle && foundBody && foundPlain, "All fields should exist");
 
     // Verify SDL output
-    enum sdl = generateTypeSDL!Article;
+    enum sdl = generateObjectTypeSDL!Article(EntityID!Article.typeName);
 
     // Should have description as doc string
     assert(sdl.canFind(`"""The article title"""`), "SDL should include title description");
