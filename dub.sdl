@@ -16,6 +16,5 @@ configuration "library" {
 
 configuration "postgres-integration" {
     targetType "executable"
-    mainSourceFile "integration/postgres_test.d"
-    importPaths "integration"
+    mainSourceFile "source/integration/postgres_test.d"
 }

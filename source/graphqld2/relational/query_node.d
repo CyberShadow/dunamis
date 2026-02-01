@@ -49,6 +49,9 @@ class QueryNode {
     /// Parent node (for hasMany relationships)
     QueryNode parent;
 
+    /// Child nodes (for hasMany relationships)
+    QueryNode[] children;
+
     /// Foreign key linking to parent (for hasMany)
     string parentFk;
 
@@ -97,6 +100,9 @@ class QueryNode {
         this.parentFk = fk;
         this.parentTypeName = parentTypeName;
         addColumn(fk);  // Need FK for grouping
+
+        // Also add to parent's children list
+        parent.children ~= this;
     }
 
     /// Set root filter (for root nodes)
@@ -134,6 +140,22 @@ class QueryNode {
     /// Check if this is a root node (no parent)
     @property bool isRoot() const {
         return parent is null;
+    }
+
+    /// Get all nodes in the tree rooted at this node (including self).
+    /// Returns nodes in BFS order (parents before children).
+    QueryNode[] allNodesInTree() {
+        QueryNode[] result;
+        QueryNode[] queue = [this];
+
+        while (queue.length > 0) {
+            auto node = queue[0];
+            queue = queue[1..$];
+            result ~= node;
+            queue ~= node.children;
+        }
+
+        return result;
     }
 }
 

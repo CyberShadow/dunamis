@@ -157,7 +157,18 @@ string generateCreateTable(Entity)() {
     string[] pkColNames;
 
     foreach (col; columns) {
-        string def = "  " ~ col.name ~ " " ~ col.sqlType;
+        string sqlType = col.sqlType;
+
+        // Use SERIAL types for auto-increment primary keys
+        if (col.isPrimaryKey && !isCompositePK) {
+            if (sqlType == "BIGINT") {
+                sqlType = "BIGSERIAL";
+            } else if (sqlType == "INTEGER") {
+                sqlType = "SERIAL";
+            }
+        }
+
+        string def = "  " ~ col.name ~ " " ~ sqlType;
         if (col.isPrimaryKey) {
             pkColNames ~= col.name;
             // Only inline PRIMARY KEY for single-column PKs
@@ -192,20 +203,98 @@ string generateCreateTable(Entity)() {
     return result;
 }
 
+/// Get FK dependencies for an entity (returns table names it depends on)
+template getEntityDependencies(Entity) {
+    enum getEntityDependencies = () {
+        string[] deps;
+        static foreach (member; __traits(allMembers, Entity)) {{
+            static if (member.length > 10 && member[0..10] == "_colField_") {
+                alias FieldMeta = __traits(getMember, Entity, member);
+                static if (FieldMeta.isForeignKey) {
+                    deps ~= FieldMeta.referencedEntity._table;
+                }
+            }
+        }}
+        return deps;
+    }();
+}
+
+/// Topologically sort entities by FK dependencies (referenced tables first)
+template sortEntitiesByDependency(AllTypes...) {
+    alias sortEntitiesByDependency = impl!();
+
+    template impl(size_t[] order = []) {
+        static if (order.length == AllTypes.length) {
+            // Done - return types in sorted order
+            alias impl = reorder!(order);
+        } else {
+            // Find next entity with all dependencies satisfied
+            enum nextIdx = findNext!(order);
+            static assert(nextIdx != -1, "Circular FK dependency detected");
+            alias impl = impl!(order ~ nextIdx);
+        }
+    }
+
+    template reorder(size_t[] order) {
+        import std.meta : AliasSeq;
+        static if (order.length == 0) {
+            alias reorder = AliasSeq!();
+        } else {
+            alias reorder = AliasSeq!(AllTypes[order[0]], reorder!(order[1..$]));
+        }
+    }
+
+    template findNext(size_t[] alreadyOrdered) {
+        enum findNext = () {
+            // Get table names already in order
+            string[] orderedTables;
+            static foreach (idx; alreadyOrdered) {
+                orderedTables ~= AllTypes[idx]._table;
+            }
+
+            // Find first entity not yet ordered whose deps are all satisfied
+            static foreach (i, Entity; AllTypes) {{
+                // Check if already ordered
+                bool alreadyDone = false;
+                static foreach (idx; alreadyOrdered) {
+                    if (i == idx) alreadyDone = true;
+                }
+
+                if (!alreadyDone) {
+                    // Check if all dependencies are satisfied
+                    enum deps = getEntityDependencies!Entity;
+                    bool allDepsSatisfied = true;
+                    static foreach (dep; deps) {{
+                        bool depFound = false;
+                        foreach (t; orderedTables) {
+                            if (t == dep) depFound = true;
+                        }
+                        if (!depFound) allDepsSatisfied = false;
+                    }}
+
+                    if (allDepsSatisfied) {
+                        return cast(int) i;
+                    }
+                }
+            }}
+            return -1;
+        }();
+    }
+}
+
 /// Generate CREATE TABLE statements for all entities reachable from Query
 template generateDDL(Query) {
     import graphqld2.graphql.schema : getAllEntityTypes;
 
     alias AllTypes = getAllEntityTypes!Query;
+    alias SortedTypes = sortEntitiesByDependency!AllTypes;
 
     enum generateDDL = () {
         string result;
         result ~= "-- Generated DDL for schema\n";
         result ~= "-- Tables are ordered by dependency (referenced tables first)\n\n";
 
-        // TODO: Proper topological sort for FK dependencies
-        // For now, just generate in discovery order (which should be roughly correct)
-        static foreach (Entity; AllTypes) {
+        static foreach (Entity; SortedTypes) {
             result ~= generateCreateTable!Entity();
             result ~= "\n";
         }

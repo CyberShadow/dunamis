@@ -325,8 +325,20 @@ JSONValue valueToJson(Value val) {
         case ValueEnum.STR: return JSONValue(val.tok.value);
         case ValueEnum.E: return JSONValue(val.tok.value);  // Enum as string
         case ValueEnum.O: {
-            // Object value - TODO: implement if needed
+            // Object value - parse ObjectType.vals (linked list of name:value pairs)
             JSONValue[string] obj;
+            auto objType = val.obj;
+            if (objType !is null) {
+                auto vals = objType.vals;
+                while (vals !is null) {
+                    auto name = vals.name.value;
+                    auto vov = vals.val;
+                    if (vov !is null && vov.ruleSelection == ValueOrVariableEnum.Val && vov.val !is null) {
+                        obj[name] = valueToJson(vov.val);
+                    }
+                    vals = vals.follow;
+                }
+            }
             return JSONValue(obj);
         }
         default:

@@ -30,6 +30,8 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
     private SqlOptimizer _sqlOptimizer;
     private QueryNode[] _executedNodes;
     private string _cachedSQL;
+    private QueryResult[int] _cachedResults;  // Store child results from CTE query (by node ID)
+    private QueryResult[string] _cachedResultsByType;  // Also index by type name for fetchChildren
 
     this(PgSqlConnection conn) {
         _conn = conn;
@@ -51,6 +53,8 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
         _executedNodes = [];
         _cachedSQL = "";
         _sqlOptimizer = new SqlOptimizer();
+        _cachedResults.clear();
+        _cachedResultsByType.clear();
     }
 
     /// Get the generated SQL (for debugging)
@@ -58,19 +62,36 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
     /// Execute a QueryNode by running SQL against PostgreSQL.
     override Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult) {
-        _executedNodes ~= node;
-
-        // For child nodes, we defer to bulk execution
-        // For root nodes, we execute the full CTE query
+        // For child nodes, check if we already have cached results from root CTE execution
         if (!node.isRoot) {
-            // Child nodes are fetched as part of the CTE
-            // Return empty for now, will be populated by root execution
+            if (node.id in _cachedResults) {
+                return resolve(_cachedResults[node.id]);
+            }
+            // Child nodes should be fetched as part of root CTE execution
+            // If we get here without cached results, something is wrong
             return resolve(new QueryResult());
         }
 
-        // Generate the full CTE query
-        auto sql = toSQL(_executedNodes, _sqlOptimizer);
+        // Root node: generate CTE for entire tree (including all children)
+        auto allNodes = node.allNodesInTree();
+        _executedNodes = allNodes;
+
+        // Generate the full CTE query for entire node tree
+        auto sql = toSQL(allNodes, _sqlOptimizer);
         _cachedSQL = sql;
+
+        debug(sql) {
+            import std.stdio : writefln, writeln;
+            writefln("PostgresDB: Generating SQL for %d nodes:", allNodes.length);
+            foreach (n; allNodes) {
+                writefln("  - node %d: %s (%s)", n.id, n.typeName, n.table);
+                if (!n.isRoot) {
+                    writefln("    parent: %s, FK: %s", n.parentTypeName, n.parentFk);
+                }
+            }
+            writeln("PostgresDB: Generated SQL:");
+            writeln(sql);
+        }
 
         // Build parameter value for root filter
         // PostgreSQL Extended Query uses $1, $2, etc. for parameters
@@ -96,6 +117,7 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
     /// Parse PostgreSQL result into QueryResult.
     /// The CTE query returns a single row with JSON containing all layers.
+    /// Also caches child results so they can be returned when child nodes are executed.
     private QueryResult parseQueryResult(PgSqlConnection.Row[] rows, QueryNode[] nodes) {
         if (rows.length == 0) {
             return new QueryResult();
@@ -105,8 +127,8 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
         auto jsonStr = rows[0].column!string(0);
         auto jsonData = parseJSON(jsonStr);
 
-        // Parse each layer
-        QueryResult[int] results;
+        // Parse each layer and cache results
+        QueryResult rootResult;
         foreach (node; nodes) {
             auto layerKey = "layer" ~ node.id.to!string;
             if (layerKey in jsonData) {
@@ -115,16 +137,19 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
                 if (node.isRoot) {
                     result.loadFromRows(layerRows, node.typeName);
+                    rootResult = result;
                 } else {
                     result.loadFromRows(layerRows, node.typeName, "id",
                                        node.parentFk, node.parentTypeName);
+                    // Cache child results for later retrieval (by node ID and type name)
+                    _cachedResults[node.id] = result;
+                    _cachedResultsByType[node.typeName] = result;
                 }
-                results[node.id] = result;
             }
         }
 
-        // Return the root result (first node)
-        return results.get(nodes[0].id, new QueryResult());
+        // Return the root result
+        return rootResult !is null ? rootResult : new QueryResult();
     }
 
     // =========================================================================
@@ -151,6 +176,12 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
     }
 
     override AnyRef[][] fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs) {
+        // Check if we have cached results for this child type from CTE execution
+        if (auto result = childType in _cachedResultsByType) {
+            return (*result).getChildRefs(parentRefs);
+        }
+
+        // Fallback to empty arrays if no cached results
         return parentRefs.map!(_ => cast(AnyRef[])[]).array;
     }
 

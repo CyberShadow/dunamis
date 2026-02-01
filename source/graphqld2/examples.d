@@ -733,14 +733,14 @@ unittest {
 -- Tables are ordered by dependency (referenced tables first)
 
 CREATE TABLE users (
-  id BIGINT PRIMARY KEY,
+  id BIGSERIAL PRIMARY KEY,
   first_name TEXT NOT NULL,
   last_name TEXT NOT NULL,
   email TEXT NOT NULL
 );
 
 CREATE TABLE posts (
-  id BIGINT PRIMARY KEY,
+  id BIGSERIAL PRIMARY KEY,
   title TEXT NOT NULL,
   body TEXT NOT NULL,
   author_id BIGINT NOT NULL,
@@ -748,7 +748,7 @@ CREATE TABLE posts (
 );
 
 CREATE TABLE comments (
-  id BIGINT PRIMARY KEY,
+  id BIGSERIAL PRIMARY KEY,
   body TEXT NOT NULL,
   post_id BIGINT NOT NULL,
   author_id BIGINT NOT NULL,
@@ -766,7 +766,7 @@ unittest {
 
     enum expected = q"EOF
 CREATE TABLE users (
-  id BIGINT PRIMARY KEY,
+  id BIGSERIAL PRIMARY KEY,
   first_name TEXT NOT NULL,
   last_name TEXT NOT NULL,
   email TEXT NOT NULL
