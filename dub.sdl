@@ -10,6 +10,12 @@ sourcePaths "source"
 dependency "graphqld:parser" repository="git+https://github.com/vpanteleev-sym/graphqld.git" version="542374109b26018c9542631c90d1ba2acef32a8b"
 dependency "ae" repository="git+https://github.com/CyberShadow/ae.git" version="573324089882f307cd619d67f02bb4e11c1eb69c"
 
+# Exclude sqlite module from main package (available via graphqld2:sqlite subpackage)
+excludedSourceFiles "source/graphqld2/sqlite/*"
+
+# Exclude integration tests from library build
+excludedSourceFiles "source/integration/*"
+
 configuration "library" {
     targetType "library"
 }
@@ -17,4 +23,29 @@ configuration "library" {
 configuration "postgres-integration" {
     targetType "executable"
     mainSourceFile "source/integration/postgres_test.d"
+    sourceFiles "source/integration/test_framework.d" "source/integration/tests.d"
+}
+
+configuration "sqlite-integration" {
+    targetType "executable"
+    mainSourceFile "source/integration/sqlite_test.d"
+    sourceFiles "source/integration/test_framework.d" "source/integration/tests.d"
+    # Include sqlite sources directly for integration test
+    sourceFiles "source/graphqld2/sqlite/fetcher.d" "source/graphqld2/sqlite/sql.d" "source/graphqld2/sqlite/package.d"
+    dependency "ae:sqlite" repository="git+https://github.com/CyberShadow/ae.git" version="573324089882f307cd619d67f02bb4e11c1eb69c"
+}
+
+# SQLite subpackage - for users who want sqlite support
+subPackage {
+    name "sqlite"
+    targetType "library"
+
+    # Include both sqlite sources and main package sources
+    sourcePaths "source"
+
+    # Only build the sqlite module
+    excludedSourceFiles "source/integration/*"
+
+    dependency "graphqld:parser" repository="git+https://github.com/vpanteleev-sym/graphqld.git" version="542374109b26018c9542631c90d1ba2acef32a8b"
+    dependency "ae:sqlite" repository="git+https://github.com/CyberShadow/ae.git" version="573324089882f307cd619d67f02bb4e11c1eb69c"
 }

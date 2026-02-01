@@ -25,6 +25,22 @@
             runHook postInstall
           '';
         };
+
+        # Build the sqlite integration test executable
+        sqliteTestBin = pkgs.buildDubPackage {
+          pname = "graphqld2-sqlite-test";
+          version = "0.0.1";
+          src = self;
+          dubLock = ./dub-lock.json;
+          dubBuildFlags = [ "--config=sqlite-integration" ];
+          buildInputs = [ pkgs.sqlite ];
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out/bin
+            cp build/graphqld2 $out/bin/sqlite_test
+            runHook postInstall
+          '';
+        };
       in {
         checks = {
           # D unit tests via dub
@@ -83,6 +99,21 @@
               touch $out
             '';
           };
+
+          # SQLite integration tests
+          sqlite-integration = pkgs.stdenv.mkDerivation {
+            name = "graphqld2-sqlite-integration";
+            dontUnpack = true;
+
+            buildPhase = ''
+              # Run tests (uses in-memory SQLite database)
+              ${sqliteTestBin}/bin/sqlite_test
+            '';
+
+            installPhase = ''
+              touch $out
+            '';
+          };
         };
 
         devShells.default = pkgs.mkShell {
@@ -90,6 +121,7 @@
             pkgs.ldc
             pkgs.postgresql
             pkgs.curl
+            pkgs.sqlite
           ];
 
           shellHook = ''
