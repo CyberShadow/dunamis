@@ -189,23 +189,17 @@ struct ArgumentInfo {
     string defaultValue;   // String representation for SDL
 }
 
-/// Field information extracted from entity mixins
+/// Field information extracted from entity mixins.
+/// Field classification (column, hasMany, belongsTo, computed) is determined
+/// by UDAs on the method, not stored here - this struct is for GraphQL schema only.
 struct FieldInfo {
     string name;
     string graphqlType;
     bool nullable;
-    FieldKind kind;
     bool hidden;           // @GqlHidden
     string description;    // @GqlDescription (empty if not set)
     string deprecation;    // @GqlDeprecated reason (empty if not deprecated)
     ArgumentInfo[] arguments;  // For computed fields with arguments
-}
-
-enum FieldKind {
-    column,
-    hasMany,
-    belongsTo,
-    computed,
 }
 
 /// Check if a member has the @GqlHidden UDA
@@ -465,7 +459,6 @@ template getEntityFields(Entity) {
                         gqlFieldName,
                         gqlType,
                         isNullable,
-                        FieldKind.column,
                         isHidden,
                         description,
                         deprecation
@@ -480,7 +473,6 @@ template getEntityFields(Entity) {
                         gqlFieldName,
                         gqlType,
                         false,
-                        FieldKind.hasMany,
                         isHidden,
                         description,
                         deprecation
@@ -501,7 +493,6 @@ template getEntityFields(Entity) {
                         gqlFieldName,
                         gqlType,
                         isNullable,
-                        FieldKind.belongsTo,
                         isHidden,
                         description,
                         deprecation
@@ -517,7 +508,6 @@ template getEntityFields(Entity) {
                         gqlFieldName,
                         gqlType,
                         false,  // computed fields are non-nullable by default
-                        FieldKind.computed,
                         isHidden,
                         description,
                         deprecation,
@@ -561,7 +551,6 @@ template getRootFields(Parent) {
                             gqlFieldName,
                             gqlType,
                             false,
-                            FieldKind.computed,
                             isHidden,
                             description,
                             deprecation
@@ -575,7 +564,6 @@ template getRootFields(Parent) {
                             gqlFieldName,
                             gqlType,
                             false,
-                            FieldKind.computed,
                             isHidden,
                             description,
                             deprecation,

@@ -715,12 +715,10 @@ unittest {
         if (f.name == "firstName") {
             hasFirstName = true;
             assert(f.graphqlType == "String!");  // Non-nullable column
-            assert(f.kind == FieldKind.column);
         }
         if (f.name == "posts") {
             hasPosts = true;
             assert(f.graphqlType == "[Post!]!");  // Non-nullable list of non-nullable items
-            assert(f.kind == FieldKind.hasMany);
         }
     }
     assert(hasFirstName, "User should have firstName field");
