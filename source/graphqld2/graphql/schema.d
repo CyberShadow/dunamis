@@ -282,11 +282,13 @@ template getComputedFieldArguments(alias member) {
         static foreach (i; 1 .. Params.length) {{
             alias P = Params[i];
 
+            enum argName = paramNames[i];
+
             // Check if parameter has a default value
             static if (is(Defaults[i] == void)) {
                 // No default - required argument
                 args ~= ArgumentInfo(
-                    paramNames[i],
+                    argName,
                     graphqlTypeName!P,
                     false,
                     ""
@@ -296,14 +298,14 @@ template getComputedFieldArguments(alias member) {
                 // For nullable types, use base type; otherwise add null default
                 static if (is(P == Nullable!U, U)) {
                     args ~= ArgumentInfo(
-                        paramNames[i],
+                        argName,
                         graphqlBaseTypeName!U,
                         true,
                         "null"
                     );
                 } else {
                     args ~= ArgumentInfo(
-                        paramNames[i],
+                        argName,
                         graphqlBaseTypeName!P,
                         true,
                         defaultValueToString(Defaults[i])
@@ -450,8 +452,20 @@ template getFields(T) {
                     }
                     else static if (hasTableEntity!fn) {
                         // Table entry point (Query/Mutation)
+                        // May have pagination arguments if wrapped by PaginationPlugin
                         alias EntityType = extractTableEntity!fn;
                         enum gqlType = "[" ~ EntityID!EntityType.typeName ~ "!]!";
+
+                        // Extract arguments (for pagination support)
+                        // Table fields can have optional first/offset params
+                        alias TableParams = Parameters!fn;
+                        static if (TableParams.length > 1) {
+                            // Has arguments beyond the first Expr param
+                            enum arguments = getComputedFieldArguments!fn;
+                        } else {
+                            // No extra arguments
+                            enum arguments = cast(ArgumentInfo[]) [];
+                        }
 
                         fields ~= FieldInfo(
                             gqlFieldName,
@@ -459,7 +473,8 @@ template getFields(T) {
                             false,
                             isHidden,
                             description,
-                            deprecation
+                            deprecation,
+                            arguments
                         );
                     }
                     else static if (isValidFieldMethod!(T, fn)) {

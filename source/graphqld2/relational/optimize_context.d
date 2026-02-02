@@ -404,3 +404,81 @@ unittest {
         assert(naiveResult[i]["authorName"].str == optimizedResult[i]["authorName"].str);
     }
 }
+
+// ============================================================================
+// Pagination Push-Down Tests
+// ============================================================================
+
+unittest {
+    import std.algorithm : canFind;
+    import graphqld2.core;
+    import graphqld2.core.pagination : limit, offset;
+    import graphqld2.relational.schema;
+    import graphqld2.relational.demo;
+
+    static MockDB!() db;
+
+    // Test: Pagination expressions push values to QueryNode
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("firstName", string);
+    }
+
+    db = new MockDB!();
+
+    // Create query with limit and offset
+    auto query = map!(
+        (Expr!User user) => jsonObject(
+            "name", user.firstName
+        )
+    )(limit(offset(getAll!User(), 10), 5));  // Skip 10, take 5
+
+    auto optCtx = new OptimizeContext();
+    query.optimize(optCtx);
+
+    auto relCtx = optCtx.getSourceContext!RelationalOptimizeContext();
+    auto nodes = relCtx.allNodes();
+    assert(nodes.length == 1, "Should have exactly 1 QueryNode");
+
+    auto node = nodes[0];
+    assert(node.typeName == "User");
+    assert(node.rootFilter == FilterType.all);
+
+    // Verify pagination was pushed to QueryNode
+    assert(!node.limit_.isNull, "Limit should be set");
+    assert(node.limit_.get == 5, "Limit should be 5");
+    assert(!node.offset_.isNull, "Offset should be set");
+    assert(node.offset_.get == 10, "Offset should be 10");
+}
+
+unittest {
+    import std.algorithm : canFind;
+    import graphqld2.core;
+    import graphqld2.core.pagination : limit;
+    import graphqld2.relational.schema;
+    import graphqld2.relational.demo;
+
+    static MockDB!() db;
+
+    // Test: Limit only (no offset)
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("firstName", string);
+    }
+
+    db = new MockDB!();
+
+    auto query = map!(
+        (Expr!User user) => jsonObject("name", user.firstName)
+    )(limit(getAll!User(), 20));
+
+    auto optCtx = new OptimizeContext();
+    query.optimize(optCtx);
+
+    auto relCtx = optCtx.getSourceContext!RelationalOptimizeContext();
+    auto node = relCtx.allNodes()[0];
+
+    assert(!node.limit_.isNull, "Limit should be set");
+    assert(node.limit_.get == 20);
+    assert(node.offset_.isNull, "Offset should not be set");
+}

@@ -6,4 +6,5 @@ public {
     import graphqld2.core.executor;
     import graphqld2.core.expr;
     import graphqld2.core.optimize;
+    import graphqld2.core.pagination;
 }

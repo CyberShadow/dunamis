@@ -541,6 +541,22 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
             }
         }
 
+        // Apply pagination for root nodes (OFFSET first, then LIMIT)
+        if (node.isRoot && (!node.offset_.isNull || !node.limit_.isNull)) {
+            // Apply offset first
+            if (!node.offset_.isNull && refs.length > 0) {
+                size_t off = node.offset_.get;
+                refs = refs.length > off ? refs[off .. $] : [];
+            }
+            // Apply limit
+            if (!node.limit_.isNull && refs.length > 0) {
+                size_t lim = node.limit_.get;
+                refs = refs.length > lim ? refs[0 .. lim] : refs;
+            }
+            // Re-initialize result with paginated refs
+            result.initialize(node.typeName, refs);
+        }
+
         // Step 2: Load all columns from base table
         foreach (column; node.columns) {
             auto values = fetchColumnJson(node.table, column, refs);

@@ -551,6 +551,16 @@ private string toCTEWithComputed(QueryNode node, SqlOptimizer sqlOpt) {
             node.table, node.parentFk, node.parent.id);
     }
 
+    // LIMIT clause (pagination)
+    if (!node.limit_.isNull) {
+        sql ~= format("\n    LIMIT %d", node.limit_.get);
+    }
+
+    // OFFSET clause (pagination)
+    if (!node.offset_.isNull) {
+        sql ~= format("\n    OFFSET %d", node.offset_.get);
+    }
+
     sql ~= "\n  )";
     return sql.data;
 }
@@ -672,4 +682,55 @@ unittest {
     assert(proj.queryNodeId == 0);
     assert(proj.columnAlias == "computed_0");
     assert(proj.dependencies().length == 2);  // input and prefetch
+}
+
+unittest {
+    // Test SQL generation with LIMIT/OFFSET
+    import std.algorithm : canFind;
+    import std.typecons : Nullable;
+
+    auto node = new QueryNode(0, "User", "users");
+    node.addColumn("first_name");
+    node.setRootFilter(FilterType.all);
+    node.setLimit(10);
+    node.setOffset(20);
+
+    auto sql = toCTEWithComputed(node, null);
+
+    // Verify SQL contains LIMIT and OFFSET clauses
+    assert(sql.canFind("LIMIT 10"), "SQL should contain LIMIT 10: " ~ sql);
+    assert(sql.canFind("OFFSET 20"), "SQL should contain OFFSET 20: " ~ sql);
+    assert(sql.canFind("users.first_name"), "SQL should contain column: " ~ sql);
+}
+
+unittest {
+    // Test SQL generation with LIMIT only (no offset)
+    import std.algorithm : canFind;
+
+    auto node = new QueryNode(0, "Post", "posts");
+    node.addColumn("title");
+    node.setRootFilter(FilterType.all);
+    node.setLimit(5);
+    // No offset
+
+    auto sql = toCTEWithComputed(node, null);
+
+    assert(sql.canFind("LIMIT 5"), "SQL should contain LIMIT 5: " ~ sql);
+    assert(!sql.canFind("OFFSET"), "SQL should not contain OFFSET: " ~ sql);
+}
+
+unittest {
+    // Test SQL generation with OFFSET only (no limit)
+    import std.algorithm : canFind;
+
+    auto node = new QueryNode(0, "Comment", "comments");
+    node.addColumn("body");
+    node.setRootFilter(FilterType.all);
+    node.setOffset(15);
+    // No limit
+
+    auto sql = toCTEWithComputed(node, null);
+
+    assert(sql.canFind("OFFSET 15"), "SQL should contain OFFSET 15: " ~ sql);
+    assert(!sql.canFind("LIMIT"), "SQL should not contain LIMIT: " ~ sql);
 }

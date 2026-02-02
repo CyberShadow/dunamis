@@ -1114,7 +1114,32 @@ class ColumnAccessExpr(T, Entity) : Expr!T {
         // Configure the node based on collection type (if not already configured)
         if (node.rootFilter == FilterType.none && node.parent is null) {
             if (auto mapInfo = cast(MapExprInfo) mapExpr) {
-                auto coll = mapInfo.collection;
+                Object coll = mapInfo.collection;
+                Object originalColl = coll;
+
+                // Unwrap pagination expressions and extract limit/offset
+                import graphqld2.core.pagination : LimitInfo, OffsetInfo;
+                while (true) {
+                    if (auto limitInfo = cast(LimitInfo) coll) {
+                        node.setLimit(limitInfo.limitValue);
+                        coll = limitInfo.limitSource;
+                    } else if (auto offsetInfo = cast(OffsetInfo) coll) {
+                        node.setOffset(offsetInfo.offsetValue);
+                        coll = offsetInfo.offsetSource;
+                    } else {
+                        break;
+                    }
+                }
+
+                // If pagination was unwrapped, replace the MapExpr's collection
+                // to prevent double-application of pagination
+                if (coll !is originalColl) {
+                    if (auto mapExprBase = cast(ExprBase) mapExpr) {
+                        if (auto collExpr = cast(ExprBase) coll) {
+                            mapExprBase.replaceDependency(0, collExpr);
+                        }
+                    }
+                }
 
                 // Check if collection is a root expression
                 if (auto rootExpr = cast(RootExprInfo) coll) {

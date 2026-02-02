@@ -3,6 +3,7 @@ module graphqld2.relational.query_node;
 import std.algorithm;
 import std.array;
 import std.conv;
+import std.typecons : Nullable;
 
 import graphqld2.core.types : AnyRef;
 import graphqld2.relational.eval_context : DataFetcher;
@@ -77,6 +78,12 @@ class QueryNode {
     /// Columns needed from each joined table (alias -> columns)
     string[][string] joinedColumns;
 
+    /// Pagination: limit number of results
+    Nullable!size_t limit_;
+
+    /// Pagination: skip first N results
+    Nullable!size_t offset_;
+
     /// Next join alias counter
     private int _nextJoinAlias = 0;
 
@@ -140,6 +147,16 @@ class QueryNode {
     /// Check if this is a root node (no parent)
     @property bool isRoot() const {
         return parent is null;
+    }
+
+    /// Set pagination limit
+    void setLimit(size_t n) {
+        limit_ = n;
+    }
+
+    /// Set pagination offset
+    void setOffset(size_t n) {
+        offset_ = n;
     }
 
     /// Get all nodes in the tree rooted at this node (including self).
