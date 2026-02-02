@@ -362,12 +362,11 @@ template isInternalMember(string name) {
 ///
 /// UDA-based classification:
 /// - @SqlColumn → column field (entities only)
-/// - Other valid methods → computed fields, relationships, table entries
+/// - Other valid methods → columns, computed fields, relationships, table entries
 template getFields(T) {
     import std.traits : hasUDA, getUDAs, ReturnType, Parameters;
     import std.meta : staticIndexOf;
-    import graphqld2.relational.schema : SqlColumn, PrimaryKeyAttr, NullableColumn;
-    import graphqld2.relational.schema : hasForeignKeyRef;
+    import graphqld2.relational.schema : SqlColumn, PrimaryKeyAttr;
     import graphqld2.core.expr : ExprResultType;
 
     enum getFields = () {
@@ -384,28 +383,12 @@ template getFields(T) {
                     enum description = getGqlDescription!fn;
                     enum deprecation = getGqlDeprecated!fn;
 
-                    // Check for relational UDAs first
-                    static if (hasUDA!(fn, SqlColumn)) {
-                        // Column field (entities)
-                        enum isPrimaryKey = hasUDA!(fn, PrimaryKeyAttr);
-                        enum isNullable = hasUDA!(fn, NullableColumn);
-                        enum isFk = hasForeignKeyRef!fn;
-
-                        static if (isPrimaryKey) {
-                            enum gqlType = "ID!";
-                        } else {
-                            alias RetType = ExprResultType!(ReturnType!fn);
-                            static if (isNullable) {
-                                enum gqlType = graphqlBaseTypeName!RetType;
-                            } else {
-                                enum gqlType = graphqlTypeName!RetType;
-                            }
-                        }
-
+                    // Check for primary key column (special case: ID! type)
+                    static if (hasUDA!(fn, SqlColumn) && hasUDA!(fn, PrimaryKeyAttr)) {
                         fields ~= FieldInfo(
                             gqlFieldName,
-                            gqlType,
-                            isNullable,
+                            "ID!",
+                            false,
                             isHidden,
                             description,
                             deprecation
@@ -448,10 +431,11 @@ template getFields(T) {
 /// Valid field methods:
 /// - Take Expr!T as first parameter
 /// - Return an Expr type
-/// - Are NOT column accessors (@SqlColumn - those need special handling for nullability/PK)
+/// Valid field methods:
+/// - Take Expr!T as first parameter
+/// - Return an Expr type
 template isValidFieldMethod(T, alias fn) {
-    import std.traits : hasUDA, Parameters, ReturnType;
-    import graphqld2.relational.schema : SqlColumn;
+    import std.traits : Parameters, ReturnType;
 
     static if (is(typeof(fn) == function)) {
         alias Params = Parameters!fn;
@@ -461,12 +445,7 @@ template isValidFieldMethod(T, alias fn) {
             // First parameter must be Expr!T
             static if (is(Params[0] : Expr!E, E) && is(E == T)) {
                 // Return type must be an Expr
-                static if (isExpr!Return) {
-                    // Exclude @SqlColumn (needs special handling for nullability and primary keys)
-                    enum isValidFieldMethod = !hasUDA!(fn, SqlColumn);
-                } else {
-                    enum isValidFieldMethod = false;
-                }
+                enum isValidFieldMethod = isExpr!Return;
             } else {
                 enum isValidFieldMethod = false;
             }

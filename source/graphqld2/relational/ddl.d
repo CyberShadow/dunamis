@@ -26,7 +26,11 @@ struct ColumnDef {
 
 /// Get the base D type name for SQL mapping
 template getDTypeName(T) {
-    static if (isCustomScalar!T) {
+    import std.typecons : Nullable;
+    static if (is(T == Nullable!U, U)) {
+        // Unwrap Nullable to get base type
+        enum getDTypeName = getDTypeName!U;
+    } else static if (isCustomScalar!T) {
         enum getDTypeName = getDTypeName!(T.DType);
     } else static if (is(T == string)) {
         enum getDTypeName = "string";
@@ -54,7 +58,8 @@ template getDTypeName(T) {
 template getColumnDefs(Entity) {
     import std.traits : hasUDA, getUDAs, ReturnType;
     import std.meta : staticIndexOf;
-    import graphqld2.relational.schema : SqlColumn, PrimaryKeyAttr, NullableColumn;
+    import std.typecons : Nullable;
+    import graphqld2.relational.schema : SqlColumn, PrimaryKeyAttr;
     import graphqld2.relational.schema : ForeignKeyRef, hasForeignKeyRef, extractForeignKeyRef;
     import graphqld2.relational.schema : BelongsToFK, hasBelongsToFK, getBelongsToFK;
     import graphqld2.relational.schema : BelongsToParent, hasBelongsToParent, extractBelongsToParent;
@@ -78,11 +83,11 @@ template getColumnDefs(Entity) {
                         // Check if primary key (via @PrimaryKeyAttr UDA)
                         enum bool isPK = hasUDA!(fieldMethod, PrimaryKeyAttr);
 
-                        // Check if nullable
-                        enum bool isNullable = hasUDA!(fieldMethod, NullableColumn);
-
                         // Get the D type from method return type
                         alias ColType = ExprResultType!(ReturnType!fieldMethod);
+
+                        // Check if nullable (return type is Nullable!T)
+                        enum bool isNullable = is(ColType == Nullable!U, U);
 
                         // Check if FK column
                         static if (hasForeignKeyRef!fieldMethod) {
