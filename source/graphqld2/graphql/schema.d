@@ -362,17 +362,12 @@ template isInternalMember(string name) {
 ///
 /// UDA-based classification:
 /// - @SqlColumn → column field (entities only)
-/// - @HasManyFK → hasMany relationship (entities only)
-/// - @BelongsToFK → belongsTo relationship (entities only)
-/// - @TableEntity → root table entry (Query/Mutation only)
-/// - No UDA → computed field (if valid signature)
+/// - Other valid methods → computed fields, relationships, table entries
 template getFields(T) {
     import std.traits : hasUDA, getUDAs, ReturnType, Parameters;
     import std.meta : staticIndexOf;
-    import graphqld2.relational.schema : SqlColumn, HasManyFK, BelongsToFK, PrimaryKeyAttr, NullableColumn;
-    import graphqld2.relational.schema : ForeignKeyRef, HasManyChild, BelongsToParent, TableEntity;
-    import graphqld2.relational.schema : hasForeignKeyRef, hasHasManyChild, hasBelongsToParent, hasTableEntity;
-    import graphqld2.relational.schema : extractHasManyChild, extractBelongsToParent, extractTableEntity;
+    import graphqld2.relational.schema : SqlColumn, PrimaryKeyAttr, NullableColumn;
+    import graphqld2.relational.schema : hasForeignKeyRef;
     import graphqld2.core.expr : ExprResultType;
 
     enum getFields = () {
@@ -416,69 +411,8 @@ template getFields(T) {
                             deprecation
                         );
                     }
-                    else static if (hasUDA!(fn, HasManyFK)) {
-                        // HasMany relationship (entities)
-                        alias ChildType = extractHasManyChild!fn;
-                        enum gqlType = "[" ~ EntityID!ChildType.typeName ~ "!]!";
-
-                        fields ~= FieldInfo(
-                            gqlFieldName,
-                            gqlType,
-                            false,
-                            isHidden,
-                            description,
-                            deprecation
-                        );
-                    }
-                    else static if (hasUDA!(fn, BelongsToFK)) {
-                        // BelongsTo relationship (entities)
-                        alias ParentType = extractBelongsToParent!fn;
-                        enum isNullable = hasUDA!(fn, NullableColumn);
-
-                        static if (isNullable) {
-                            enum gqlType = EntityID!ParentType.typeName;
-                        } else {
-                            enum gqlType = EntityID!ParentType.typeName ~ "!";
-                        }
-
-                        fields ~= FieldInfo(
-                            gqlFieldName,
-                            gqlType,
-                            isNullable,
-                            isHidden,
-                            description,
-                            deprecation
-                        );
-                    }
-                    else static if (hasTableEntity!fn) {
-                        // Table entry point (Query/Mutation)
-                        // May have pagination arguments if wrapped by PaginationPlugin
-                        alias EntityType = extractTableEntity!fn;
-                        enum gqlType = "[" ~ EntityID!EntityType.typeName ~ "!]!";
-
-                        // Extract arguments (for pagination support)
-                        // Table fields can have optional first/offset params
-                        alias TableParams = Parameters!fn;
-                        static if (TableParams.length > 1) {
-                            // Has arguments beyond the first Expr param
-                            enum arguments = getComputedFieldArguments!fn;
-                        } else {
-                            // No extra arguments
-                            enum arguments = cast(ArgumentInfo[]) [];
-                        }
-
-                        fields ~= FieldInfo(
-                            gqlFieldName,
-                            gqlType,
-                            false,
-                            isHidden,
-                            description,
-                            deprecation,
-                            arguments
-                        );
-                    }
                     else static if (isValidFieldMethod!(T, fn)) {
-                        // Computed field or mutation method (no relational UDA)
+                        // Field method: computed field, relationship, or table entry point
                         enum gqlType = computedFieldReturnType!fn;
                         enum arguments = getComputedFieldArguments!fn;
 
@@ -514,10 +448,10 @@ template getFields(T) {
 /// Valid field methods:
 /// - Take Expr!T as first parameter
 /// - Return an Expr type
-/// - Are NOT mixin-generated (no @SqlColumn, @HasManyFK, @BelongsToFK, @TableEntity)
+/// - Are NOT column accessors (@SqlColumn - those need special handling for nullability/PK)
 template isValidFieldMethod(T, alias fn) {
     import std.traits : hasUDA, Parameters, ReturnType;
-    import graphqld2.relational.schema : SqlColumn, HasManyFK, BelongsToFK, TableEntity;
+    import graphqld2.relational.schema : SqlColumn;
 
     static if (is(typeof(fn) == function)) {
         alias Params = Parameters!fn;
@@ -528,12 +462,8 @@ template isValidFieldMethod(T, alias fn) {
             static if (is(Params[0] : Expr!E, E) && is(E == T)) {
                 // Return type must be an Expr
                 static if (isExpr!Return) {
-                    // Must not have relational UDAs (those are handled separately)
-                    enum hasMixinUda = hasUDA!(fn, SqlColumn) ||
-                                       hasUDA!(fn, HasManyFK) ||
-                                       hasUDA!(fn, BelongsToFK) ||
-                                       hasUDA!(fn, TableEntity);
-                    enum isValidFieldMethod = !hasMixinUda;
+                    // Exclude @SqlColumn (needs special handling for nullability and primary keys)
+                    enum isValidFieldMethod = !hasUDA!(fn, SqlColumn);
                 } else {
                     enum isValidFieldMethod = false;
                 }
