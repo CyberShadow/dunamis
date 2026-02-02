@@ -642,7 +642,8 @@ unittest {
 
     // Note: FK columns (authorId, postId) are hidden with @GqlHidden,
     // D keyword conflicts are resolved with @GqlName (body_ → body),
-    // and User fields demonstrate @GqlDescription and @GqlDeprecated
+    // and User fields demonstrate @GqlDescription and @GqlDeprecated.
+    // Primary key fields render as their actual type (Int64!) rather than ID!.
     enum expected = q"EOF
 scalar Int64
 
@@ -653,7 +654,7 @@ type Query {
 }
 
 type User {
-  id: ID!
+  id: Int64!
   """The user's first name"""
   firstName: String!
   """The user's last name"""
@@ -671,7 +672,7 @@ type User {
 }
 
 type Post {
-  id: ID!
+  id: Int64!
   title: String!
   body: String!
   author: User!
@@ -681,7 +682,7 @@ type Post {
 }
 
 type Comment {
-  id: ID!
+  id: Int64!
   body: String!
   post: Post!
   author: User!

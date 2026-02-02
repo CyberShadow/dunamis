@@ -10,7 +10,6 @@ import std.typecons : Nullable;
 
 import graphqld2.core.types : isCustomScalar;
 import graphqld2.core.expr : Expr, ExprResultType, isExpr;
-import graphqld2.relational.schema : EntityID;
 
 // ============================================================================
 // Schema Template
@@ -101,6 +100,77 @@ struct GqlDeprecated {
 }
 
 // ============================================================================
+// GraphQL Type Name Resolution
+// ============================================================================
+
+/// Get GraphQL type name for any D type.
+/// 1. Check for @GqlName UDA on the type
+/// 2. If absent, use __traits(identifier) for the D type name
+template getGraphQLTypeName(T) {
+    enum getGraphQLTypeName = () {
+        // Check for @GqlName UDA on the type
+        static if (hasUDA!(T, GqlName)) {
+            return getUDAs!(T, GqlName)[0].name;
+        } else {
+            // Use D type name
+            return __traits(identifier, T);
+        }
+    }();
+}
+
+/// Check if a type is an "object type" (struct with valid field methods).
+/// This replaces the old isEntity check - now any struct with Expr-returning
+/// static methods is treated as a GraphQL object type.
+template isObjectType(T) {
+    static if (is(T == struct)) {
+        // Check if it has at least one valid field method
+        enum isObjectType = hasAnyValidFieldMethod!T;
+    } else {
+        enum isObjectType = false;
+    }
+}
+
+/// Check if type has any valid field methods
+private template hasAnyValidFieldMethod(T) {
+    enum hasAnyValidFieldMethod = () {
+        static foreach (member; __traits(allMembers, T)) {{
+            static if (!isInternalMember!member &&
+                       is(typeof(__traits(getMember, T, member)) == function)) {
+                static if (isValidFieldMethodForType!(T, member)) {
+                    return true;
+                }
+            }
+        }}
+        return false;
+    }();
+}
+
+/// Helper to check if a member is a valid field method for type T.
+/// Uses string member name to avoid forward reference issues.
+private template isValidFieldMethodForType(T, string member) {
+    static if (__traits(compiles, __traits(getMember, T, member))) {
+        alias fn = __traits(getMember, T, member);
+        static if (is(typeof(fn) == function)) {
+            alias Params = Parameters!fn;
+            alias Return = ReturnType!fn;
+            static if (Params.length >= 1) {
+                static if (is(Params[0] : Expr!E, E) && is(E == T)) {
+                    enum isValidFieldMethodForType = isExpr!Return;
+                } else {
+                    enum isValidFieldMethodForType = false;
+                }
+            } else {
+                enum isValidFieldMethodForType = false;
+            }
+        } else {
+            enum isValidFieldMethodForType = false;
+        }
+    } else {
+        enum isValidFieldMethodForType = false;
+    }
+}
+
+// ============================================================================
 // GraphQL Type Mapping
 // ============================================================================
 
@@ -154,9 +224,9 @@ template graphqlBaseTypeName(T) {
     } else static if (is(T == JSONValue)) {
         // Raw JSON value - use JSON scalar
         enum graphqlBaseTypeName = "JSON";
-    } else static if (__traits(hasMember, T, "nodeId")) {
-        // Entity type - reference by type name from nodeId metadata
-        enum graphqlBaseTypeName = EntityID!T.typeName;
+    } else static if (isObjectType!T) {
+        // Object type (struct with valid field methods) - use type name
+        enum graphqlBaseTypeName = getGraphQLTypeName!T;
     } else static if (is(T == struct)) {
         // Input type struct - use struct name
         enum graphqlBaseTypeName = T.stringof;
@@ -358,15 +428,14 @@ template isInternalMember(string name) {
 
 
 /// Extract field information from any type (Entity, Query, or Mutation).
-/// Scans for methods with relational UDAs and computed fields.
+/// Scans for methods that are valid GraphQL field methods.
 ///
-/// UDA-based classification:
-/// - @SqlColumn → column field (entities only)
-/// - Other valid methods → columns, computed fields, relationships, table entries
+/// Valid field methods:
+/// - Take Expr!T as first parameter
+/// - Return an Expr type
 template getFields(T) {
     import std.traits : hasUDA, getUDAs, ReturnType, Parameters;
     import std.meta : staticIndexOf;
-    import graphqld2.relational.schema : SqlColumn, PrimaryKeyAttr;
     import graphqld2.core.expr : ExprResultType;
 
     enum getFields = () {
@@ -383,18 +452,7 @@ template getFields(T) {
                     enum description = getGqlDescription!fn;
                     enum deprecation = getGqlDeprecated!fn;
 
-                    // Check for primary key column (special case: ID! type)
-                    static if (hasUDA!(fn, SqlColumn) && hasUDA!(fn, PrimaryKeyAttr)) {
-                        fields ~= FieldInfo(
-                            gqlFieldName,
-                            "ID!",
-                            false,
-                            isHidden,
-                            description,
-                            deprecation
-                        );
-                    }
-                    else static if (isValidFieldMethod!(T, fn)) {
+                    static if (isValidFieldMethod!(T, fn)) {
                         // Field method: computed field, relationship, or table entry point
                         enum gqlType = computedFieldReturnType!fn;
                         enum arguments = getComputedFieldArguments!fn;
@@ -564,9 +622,9 @@ template graphqlInputTypeName(T) {
     } else static if (isInputType!T) {
         // Input type struct - use struct name as type name
         enum graphqlInputTypeName = T.stringof;
-    } else static if (__traits(hasMember, T, "nodeId")) {
-        // Entity reference in input (e.g., for ID references)
-        enum graphqlInputTypeName = EntityID!T.typeName;
+    } else static if (isObjectType!T) {
+        // Object type reference in input (e.g., for ID references)
+        enum graphqlInputTypeName = getGraphQLTypeName!T;
     } else {
         static assert(false,
             "No GraphQL input type mapping for `" ~ T.stringof ~ "`. " ~
@@ -736,53 +794,70 @@ template staticContains(T, Types...) {
     }
 }
 
-/// Helper to get related types from an entity by iterating over members.
-/// Scans for methods with @HasManyChild or @BelongsToParent UDAs.
-template getRelatedTypesImpl(Entity, size_t idx, Members...) {
-    import std.traits : hasUDA;
-    import graphqld2.relational.schema : HasManyFK, BelongsToFK;
-    import graphqld2.relational.schema : hasHasManyChild, hasBelongsToParent;
-    import graphqld2.relational.schema : extractHasManyChild, extractBelongsToParent;
+/// Extract object type from a result type (handles T, T[], Nullable!T).
+/// Returns void if no object type is found.
+template extractEntityFromType(T) {
+    static if (is(T == E[], E)) {
+        // Array - check element type
+        alias extractEntityFromType = extractEntityFromType!E;
+    } else static if (is(T == Nullable!U, U)) {
+        // Nullable - unwrap
+        alias extractEntityFromType = extractEntityFromType!U;
+    } else static if (isObjectType!T) {
+        // Object type (struct with valid field methods)
+        alias extractEntityFromType = T;
+    } else {
+        // Not an object type
+        alias extractEntityFromType = void;
+    }
+}
+
+/// Helper to get related types from a type by iterating over members.
+/// Scans for valid field methods and extracts object types from return types.
+template getRelatedTypesImpl(T, size_t idx, Members...) {
+    import graphqld2.core.expr : ExprResultType;
 
     static if (idx >= Members.length) {
         alias getRelatedTypesImpl = AliasSeq!();
     } else {
         enum member = Members[idx];
-        alias Rest = getRelatedTypesImpl!(Entity, idx + 1, Members);
+        alias Rest = getRelatedTypesImpl!(T, idx + 1, Members);
 
-        // Check for function members with relationship UDAs
-        static if (is(typeof(__traits(getMember, Entity, member)) == function)) {
-            alias fieldMethod = __traits(getMember, Entity, member);
+        static if (!isInternalMember!member &&
+                   is(typeof(__traits(getMember, T, member)) == function)) {
+            alias fn = __traits(getMember, T, member);
 
-            // HasMany relationships
-            static if (hasHasManyChild!fieldMethod) {
-                alias ChildType = extractHasManyChild!fieldMethod;
-                alias getRelatedTypesImpl = AliasSeq!(ChildType, Rest);
-            }
-            // BelongsTo relationships
-            else static if (hasBelongsToParent!fieldMethod) {
-                alias ParentType = extractBelongsToParent!fieldMethod;
-                alias getRelatedTypesImpl = AliasSeq!(ParentType, Rest);
-            }
-            else {
+            // Check if it's a valid field method
+            static if (isValidFieldMethod!(T, fn)) {
+                alias RetType = ReturnType!fn;
+                alias ResultT = ExprResultType!RetType;
+
+                // Extract object type from return type
+                alias EntityFromReturn = extractEntityFromType!ResultT;
+
+                static if (!is(EntityFromReturn == void)) {
+                    alias getRelatedTypesImpl = AliasSeq!(EntityFromReturn, Rest);
+                } else {
+                    alias getRelatedTypesImpl = Rest;
+                }
+            } else {
                 alias getRelatedTypesImpl = Rest;
             }
-        }
-        else {
+        } else {
             alias getRelatedTypesImpl = Rest;
         }
     }
 }
 
-/// Get all entity types directly referenced by an entity (via relationships)
-template getRelatedTypes(Entity) {
-    alias getRelatedTypes = getRelatedTypesImpl!(Entity, 0, __traits(allMembers, Entity));
+/// Get all object types directly referenced by a type (via field return types)
+template getRelatedTypes(T) {
+    alias getRelatedTypes = getRelatedTypesImpl!(T, 0, __traits(allMembers, T));
 }
 
 /// Helper to get root types from Query by iterating over members.
-/// Scans for methods with @TableEntity UDA.
+/// Scans for valid field methods and extracts object types from return types.
 template getRootTypesImpl(Query, size_t idx, Members...) {
-    import graphqld2.relational.schema : hasTableEntity, extractTableEntity;
+    import graphqld2.core.expr : ExprResultType;
 
     static if (idx >= Members.length) {
         alias getRootTypesImpl = AliasSeq!();
@@ -790,25 +865,33 @@ template getRootTypesImpl(Query, size_t idx, Members...) {
         enum member = Members[idx];
         alias Rest = getRootTypesImpl!(Query, idx + 1, Members);
 
-        // Check for function members with @TableEntity UDA
-        static if (is(typeof(__traits(getMember, Query, member)) == function)) {
-            alias fieldMethod = __traits(getMember, Query, member);
+        static if (!isInternalMember!member &&
+                   is(typeof(__traits(getMember, Query, member)) == function)) {
+            alias fn = __traits(getMember, Query, member);
 
-            static if (hasTableEntity!fieldMethod) {
-                alias EntityType = extractTableEntity!fieldMethod;
-                alias getRootTypesImpl = AliasSeq!(EntityType, Rest);
-            }
-            else {
+            // Check if it's a valid field method
+            static if (isValidFieldMethod!(Query, fn)) {
+                alias RetType = ReturnType!fn;
+                alias ResultT = ExprResultType!RetType;
+
+                // Extract object type from return type
+                alias EntityFromReturn = extractEntityFromType!ResultT;
+
+                static if (!is(EntityFromReturn == void)) {
+                    alias getRootTypesImpl = AliasSeq!(EntityFromReturn, Rest);
+                } else {
+                    alias getRootTypesImpl = Rest;
+                }
+            } else {
                 alias getRootTypesImpl = Rest;
             }
-        }
-        else {
+        } else {
             alias getRootTypesImpl = Rest;
         }
     }
 }
 
-/// Get root entity types from Query
+/// Get root object types from Query
 template getRootTypes(Query) {
     alias getRootTypes = getRootTypesImpl!(Query, 0, __traits(allMembers, Query));
 }
@@ -938,8 +1021,8 @@ template rootFieldReturnType(alias member) {
         enum rootFieldReturnType = graphqlBaseTypeName!U;
     } else static if (is(ResultType == E[], E)) {
         enum rootFieldReturnType = "[" ~ graphqlTypeName!E ~ "]!";
-    } else static if (__traits(hasMember, ResultType, "nodeId")) {
-        enum rootFieldReturnType = EntityID!ResultType.typeName ~ "!";
+    } else static if (isObjectType!ResultType) {
+        enum rootFieldReturnType = getGraphQLTypeName!ResultType ~ "!";
     } else static if (isCustomScalar!ResultType) {
         enum rootFieldReturnType = ResultType.name ~ "!";
     } else {
@@ -1008,31 +1091,47 @@ string generateInputTypeSDL(T)() if (isInputType!T) {
     return result;
 }
 
-/// Collect custom scalar names from an entity's column types
-private template getCustomScalarNames(Entity) {
-    import std.traits : hasUDA, ReturnType;
-    import graphqld2.relational.schema : SqlColumn;
+/// Collect custom scalar names from any type's field return types.
+private template getCustomScalarNames(T) {
     import graphqld2.core.expr : ExprResultType;
 
     enum getCustomScalarNames = () {
         string[] names;
-        static foreach (member; __traits(allMembers, Entity)) {{
-            static if (is(typeof(__traits(getMember, Entity, member)) == function)) {
-                alias fieldMethod = __traits(getMember, Entity, member);
-                // Check for @SqlColumn UDA (column fields)
-                static if (hasUDA!(fieldMethod, SqlColumn)) {
-                    alias ColType = ExprResultType!(ReturnType!fieldMethod);
-                    static if (isCustomScalar!ColType) {
+        static foreach (member; __traits(allMembers, T)) {{
+            static if (!isInternalMember!member &&
+                       is(typeof(__traits(getMember, T, member)) == function)) {
+                alias fn = __traits(getMember, T, member);
+
+                static if (isValidFieldMethod!(T, fn)) {
+                    alias RetType = ReturnType!fn;
+                    alias ResultT = ExprResultType!RetType;
+                    alias Unwrapped = UnwrapNullable!ResultT;
+
+                    // Check if the unwrapped type is a custom scalar
+                    static if (isCustomScalar!Unwrapped) {
                         // Add if not already present
                         bool found = false;
                         foreach (n; names) {
-                            if (n == ColType.name) {
+                            if (n == Unwrapped.name) {
                                 found = true;
                                 break;
                             }
                         }
                         if (!found) {
-                            names ~= ColType.name;
+                            names ~= Unwrapped.name;
+                        }
+                    }
+                    // Also check array element types
+                    else static if (is(Unwrapped == E[], E) && isCustomScalar!E) {
+                        bool found = false;
+                        foreach (n; names) {
+                            if (n == E.name) {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) {
+                            names ~= E.name;
                         }
                     }
                 }
@@ -1110,9 +1209,9 @@ template generateSchemaSDL(alias SchemaOrQuery) {
             result ~= "\n";
         }
 
-        // Generate each discovered entity type
+        // Generate each discovered object type
         static foreach (Entity; AllTypes) {
-            result ~= generateObjectTypeSDL!Entity(EntityID!Entity.typeName);
+            result ~= generateObjectTypeSDL!Entity(getGraphQLTypeName!Entity);
             result ~= "\n";
         }
 
@@ -1231,7 +1330,7 @@ unittest {
     assert(foundPasswordHash, "passwordHash field should exist");
 
     // Verify SDL doesn't include hidden field
-    enum sdl = generateObjectTypeSDL!User(EntityID!User.typeName);
+    enum sdl = generateObjectTypeSDL!User(getGraphQLTypeName!User);
     assert(sdl.canFind("name:"), "SDL should include name field");
     assert(!sdl.canFind("passwordHash"), "SDL should NOT include passwordHash field");
 }
@@ -1284,7 +1383,7 @@ unittest {
     assert(foundTitle && foundBody && foundPlain, "All fields should exist");
 
     // Verify SDL output
-    enum sdl = generateObjectTypeSDL!Article(EntityID!Article.typeName);
+    enum sdl = generateObjectTypeSDL!Article(getGraphQLTypeName!Article);
 
     // Should have description as doc string
     assert(sdl.canFind(`"""The article title"""`), "SDL should include title description");
