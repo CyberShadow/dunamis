@@ -95,17 +95,17 @@ struct User {
     mixin HasMany!("comments", Comment, "author_id");
 
     /// Computed field using operator overloading and property-like access
-    static auto fullName(RefExpr!User u) => u.firstName ~ " " ~ u.lastName;
+    static auto fullName(Expr!User u) => u.firstName ~ " " ~ u.lastName;
 
     /// Computed field with arguments - demonstrates field argument support
     @GqlDescription("A personalized greeting")
-    static auto greeting(RefExpr!User u, string prefix, string suffix = "!") {
+    static auto greeting(Expr!User u, string prefix, string suffix = "!") {
         return prefix ~ " " ~ u.firstName ~ suffix;
     }
 
     /// Computed field with struct argument - demonstrates input type generation
     @GqlDescription("Formatted name with options")
-    static auto formattedName(RefExpr!User u, FormatOptions options) {
+    static auto formattedName(Expr!User u, FormatOptions options) {
         // For now, just use prefix - full implementation would handle all options
         return options.prefix ~ u.firstName;
     }
@@ -128,7 +128,7 @@ struct Post {
     mixin HasMany!("comments", Comment, "post_id");
 
     /// Computed: render full post as HTML with author and comments
-    static auto html(RefExpr!Post p) {
+    static auto html(Expr!Post p) {
         return use(
             (string title, string body_, string authorName, string[] commentHtmls) {
                 auto commentsHtml = commentHtmls.join("\n");
@@ -148,13 +148,13 @@ struct Post {
             p.body_,
             p.author.fullName,
             map!(
-                (RefExpr!Comment c) => c.html
+                (Expr!Comment c) => c.html
             )(p.comments)
         );
     }
 
     /// Computed: short summary for listings
-    static auto summary(RefExpr!Post p) {
+    static auto summary(Expr!Post p) {
         return use(
             (string title, string body_, string authorName) {
                 auto truncated = body_.length > 100 ? body_[0..100] ~ "..." : body_;
@@ -185,7 +185,7 @@ struct Comment {
     mixin BelongsTo!("author", "authorId");
 
     /// Computed: render comment as HTML with author name
-    static auto html(RefExpr!Comment c) {
+    static auto html(Expr!Comment c) {
         return use(
             (string body_, string authorName) =>
                 `<div class="comment">
@@ -245,7 +245,7 @@ unittest {
     auto executor = new Executor();
 
     auto query = map!(
-        (RefExpr!Post p) => p.title
+        (Expr!Post p) => p.title
     )(getByIds!Post([1, 2]));
 
     auto titles = awaitSync(executor.execute(query));
@@ -278,7 +278,7 @@ unittest {
     auto executor = new Executor();
 
     auto query = map!(
-        (RefExpr!Post p) => p.summary
+        (Expr!Post p) => p.summary
     )(getByIds!Post([1, 2]));
 
     auto summaries = awaitSync(executor.execute(query));
@@ -301,7 +301,7 @@ unittest {
     auto executor = new Executor();
 
     auto query = map!(
-        (RefExpr!Post p) => p.html
+        (Expr!Post p) => p.html
     )(getByIds!Post([1]));
 
     auto htmls = awaitSync(executor.execute(query));
@@ -327,10 +327,10 @@ unittest {
 
     // Query: { users { firstName, posts { title } } }
     auto query = map!(
-        (RefExpr!User user) => jsonObject(
+        (Expr!User user) => jsonObject(
             "firstName", user.firstName,
             "posts", map!(
-                (RefExpr!Post post) => jsonObject(
+                (Expr!Post post) => jsonObject(
                     "title", post.title
                 )
             )(user.posts)
@@ -364,15 +364,15 @@ unittest {
 
     // Query: { users { firstName, posts { title }, comments { body } } }
     auto query = map!(
-        (RefExpr!User user) => jsonObject(
+        (Expr!User user) => jsonObject(
             "firstName", user.firstName,
             "posts", map!(
-                (RefExpr!Post post) => jsonObject(
+                (Expr!Post post) => jsonObject(
                     "title", post.title
                 )
             )(user.posts),
             "comments", map!(
-                (RefExpr!Comment comment) => jsonObject(
+                (Expr!Comment comment) => jsonObject(
                     "body", comment.body_
                 )
             )(user.comments)
@@ -549,7 +549,7 @@ unittest {
     // Query: { users { fullName } }
     // fullName = firstName ~ " " ~ lastName
     auto query = map!(
-        (RefExpr!User user) => user.fullName
+        (Expr!User user) => user.fullName
     )(getByIds!User([1, 2]));
 
     // Phase 1: Standard optimization (creates QueryNodes and ProjectColumnExprs)
@@ -609,7 +609,7 @@ unittest {
     // Query: { users { greeting(prefix: "Hello") } }
     // Uses opDispatch to call User.greeting with arguments
     auto query = map!(
-        (RefExpr!User user) => user.greeting("Hello")  // Uses default suffix "!"
+        (Expr!User user) => user.greeting("Hello")  // Uses default suffix "!"
     )(getByIds!User([1, 2]));
 
     auto result = awaitSync(executor.execute(query));

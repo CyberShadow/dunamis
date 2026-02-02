@@ -115,16 +115,16 @@ struct User {
     mixin HasMany!("comments", Comment, "author_id");
 
     // Computed field - uses property-like access via opDispatch
-    static auto fullName(RefExpr!User u) => u.firstName ~ " " ~ u.lastName;
+    static auto fullName(Expr!User u) => u.firstName ~ " " ~ u.lastName;
 
     // Computed field with arguments - arguments are concrete values at planning time
     @GqlDescription("A personalized greeting")
-    static auto greeting(RefExpr!User u, string prefix, string suffix = "!") {
+    static auto greeting(Expr!User u, string prefix, string suffix = "!") {
         return constant(prefix, u) ~ " " ~ u.firstName ~ constant(suffix, u);
     }
 
     // Computed field with struct argument - generates input type automatically
-    static auto formattedName(RefExpr!User u, FormatOptions options) {
+    static auto formattedName(Expr!User u, FormatOptions options) {
         return options.prefix ~ u.firstName;
     }
 }
@@ -180,7 +180,7 @@ auto executor = new Executor();
 // Query: { posts { title, author { fullName } } }
 // Uses property-like syntax: p.title, p.author.fullName
 auto query = map!(
-    (RefExpr!Post p) => jsonObject(
+    (Expr!Post p) => jsonObject(
         "title", p.title,
         "author", p.author.fullName
     )
@@ -219,10 +219,10 @@ WHERE posts.id IN (1, 2)
 ```d
 // Query: { users { firstName, posts { title } } }
 auto query = map!(
-    (RefExpr!User user) => jsonObject(
+    (Expr!User user) => jsonObject(
         "firstName", user.firstName,
         "posts", map!(
-            (RefExpr!Post post) => jsonObject(
+            (Expr!Post post) => jsonObject(
                 "title", post.title
             )
         )(user.posts)
@@ -258,7 +258,7 @@ struct FormatOptions {
 }
 
 // Used in computed field
-static auto formattedName(RefExpr!User u, FormatOptions options) { ... }
+static auto formattedName(Expr!User u, FormatOptions options) { ... }
 ```
 
 Generates GraphQL schema:
@@ -365,7 +365,7 @@ auto result = executor.execute(query);
 - JOINs for belongsTo relationships
 - Child queries (CTEs) for hasMany relationships
 - Computed fields with SQL push-down (dialect-aware: `||` for PostgreSQL/SQLite, `CONCAT()` for MySQL)
-- Computed fields in GraphQL schema (static functions taking `RefExpr!Entity`)
+- Computed fields in GraphQL schema (static functions taking `Expr!Entity`)
 - Field arguments for computed fields (with defaults, introspected from D function signatures)
 - Input types auto-generated from struct arguments (with `Nullable!(Nullable!T)` for three-state fields)
 - Data-source agnostic Executor

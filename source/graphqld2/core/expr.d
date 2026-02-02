@@ -236,11 +236,6 @@ abstract class Expr(T) : ExprBase {
     }
 }
 
-/// Convenience alias for entity reference expressions.
-/// Since Entity structs now serve as their own reference type,
-/// this is simply `Expr!Entity`.
-alias RefExpr(Entity) = Expr!Entity;
-
 // ============================================================================
 // Helper Templates
 // ============================================================================
