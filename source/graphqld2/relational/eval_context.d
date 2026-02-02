@@ -43,6 +43,27 @@ struct DBConfig {
 enum defaultDBConfig = DBConfig();
 
 // ============================================================================
+// Enum Helpers
+// ============================================================================
+
+/// Convert a database string to a D enum value.
+/// Matches the string against enum member names.
+/// Returns T.init for empty strings or unknown values (graceful degradation).
+T enumFromDbString(T)(string s) if (is(T == enum)) {
+    import std.traits : EnumMembers;
+
+    if (s.length == 0) return T.init;
+
+    static foreach (member; EnumMembers!T) {
+        if (__traits(identifier, member) == s) {
+            return member;
+        }
+    }
+
+    return T.init;  // Default for unknown values
+}
+
+// ============================================================================
 // Data Fetcher Base Class
 // ============================================================================
 
@@ -102,6 +123,10 @@ abstract class DataFetcher {
             // Custom scalar - fetch underlying type and wrap
             auto rawValues = fetchColumn!(T.DType)(table, column, refs);
             return rawValues.map!(v => T(v)).array;
+        } else static if (is(T == enum)) {
+            // D enum - fetch as string and convert
+            auto rawValues = fetchColumnString(table, column, refs);
+            return rawValues.map!(v => enumFromDbString!T(v)).array;
         } else static if (is(T == string)) {
             return fetchColumnString(table, column, refs);
         } else static if (is(T == long)) {
@@ -364,6 +389,12 @@ class QueryResult {
         } else static if (isCustomScalar!T) {
             // Custom scalar - extract underlying type and wrap
             return T(extractValue!(T.DType)(val));
+        } else static if (is(T == enum)) {
+            // D enum - extract as string and convert
+            if (val.type == JSONType.string) {
+                return enumFromDbString!T(val.str);
+            }
+            return T.init;
         } else static if (is(T == string)) {
             // Handle both string and integer values (for FK columns)
             if (val.type == JSONType.integer) {
@@ -788,6 +819,12 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
         } else static if (is(T == double)) {
             if (val.type == JSONType.integer) return cast(double)val.integer;
             return val.floating;
+        } else static if (is(T == enum)) {
+            // D enum - extract as string and convert
+            if (val.type == JSONType.string) {
+                return enumFromDbString!T(val.str);
+            }
+            return T.init;
         } else {
             static assert(false, "Unsupported type: " ~ T.stringof);
         }

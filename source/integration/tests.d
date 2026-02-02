@@ -5,7 +5,7 @@
  */
 module integration.tests;
 
-import std.json;
+import std.json : JSONType, JSONValue;
 import integration.test_framework;
 
 // ============================================================================
@@ -137,6 +137,113 @@ void testMutationPersistence() {
 }
 
 // ============================================================================
+// Enum Tests
+// ============================================================================
+
+void testQueryTasksWithEnumStatus() {
+    auto response = graphql(`{
+        tasks {
+            title
+            status
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto tasks = response["data"]["tasks"].array;
+    assertTrue(tasks.length >= 3, "Expected at least 3 tasks");
+
+    // Check that status values are returned as enum strings
+    bool foundPending = false;
+    bool foundInProgress = false;
+    bool foundCompleted = false;
+
+    foreach (task; tasks) {
+        auto status = task["status"].str;
+        if (status == "pending") foundPending = true;
+        if (status == "inProgress") foundInProgress = true;
+        if (status == "completed") foundCompleted = true;
+    }
+
+    assertTrue(foundPending, "Expected to find task with status 'pending'");
+    assertTrue(foundInProgress, "Expected to find task with status 'inProgress'");
+    assertTrue(foundCompleted, "Expected to find task with status 'completed'");
+}
+
+void testQueryTaskFields() {
+    auto response = graphql(`{
+        tasks {
+            title
+            status
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto tasks = response["data"]["tasks"].array;
+    assertTrue(tasks.length > 0, "Expected at least 1 task");
+
+    // Check that each task has title and status
+    foreach (task; tasks) {
+        assertTrue(("title" in task) !is null, "Task should have title");
+        assertTrue(("status" in task) !is null, "Task should have status");
+        // Verify status is a valid enum value
+        auto status = task["status"].str;
+        assertTrue(
+            status == "pending" || status == "inProgress" ||
+            status == "completed" || status == "cancelled",
+            "Status should be a valid enum value, got: " ~ status
+        );
+    }
+}
+
+void testCreateTaskWithEnumStatus() {
+    auto response = graphql(`
+        mutation {
+            createTask(input: {title: "New Task", status: "cancelled"}) {
+                title
+                status
+            }
+        }
+    `);
+
+    assertNoErrors(response);
+    auto task = response["data"]["createTask"];
+    assertTrue(task["title"].str == "New Task", "Expected title to be 'New Task'");
+    assertTrue(task["status"].str == "cancelled", "Expected status to be 'cancelled'");
+}
+
+void testEnumPersistence() {
+    // Create a task with specific status
+    auto createResponse = graphql(`
+        mutation {
+            createTask(input: {title: "Persisted Task", status: "inProgress"}) {
+                id
+                title
+                status
+            }
+        }
+    `);
+    assertNoErrors(createResponse);
+    assertTrue(createResponse["data"]["createTask"]["status"].str == "inProgress",
+        "Created task should have status 'inProgress'");
+
+    // Query to verify the enum was persisted correctly
+    auto queryResponse = graphql(`{ tasks { title status } }`);
+    assertNoErrors(queryResponse);
+
+    auto tasks = queryResponse["data"]["tasks"].array;
+    bool found = false;
+    foreach (task; tasks) {
+        if (task["title"].str == "Persisted Task") {
+            assertTrue(task["status"].str == "inProgress",
+                "Persisted task should have status 'inProgress'");
+            found = true;
+            break;
+        }
+    }
+    assertTrue(found, "Created task should be queryable");
+}
+
+// ============================================================================
 // Test Registration
 // ============================================================================
 
@@ -148,4 +255,10 @@ static this() {
     registerTest("Query computed field (fullName)", "tests", &testQueryComputedField);
     registerTest("Mutation: create user", "tests", &testCreateUser);
     registerTest("Mutation persistence", "tests", &testMutationPersistence);
+
+    // Enum tests
+    registerTest("Query tasks with enum status", "tests", &testQueryTasksWithEnumStatus);
+    registerTest("Query task fields", "tests", &testQueryTaskFields);
+    registerTest("Mutation: create task with enum", "tests", &testCreateTaskWithEnumStatus);
+    registerTest("Enum persistence", "tests", &testEnumPersistence);
 }

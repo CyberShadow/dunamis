@@ -4,6 +4,7 @@ import std.algorithm;
 import std.array;
 import std.conv;
 import std.json;
+import std.meta : staticMap;
 import std.traits;
 import std.typecons : Nullable;
 
@@ -345,6 +346,31 @@ JSONValue valueToJson(Value val) {
 }
 
 // ============================================================================
+// Enum Value Extraction
+// ============================================================================
+
+/// Convert a string to a D enum value.
+/// Matches the string against enum member names.
+T enumFromString(T)(string s) if (is(T == enum)) {
+    import std.traits : EnumMembers;
+
+    static foreach (member; EnumMembers!T) {
+        if (__traits(identifier, member) == s) {
+            return member;
+        }
+    }
+
+    throw new CompilerException(
+        "Invalid enum value '" ~ s ~ "' for type " ~ T.stringof ~
+        ". Valid values: " ~ [staticMap!(getMemberName, EnumMembers!T)].join(", ")
+    );
+}
+
+private template getMemberName(alias member) {
+    enum getMemberName = __traits(identifier, member);
+}
+
+// ============================================================================
 // JSON Value Extraction (for variables)
 // ============================================================================
 
@@ -401,6 +427,12 @@ T extractValueFromJson(T)(JSONValue json) {
     } else static if (isCustomScalar!T) {
         // CustomScalar handles its own JSON deserialization
         return T.fromJsonValue(json);
+    } else static if (is(T == enum)) {
+        // D enum - convert from string
+        if (json.type != JSONType.string) {
+            throw new CompilerException("Expected string for enum " ~ T.stringof ~ ", got " ~ json.type.to!string);
+        }
+        return enumFromString!T(json.str);
     } else static if (isInputType!T) {
         return extractInputObjectFromJson!T(json);
     } else static if (is(T == JSONValue[string])) {
@@ -468,6 +500,17 @@ T extractValue(T)(Value val, T defaultValue = T.init) {
     } else static if (isCustomScalar!T) {
         // CustomScalar handles its own JSON deserialization
         return T.fromJsonValue(valueToJson(val));
+    } else static if (is(T == enum)) {
+        // D enum - extract from enum value or string
+        import graphql.ast : ValueEnum;
+        if (val.ruleSelection == ValueEnum.E) {
+            return enumFromString!T(val.tok.value);
+        } else if (val.ruleSelection == ValueEnum.STR) {
+            return enumFromString!T(val.tok.value);
+        }
+        throw new CompilerException(
+            "Expected enum value for " ~ T.stringof ~ ", got " ~ val.ruleSelection.to!string
+        );
     } else static if (isInputType!T) {
         return extractInputObject!T(val);
     } else static if (is(T == JSONValue[string])) {
@@ -2113,4 +2156,51 @@ unittest {
     assert(users.length == 2);
     assert(users[0]["name"].str == "Alice");
     assert(users[1]["name"].str == "Bob");
+}
+
+// Test enum support in queries
+unittest {
+    import ae.utils.promise.await : awaitSync;
+    import graphqld2.core.executor : Executor;
+    import graphqld2.relational.demo : DemoEntity, MockDB;
+    import graphqld2.relational.schema : Col, Table, getAll;
+
+    enum Status { pending, inProgress, completed }
+
+    static MockDB!() db;
+
+    static struct Task {
+        mixin DemoEntity!(db, "tasks");
+        mixin Col!("title", string);
+        mixin Col!("status", Status);
+    }
+
+    static struct Query {
+        mixin Table!(Task, "tasks");
+    }
+
+    db = new MockDB!();
+    db.setTableData("tasks", `[
+        {"id": 1, "title": "Task 1", "status": "pending"},
+        {"id": 2, "title": "Task 2", "status": "inProgress"},
+        {"id": 3, "title": "Task 3", "status": "completed"}
+    ]`);
+
+    // Query tasks with enum field
+    auto query = compileQuery!Query(`{
+        tasks {
+            title
+            status
+        }
+    }`);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query));
+
+    // Verify enum values are returned correctly
+    auto tasks = result["tasks"].array;
+    assert(tasks.length == 3, "Should have 3 tasks");
+    assert(tasks[0]["status"].str == "pending", "First task status should be pending");
+    assert(tasks[1]["status"].str == "inProgress", "Second task status should be inProgress");
+    assert(tasks[2]["status"].str == "completed", "Third task status should be completed");
 }

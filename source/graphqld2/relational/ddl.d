@@ -48,6 +48,9 @@ template getDTypeName(T) {
         enum getDTypeName = "float";
     } else static if (is(T == double)) {
         enum getDTypeName = "double";
+    } else static if (is(T == enum)) {
+        // Enums are stored as strings
+        enum getDTypeName = "string";
     } else {
         enum getDTypeName = "string";  // Fallback
     }

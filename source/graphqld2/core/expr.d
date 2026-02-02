@@ -894,6 +894,10 @@ JSONValue toJsonValue(T)(T value) {
     } else static if (isCustomScalar!T) {
         // CustomScalar has its own toJson method
         return T.toJson(value.value);
+    } else static if (is(T == enum)) {
+        // D enum - convert to string using member name
+        import std.conv : to;
+        return JSONValue(value.to!string);
     } else static if (is(T == string)) {
         return JSONValue(value);
     } else static if (is(T == bool)) {

@@ -200,6 +200,9 @@ template graphqlBaseTypeName(T) {
     static if (isCustomScalar!T) {
         // Custom scalar - use its declared name
         enum graphqlBaseTypeName = T.name;
+    } else static if (is(T == enum)) {
+        // D enum - use enum name as GraphQL enum type
+        enum graphqlBaseTypeName = __traits(identifier, T);
     } else static if (is(T == string)) {
         // GraphQL String
         enum graphqlBaseTypeName = "String";
@@ -546,6 +549,24 @@ template isInputType(T) {
     }
 }
 
+/// Check if a type is a D enum that should become a GraphQL enum
+template isGraphQLEnum(T) {
+    enum isGraphQLEnum = is(T == enum);
+}
+
+/// Generate GraphQL SDL for a D enum type
+template generateEnumTypeSDL(E) if (isGraphQLEnum!E) {
+    import std.traits : EnumMembers;
+
+    enum generateEnumTypeSDL = () {
+        string result = "enum " ~ __traits(identifier, E) ~ " {\n";
+        static foreach (member; EnumMembers!E) {
+            result ~= "  " ~ __traits(identifier, member) ~ "\n";
+        }
+        return result ~ "}\n";
+    }();
+}
+
 /// Field information for input type fields
 struct InputFieldInfo {
     string name;
@@ -600,6 +621,9 @@ template getInputTypeFields(T) if (isInputType!T) {
 template graphqlInputTypeName(T) {
     static if (isCustomScalar!T) {
         enum graphqlInputTypeName = T.name;
+    } else static if (is(T == enum)) {
+        // D enum - use enum name as GraphQL enum type
+        enum graphqlInputTypeName = __traits(identifier, T);
     } else static if (is(T == string)) {
         enum graphqlInputTypeName = "String";
     } else static if (is(T == bool)) {
@@ -777,6 +801,142 @@ template getInputTypesFromMutationImpl(Mutation, size_t idx, Members...) {
 /// Collect all input types from a Mutation type's parameters
 template getInputTypesFromMutation(Mutation) {
     alias getInputTypesFromMutation = getInputTypesFromMutationImpl!(Mutation, 0, __traits(allMembers, Mutation));
+}
+
+// ============================================================================
+// Enum Type Discovery
+// ============================================================================
+
+/// Helper to extract enum type from a type (unwraps Nullable, arrays)
+template extractEnumFromType(T) {
+    static if (is(T == E[], E)) {
+        alias extractEnumFromType = extractEnumFromType!E;
+    } else static if (is(T == Nullable!U, U)) {
+        alias extractEnumFromType = extractEnumFromType!U;
+    } else static if (isGraphQLEnum!T) {
+        alias extractEnumFromType = T;
+    } else {
+        alias extractEnumFromType = void;
+    }
+}
+
+/// Helper to collect enum types from entity members (iterative)
+template getEnumTypesFromEntityImpl(Entity, size_t idx, Members...) {
+    import std.traits : ReturnType, Parameters;
+    import graphqld2.core.expr : ExprResultType;
+
+    static if (idx >= Members.length) {
+        alias getEnumTypesFromEntityImpl = AliasSeq!();
+    } else {
+        enum member = Members[idx];
+        alias Rest = getEnumTypesFromEntityImpl!(Entity, idx + 1, Members);
+
+        static if (isInternalMember!member) {
+            alias getEnumTypesFromEntityImpl = Rest;
+        } else static if (__traits(compiles, isValidFieldMethod!(Entity, __traits(getMember, Entity, member)))) {
+            static if (isValidFieldMethod!(Entity, __traits(getMember, Entity, member))) {
+                alias fn = __traits(getMember, Entity, member);
+                alias RetType = ReturnType!fn;
+                alias ResultT = ExprResultType!RetType;
+
+                // Check return type for enum
+                alias EnumFromReturn = extractEnumFromType!ResultT;
+
+                // Check argument types for enums
+                alias Params = Parameters!fn;
+                alias EnumFromArgs = getEnumTypesFromParamsImpl!(1, Params);
+
+                static if (!is(EnumFromReturn == void)) {
+                    alias getEnumTypesFromEntityImpl = AliasSeq!(EnumFromReturn, EnumFromArgs, Rest);
+                } else {
+                    alias getEnumTypesFromEntityImpl = AliasSeq!(EnumFromArgs, Rest);
+                }
+            } else {
+                alias getEnumTypesFromEntityImpl = Rest;
+            }
+        } else {
+            alias getEnumTypesFromEntityImpl = Rest;
+        }
+    }
+}
+
+/// Helper to extract enum types from parameters (iterative)
+template getEnumTypesFromParamsImpl(size_t idx, Params...) {
+    static if (idx >= Params.length) {
+        alias getEnumTypesFromParamsImpl = AliasSeq!();
+    } else {
+        alias P = Params[idx];
+        alias Unwrapped = UnwrapNullable!P;
+        alias Rest = getEnumTypesFromParamsImpl!(idx + 1, Params);
+
+        static if (isGraphQLEnum!Unwrapped) {
+            alias getEnumTypesFromParamsImpl = AliasSeq!(Unwrapped, Rest);
+        } else static if (isInputType!Unwrapped) {
+            // Check inside input type for enum fields
+            alias EnumsFromInput = getEnumTypesFromInputType!Unwrapped;
+            alias getEnumTypesFromParamsImpl = AliasSeq!(EnumsFromInput, Rest);
+        } else {
+            alias getEnumTypesFromParamsImpl = Rest;
+        }
+    }
+}
+
+/// Helper to collect enum types from input type fields
+template getEnumTypesFromInputTypeImpl(T, size_t idx, Members...) {
+    static if (idx >= Members.length) {
+        alias getEnumTypesFromInputTypeImpl = AliasSeq!();
+    } else {
+        enum member = Members[idx];
+        alias Rest = getEnumTypesFromInputTypeImpl!(T, idx + 1, Members);
+
+        static if (isInternalMember!member) {
+            alias getEnumTypesFromInputTypeImpl = Rest;
+        } else static if (__traits(compiles, typeof(__traits(getMember, T, member)))) {
+            alias MemberType = typeof(__traits(getMember, T, member));
+
+            static if (!is(MemberType == function) && !is(MemberType == void)) {
+                alias Unwrapped = UnwrapNullable!MemberType;
+
+                static if (isGraphQLEnum!Unwrapped) {
+                    alias getEnumTypesFromInputTypeImpl = AliasSeq!(Unwrapped, Rest);
+                } else {
+                    alias getEnumTypesFromInputTypeImpl = Rest;
+                }
+            } else {
+                alias getEnumTypesFromInputTypeImpl = Rest;
+            }
+        } else {
+            alias getEnumTypesFromInputTypeImpl = Rest;
+        }
+    }
+}
+
+/// Collect enum types from an input type's fields
+template getEnumTypesFromInputType(T) if (isInputType!T) {
+    alias getEnumTypesFromInputType = getEnumTypesFromInputTypeImpl!(T, 0, __traits(allMembers, T));
+}
+
+/// Collect all enum types from an entity's fields
+template getEnumTypesFromEntity(Entity) {
+    alias getEnumTypesFromEntity = getEnumTypesFromEntityImpl!(Entity, 0, __traits(allMembers, Entity));
+}
+
+/// Helper to collect enum types from multiple entities
+template getEnumTypesFromEntitiesImpl(Entities...) {
+    static if (Entities.length == 0) {
+        alias getEnumTypesFromEntitiesImpl = AliasSeq!();
+    } else {
+        alias First = getEnumTypesFromEntity!(Entities[0]);
+        alias Rest = getEnumTypesFromEntitiesImpl!(Entities[1..$]);
+        alias getEnumTypesFromEntitiesImpl = AliasSeq!(First, Rest);
+    }
+}
+
+/// Collect all enum types from all entities in the schema
+template getAllEnumTypes(Query) {
+    alias AllEntityTypes = getAllEntityTypes!Query;
+    alias AllEnumTypes = getEnumTypesFromEntitiesImpl!AllEntityTypes;
+    alias getAllEnumTypes = uniqueTypes!AllEnumTypes;
 }
 
 // ============================================================================
@@ -1187,6 +1347,9 @@ template generateSchemaSDL(alias SchemaOrQuery) {
         alias AllInputTypes = EntityInputTypes;
     }
 
+    // Collect enum types from entities
+    alias AllEnumTypes = getAllEnumTypes!QueryType;
+
     enum generateSchemaSDL = () {
         string result;
 
@@ -1195,6 +1358,12 @@ template generateSchemaSDL(alias SchemaOrQuery) {
             result ~= "scalar " ~ scalarName ~ "\n";
         }
         static if (getAllCustomScalarNames!AllTypes.length > 0) {
+            result ~= "\n";
+        }
+
+        // Generate enum types
+        static foreach (EnumType; AllEnumTypes) {
+            result ~= generateEnumTypeSDL!EnumType;
             result ~= "\n";
         }
 
@@ -1571,4 +1740,48 @@ unittest {
     static assert(sdl.canFind("type Query"));
     static assert(!sdl.canFind("type Mutation"),
         "Schema without mutations should not have type Mutation");
+}
+
+// Test enum support in GraphQL schema
+unittest {
+    import std.algorithm : canFind;
+    import graphqld2.relational.demo : DemoEntity, MockDB;
+    import graphqld2.relational.schema : Col, Table, getAll;
+
+    // Define a D enum
+    enum Status { pending, inProgress, completed }
+
+    static MockDB!() db;
+
+    static struct Task {
+        mixin DemoEntity!(db, "tasks");
+        mixin Col!("title", string);
+        mixin Col!("status", Status);
+    }
+
+    static struct MyQuery {
+        mixin Table!(Task, "tasks");
+    }
+
+    // Test type name mapping
+    static assert(graphqlTypeName!Status == "Status!");
+    static assert(graphqlBaseTypeName!Status == "Status");
+    static assert(graphqlTypeName!(Nullable!Status) == "Status");
+
+    // Test enum detection
+    static assert(isGraphQLEnum!Status);
+    static assert(!isGraphQLEnum!string);
+    static assert(!isGraphQLEnum!int);
+
+    // Test SDL generation
+    enum sdl = generateSchemaSDL!MyQuery;
+
+    // Should contain enum definition
+    static assert(sdl.canFind("enum Status"), "SDL should contain enum Status: " ~ sdl);
+    static assert(sdl.canFind("pending"), "SDL should contain pending: " ~ sdl);
+    static assert(sdl.canFind("inProgress"), "SDL should contain inProgress: " ~ sdl);
+    static assert(sdl.canFind("completed"), "SDL should contain completed: " ~ sdl);
+
+    // Task type should have status field
+    static assert(sdl.canFind("status: Status!"), "Task should have status: Status! field: " ~ sdl);
 }

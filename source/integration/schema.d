@@ -7,6 +7,7 @@
 module integration.schema;
 
 import std.json : JSONValue;
+import std.typecons : Nullable;
 
 import graphqld2.core;
 import graphqld2.graphql : Schema;
@@ -16,6 +17,14 @@ import graphqld2.relational.mutation : insert;
 
 import std.stdio : writeln, writefln;
 import integration.test_framework : graphql, assertNoErrors;
+
+/// Task status enum for testing enum support
+enum TaskStatus {
+    pending,
+    inProgress,
+    completed,
+    cancelled
+}
 
 /// Seed the database with test data via GraphQL mutations.
 /// Works with any backend since it uses the HTTP API.
@@ -46,6 +55,19 @@ void seedDatabase() {
     assertNoErrors(post3);
     writeln("  Created post: D Programming");
 
+    // Create tasks with different statuses
+    auto task1 = graphql(`mutation { createTask(input: {title: "Write tests", status: "pending", assignee_id: ` ~ aliceId.toString() ~ `}) { id } }`);
+    assertNoErrors(task1);
+    writeln("  Created task: Write tests (pending)");
+
+    auto task2 = graphql(`mutation { createTask(input: {title: "Review PR", status: "inProgress", assignee_id: ` ~ aliceId.toString() ~ `}) { id } }`);
+    assertNoErrors(task2);
+    writeln("  Created task: Review PR (inProgress)");
+
+    auto task3 = graphql(`mutation { createTask(input: {title: "Deploy app", status: "completed", assignee_id: ` ~ bobId.toString() ~ `}) { id } }`);
+    assertNoErrors(task3);
+    writeln("  Created task: Deploy app (completed)");
+
     writeln("Seeding complete.");
 }
 
@@ -53,6 +75,7 @@ void seedDatabase() {
 /// Usage: mixin TestSchema!db;
 mixin template TestSchema(alias db) {
     import std.json : JSONValue;
+    import std.typecons : Nullable;
     import graphqld2.core.expr : Expr;
     import graphqld2.graphql : Schema;
     import graphqld2.relational.schema : Table, ForeignKey, BelongsTo, HasMany, Col, getAll, hasMany;
@@ -77,14 +100,24 @@ mixin template TestSchema(alias db) {
         mixin BelongsTo!("author", "authorId");
     }
 
+    struct Task {
+        mixin DemoEntity!(db, "tasks");
+        mixin Col!("title", string);
+        mixin Col!("status", TaskStatus);
+        mixin Col!("assigneeId", Nullable!(ForeignKey!User));
+        mixin BelongsTo!("assignee", "assigneeId");
+    }
+
     struct Query {
         mixin Table!(User, "users");
         mixin Table!(Post, "posts");
+        mixin Table!(Task, "tasks");
     }
 
     struct Mutation {
         mixin CrudMutations!User;
         mixin CrudMutations!Post;
+        mixin CrudMutations!Task;
 
         static auto createUserWithName(Expr!Mutation parent, string firstName, string lastName) {
             return insert!User([
