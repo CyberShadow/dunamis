@@ -93,6 +93,12 @@ class InsertExpr(Entity) : Expr!Entity, AnyRefEvaluable {
     }
 
     override Promise!(Entity[]) eval(EvalContext ctx) {
+        // Memoization: mutations should only execute once even when eval() is called
+        // multiple times (e.g., when multiple ColumnAccessExpr share the same InsertExpr)
+        if (auto cached = ctx.getCachedEval(this)) {
+            return cast(Promise!(Entity[])) cached;
+        }
+
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
 
         // Ensure fetcher is available
@@ -106,7 +112,7 @@ class InsertExpr(Entity) : Expr!Entity, AnyRefEvaluable {
         }
 
         // Execute INSERT via DataFetcher
-        return relCtx.fetcher.executeInsert(_table, _typeName, _input)
+        auto promise = relCtx.fetcher.executeInsert(_table, _typeName, _input)
             .then((QueryResult result) {
                 // Store result for field access
                 relCtx.storeMutationResult(_typeName, result);
@@ -115,27 +121,18 @@ class InsertExpr(Entity) : Expr!Entity, AnyRefEvaluable {
                 auto refs = result.allRefs();
                 return refs.map!(r => Entity(r.nodeId)).array;
             });
+
+        // Cache for future calls
+        ctx.setCachedEval(this, promise);
+        return promise;
     }
 
     /// AnyRefEvaluable implementation
     Promise!(AnyRef[]) evalAsAnyRef(EvalContext ctx) {
-        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-
-        auto fetcher = EntityID!Entity.db;
-        if (fetcher is null) {
-            return resolve(cast(AnyRef[])[]);
-        }
-
-        if (relCtx.fetcher is null) {
-            relCtx.fetcher = fetcher;
-        }
-
-        return relCtx.fetcher.executeInsert(_table, _typeName, _input)
-            .then((QueryResult result) {
-                // Store result for field access
-                relCtx.storeMutationResult(_typeName, result);
-                return result.allRefs();
-            });
+        // Use eval() internally to benefit from memoization
+        return this.eval(ctx).then((Entity[] entities) {
+            return entities.map!(e => AnyRef(e.nodeId.id)).array;
+        });
     }
 
     /// Access input for SQL generation
