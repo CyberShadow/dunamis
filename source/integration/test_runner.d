@@ -62,12 +62,18 @@ abstract class IntegrationTestRunner(alias db, alias Schema) {
             auto query = json["query"].str;
             JSONValue variables = "variables" in json ? json["variables"] : JSONValue.emptyObject;
 
+            // Check for optimization preference via header (defaults to true)
+            bool optimize = true;
+            if (auto optHeader = "X-Optimize" in request.headers) {
+                optimize = (*optHeader != "false");
+            }
+
             db.reset();
 
             auto compiledQuery = compileQuery!Schema(query, variables);
             auto executor = new Executor();
 
-            executor.execute(compiledQuery).then((JSONValue result) {
+            executor.execute(compiledQuery, optimize).then((JSONValue result) {
                 auto response = new HttpResponseEx();
                 response.status = HttpStatusCode.OK;
                 response.headers["Content-Type"] = "application/json";

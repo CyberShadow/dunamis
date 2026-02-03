@@ -110,10 +110,11 @@ struct TestResults {
 // Test Runner
 // ============================================================================
 
-/// Run all registered tests
-TestResults runAllTests() {
+/// Run tests with a specific optimization mode
+private TestResults runTestsWithMode(bool optimize) {
     import core.time : MonoTime;
 
+    currentOptimizeMode = optimize;
     TestResults results;
 
     foreach (test; registeredTests) {
@@ -146,11 +147,51 @@ TestResults runAllTests() {
     return results;
 }
 
+/// Run all registered tests in both optimized and unoptimized modes
+TestResults runAllTests() {
+    TestResults combinedResults;
+
+    // Run with optimization enabled
+    writeln();
+    writeln("───────────────────────────────────────────────────────────────");
+    writeln("  Running tests WITH optimization");
+    writeln("───────────────────────────────────────────────────────────────");
+    writeln();
+    auto optimizedResults = runTestsWithMode(true);
+
+    // Copy results with mode prefix
+    foreach (r; optimizedResults.results) {
+        TestResult prefixed = r;
+        prefixed.name = "[optimized] " ~ r.name;
+        combinedResults.results ~= prefixed;
+    }
+
+    // Run without optimization
+    writeln();
+    writeln("───────────────────────────────────────────────────────────────");
+    writeln("  Running tests WITHOUT optimization (naive path)");
+    writeln("───────────────────────────────────────────────────────────────");
+    writeln();
+    auto unoptimizedResults = runTestsWithMode(false);
+
+    // Copy results with mode prefix
+    foreach (r; unoptimizedResults.results) {
+        TestResult prefixed = r;
+        prefixed.name = "[naive] " ~ r.name;
+        combinedResults.results ~= prefixed;
+    }
+
+    return combinedResults;
+}
+
 // ============================================================================
 // GraphQL Client
 // ============================================================================
 
 private __gshared string graphqlEndpoint = "http://localhost:8080/graphql";
+
+/// Current optimization mode for tests (controlled by runAllTests)
+private __gshared bool currentOptimizeMode = true;
 
 /// Set the GraphQL endpoint URL
 void setGraphQLEndpoint(string url) {
@@ -158,12 +199,14 @@ void setGraphQLEndpoint(string url) {
 }
 
 /// Execute a GraphQL query/mutation and return the parsed response
+/// Uses the current optimization mode set by runAllTests
 JSONValue graphql(string query, JSONValue variables = JSONValue.emptyObject) {
     import std.net.curl : HTTP, CurlException;
     import std.exception : enforce;
 
     auto http = HTTP(graphqlEndpoint);
     http.addRequestHeader("Content-Type", "application/json");
+    http.addRequestHeader("X-Optimize", currentOptimizeMode ? "true" : "false");
 
     auto requestBody = JSONValue([
         "query": JSONValue(query),
