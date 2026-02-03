@@ -43,16 +43,19 @@ Walk the expression tree and:
 - Evaluate expressions against fetched data
 - Assemble the response
 
-### Key Constraint
+### Declarative vs Dynamic Relationships
 
-> The compute phase cannot return object IDs that we then need to fetch.
+For **optimal performance**, relationships should be declared in the schema:
+- Foreign key relationships known statically → JOINs and CTEs
+- Prefetch all possible dependencies, discard unused ones
+- O(fields) database round-trips, not O(objects)
 
-All relationships must be declared in the schema, not computed at runtime. This means:
-- Foreign key relationships are known statically
-- We fetch all possible dependencies, discard unused ones
-- No dynamic "fetch this ID I just computed" patterns
+However, **dynamic fetching is still possible** when needed. Custom `Expr` implementations can perform arbitrary async operations (the API uses Promises). This is useful for:
+- ML-based recommendations returning computed IDs
+- External service lookups
+- Complex business logic that can't be expressed declaratively
 
-This is an acceptable trade-off for most CRUD applications.
+The trade-off: dynamic fetches don't benefit from the batch optimization and may reintroduce N+1 patterns for that specific field. For most CRUD applications, declarative relationships cover the common cases.
 
 ## Architecture
 
@@ -105,6 +108,14 @@ The struct itself stores no column data. Instead, it acts as a **proxy** for the
 - `user.firstName` doesn't read from memory—it returns an `Expr!string` that represents "the firstName column for this user"
 - The actual data lives in the database until explicitly fetched
 
+**Why this design?**
+
+1. **Efficiency** - Only requested columns are fetched. If a query doesn't select `email`, that column is never read from the database. This matters when some columns are large (BLOBs, long text) or expensive to compute (view-backed tables with complex aggregations).
+
+2. **Vectorization** - Operations happen on all objects at once, not one at a time. Traditional resolver-based systems call `fullName(user)` for each user sequentially. Here, `u.firstName ~ " " ~ u.lastName` becomes a single SQL expression evaluated for all users in one query.
+
+3. **Compile-time safety** - Field access returns `Expr!T`, not `T`. This means typos like `user.fristName` fail at compile time, and the type system ensures expressions compose correctly.
+
 **Deferred materialization**: In most cases, even these lightweight proxy objects are never instantiated. When you write:
 
 ```d
@@ -136,7 +147,13 @@ struct User {
 }
 ```
 
-This uniform representation enables the optimizer to analyze and transform field access patterns regardless of whether the data comes from a database column, a JOIN, or in-memory computation.
+**Why this design?**
+
+1. **Uniform representation** - The optimizer can analyze and transform field access patterns regardless of whether the data comes from a database column, a JOIN, or in-memory computation. All fields look the same to the expression tree.
+
+2. **SQL pushdown** - Because fields return expressions (not values), the optimizer can compose them into SQL. `u.firstName ~ " " ~ u.lastName` isn't computed in D—it becomes `first_name || ' ' || last_name` in the SQL query itself.
+
+3. **Compile-time validation** - Return types are checked at compile time. If `fullName` returns `Expr!int` but you try to concatenate it with a string, the compiler catches it immediately. Traditional resolver-based systems return `Json` and defer type errors to runtime.
 
 ### 3. Data Source Binding via Static Alias
 
@@ -151,7 +168,20 @@ struct User {
 }
 ```
 
-This allows the optimizer to determine at compile time which data source handles each entity, enabling type-safe query generation and appropriate SQL dialect selection.
+**Why this design?**
+
+1. **Multiple data sources** - A single schema can span multiple databases or backends. Users from PostgreSQL, analytics from ClickHouse, cache from Redis—each entity declares its source, and the executor coordinates them:
+   ```d
+   static PostgresDB mainDb;
+   static ClickHouseDB analyticsDb;
+
+   struct User { mixin Entity!(mainDb, "users"); }
+   struct PageView { mixin Entity!(analyticsDb, "page_views"); }
+   ```
+
+2. **Compile-time dialect selection** - The optimizer knows at compile time which SQL dialect to use. PostgreSQL gets `||` for concatenation, MySQL gets `CONCAT()`. No runtime dialect switching needed.
+
+3. **Type-safe query generation** - The binding is checked at compile time. If you reference a non-existent data source or mismatched types, compilation fails.
 
 ### 4. Extensible Optimizer via Pattern Matching
 
@@ -517,11 +547,15 @@ The Nix flake uses these same versions via `buildDubPackage`.
   }
   ```
   This would enable in-memory objects alongside database entities, with field access automatically projected through `Expr`. Objects without external data sources wouldn't need IDs.
+- **Eager column fetching** - Option to fetch columns into entity structs at materialization time, useful when columns are small and frequently accessed together. Currently entities are lightweight proxies that only hold IDs; this would allow opting into traditional struct-with-data semantics where beneficial.
 - **Filtering/pagination** - WHERE clauses, LIMIT/OFFSET/cursor support
+- **Polymorphism** - GraphQL union and interface types for heterogeneous collections
 - **Expression deduplication** - Grafast-style peer analysis
 - **Plan caching** - Reuse optimized plans for repeated queries
 - **Async/parallel execution** - For independent fetches
 - **Runtime introspection** - `__schema`, `__type`, `__typename` queries
+- **Error path tracking** - Track field paths through nested selections for precise error reporting (e.g., `["users", 0, "posts", 2, "title"]`)
+- **Field override plugin layer** - Runtime mechanism to intercept and override any field resolution, enabling feature flags, A/B testing, gradual rollouts, or per-deployment customization without recompilation
 
 ## Related Work
 
