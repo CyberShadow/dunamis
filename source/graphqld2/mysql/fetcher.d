@@ -151,40 +151,42 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
     // =========================================================================
     // Individual fetch methods (for naive/fallback path)
+    // These return Promises to support async operations.
+    // Currently returns stubs/cached data - could implement real async queries.
     // =========================================================================
 
-    override string[] fetchColumnString(string table, string column, AnyRef[] refs) {
+    override Promise!(string[]) fetchColumnString(string table, string column, AnyRef[] refs) {
         // Not used in optimized path - implemented for interface completeness
         string[] result;
         result.length = refs.length;
-        return result;
+        return resolve(result);
     }
 
-    override long[] fetchColumnLong(string table, string column, AnyRef[] refs) {
+    override Promise!(long[]) fetchColumnLong(string table, string column, AnyRef[] refs) {
         long[] result;
         result.length = refs.length;
-        return result;
+        return resolve(result);
     }
 
-    override long[] fetchAllIds(string table) {
+    override Promise!(long[]) fetchAllIds(string table) {
         // Not used in optimized path - data is fetched via executeQueryNode
         // Returning empty triggers the caller to use the optimized path
-        return [];
+        return resolve(cast(long[])[]);
     }
 
-    override AnyRef[][] fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs) {
+    override Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs) {
         // Check if we have cached results for this child type from CTE execution
         if (auto result = childType in _cachedResultsByType) {
-            return (*result).getChildRefs(parentRefs);
+            return resolve((*result).getChildRefs(parentRefs));
         }
 
         // Fallback to empty arrays if no cached results
-        return parentRefs.map!(_ => cast(AnyRef[])[]).array;
+        return resolve(parentRefs.map!(_ => cast(AnyRef[])[]).array);
     }
 
-    override AnyRef[] fetchBelongsTo(string childTable, string fk, string parentType, AnyRef[] childRefs) {
+    override Promise!(AnyRef[]) fetchBelongsTo(string childTable, string fk, string parentType, AnyRef[] childRefs) {
         if (childRefs.length == 0) {
-            return [];
+            return resolve(cast(AnyRef[])[]);
         }
 
         // fk is already the SQL column name (from @SqlColumn UDA via getSqlColumn)
@@ -203,13 +205,13 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
                         refs ~= AnyRef.init;
                     }
                 }
-                return refs;
+                return resolve(refs);
             }
         }
 
         // Naive path: would need async query, return invalid refs
         // (Optimized path uses ProjectTypedBelongsToExpr instead)
-        return childRefs.map!(_ => AnyRef.init).array;
+        return resolve(childRefs.map!(_ => AnyRef.init).array);
     }
 
     /// Convert JSON value to ID string (handles integers and strings)
@@ -224,11 +226,11 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
     }
 
 
-    override JSONValue[] fetchColumnJson(string table, string column, AnyRef[] refs) {
+    override Promise!(JSONValue[]) fetchColumnJson(string table, string column, AnyRef[] refs) {
         JSONValue[] result;
         result.length = refs.length;
         foreach (ref r; result) r = JSONValue(null);
-        return result;
+        return resolve(result);
     }
 
     // =========================================================================

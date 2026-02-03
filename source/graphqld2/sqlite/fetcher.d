@@ -156,34 +156,35 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
     // =========================================================================
     // Individual fetch methods (for naive/fallback path)
+    // SQLite is synchronous, so results are wrapped in resolve().
     // =========================================================================
 
-    override string[] fetchColumnString(string table, string column, AnyRef[] refs) {
+    override Promise!(string[]) fetchColumnString(string table, string column, AnyRef[] refs) {
         string[] result;
         result.length = refs.length;
-        return result;
+        return resolve(result);
     }
 
-    override long[] fetchColumnLong(string table, string column, AnyRef[] refs) {
+    override Promise!(long[]) fetchColumnLong(string table, string column, AnyRef[] refs) {
         long[] result;
         result.length = refs.length;
-        return result;
+        return resolve(result);
     }
 
-    override long[] fetchAllIds(string table) {
-        return [];
+    override Promise!(long[]) fetchAllIds(string table) {
+        return resolve(cast(long[])[]);
     }
 
-    override AnyRef[][] fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs) {
+    override Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs) {
         if (auto result = childType in _cachedResultsByType) {
-            return (*result).getChildRefs(parentRefs);
+            return resolve((*result).getChildRefs(parentRefs));
         }
-        return parentRefs.map!(_ => cast(AnyRef[])[]).array;
+        return resolve(parentRefs.map!(_ => cast(AnyRef[])[]).array);
     }
 
-    override AnyRef[] fetchBelongsTo(string childTable, string fk, string parentType, AnyRef[] childRefs) {
+    override Promise!(AnyRef[]) fetchBelongsTo(string childTable, string fk, string parentType, AnyRef[] childRefs) {
         if (childRefs.length == 0) {
-            return [];
+            return resolve(cast(AnyRef[])[]);
         }
 
         // fk is already the SQL column name (from @SqlColumn UDA via getSqlColumn)
@@ -202,14 +203,14 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
                         refs ~= AnyRef.init;
                     }
                 }
-                return refs;
+                return resolve(refs);
             }
         }
 
         // Naive path fallback: query the database directly
         auto idList = childRefs.map!(r => r.localId).join(",");
         if (idList.length == 0) {
-            return childRefs.map!(_ => AnyRef.init).array;
+            return resolve(childRefs.map!(_ => AnyRef.init).array);
         }
 
         auto sql = format("SELECT id, %s FROM %s WHERE id IN (%s)", fk, childTable, idList);
@@ -238,7 +239,7 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
                 result ~= AnyRef.init;
             }
         }
-        return result;
+        return resolve(result);
     }
 
     /// Convert JSON value to ID string (handles integers and strings)
@@ -253,11 +254,11 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
     }
 
 
-    override JSONValue[] fetchColumnJson(string table, string column, AnyRef[] refs) {
+    override Promise!(JSONValue[]) fetchColumnJson(string table, string column, AnyRef[] refs) {
         JSONValue[] result;
         result.length = refs.length;
         foreach (ref r; result) r = JSONValue(null);
-        return result;
+        return resolve(result);
     }
 
     // =========================================================================

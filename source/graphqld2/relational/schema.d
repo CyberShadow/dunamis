@@ -1063,10 +1063,11 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
 
         // Fallback: naive path using fetchAllIds
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-        auto ids = relCtx.fetchAllIds(EntityID!Entity.table);
-        auto entities = ids.map!(id => Entity(EntityID!Entity.typeName ~ ":" ~ id.to!string)).array;
-        // At root level, there's always exactly 1 parent (queryRoot)
-        return resolve([entities]);
+        return relCtx.fetchAllIds(EntityID!Entity.table).then((long[] ids) {
+            auto entities = ids.map!(id => Entity(EntityID!Entity.typeName ~ ":" ~ id.to!string)).array;
+            // At root level, there's always exactly 1 parent (queryRoot)
+            return [entities];
+        });
     }
 
     // RootExprInfo implementation
@@ -1337,16 +1338,16 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
         return evalRefAsAnyRef(input, ctx).then((AnyRef[] entityRefs) {
             // First, check for mutation results (mutations store their results here)
             if (relCtx.hasMutationResult(EntityID!Entity.typeName)) {
-                return relCtx.getMutationColumnValues!T(EntityID!Entity.typeName, column, entityRefs);
+                return resolve(relCtx.getMutationColumnValues!T(EntityID!Entity.typeName, column, entityRefs));
             }
 
-            // Otherwise, fetch from database
+            // Otherwise, fetch from database (async)
             if (relCtx.fetcher !is null) {
                 return relCtx.fetcher.fetchColumn!T(EntityID!Entity.table, column, entityRefs);
             }
 
             // Fallback to empty results
-            return entityRefs.map!(_ => T.init).array;
+            return resolve(entityRefs.map!(_ => T.init).array);
         });
     }
 
@@ -1407,15 +1408,17 @@ class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Child[]), HasManyInfo 
 
         // Get the parent refs from the input chain, then fetch children
         return evalRefAsAnyRef(input, ctx).then((AnyRef[] parentRefs) {
-            // Naive path: fetch children directly
+            // Naive path: fetch children directly (async)
             if (relCtx.fetcher !is null) {
-                auto children = relCtx.fetcher.fetchChildren(EntityID!Child.table, EntityID!Child.typeName, fk, parentRefs);
-                // Convert AnyRef[][] to Child[][]
-                return children.map!(group => group.map!(r => Child(r.nodeId)).array).array;
+                return relCtx.fetcher.fetchChildren(EntityID!Child.table, EntityID!Child.typeName, fk, parentRefs)
+                    .then((AnyRef[][] children) {
+                        // Convert AnyRef[][] to Child[][]
+                        return children.map!(group => group.map!(r => Child(r.nodeId)).array).array;
+                    });
             }
 
             // Fallback to empty results
-            return parentRefs.map!(_ => cast(Child[])[]).array;
+            return resolve(parentRefs.map!(_ => cast(Child[])[]).array);
         });
     }
 
@@ -1548,25 +1551,26 @@ class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultTyp
         return evalRefAsAnyRef(input, ctx).then((AnyRef[] childRefs) {
             static if (is(Child == void)) {
                 // Can't fetch without knowing child entity type
-                return childRefs.map!(_ => ResultType.init).array;
+                return resolve(childRefs.map!(_ => ResultType.init).array);
             } else {
-                // Naive path: fetch parent refs directly
+                // Naive path: fetch parent refs directly (async)
                 auto relCtx = ctx.getSourceContext!RelationalEvalContext();
                 if (relCtx.fetcher !is null) {
-                    auto parentRefs = relCtx.fetcher.fetchBelongsTo(EntityID!Child.table, fk, EntityID!Parent.typeName, childRefs);
-
-                    static if (is(ResultType == Parent)) {
-                        // Convert AnyRef[] to Parent[] via nodeId
-                        return parentRefs.map!(r => Parent(r.nodeId)).array;
-                    } else static if (is(ResultType == Nullable!Parent)) {
-                        // Wrap in Nullable, handling invalid refs as null
-                        return parentRefs.map!(r => r.isValid ? Nullable!Parent(Parent(r.nodeId)) : Nullable!Parent.init).array;
-                    } else {
-                        static assert(false, "ResultType must be Parent or Nullable!Parent");
-                    }
+                    return relCtx.fetcher.fetchBelongsTo(EntityID!Child.table, fk, EntityID!Parent.typeName, childRefs)
+                        .then((AnyRef[] parentRefs) {
+                            static if (is(ResultType == Parent)) {
+                                // Convert AnyRef[] to Parent[] via nodeId
+                                return parentRefs.map!(r => Parent(r.nodeId)).array;
+                            } else static if (is(ResultType == Nullable!Parent)) {
+                                // Wrap in Nullable, handling invalid refs as null
+                                return parentRefs.map!(r => r.isValid ? Nullable!Parent(Parent(r.nodeId)) : Nullable!Parent.init).array;
+                            } else {
+                                static assert(false, "ResultType must be Parent or Nullable!Parent");
+                            }
+                        });
                 }
 
-                return childRefs.map!(_ => ResultType.init).array;
+                return resolve(childRefs.map!(_ => ResultType.init).array);
             }
         });
     }

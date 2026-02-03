@@ -107,10 +107,12 @@ abstract class DataFetcher {
 
     // =========================================================================
     // Individual fetch methods (for naive path and MockDB!() internals)
+    // These return Promises to support async databases (PostgreSQL, MySQL).
+    // Sync databases (SQLite, MockDB) wrap results with resolve().
     // =========================================================================
 
     /// Fetch column values for refs (template dispatcher)
-    final T[] fetchColumn(T)(string table, string column, AnyRef[] refs) {
+    final Promise!(T[]) fetchColumn(T)(string table, string column, AnyRef[] refs) {
         import std.typecons : Nullable;
         import graphqld2.core.types : isCustomScalar;
         import std.algorithm : map;
@@ -118,54 +120,59 @@ abstract class DataFetcher {
 
         static if (is(T == Nullable!U, U)) {
             // Nullable type - fetch inner type and wrap (nulls preserved via Nullable)
-            auto rawValues = fetchColumn!U(table, column, refs);
-            return rawValues.map!(v => T(v)).array;
+            return fetchColumn!U(table, column, refs).then((U[] rawValues) {
+                return rawValues.map!(v => T(v)).array;
+            });
         } else static if (isCustomScalar!T) {
             // Custom scalar - fetch underlying type and wrap
-            auto rawValues = fetchColumn!(T.DType)(table, column, refs);
-            return rawValues.map!(v => T(v)).array;
+            return fetchColumn!(T.DType)(table, column, refs).then((T.DType[] rawValues) {
+                return rawValues.map!(v => T(v)).array;
+            });
         } else static if (is(T == enum)) {
             // D enum - fetch as string and convert
-            auto rawValues = fetchColumnString(table, column, refs);
-            return rawValues.map!(v => enumFromDbString!T(v)).array;
+            return fetchColumnString(table, column, refs).then((string[] rawValues) {
+                return rawValues.map!(v => enumFromDbString!T(v)).array;
+            });
         } else static if (is(T == string)) {
             return fetchColumnString(table, column, refs);
         } else static if (is(T == long)) {
             return fetchColumnLong(table, column, refs);
         } else static if (is(T == int)) {
-            return cast(int[]) fetchColumnLong(table, column, refs);
+            return fetchColumnLong(table, column, refs).then((long[] longs) {
+                return cast(int[]) longs;
+            });
         } else {
             static assert(false, "Unsupported column type: " ~ T.stringof);
         }
     }
 
     /// Fetch string column values - override in subclass
-    string[] fetchColumnString(string table, string column, AnyRef[] refs) {
+    Promise!(string[]) fetchColumnString(string table, string column, AnyRef[] refs) {
         string[] result;
         result.length = refs.length;
-        return result;
+        return resolve(result);
     }
 
     /// Fetch long column values - override in subclass
-    long[] fetchColumnLong(string table, string column, AnyRef[] refs) {
+    Promise!(long[]) fetchColumnLong(string table, string column, AnyRef[] refs) {
         long[] result;
         result.length = refs.length;
-        return result;
+        return resolve(result);
     }
 
     /// Fetch all IDs from a table (returns native long IDs)
-    abstract long[] fetchAllIds(string table);
+    abstract Promise!(long[]) fetchAllIds(string table);
 
     /// Fetch children for parent refs (hasMany)
     /// Returns AnyRef[][] - one AnyRef[] per parent
-    abstract AnyRef[][] fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs);
+    abstract Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs);
 
     /// Fetch parent refs for child refs (belongsTo)
     /// Returns one AnyRef per child (or AnyRef.init for NULL FKs)
-    abstract AnyRef[] fetchBelongsTo(string childTable, string fk, string parentType, AnyRef[] childRefs);
+    abstract Promise!(AnyRef[]) fetchBelongsTo(string childTable, string fk, string parentType, AnyRef[] childRefs);
 
     /// Fetch a column as JSONValue array (type-erased).
-    abstract JSONValue[] fetchColumnJson(string table, string column, AnyRef[] refs);
+    abstract Promise!(JSONValue[]) fetchColumnJson(string table, string column, AnyRef[] refs);
 
     // =========================================================================
     // Mutation methods (for INSERT/UPDATE/DELETE)
@@ -500,11 +507,11 @@ class RelationalEvalContext {
     }
 
     /// Fetch all IDs for a table (delegates to fetcher)
-    long[] fetchAllIds(string table) {
+    Promise!(long[]) fetchAllIds(string table) {
         if (fetcher !is null) {
             return fetcher.fetchAllIds(table);
         }
-        return [];
+        return resolve(cast(long[])[]);
     }
 
     /// Store mutation result for later field access.
@@ -594,14 +601,14 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
             // Child node: get children via parent
             if (parentResult !is null) {
                 auto parentRefs = parentResult.allRefs();
-                auto childGroups = fetchChildren(
+                auto childGroups = fetchChildrenSync(
                     node.table, node.typeName, node.parentFk, parentRefs);
 
                 foreach (group; childGroups) {
                     refs ~= group;
                 }
 
-                auto fkValues = fetchColumnJson(node.table, node.parentFk, refs);
+                auto fkValues = fetchColumnJsonSync(node.table, node.parentFk, refs);
                 result.initializeAsChild(node.typeName, refs, parentRefs, node.parentFk, fkValues);
             }
         }
@@ -631,7 +638,7 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
         // Step 2: Load all columns from base table
         foreach (column; node.columns) {
-            auto values = fetchColumnJson(node.table, column, refs);
+            auto values = fetchColumnJsonSync(node.table, column, refs);
             result.loadColumn(column, refs, values);
         }
 
@@ -642,7 +649,7 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
             if (joinedCols is null) continue;
 
             // Get FK values to determine joined refs
-            auto fkValues = fetchColumnJson(node.table, joinInfo.fk, refs);
+            auto fkValues = fetchColumnJsonSync(node.table, joinInfo.fk, refs);
 
             AnyRef[] joinedRefs;
             foreach (fkVal; fkValues) {
@@ -656,7 +663,7 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
             // Load each joined column
             foreach (column; joinedCols) {
-                auto values = fetchColumnJson(joinInfo.targetTable, column, joinedRefs);
+                auto values = fetchColumnJsonSync(joinInfo.targetTable, column, joinedRefs);
                 result.loadColumn(joinAlias ~ "." ~ column, refs, values);
             }
         }
@@ -664,12 +671,12 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
         return result;
     }
 
-    override string[] fetchColumnString(string table, string column, AnyRef[] refs) {
-        return fetchColumnGeneric!string(table, column, refs);
+    override Promise!(string[]) fetchColumnString(string table, string column, AnyRef[] refs) {
+        return resolve(fetchColumnGenericSync!string(table, column, refs));
     }
 
-    override long[] fetchColumnLong(string table, string column, AnyRef[] refs) {
-        return fetchColumnGeneric!long(table, column, refs);
+    override Promise!(long[]) fetchColumnLong(string table, string column, AnyRef[] refs) {
+        return resolve(fetchColumnGenericSync!long(table, column, refs));
     }
 
     /// Extract ID from JSON value as string (handles both integer and string IDs)
@@ -703,7 +710,7 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
         return AnyRef(typeName ~ ":" ~ keyStr);
     }
 
-    private T[] fetchColumnGeneric(T)(string table, string column, AnyRef[] refs) {
+    private T[] fetchColumnGenericSync(T)(string table, string column, AnyRef[] refs) {
         T[] result;
         if (table !in _tableData) {
             result.length = refs.length;
@@ -726,7 +733,12 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
         return result;
     }
 
-    override long[] fetchAllIds(string table) {
+    override Promise!(long[]) fetchAllIds(string table) {
+        return resolve(fetchAllIdsSync(table));
+    }
+
+    /// Synchronous implementation of fetchAllIds (used internally)
+    private long[] fetchAllIdsSync(string table) {
         if (table !in _tableData) return [];
         return _tableData[table].array
             .filter!(row => row["id"].type == JSONType.integer)
@@ -740,7 +752,12 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
         return _tableData[table].array.map!(row => buildKeyFromRow(table, row)).array;
     }
 
-    override AnyRef[][] fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs) {
+    override Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs) {
+        return resolve(fetchChildrenSync(childTable, childType, fk, parentRefs));
+    }
+
+    /// Synchronous implementation of fetchChildren (used internally by executeQueryNodeSync)
+    private AnyRef[][] fetchChildrenSync(string childTable, string childType, string fk, AnyRef[] parentRefs) {
         if (childTable !in _tableData) {
             return parentRefs.map!(_ => cast(AnyRef[])[]).array;
         }
@@ -768,7 +785,12 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
         return result;
     }
 
-    override AnyRef[] fetchBelongsTo(string childTable, string fk, string parentType, AnyRef[] childRefs) {
+    override Promise!(AnyRef[]) fetchBelongsTo(string childTable, string fk, string parentType, AnyRef[] childRefs) {
+        return resolve(fetchBelongsToSync(childTable, fk, parentType, childRefs));
+    }
+
+    /// Synchronous implementation of fetchBelongsTo (used internally)
+    private AnyRef[] fetchBelongsToSync(string childTable, string fk, string parentType, AnyRef[] childRefs) {
         if (childTable !in _tableData) {
             return childRefs.map!(_ => AnyRef.init).array;
         }
@@ -795,7 +817,12 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
         return result;
     }
 
-    override JSONValue[] fetchColumnJson(string table, string column, AnyRef[] refs) {
+    override Promise!(JSONValue[]) fetchColumnJson(string table, string column, AnyRef[] refs) {
+        return resolve(fetchColumnJsonSync(table, column, refs));
+    }
+
+    /// Synchronous implementation of fetchColumnJson (used internally by executeQueryNodeSync)
+    private JSONValue[] fetchColumnJsonSync(string table, string column, AnyRef[] refs) {
         if (table !in _tableData) {
             JSONValue[] result;
             result.length = refs.length;
@@ -1133,27 +1160,27 @@ class DebugSqlDB(DBConfig config = defaultDBConfig) : DataFetcher {
     }
 
     // Delegate all other methods to wrapped fetcher
-    override string[] fetchColumnString(string table, string column, AnyRef[] refs) {
+    override Promise!(string[]) fetchColumnString(string table, string column, AnyRef[] refs) {
         return _delegate.fetchColumnString(table, column, refs);
     }
 
-    override long[] fetchColumnLong(string table, string column, AnyRef[] refs) {
+    override Promise!(long[]) fetchColumnLong(string table, string column, AnyRef[] refs) {
         return _delegate.fetchColumnLong(table, column, refs);
     }
 
-    override long[] fetchAllIds(string table) {
+    override Promise!(long[]) fetchAllIds(string table) {
         return _delegate.fetchAllIds(table);
     }
 
-    override AnyRef[][] fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs) {
+    override Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs) {
         return _delegate.fetchChildren(childTable, childType, fk, parentRefs);
     }
 
-    override AnyRef[] fetchBelongsTo(string childTable, string fk, string parentType, AnyRef[] childRefs) {
+    override Promise!(AnyRef[]) fetchBelongsTo(string childTable, string fk, string parentType, AnyRef[] childRefs) {
         return _delegate.fetchBelongsTo(childTable, fk, parentType, childRefs);
     }
 
-    override JSONValue[] fetchColumnJson(string table, string column, AnyRef[] refs) {
+    override Promise!(JSONValue[]) fetchColumnJson(string table, string column, AnyRef[] refs) {
         return _delegate.fetchColumnJson(table, column, refs);
     }
 }
@@ -1199,6 +1226,8 @@ unittest {
 }
 
 unittest {
+    import ae.utils.promise.await : awaitSync;
+
     // Test MockDB!()
     auto fetcher = new MockDB!()();
     fetcher.setTableData("users", `[
@@ -1207,14 +1236,16 @@ unittest {
     ]`);
 
     auto refs = [AnyRef("User:1"), AnyRef("User:2")];
-    auto names = fetcher.fetchColumn!string("users", "first_name", refs);
+    auto names = awaitSync(fetcher.fetchColumn!string("users", "first_name", refs));
     assert(names == ["Alice", "Bob"]);
 
-    auto allIds = fetcher.fetchAllIds("users");
+    auto allIds = awaitSync(fetcher.fetchAllIds("users"));
     assert(allIds == [1, 2]);
 }
 
 unittest {
+    import ae.utils.promise.await : awaitSync;
+
     // Test MockDB!() hasMany
     auto fetcher = new MockDB!()();
     fetcher.setTableData("posts", `[
@@ -1224,13 +1255,15 @@ unittest {
     ]`);
 
     auto parentRefs = [AnyRef("User:1"), AnyRef("User:2")];
-    auto children = fetcher.fetchChildren("posts", "Post", "author_id", parentRefs);
+    auto children = awaitSync(fetcher.fetchChildren("posts", "Post", "author_id", parentRefs));
     assert(children.length == 2);
     assert(children[0].length == 2);  // User:1 has 2 posts
     assert(children[1].length == 1);  // User:2 has 1 post
 }
 
 unittest {
+    import ae.utils.promise.await : awaitSync;
+
     // Test MockDB!() belongsTo
     auto fetcher = new MockDB!()();
     fetcher.setTableData("posts", `[
@@ -1239,7 +1272,7 @@ unittest {
     ]`);
 
     auto childRefs = [AnyRef("Post:1"), AnyRef("Post:2")];
-    auto parents = fetcher.fetchBelongsTo("posts", "author_id", "User", childRefs);
+    auto parents = awaitSync(fetcher.fetchBelongsTo("posts", "author_id", "User", childRefs));
     assert(parents == [AnyRef("User:10"), AnyRef("User:20")]);
 }
 
@@ -1257,6 +1290,8 @@ unittest {
 }
 
 unittest {
+    import ae.utils.promise.await : awaitSync;
+
     // Test string (UUID-style) primary keys
     auto fetcher = new MockDB!()();
     fetcher.setTableData("items", `[
@@ -1267,7 +1302,7 @@ unittest {
 
     // Fetch by string IDs
     auto refs = [AnyRef("Item:abc-123"), AnyRef("Item:def-456")];
-    auto names = fetcher.fetchColumn!string("items", "name", refs);
+    auto names = awaitSync(fetcher.fetchColumn!string("items", "name", refs));
     assert(names == ["First", "Second"]);
 
     // Fetch all IDs as strings
@@ -1276,6 +1311,8 @@ unittest {
 }
 
 unittest {
+    import ae.utils.promise.await : awaitSync;
+
     // Test string FK references
     auto fetcher = new MockDB!()();
     fetcher.setTableData("categories", `[
@@ -1290,18 +1327,19 @@ unittest {
 
     // Fetch belongsTo with string FKs
     auto childRefs = [AnyRef("Product:prod-1"), AnyRef("Product:prod-2")];
-    auto parents = fetcher.fetchBelongsTo("products", "category_id", "Category", childRefs);
+    auto parents = awaitSync(fetcher.fetchBelongsTo("products", "category_id", "Category", childRefs));
     assert(parents == [AnyRef("Category:cat-a"), AnyRef("Category:cat-b")]);
 
     // Fetch hasMany with string FKs
     auto parentRefs = [AnyRef("Category:cat-a"), AnyRef("Category:cat-b")];
-    auto children = fetcher.fetchChildren("products", "Product", "category_id", parentRefs);
+    auto children = awaitSync(fetcher.fetchChildren("products", "Product", "category_id", parentRefs));
     assert(children.length == 2);
     assert(children[0].length == 2);  // cat-a has 2 products
     assert(children[1].length == 1);  // cat-b has 1 product
 }
 
 unittest {
+    import ae.utils.promise.await : awaitSync;
     import graphqld2.core.types : encodeCompositeKey, decodeCompositeKey;
 
     // Test composite primary keys (e.g., OrderItem with order_id + product_id)
@@ -1323,11 +1361,12 @@ unittest {
     assert(fetcher.fetchAllIdsString("order_items") == ["1,100", "1,101", "2,100", "2,102"]);
 
     // Fetch column values by composite key
-    auto quantities = fetcher.fetchColumn!long("order_items", "quantity", [ref1, ref2, ref3]);
+    auto quantities = awaitSync(fetcher.fetchColumn!long("order_items", "quantity", [ref1, ref2, ref3]));
     assert(quantities == [2, 1, 3]);
 }
 
 unittest {
+    import ae.utils.promise.await : awaitSync;
     import graphqld2.core.types : encodeCompositeKey;
 
     // Test composite keys with special characters (requiring quoting)
@@ -1346,6 +1385,6 @@ unittest {
     auto ref1 = AnyRef("Translation:en-US,hello");
     auto ref2 = AnyRef("Translation:" ~ encodedKey);  // en-US,"hello,world"
 
-    auto values = fetcher.fetchColumn!string("translations", "value", [ref1, ref2]);
+    auto values = awaitSync(fetcher.fetchColumn!string("translations", "value", [ref1, ref2]));
     assert(values == ["Hello", "Hello, World"]);
 }
