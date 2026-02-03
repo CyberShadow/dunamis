@@ -74,12 +74,24 @@ string toSQL(QueryNode[] nodes, SqlOptimizer sqlOpt) {
     sql ~= ctes.join(",\n");
 
     // Final SELECT: aggregate all layers into JSON using SQLite's json_object
+    // SQLite: use subquery with ORDER BY to preserve sorting in json_group_array
     sql ~= "\nSELECT json_object(\n";
     string[] jsonParts;
     foreach (node; nodes) {
         // SQLite: json_group_array to aggregate rows, or empty array if no rows
-        jsonParts ~= format("  'layer%d', COALESCE((SELECT json_group_array(json(row_json)) FROM layer%d), json('[]'))",
-            node.id, node.id);
+        if (node.orderBy_.length > 0) {
+            // Subquery orders rows before aggregation
+            string[] orderParts;
+            foreach (spec; node.orderBy_) {
+                orderParts ~= format("%s%s", spec.column, spec.descending ? " DESC" : "");
+            }
+            auto orderByClause = orderParts.join(", ");
+            jsonParts ~= format("  'layer%d', COALESCE((SELECT json_group_array(json(row_json)) FROM (SELECT * FROM layer%d ORDER BY %s)), json('[]'))",
+                node.id, node.id, orderByClause);
+        } else {
+            jsonParts ~= format("  'layer%d', COALESCE((SELECT json_group_array(json(row_json)) FROM layer%d), json('[]'))",
+                node.id, node.id);
+        }
     }
     sql ~= jsonParts.join(",\n");
     sql ~= "\n)\n";
@@ -126,6 +138,26 @@ private string toCTE(QueryNode node, SqlOptimizer sqlOpt) {
     } else {
         sql ~= format("%s.%s IN (SELECT id FROM layer%d)",
             node.table, node.parentFk, node.parent.id);
+    }
+
+    // ORDER BY clause (sorting)
+    if (node.orderBy_.length > 0) {
+        string[] orderParts;
+        foreach (spec; node.orderBy_) {
+            orderParts ~= format("%s.%s%s", node.table, spec.column,
+                spec.descending ? " DESC" : "");
+        }
+        sql ~= format("\n    ORDER BY %s", orderParts.join(", "));
+    }
+
+    // LIMIT clause (pagination)
+    if (!node.limit_.isNull) {
+        sql ~= format("\n    LIMIT %d", node.limit_.get);
+    }
+
+    // OFFSET clause (pagination)
+    if (!node.offset_.isNull) {
+        sql ~= format("\n    OFFSET %d", node.offset_.get);
     }
 
     sql ~= "\n  )";

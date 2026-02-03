@@ -837,3 +837,168 @@ unittest {
     assert(hasFirstName, "Should have first_name column");
 }
 
+// ============================================================================
+// Sorting Tests
+// ============================================================================
+
+// Test column-based sorting with orderBy
+unittest {
+    import graphqld2.core.sorting : orderBy, OrderBySpec, SortDirection;
+
+    auto mock = new MockDB!()();
+    mock.setTableData("users", `[
+        {"id": 1, "first_name": "Charlie", "last_name": "Zebra"},
+        {"id": 2, "first_name": "Alice", "last_name": "Young"},
+        {"id": 3, "first_name": "Bob", "last_name": "Xavier"}
+    ]`);
+
+    db = new DebugSqlDB!()(mock, testDialect());
+    auto executor = new Executor();
+
+    // Sort by first_name ASC using getAll
+    auto query = map!(
+        (Expr!User u) => u.firstName
+    )(orderBy(getAll!User(), "first_name", SortDirection.ASC));
+
+    auto names = awaitSync(executor.execute(query));
+
+    // Should be sorted: Alice, Bob, Charlie
+    assert(names.length == 3);
+    assert(names[0] == "Alice", "First should be Alice, got: " ~ names[0]);
+    assert(names[1] == "Bob", "Second should be Bob, got: " ~ names[1]);
+    assert(names[2] == "Charlie", "Third should be Charlie, got: " ~ names[2]);
+
+    debug(sql) {
+        import std.stdio : writeln;
+        writeln("\n=== Test: Column-based sorting (first_name ASC) ===");
+        db.printSQL();
+    }
+}
+
+// Test descending sort
+unittest {
+    import graphqld2.core.sorting : orderBy, SortDirection;
+
+    auto mock = new MockDB!()();
+    mock.setTableData("users", `[
+        {"id": 1, "first_name": "Charlie"},
+        {"id": 2, "first_name": "Alice"},
+        {"id": 3, "first_name": "Bob"}
+    ]`);
+
+    db = new DebugSqlDB!()(mock, testDialect());
+    auto executor = new Executor();
+
+    // Sort by first_name DESC
+    auto query = map!(
+        (Expr!User u) => u.firstName
+    )(orderBy(getAll!User(), "first_name", SortDirection.DESC));
+
+    auto names = awaitSync(executor.execute(query));
+
+    // Should be sorted: Charlie, Bob, Alice
+    assert(names.length == 3);
+    assert(names[0] == "Charlie", "First should be Charlie, got: " ~ names[0]);
+    assert(names[1] == "Bob", "Second should be Bob, got: " ~ names[1]);
+    assert(names[2] == "Alice", "Third should be Alice, got: " ~ names[2]);
+}
+
+// Test predicate-based sorting with sortBy
+unittest {
+    import graphqld2.core.sorting : sortBy;
+
+    auto mock = new MockDB!()();
+    mock.setTableData("users", `[
+        {"id": 1, "first_name": "Charlie"},
+        {"id": 2, "first_name": "Alice"},
+        {"id": 3, "first_name": "Bob"}
+    ]`);
+
+    db = new DebugSqlDB!()(mock, testDialect());
+    auto executor = new Executor();
+
+    // Sort by firstName using predicate (a.lt(b) for ASC)
+    // Note: D class comparison operators can't be overridden, so we use .lt() method
+    auto query = map!(
+        (Expr!User u) => u.firstName
+    )(sortBy!((a, b) => a.firstName.lt(b.firstName))(getAll!User()));
+
+    auto names = awaitSync(executor.execute(query));
+
+    // Should be sorted: Alice, Bob, Charlie
+    assert(names.length == 3);
+    assert(names[0] == "Alice", "First should be Alice, got: " ~ names[0]);
+    assert(names[1] == "Bob", "Second should be Bob, got: " ~ names[1]);
+    assert(names[2] == "Charlie", "Third should be Charlie, got: " ~ names[2]);
+
+    debug(sql) {
+        import std.stdio : writeln;
+        writeln("\n=== Test: Predicate-based sorting (firstName ASC) ===");
+        db.printSQL();
+    }
+}
+
+// Test predicate-based sorting DESC
+unittest {
+    import graphqld2.core.sorting : sortBy;
+
+    auto mock = new MockDB!()();
+    mock.setTableData("users", `[
+        {"id": 1, "first_name": "Charlie"},
+        {"id": 2, "first_name": "Alice"},
+        {"id": 3, "first_name": "Bob"}
+    ]`);
+
+    db = new DebugSqlDB!()(mock, testDialect());
+    auto executor = new Executor();
+
+    // Sort by firstName using predicate (a.gt(b) for DESC)
+    auto query = map!(
+        (Expr!User u) => u.firstName
+    )(sortBy!((a, b) => a.firstName.gt(b.firstName))(getAll!User()));
+
+    auto names = awaitSync(executor.execute(query));
+
+    // Should be sorted: Charlie, Bob, Alice
+    assert(names.length == 3);
+    assert(names[0] == "Charlie", "First should be Charlie, got: " ~ names[0]);
+    assert(names[1] == "Bob", "Second should be Bob, got: " ~ names[1]);
+    assert(names[2] == "Alice", "Third should be Alice, got: " ~ names[2]);
+}
+
+// Test sorting combined with pagination (limit/offset)
+unittest {
+    import graphqld2.core.sorting : orderBy, SortDirection;
+    import graphqld2.core.pagination : limit, offset;
+
+    auto mock = new MockDB!()();
+    mock.setTableData("users", `[
+        {"id": 1, "first_name": "Alice"},
+        {"id": 2, "first_name": "Bob"},
+        {"id": 3, "first_name": "Charlie"},
+        {"id": 4, "first_name": "David"},
+        {"id": 5, "first_name": "Eve"}
+    ]`);
+
+    db = new DebugSqlDB!()(mock, testDialect());
+    auto executor = new Executor();
+
+    // Sort by first_name ASC, then skip 1 and take 2
+    auto query = map!(
+        (Expr!User u) => u.firstName
+    )(limit(offset(orderBy(getAll!User(), "first_name", SortDirection.ASC), 1), 2));
+
+    auto names = awaitSync(executor.execute(query));
+
+    // Should be: Bob, Charlie (sorted: Alice, Bob, Charlie, David, Eve → skip 1 → Bob, Charlie, David, Eve → take 2 → Bob, Charlie)
+    assert(names.length == 2);
+    assert(names[0] == "Bob", "First should be Bob, got: " ~ names[0]);
+    assert(names[1] == "Charlie", "Second should be Charlie, got: " ~ names[1]);
+
+    debug(sql) {
+        import std.stdio : writeln;
+        writeln("\n=== Test: Sorting + pagination ===");
+        db.printSQL();
+    }
+}
+

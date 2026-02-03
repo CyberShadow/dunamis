@@ -6,6 +6,7 @@ import std.conv;
 import std.typecons : Nullable;
 
 import graphqld2.core.types : AnyRef;
+import graphqld2.core.sorting : OrderBySpec, SortDirection;
 import graphqld2.relational.eval_context : DataFetcher;
 
 // ============================================================================
@@ -84,6 +85,9 @@ class QueryNode {
     /// Pagination: skip first N results
     Nullable!size_t offset_;
 
+    /// Sorting: order results by columns
+    OrderBySpec[] orderBy_;
+
     /// Next join alias counter
     private int _nextJoinAlias = 0;
 
@@ -159,6 +163,16 @@ class QueryNode {
         offset_ = n;
     }
 
+    /// Add ORDER BY clause
+    void addOrderBy(string column, SortDirection direction = SortDirection.ASC) {
+        orderBy_ ~= OrderBySpec(column, direction);
+    }
+
+    /// Add ORDER BY clause (convenience)
+    void addOrderBy(OrderBySpec spec) {
+        orderBy_ ~= spec;
+    }
+
     /// Get all nodes in the tree rooted at this node (including self).
     /// Returns nodes in BFS order (parents before children).
     QueryNode[] allNodesInTree() {
@@ -231,4 +245,19 @@ unittest {
     assert(alias2 == "j1");
     assert(alias3 == "j0");  // Returns existing alias
     assert(node.joins.length == 2);
+}
+
+unittest {
+    // Test QueryNode ORDER BY
+    auto node = new QueryNode(0, "User", "users");
+    assert(node.orderBy_.length == 0);
+
+    node.addOrderBy("last_name", SortDirection.ASC);
+    node.addOrderBy("first_name", SortDirection.DESC);
+
+    assert(node.orderBy_.length == 2);
+    assert(node.orderBy_[0].column == "last_name");
+    assert(node.orderBy_[0].direction == SortDirection.ASC);
+    assert(node.orderBy_[1].column == "first_name");
+    assert(node.orderBy_[1].direction == SortDirection.DESC);
 }

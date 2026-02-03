@@ -76,13 +76,25 @@ string toSQL(QueryNode[] nodes, SqlOptimizer sqlOpt) {
     sql ~= ctes.join(",\n");
 
     // Final SELECT: aggregate all layers into JSON using MySQL's JSON_OBJECT
+    // MySQL 8.0+: Use ORDER BY inside JSON_ARRAYAGG to preserve sorting
     sql ~= "\nSELECT JSON_OBJECT(\n";
     string[] jsonParts;
     foreach (node; nodes) {
         // MySQL: COALESCE with JSON_ARRAYAGG, or empty JSON array if no rows
         // Note: JSON_ARRAYAGG returns NULL if no rows, so we wrap with COALESCE
-        jsonParts ~= format("  'layer%d', COALESCE((SELECT JSON_ARRAYAGG(row_json) FROM layer%d), JSON_ARRAY())",
-            node.id, node.id);
+        if (node.orderBy_.length > 0) {
+            string[] orderParts;
+            foreach (spec; node.orderBy_) {
+                orderParts ~= format("%s%s", spec.column, spec.descending ? " DESC" : "");
+            }
+            string orderByClause = orderParts.join(", ");
+            // MySQL aggregate ORDER BY syntax: JSON_ARRAYAGG(expr ORDER BY col)
+            jsonParts ~= format("  'layer%d', COALESCE((SELECT JSON_ARRAYAGG(row_json ORDER BY %s) FROM layer%d), JSON_ARRAY())",
+                node.id, orderByClause, node.id);
+        } else {
+            jsonParts ~= format("  'layer%d', COALESCE((SELECT JSON_ARRAYAGG(row_json) FROM layer%d), JSON_ARRAY())",
+                node.id, node.id);
+        }
     }
     sql ~= jsonParts.join(",\n");
     sql ~= "\n) AS result\n";
@@ -129,6 +141,26 @@ private string toCTE(QueryNode node, SqlOptimizer sqlOpt) {
     } else {
         sql ~= format("%s.%s IN (SELECT id FROM layer%d)",
             node.table, node.parentFk, node.parent.id);
+    }
+
+    // ORDER BY clause (sorting)
+    if (node.orderBy_.length > 0) {
+        string[] orderParts;
+        foreach (spec; node.orderBy_) {
+            orderParts ~= format("%s.%s%s", node.table, spec.column,
+                spec.descending ? " DESC" : "");
+        }
+        sql ~= format("\n    ORDER BY %s", orderParts.join(", "));
+    }
+
+    // LIMIT clause (pagination)
+    if (!node.limit_.isNull) {
+        sql ~= format("\n    LIMIT %d", node.limit_.get);
+    }
+
+    // OFFSET clause (pagination)
+    if (!node.offset_.isNull) {
+        sql ~= format("\n    OFFSET %d", node.offset_.get);
     }
 
     sql ~= "\n  )";

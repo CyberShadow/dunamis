@@ -758,12 +758,92 @@ struct JoinHop {
 }
 
 // ============================================================================
+// Sorting Pattern Matching
+// ============================================================================
+
+/// Extract ORDER BY specs from a SortByInfo by pattern-matching its predicate.
+///
+/// Recognizes patterns like:
+/// - (a, b) => a.column < b.column → ORDER BY column ASC
+/// - (a, b) => a.column > b.column → ORDER BY column DESC
+///
+/// Returns empty array if pattern doesn't match.
+private OrderBySpec[] extractSortBySpecs(SortByInfo sortByInfo) {
+    import graphqld2.core.expr : BinaryOpInfo;
+    import graphqld2.core.sorting : SortItemInfo, SortDirection, OrderBySpec;
+
+    auto predicate = sortByInfo.sortPredicate;
+    auto leftItem = sortByInfo.sortLeftItem;
+    auto rightItem = sortByInfo.sortRightItem;
+
+    // Try to match: BinaryOp(<, ColumnAccess(left, col), ColumnAccess(right, col))
+    //           or: BinaryOp(>, ColumnAccess(left, col), ColumnAccess(right, col))
+    auto binOp = cast(BinaryOpInfo) predicate;
+    if (binOp is null) return [];
+
+    string op = binOp.operator;
+    if (op != "<" && op != ">") return [];
+
+    // Get left and right operands
+    auto leftOp = binOp.left;
+    auto rightOp = binOp.right;
+
+    // Try to extract column info from each operand
+    auto leftColInfo = extractSortColumnInfo(leftOp, leftItem, rightItem);
+    auto rightColInfo = extractSortColumnInfo(rightOp, leftItem, rightItem);
+
+    if (leftColInfo.column.length == 0 || rightColInfo.column.length == 0) return [];
+
+    // Both must access the same column
+    if (leftColInfo.column != rightColInfo.column) return [];
+
+    // Verify left operand is on left item and right operand is on right item
+    if (!leftColInfo.isLeftItem || rightColInfo.isLeftItem) return [];
+
+    // Determine direction: < means ASC, > means DESC
+    auto direction = (op == "<") ? SortDirection.ASC : SortDirection.DESC;
+
+    return [OrderBySpec(leftColInfo.column, direction)];
+}
+
+/// Info about a column extracted from a sort predicate operand
+private struct SortColumnInfo {
+    string column;        // SQL column name, empty if not a column access
+    bool isLeftItem;      // true if this accesses the left (a) sort item
+}
+
+/// Try to extract column info from a sort predicate operand.
+private SortColumnInfo extractSortColumnInfo(Object expr, Object leftItem, Object rightItem) {
+    import graphqld2.core.sorting : SortItemInfo;
+
+    // Check if this is a column access expression
+    auto colAccess = cast(ColumnAccessInfo) expr;
+    if (colAccess is null) return SortColumnInfo.init;
+
+    // Get the input expression
+    auto inputExpr = colAccess.inputExpr();
+
+    // Check if input is one of the sort item placeholders
+    if (inputExpr is leftItem) {
+        return SortColumnInfo(colAccess.sqlColumn, true);
+    } else if (inputExpr is rightItem) {
+        return SortColumnInfo(colAccess.sqlColumn, false);
+    }
+
+    return SortColumnInfo.init;
+}
+
+// ============================================================================
 // Base classes for runtime type checking
 // ============================================================================
 
-/// Interface for column access expressions (for chain walking)
+/// Interface for column access expressions (for chain walking and optimizer analysis)
 interface ColumnAccessInfo {
+    /// The input expression this column is accessed from
     @property ExprBase inputExpr();
+
+    /// The SQL column name (e.g., "first_name")
+    @property string sqlColumn();
 }
 
 /// Interface for belongsTo expressions (for chain walking)
@@ -1075,7 +1155,7 @@ string[] decodeEntityCompositeKey(T)(T entity) {
 
 /// Expression that reads a column from entities.
 /// Takes typed Expr!Entity for type safety.
-class ColumnAccessExpr(T, Entity) : Expr!T {
+class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
     private ExprBase _input;  // the entity we're reading from (type-erased for storage)
     string _column;
 
@@ -1083,6 +1163,10 @@ class ColumnAccessExpr(T, Entity) : Expr!T {
         _input = input;
         _column = column;
     }
+
+    // ColumnAccessInfo implementation
+    @property ExprBase inputExpr() { return _input; }
+    @property string sqlColumn() { return _column; }
 
     override ExprBase[] dependencies() {
         return [_input];
@@ -1124,15 +1208,53 @@ class ColumnAccessExpr(T, Entity) : Expr!T {
                 Object coll = mapInfo.collection;
                 Object originalColl = coll;
 
-                // Unwrap pagination expressions and extract limit/offset
+                // Unwrap pagination and sorting expressions.
+                // Standard SQL execution order is: ORDER BY -> OFFSET -> LIMIT
+                // Expression nesting: limit(offset(orderBy(source))) is the correct pattern.
+                // When unwrapping outside-in, we see: LIMIT, then OFFSET, then ORDER BY.
+                // This maps correctly to SQL since we output: ORDER BY ... OFFSET ... LIMIT ...
+                //
+                // Invalid pattern: orderBy(limit(offset(source))) - would paginate then sort.
+                // When unwrapping, we'd see ORDER BY first, then LIMIT/OFFSET.
+                // We can't push this down as a single SQL query.
                 import graphqld2.core.pagination : LimitInfo, OffsetInfo;
+                import graphqld2.core.sorting : SortByInfo, OrderByInfo;
+                bool seenSort = false;  // Track if we've seen ORDER BY (outside-in)
                 while (true) {
                     if (auto limitInfo = cast(LimitInfo) coll) {
+                        if (seenSort) {
+                            // Pagination inside sorting - can't express in SQL
+                            break;
+                        }
                         node.setLimit(limitInfo.limitValue);
                         coll = limitInfo.limitSource;
                     } else if (auto offsetInfo = cast(OffsetInfo) coll) {
+                        if (seenSort) {
+                            // Pagination inside sorting - can't express in SQL
+                            break;
+                        }
                         node.setOffset(offsetInfo.offsetValue);
                         coll = offsetInfo.offsetSource;
+                    } else if (auto orderByInfo = cast(OrderByInfo) coll) {
+                        // Column-based OrderBy (already pattern-matched or directly created)
+                        foreach (spec; orderByInfo.orderBySpecs) {
+                            node.addOrderBy(spec);
+                        }
+                        coll = orderByInfo.orderBySource;
+                        seenSort = true;
+                    } else if (auto sortByInfo = cast(SortByInfo) coll) {
+                        // Predicate-based SortBy - try to pattern-match for SQL push-down
+                        auto specs = extractSortBySpecs(sortByInfo);
+                        if (specs.length > 0) {
+                            foreach (spec; specs) {
+                                node.addOrderBy(spec);
+                            }
+                            coll = sortByInfo.sortSource;
+                            seenSort = true;
+                        } else {
+                            // Pattern matching failed - can't push down to SQL
+                            break;
+                        }
                     } else {
                         break;
                     }

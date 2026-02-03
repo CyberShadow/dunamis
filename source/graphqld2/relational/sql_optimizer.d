@@ -495,11 +495,23 @@ string toSQL(QueryNode[] nodes, SqlOptimizer sqlOpt) {
     sql ~= ctes.join(",\n");
 
     // Final SELECT: aggregate all layers into JSON
+    // PostgreSQL: use subquery with ORDER BY to preserve sorting in json_agg
     sql ~= "\nSELECT json_build_object(\n";
     string[] jsonParts;
     foreach (node; nodes) {
-        jsonParts ~= format("  'layer%d', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer%d t)",
-            node.id, node.id);
+        if (node.orderBy_.length > 0) {
+            // Subquery orders rows before json_agg processes them
+            string[] orderParts;
+            foreach (spec; node.orderBy_) {
+                orderParts ~= format("%s%s", spec.column, spec.descending ? " DESC" : "");
+            }
+            auto orderByClause = orderParts.join(", ");
+            jsonParts ~= format("  'layer%d', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (SELECT * FROM layer%d ORDER BY %s) t)",
+                node.id, node.id, orderByClause);
+        } else {
+            jsonParts ~= format("  'layer%d', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer%d t)",
+                node.id, node.id);
+        }
     }
     sql ~= jsonParts.join(",\n");
     sql ~= "\n)\n";
@@ -549,6 +561,16 @@ private string toCTEWithComputed(QueryNode node, SqlOptimizer sqlOpt) {
     } else {
         sql ~= format("%s.%s IN (SELECT id FROM layer%d)",
             node.table, node.parentFk, node.parent.id);
+    }
+
+    // ORDER BY clause (sorting)
+    if (node.orderBy_.length > 0) {
+        string[] orderParts;
+        foreach (spec; node.orderBy_) {
+            orderParts ~= format("%s.%s%s", node.table, spec.column,
+                spec.descending ? " DESC" : "");
+        }
+        sql ~= format("\n    ORDER BY %s", orderParts.join(", "));
     }
 
     // LIMIT clause (pagination)

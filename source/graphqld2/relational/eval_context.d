@@ -9,6 +9,7 @@ import std.typecons : Nullable;
 import ae.utils.promise;
 
 import graphqld2.core.types;
+import graphqld2.core.sorting : OrderBySpec, SortDirection;
 import graphqld2.relational.query_node;
 
 // ============================================================================
@@ -605,6 +606,13 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
             }
         }
 
+        // Apply sorting for root nodes (before pagination)
+        if (node.isRoot && node.orderBy_.length > 0 && refs.length > 1) {
+            refs = sortRefs(node.table, refs, node.orderBy_);
+            // Re-initialize result with sorted refs
+            result.initialize(node.typeName, refs);
+        }
+
         // Apply pagination for root nodes (OFFSET first, then LIMIT)
         if (node.isRoot && (!node.offset_.isNull || !node.limit_.isNull)) {
             // Apply offset first
@@ -850,6 +858,96 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
         } else {
             static assert(false, "Unsupported type: " ~ T.stringof);
         }
+    }
+
+    // =========================================================================
+    // Sorting methods
+    // =========================================================================
+
+    /// Sort refs by column values according to ORDER BY specs
+    private AnyRef[] sortRefs(string table, AnyRef[] refs, OrderBySpec[] orderBySpecs) {
+        import std.range : iota;
+        import std.typecons : tuple;
+
+        if (table !in _tableData) return refs;
+
+        // Build key -> row lookup
+        JSONValue[string] rowByKey;
+        foreach (row; _tableData[table].array) {
+            rowByKey[buildKeyFromRow(table, row)] = row;
+        }
+
+        // Create array of (index, ref) pairs to sort
+        auto indexed = refs.length.iota.map!(i => tuple(i, refs[i])).array;
+
+        // Sort using multi-key comparison
+        indexed.sort!((a, b) {
+            auto refA = a[1];
+            auto refB = b[1];
+
+            auto rowPtrA = refA.localId in rowByKey;
+            auto rowPtrB = refB.localId in rowByKey;
+
+            // Handle missing rows
+            if (rowPtrA is null && rowPtrB is null) return false;
+            if (rowPtrA is null) return true;  // Nulls last
+            if (rowPtrB is null) return false;
+
+            auto rowA = *rowPtrA;
+            auto rowB = *rowPtrB;
+
+            // Compare by each ORDER BY column
+            foreach (spec; orderBySpecs) {
+                auto colName = spec.column;
+
+                // Get column values (handle missing columns)
+                auto valA = (colName in rowA) ? rowA[colName] : JSONValue(null);
+                auto valB = (colName in rowB) ? rowB[colName] : JSONValue(null);
+
+                auto cmp = jsonCompare(valA, valB);
+                if (cmp != 0) {
+                    return spec.descending ? (cmp > 0) : (cmp < 0);
+                }
+            }
+            return false;  // Equal
+        });
+
+        return indexed.map!(t => t[1]).array;
+    }
+
+    /// Compare two JSON values for sorting
+    private static int jsonCompare(JSONValue a, JSONValue b) {
+        // Handle nulls
+        if (a.type == JSONType.null_ && b.type == JSONType.null_) return 0;
+        if (a.type == JSONType.null_) return 1;   // null > non-null (nulls last)
+        if (b.type == JSONType.null_) return -1;
+
+        // Compare by type
+        if (a.type == JSONType.string && b.type == JSONType.string) {
+            if (a.str < b.str) return -1;
+            if (a.str > b.str) return 1;
+            return 0;
+        }
+        if (a.type == JSONType.integer && b.type == JSONType.integer) {
+            if (a.integer < b.integer) return -1;
+            if (a.integer > b.integer) return 1;
+            return 0;
+        }
+        if (a.type == JSONType.float_ && b.type == JSONType.float_) {
+            if (a.floating < b.floating) return -1;
+            if (a.floating > b.floating) return 1;
+            return 0;
+        }
+        if (a.type == JSONType.true_ || a.type == JSONType.false_ ||
+            b.type == JSONType.true_ || b.type == JSONType.false_) {
+            bool aVal = (a.type == JSONType.true_);
+            bool bVal = (b.type == JSONType.true_);
+            if (aVal < bVal) return -1;
+            if (aVal > bVal) return 1;
+            return 0;
+        }
+        // Incompatible types - compare as strings
+        return 0;
     }
 
     // =========================================================================
