@@ -23,6 +23,10 @@ class MySQLDialect : SqlDialect {
         return "(CASE WHEN " ~ conditionSql ~ " THEN " ~ trueSql ~ " ELSE " ~ falseSql ~ " END)";
     }
 
+    override string isNullOp(string operandSql) {
+        return "(" ~ operandSql ~ " IS NULL)";
+    }
+
     override string name() { return "MySQL"; }
 
     private static string toSqlOp(string op) {
@@ -76,4 +80,7 @@ unittest {
     // Case when
     assert(dialect.caseWhen("a > 0", "'positive'", "'negative'") ==
            "(CASE WHEN a > 0 THEN 'positive' ELSE 'negative' END)");
+
+    // IS NULL
+    assert(dialect.isNullOp("a") == "(a IS NULL)");
 }

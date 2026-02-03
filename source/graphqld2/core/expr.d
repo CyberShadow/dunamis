@@ -241,6 +241,19 @@ abstract class Expr(T) : ExprBase {
         }
     }
 
+    // Null checks - only available on Expr!(Nullable!T)
+    static if (is(T == Nullable!U, U)) {
+        /// Check if this nullable value is null
+        auto isNull() {
+            return new IsNullExpr!U(this);
+        }
+
+        /// Check if this nullable value is not null (convenience for isNull().not())
+        auto isNotNull() {
+            return isNull().not();
+        }
+    }
+
     // =========================================================================
     // Field Access via opDispatch
     // =========================================================================
@@ -626,6 +639,50 @@ class UnaryOpExpr(T, string op) : Expr!(typeof(mixin(op ~ "T.init"))), UnaryOpIn
 
     // UnaryOpInfo implementation
     override string operator() { return op; }
+    override ExprBase operand() { return _operand; }
+}
+
+// ============================================================================
+// IsNull Expression
+// ============================================================================
+
+/// Interface for IsNull expression pattern matching by optimizers
+interface IsNullInfo {
+    /// The operand being checked for null (type-erased)
+    ExprBase operand();
+}
+
+/// Expression that checks if a Nullable!T value is null.
+/// Returns Expr!bool - true if the value is null, false otherwise.
+class IsNullExpr(T) : Expr!bool, IsNullInfo {
+    private ExprBase _operand;
+
+    this(Expr!(Nullable!T) operand) {
+        _operand = operand;
+    }
+
+    override ExprBase[] dependencies() {
+        return [_operand];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0)
+            _operand = newDep;
+    }
+
+    override Promise!(bool[]) eval(EvalContext ctx) {
+        auto operand = _operand;
+
+        return evalAs!(Nullable!T)(operand, ctx).then((Nullable!T[] vals) {
+            bool[] result = new bool[vals.length];
+            foreach (i, v; vals) {
+                result[i] = v.isNull;
+            }
+            return result;
+        });
+    }
+
+    // IsNullInfo implementation
     override ExprBase operand() { return _operand; }
 }
 

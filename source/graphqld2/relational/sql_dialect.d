@@ -23,6 +23,10 @@ interface SqlDialect {
     /// Returns: CASE WHEN condition THEN trueVal ELSE falseVal END
     string caseWhen(string conditionSql, string trueSql, string falseSql);
 
+    /// Generate SQL for IS NULL check.
+    /// Returns: (operand IS NULL)
+    string isNullOp(string operandSql);
+
     /// Get the dialect name for debugging
     string name();
 }

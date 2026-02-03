@@ -581,6 +581,38 @@ void testQueryTransitiveFieldsCombined() {
 }
 
 // ============================================================================
+// Null Check Tests (isNull/isNotNull)
+// ============================================================================
+
+void testQueryIsNullField() {
+    auto response = graphql(`{
+        tasks {
+            title
+            isUnassigned
+            isAssigned
+            assignee { firstName }
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto tasks = response["data"]["tasks"].array;
+    assertTrue(tasks.length >= 3, "Expected at least 3 tasks");
+
+    foreach (task; tasks) {
+        bool isUnassigned = task["isUnassigned"].boolean;
+        bool isAssigned = task["isAssigned"].boolean;
+        bool hasAssignee = task["assignee"].type != JSONType.null_;
+
+        assertTrue(isUnassigned == !hasAssignee,
+            "isUnassigned should be true iff assignee is null");
+        assertTrue(isAssigned == hasAssignee,
+            "isAssigned should be true iff assignee is not null");
+        assertTrue(isUnassigned != isAssigned,
+            "isUnassigned and isAssigned should be opposites");
+    }
+}
+
+// ============================================================================
 // Test Registration
 // ============================================================================
 
@@ -617,4 +649,7 @@ static this() {
     registerTest("Query authorIsAdult (transitive comparison)", "tests", &testQueryAuthorIsAdultField);
     registerTest("Query authorAgeCategory (transitive ternary)", "tests", &testQueryAuthorAgeCategoryField);
     registerTest("Query transitive fields combined", "tests", &testQueryTransitiveFieldsCombined);
+
+    // Null check tests (isNull/isNotNull)
+    registerTest("Query isNull/isNotNull fields", "tests", &testQueryIsNullField);
 }

@@ -124,11 +124,67 @@ abstract class DataFetcher {
         import graphqld2.core.types : isCustomScalar;
         import std.algorithm : map;
         import std.array : array;
+        import std.json : JSONType;
 
         static if (is(T == Nullable!U, U)) {
-            // Nullable type - fetch inner type and wrap (nulls preserved via Nullable)
-            return fetchColumn!U(table, column, refs).then((U[] rawValues) {
-                return rawValues.map!(v => T(v)).array;
+            // Nullable type - use JSON fetch to preserve null information
+            return fetchColumnJson(table, column, refs).then((JSONValue[] jsonValues) {
+                T[] result;
+                result.reserve(jsonValues.length);
+                foreach (val; jsonValues) {
+                    if (val.type == JSONType.null_) {
+                        result ~= T.init;  // Null Nullable
+                    } else {
+                        // Extract inner value and wrap in Nullable
+                        static if (isCustomScalar!U) {
+                            // Custom scalar - extract underlying value and wrap
+                            alias DType = U.DType;
+                            static if (is(DType == int) || is(DType == long)) {
+                                if (val.type == JSONType.integer) {
+                                    result ~= T(U(cast(DType) val.integer));
+                                } else if (val.type == JSONType.string) {
+                                    import std.conv : to;
+                                    result ~= T(U(val.str.to!DType));
+                                } else {
+                                    result ~= T.init;
+                                }
+                            } else static if (is(DType == string)) {
+                                if (val.type == JSONType.string) {
+                                    result ~= T(U(val.str));
+                                } else if (val.type == JSONType.integer) {
+                                    import std.conv : to;
+                                    result ~= T(U(val.integer.to!string));
+                                } else {
+                                    result ~= T.init;
+                                }
+                            } else {
+                                result ~= T.init;
+                            }
+                        } else static if (is(U == int) || is(U == long)) {
+                            if (val.type == JSONType.integer) {
+                                result ~= T(cast(U) val.integer);
+                            } else if (val.type == JSONType.string) {
+                                import std.conv : to;
+                                result ~= T(val.str.to!U);
+                            } else {
+                                result ~= T.init;
+                            }
+                        } else static if (is(U == string)) {
+                            if (val.type == JSONType.string) {
+                                result ~= T(val.str);
+                            } else if (val.type == JSONType.integer) {
+                                import std.conv : to;
+                                result ~= T(val.integer.to!string);
+                            } else {
+                                result ~= T.init;
+                            }
+                        } else {
+                            // Fallback for other types
+                            result ~= T.init;
+                        }
+                    }
+                }
+                return result;
             });
         } else static if (isCustomScalar!T) {
             // Custom scalar - fetch underlying type and wrap

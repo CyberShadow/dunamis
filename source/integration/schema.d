@@ -145,6 +145,16 @@ mixin template TestSchema(alias db) {
         mixin Col!("status", TaskStatus);
         mixin Col!("assigneeId", Nullable!(ForeignKey!User));
         mixin BelongsTo!("assignee", "assigneeId");
+
+        /// Computed field: is this task unassigned? (tests isNull)
+        static auto isUnassigned(Expr!Task t) {
+            return t.assigneeId.isNull();
+        }
+
+        /// Computed field: is this task assigned? (tests isNotNull convenience)
+        static auto isAssigned(Expr!Task t) {
+            return t.assigneeId.isNotNull();
+        }
     }
 
     struct Query {

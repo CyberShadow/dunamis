@@ -150,6 +150,14 @@ class SqlOptimizer : ExprOptimizer {
                     parent.replaceDependency(i, replacement);
                 }
             }
+
+            // Check if this dependency is an isNull check that could be pushed down
+            if (auto isNullOp = cast(IsNullInfo) dep) {
+                auto replacement = tryPushDownIsNull(dep, isNullOp, ctx);
+                if (replacement !is null && replacement !is dep) {
+                    parent.replaceDependency(i, replacement);
+                }
+            }
         }
     }
 
@@ -177,6 +185,11 @@ class SqlOptimizer : ExprOptimizer {
             return hasJoinedColumnExpr(ternaryOp.condition) ||
                    hasJoinedColumnExpr(ternaryOp.trueExpr) ||
                    hasJoinedColumnExpr(ternaryOp.falseExpr);
+        }
+
+        // Recurse into isNull ops
+        if (auto isNullOp = cast(IsNullInfo) expr) {
+            return hasJoinedColumnExpr(isNullOp.operand);
         }
 
         // Constants don't have joined columns
@@ -329,6 +342,43 @@ class SqlOptimizer : ExprOptimizer {
         return createProjectComputedExpr(queryNodeId, alias_, expr.resultType, input, prefetch);
     }
 
+    /// Try to push down an isNull check to SQL
+    protected ExprBase tryPushDownIsNull(ExprBase expr, IsNullInfo isNullOp, OptimizeContext ctx) {
+        // Check if operand can be translated to SQL
+        int queryNodeId = -1;
+        auto operandSql = tryGetSqlExpr(isNullOp.operand, queryNodeId);
+
+        if (operandSql.isNull || queryNodeId < 0) {
+            return null;
+        }
+
+        // Extract input and prefetch from the operand
+        auto input = extractInputFromExpr(isNullOp.operand);
+        if (input is null) {
+            return null;
+        }
+
+        auto prefetch = extractPrefetchFromExpr(isNullOp.operand);
+        if (prefetch is null) {
+            return null;
+        }
+
+        // Build the SQL expression using dialect-specific formatting
+        auto sqlExpr = _dialect.isNullOp(operandSql.get);
+
+        // Create computed column alias
+        auto alias_ = "computed_" ~ (_nextComputedAlias++).to!string;
+
+        // Register the computed column
+        if (queryNodeId !in _computedColumns) {
+            _computedColumns[queryNodeId] = [];
+        }
+        _computedColumns[queryNodeId] ~= ComputedColumn(alias_, sqlExpr, typeid(bool));
+
+        // Create and return projection for computed column
+        return createProjectComputedExpr(queryNodeId, alias_, typeid(bool), input, prefetch);
+    }
+
     /// Extract the input expression from a projection, binary op, unary op, or ternary op.
     /// Returns the entity ref source (e.g., EveryItemOfExpr) that provides the
     /// refs for looking up computed column values.
@@ -352,6 +402,11 @@ class SqlOptimizer : ExprOptimizer {
             result = extractInputFromExpr(ternaryOp.trueExpr);
             if (result !is null) return result;
             return extractInputFromExpr(ternaryOp.falseExpr);
+        }
+
+        // Check for isNull ops and recurse
+        if (auto isNullOp = cast(IsNullInfo) expr) {
+            return extractInputFromExpr(isNullOp.operand);
         }
 
         // Check for projection expressions - they have input as first dependency
@@ -392,6 +447,11 @@ class SqlOptimizer : ExprOptimizer {
             result = extractPrefetchFromExpr(ternaryOp.trueExpr);
             if (result !is null) return result;
             return extractPrefetchFromExpr(ternaryOp.falseExpr);
+        }
+
+        // Check for isNull ops and recurse
+        if (auto isNullOp = cast(IsNullInfo) expr) {
+            return extractPrefetchFromExpr(isNullOp.operand);
         }
 
         // Check for projection expressions - they have prefetch as second dependency
@@ -462,6 +522,14 @@ class SqlOptimizer : ExprOptimizer {
             auto falseSql = tryGetSqlExpr(ternaryOp.falseExpr, queryNodeId);
             if (!condSql.isNull && !trueSql.isNull && !falseSql.isNull) {
                 return Nullable!string(_dialect.caseWhen(condSql.get, trueSql.get, falseSql.get));
+            }
+        }
+
+        // Check if it's a nested isNull op
+        if (auto isNullOp = cast(IsNullInfo) expr) {
+            auto operandSql = tryGetSqlExpr(isNullOp.operand, queryNodeId);
+            if (!operandSql.isNull) {
+                return Nullable!string(_dialect.isNullOp(operandSql.get));
             }
         }
 
@@ -801,6 +869,9 @@ unittest {
         override string caseWhen(string conditionSql, string trueSql, string falseSql) {
             return "(CASE WHEN " ~ conditionSql ~ " THEN " ~ trueSql ~ " ELSE " ~ falseSql ~ " END)";
         }
+        override string isNullOp(string operandSql) {
+            return "(" ~ operandSql ~ " IS NULL)";
+        }
         override string name() { return "Test"; }
     }
     auto optimizer = new SqlOptimizer(new TestDialect());
@@ -847,6 +918,9 @@ unittest {
         }
         override string caseWhen(string conditionSql, string trueSql, string falseSql) {
             return "(CASE WHEN " ~ conditionSql ~ " THEN " ~ trueSql ~ " ELSE " ~ falseSql ~ " END)";
+        }
+        override string isNullOp(string operandSql) {
+            return "(" ~ operandSql ~ " IS NULL)";
         }
         override string name() { return "Test"; }
     }

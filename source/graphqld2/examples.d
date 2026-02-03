@@ -36,6 +36,9 @@ private class TestDialect : SqlDialect {
     override string caseWhen(string conditionSql, string trueSql, string falseSql) {
         return "(CASE WHEN " ~ conditionSql ~ " THEN " ~ trueSql ~ " ELSE " ~ falseSql ~ " END)";
     }
+    override string isNullOp(string operandSql) {
+        return "(" ~ operandSql ~ " IS NULL)";
+    }
     override string name() { return "Test"; }
 }
 
@@ -576,6 +579,9 @@ unittest {
         }
         override string caseWhen(string conditionSql, string trueSql, string falseSql) {
             return "(CASE WHEN " ~ conditionSql ~ " THEN " ~ trueSql ~ " ELSE " ~ falseSql ~ " END)";
+        }
+        override string isNullOp(string operandSql) {
+            return "(" ~ operandSql ~ " IS NULL)";
         }
         override string name() { return "Test"; }
     }
