@@ -25,6 +25,7 @@ configuration "postgres-integration" {
     targetType "executable"
     mainSourceFile "source/integration/postgres_test.d"
     sourceFiles "source/integration/test_framework.d" "source/integration/tests.d" "source/integration/schema.d" "source/integration/test_runner.d"
+    debugVersions "ASOCKETS_DEBUG_IDLE"
 }
 
 configuration "sqlite-integration" {
@@ -34,6 +35,7 @@ configuration "sqlite-integration" {
     # Include sqlite sources directly for integration test
     sourceFiles "source/graphqld2/sqlite/ddl.d" "source/graphqld2/sqlite/dialect.d" "source/graphqld2/sqlite/fetcher.d" "source/graphqld2/sqlite/sql.d" "source/graphqld2/sqlite/package.d"
     dependency "ae:sqlite" repository="git+https://github.com/CyberShadow/ae.git" version="85f44a586afccdaf652a60489dc3604b23dba893"
+    debugVersions "ASOCKETS_DEBUG_IDLE"
 }
 
 configuration "mysql-integration" {
@@ -42,6 +44,7 @@ configuration "mysql-integration" {
     sourceFiles "source/integration/test_framework.d" "source/integration/tests.d" "source/integration/schema.d" "source/integration/test_runner.d"
     # Include mysql sources directly for integration test
     sourceFiles "source/graphqld2/mysql/ddl.d" "source/graphqld2/mysql/dialect.d" "source/graphqld2/mysql/fetcher.d" "source/graphqld2/mysql/sql.d" "source/graphqld2/mysql/connection.d" "source/graphqld2/mysql/package.d"
+    debugVersions "ASOCKETS_DEBUG_IDLE"
 }
 
 # SQLite subpackage - for users who want sqlite support
