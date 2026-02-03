@@ -26,10 +26,17 @@ Solutions like DataLoader help but require manual batching logic and don't funda
 2. **Bulk resolution** - All field computations happen once per field, for all objects
 3. **Constant DB calls per query** - Number of database round-trips is O(fields), not O(objects)
 4. **Declarative relationships** - Object relations defined at schema level, not computed at runtime
+5. **SQL optimization** - Expression pushdown and automatic JOINs for declared relationships
 
-## Approach: Two-Phase Execution
+## Approach
 
-### Phase 1: Optimization
+The core library is built around expression trees (`Expr!T`) that are data-source agnostic. Different data sources can implement their own optimization strategies.
+
+### SQL: Two-Phase Execution
+
+For relational databases, the library uses a two-phase approach:
+
+**Phase 1: Optimization**
 
 Walk the expression tree and:
 - Collect QueryNodes (one per MapExpr scope)
@@ -37,7 +44,7 @@ Walk the expression tree and:
 - Build JOINs for belongsTo relationships
 - Create child QueryNodes for hasMany relationships
 
-### Phase 2: Evaluation
+**Phase 2: Evaluation**
 
 - Execute prefetch queries (CTE-based SQL for all layers)
 - Evaluate expressions against fetched data
@@ -50,12 +57,12 @@ For **optimal performance**, relationships should be declared in the schema:
 - Prefetch all possible dependencies, discard unused ones
 - O(fields) database round-trips, not O(objects)
 
-However, **dynamic fetching is still possible** when needed. Custom `Expr` implementations can perform arbitrary async operations (the API uses Promises). This is useful for:
+However, **dynamic fetching is always possible**. Custom `Expr` implementations can perform arbitrary async operations (the API uses Promises). This is useful for:
 - ML-based recommendations returning computed IDs
 - External service lookups
 - Complex business logic that can't be expressed declaratively
 
-The trade-off: dynamic fetches don't benefit from the batch optimization and may reintroduce N+1 patterns for that specific field. For most CRUD applications, declarative relationships cover the common cases.
+The trade-off: dynamic fetches don't benefit from the batch optimization and may reintroduce N+1 patterns for that specific field.
 
 ## Architecture
 
@@ -493,12 +500,38 @@ auto result = executor.execute(query);
 - Mutations with `CrudMutations` mixin (INSERT/UPDATE/DELETE)
 - `Schema!(Query, Mutation)` template for bundling query and mutation types
 
-**Not yet implemented:**
-- Filtering/pagination (WHERE, LIMIT, OFFSET)
-- Polymorphism (GraphQL union/interface types)
-- Runtime introspection (`__schema`, `__type`, `__typename`)
+## Future Directions
 
-## Running Tests
+- **POD type support** - Allow `Expr!T` for plain D structs without Entity mixins:
+  ```d
+  struct Range {
+      int start, end;
+      int length() => end - start;  // Regular method
+      // Optionally opt-in to Expr for performance:
+      static Expr!int fastLength(Expr!Range r) => r.end - r.start;
+  }
+  ```
+  This would enable in-memory objects alongside database entities, with field access automatically projected through `Expr`. Objects without external data sources wouldn't need IDs.
+- **Eager column fetching** - Option to fetch columns into entity structs at materialization time, useful when columns are small and frequently accessed together. Currently entities are lightweight proxies that only hold IDs; this would allow opting into traditional struct-with-data semantics where beneficial.
+- **Filtering/pagination** - WHERE clauses, LIMIT/OFFSET/cursor support
+- **Polymorphism** - GraphQL union and interface types for heterogeneous collections
+- **Expression deduplication** - Grafast-style peer analysis
+- **Plan caching** - Reuse optimized plans for repeated queries
+- **Async/parallel execution** - For independent fetches
+- **Runtime introspection** - `__schema`, `__type`, `__typename` queries
+- **Error path tracking** - Track field paths through nested selections for precise error reporting (e.g., `["users", 0, "posts", 2, "title"]`)
+- **Field override plugin layer** - Runtime mechanism to intercept and override any field resolution, enabling feature flags, A/B testing, gradual rollouts, or per-deployment customization without recompilation
+
+## Related Work
+
+- [graphqld](https://github.com/burner/graphqld) - GraphQL library for D using traditional resolver-based approach
+- [Grafast](https://grafast.org/) (PostGraphile) - Similar "steps" concept for batched execution
+- [Haxl](https://github.com/facebook/Haxl) - Haskell library for implicit batching
+- [DataLoader](https://github.com/graphql/dataloader) - Per-request batching and caching
+
+## Development
+
+### Running Tests
 
 ```bash
 # Unit tests
@@ -525,40 +558,3 @@ The `nix flake check` command runs:
 
 Each integration test creates tables via DDL generation, seeds data via mutations,
 starts an HTTP server, and runs GraphQL queries to verify end-to-end functionality.
-
-## Dependencies
-
-Dependencies are pinned in `dub-lock.json` for reproducible builds:
-
-- **ae** - Networking and async I/O library (pinned to GitHub commit)
-- **graphqld** - GraphQL parser (pinned to GitHub commit)
-
-The Nix flake uses these same versions via `buildDubPackage`.
-
-## Future Directions
-
-- **POD type support** - Allow `Expr!T` for plain D structs without Entity mixins:
-  ```d
-  struct Range {
-      int start, end;
-      int length() => end - start;  // Regular method
-      // Optionally opt-in to Expr for performance:
-      static Expr!int fastLength(Expr!Range r) => r.end - r.start;
-  }
-  ```
-  This would enable in-memory objects alongside database entities, with field access automatically projected through `Expr`. Objects without external data sources wouldn't need IDs.
-- **Eager column fetching** - Option to fetch columns into entity structs at materialization time, useful when columns are small and frequently accessed together. Currently entities are lightweight proxies that only hold IDs; this would allow opting into traditional struct-with-data semantics where beneficial.
-- **Filtering/pagination** - WHERE clauses, LIMIT/OFFSET/cursor support
-- **Polymorphism** - GraphQL union and interface types for heterogeneous collections
-- **Expression deduplication** - Grafast-style peer analysis
-- **Plan caching** - Reuse optimized plans for repeated queries
-- **Async/parallel execution** - For independent fetches
-- **Runtime introspection** - `__schema`, `__type`, `__typename` queries
-- **Error path tracking** - Track field paths through nested selections for precise error reporting (e.g., `["users", 0, "posts", 2, "title"]`)
-- **Field override plugin layer** - Runtime mechanism to intercept and override any field resolution, enabling feature flags, A/B testing, gradual rollouts, or per-deployment customization without recompilation
-
-## Related Work
-
-- [Grafast](https://grafast.org/) (PostGraphile) - Similar "steps" concept for batched execution
-- [Haxl](https://github.com/facebook/Haxl) - Haskell library for implicit batching
-- [DataLoader](https://github.com/graphql/dataloader) - Per-request batching and caching
