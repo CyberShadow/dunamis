@@ -9,10 +9,11 @@ import std.string;
 import ae.sys.sqlite3 : SQLite;
 import ae.utils.promise : Promise, resolve;
 
-import graphqld2.core.types;
+import graphqld2.core.types : AnyRef, makeAnyRef;
 import graphqld2.core.optimize : ExprOptimizer;
 import graphqld2.core.expr : ExprBase;
 import graphqld2.relational.eval_context;
+import std.format : format;
 import graphqld2.relational.query_node;
 import graphqld2.relational.sql_optimizer;
 import graphqld2.sqlite.dialect : sqliteDialect;
@@ -138,6 +139,9 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
                 if (node.isRoot) {
                     result.loadFromRows(layerRows, node.typeName);
                     rootResult = result;
+                    // Also cache root result so fetchBelongsTo can find FK columns
+                    _cachedResults[node.id] = result;
+                    _cachedResultsByType[node.typeName] = result;
                 } else {
                     result.loadFromRows(layerRows, node.typeName, "id",
                                        node.parentFk, node.parentTypeName);
@@ -178,8 +182,44 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
     }
 
     override AnyRef[] fetchBelongsTo(string childTable, string fk, string parentType, AnyRef[] childRefs) {
-        return childRefs.map!(_ => AnyRef.init).array;
+        if (childRefs.length == 0) {
+            return [];
+        }
+
+        // fk is already the SQL column name (from @SqlColumn UDA via getSqlColumn)
+        // Try to get FK values from cached query results first
+        // The FK column is included in the main query, so we can avoid an extra query
+        foreach (result; _cachedResults.byValue) {
+            if (result.hasColumn(fk)) {
+                // Found the FK column in cached results
+                auto fkValues = result.getColumnRaw(fk, childRefs);
+                AnyRef[] refs;
+                refs.reserve(fkValues.length);
+                foreach (fkVal; fkValues) {
+                    if (fkVal.type != JSONType.null_) {
+                        refs ~= makeAnyRef(parentType, jsonToIdString(fkVal));
+                    } else {
+                        refs ~= AnyRef.init;
+                    }
+                }
+                return refs;
+            }
+        }
+
+        assert(false, "FK column '" ~ fk ~ "' not found in cached results");
     }
+
+    /// Convert JSON value to ID string (handles integers and strings)
+    private static string jsonToIdString(JSONValue val) {
+        if (val.type == JSONType.integer) {
+            return val.integer.to!string;
+        } else if (val.type == JSONType.string) {
+            return val.str;
+        } else {
+            return "";
+        }
+    }
+
 
     override JSONValue[] fetchColumnJson(string table, string column, AnyRef[] refs) {
         JSONValue[] result;

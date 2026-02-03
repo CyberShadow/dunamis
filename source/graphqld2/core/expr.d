@@ -1318,3 +1318,160 @@ unittest {
     assert(result.length == 1);
     assert(result[0] == [false, true, true]);
 }
+
+// ============================================================================
+// Nullable Object Expression
+// ============================================================================
+
+/// Expression that handles nullable object types for selection sets.
+/// For null values, returns JSON null; for non-null values, evaluates the inner expression.
+///
+/// This is used for nullable BelongsTo relationships where the FK can be null.
+/// The selection set is compiled against the UnwrapNullableExpr, which forwards
+/// to the actual nullable input during optimization so the chain can be traversed.
+class NullableObjectExpr(T) : Expr!JSONValue {
+    private ExprBase _nullableInput;  // Expr!(Nullable!T)
+    private ExprBase _innerExpr;      // Expr!JSONValue (selection set compiled for T)
+    private UnwrapNullableExpr!T _unwrapper;  // Projects Nullable!T -> T
+
+    this(Expr!(Nullable!T) nullableInput, Expr!JSONValue innerExpr, UnwrapNullableExpr!T unwrapper) {
+        _nullableInput = nullableInput;
+        _innerExpr = innerExpr;
+        _unwrapper = unwrapper;
+    }
+
+    override ExprBase[] dependencies() {
+        return [_nullableInput, _innerExpr];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0) _nullableInput = newDep;
+        else if (index == 1) _innerExpr = newDep;
+    }
+
+    override Expr!JSONValue optimize(OptimizeContext ctx) {
+        _nullableInput = optimizeExpr(_nullableInput, ctx);
+        _innerExpr = (cast(Expr!JSONValue) _innerExpr).optimize(ctx);
+        return this;
+    }
+
+    override Promise!(JSONValue[]) eval(EvalContext ctx) {
+        auto innerExpr = _innerExpr;
+        auto unwrapper = _unwrapper;
+
+        // Evaluate the nullable input to know which indices are null
+        return evalAs!(Nullable!T)(_nullableInput, ctx).then((Nullable!T[] nullableVals) {
+            // If all are null, return null JSONValues without evaluating inner
+            bool anyNonNull = false;
+            foreach (nval; nullableVals) {
+                if (!nval.isNull) {
+                    anyNonNull = true;
+                    break;
+                }
+            }
+            if (!anyNonNull) {
+                JSONValue[] result = new JSONValue[nullableVals.length];
+                foreach (ref r; result) r = JSONValue(null);
+                return resolve(result);
+            }
+
+            // Set unwrapper values for ALL entities (using T.init for nulls)
+            // The inner expression (ProjectJoinedColumnExpr) doesn't actually use
+            // the unwrapper values - it uses the parent refs from baseInput.
+            // But we set values in case any expression needs them.
+            T[] allVals;
+            allVals.length = nullableVals.length;
+            foreach (i, nval; nullableVals) {
+                if (!nval.isNull) {
+                    allVals[i] = nval.get;
+                }
+                // else: keep T.init
+            }
+            unwrapper.setValues(allVals);
+
+            // Evaluate inner expression for ALL entities
+            // The optimized ProjectJoinedColumnExpr uses parent refs (e.g., Task refs)
+            // and returns values for all of them (null/empty for null FK rows)
+            return evalAs!JSONValue(innerExpr, ctx).then((JSONValue[] innerResults) {
+                // Mask results: return JSON null where FK is null
+                JSONValue[] result = new JSONValue[nullableVals.length];
+                foreach (i, nval; nullableVals) {
+                    if (nval.isNull) {
+                        result[i] = JSONValue(null);
+                    } else {
+                        result[i] = innerResults[i];
+                    }
+                }
+                return result;
+            });
+        });
+    }
+}
+
+/// Helper expression that unwraps Nullable!T to T for selection set compilation.
+/// This expression forwards to its nullable input during optimization so the
+/// chain traversal (findMapExprFromChain) can reach the BelongsToAccessExpr.
+///
+/// At evaluation time, it returns values set by NullableObjectExpr.
+/// For entity types (those with nodeId), also implements AnyRefEvaluable to
+/// provide refs for projection expressions inside nullable selection sets.
+class UnwrapNullableExpr(T) : Expr!T, UnwrapNullableInfo, AnyRefEvaluable {
+    private ExprBase _nullableInput;  // The actual Expr!(Nullable!T) to forward to
+    private T[] _values;  // Set by NullableObjectExpr during eval
+
+    this(Expr!(Nullable!T) nullableInput) {
+        _nullableInput = nullableInput;
+    }
+
+    void setValues(T[] values) {
+        _values = values;
+    }
+
+    override ExprBase[] dependencies() {
+        return [_nullableInput];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0) _nullableInput = newDep;
+    }
+
+    override Expr!T optimize(OptimizeContext ctx) {
+        _nullableInput = optimizeExpr(_nullableInput, ctx);
+        return this;
+    }
+
+    override Promise!(T[]) eval(EvalContext ctx) {
+        return resolve(_values);
+    }
+
+    // UnwrapNullableInfo implementation - allows chain traversal to continue
+    @property ExprBase inputExpr() { return _nullableInput; }
+
+    // AnyRefEvaluable implementation - returns refs from stored entity values
+    // This allows ProjectJoinedColumnExpr to get the filtered non-null refs
+    Promise!(AnyRef[]) evalAsAnyRef(EvalContext ctx) {
+        import graphqld2.core.types : AnyRef;
+        // For entity types, extract refs from nodeId
+        static if (is(typeof(T.init.nodeId))) {
+            return resolve(std.algorithm.map!(v => AnyRef(v.nodeId.id))(_values).array);
+        } else {
+            // Non-entity types - should not reach here for BelongsTo usage
+            assert(false, "UnwrapNullableExpr.evalAsAnyRef called for non-entity type " ~ T.stringof);
+        }
+    }
+}
+
+/// Interface for UnwrapNullableExpr to allow chain traversal during optimization.
+/// This lets findMapExprFromChain continue through nullable wrappers.
+interface UnwrapNullableInfo {
+    @property ExprBase inputExpr();
+}
+
+/// Finalize a nullable object expression after the selection set has been compiled.
+NullableObjectExpr!T finalizeNullableObjectExpr(T)(
+    Expr!(Nullable!T) nullableInput,
+    UnwrapNullableExpr!T unwrapper,
+    Expr!JSONValue innerExpr
+) {
+    return new NullableObjectExpr!T(nullableInput, innerExpr, unwrapper);
+}

@@ -698,7 +698,7 @@ auto belongsTo(Parent, ResultType = Parent, string fk, Child)(Expr!Child input) 
 ///
 /// Accepts ExprBase to work with any Expr!Entity type.
 private Object findMapExprFromChain(ExprBase expr, ref JoinHop[] joinPath, out ExprBase baseInput) {
-    import graphqld2.core.expr : EveryItemOfExprInfo;
+    import graphqld2.core.expr : EveryItemOfExprInfo, UnwrapNullableInfo;
 
     // Track the first expression before any belongsTo chain starts
     // This produces refs for the query node's base table
@@ -735,6 +735,11 @@ private Object findMapExprFromChain(ExprBase expr, ref JoinHop[] joinPath, out E
         }
         if (auto hasMany = cast(HasManyInfo) expr) {
             expr = hasMany.inputExpr;
+            continue;
+        }
+        // Unwrap nullable expressions - continue through to the nullable input
+        if (auto unwrap = cast(UnwrapNullableInfo) expr) {
+            expr = unwrap.inputExpr;
             continue;
         }
         // Unknown expression type

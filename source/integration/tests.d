@@ -195,6 +195,34 @@ void testQueryTaskFields() {
     }
 }
 
+void testQueryTaskWithNullableAssignee() {
+    auto response = graphql(`{
+        tasks {
+            title
+            status
+            assignee {
+                firstName
+                lastName
+            }
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto tasks = response["data"]["tasks"].array;
+    assertTrue(tasks.length > 0, "Expected at least 1 task");
+
+    // Check that tasks have assignees (nullable relationship)
+    bool foundWithAssignee = false;
+    foreach (task; tasks) {
+        if (task["assignee"].type != JSONType.null_) {
+            foundWithAssignee = true;
+            assertTrue(("firstName" in task["assignee"]) !is null, "Assignee should have firstName");
+            assertTrue(("lastName" in task["assignee"]) !is null, "Assignee should have lastName");
+        }
+    }
+    assertTrue(foundWithAssignee, "Expected at least one task with an assignee");
+}
+
 void testCreateTaskWithEnumStatus() {
     auto response = graphql(`
         mutation {
@@ -259,6 +287,7 @@ static this() {
     // Enum tests
     registerTest("Query tasks with enum status", "tests", &testQueryTasksWithEnumStatus);
     registerTest("Query task fields", "tests", &testQueryTaskFields);
+    registerTest("Query task with nullable assignee", "tests", &testQueryTaskWithNullableAssignee);
     registerTest("Mutation: create task with enum", "tests", &testCreateTaskWithEnumStatus);
     registerTest("Enum persistence", "tests", &testEnumPersistence);
 }

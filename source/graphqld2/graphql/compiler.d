@@ -941,7 +941,7 @@ template isFieldMethod(T, alias member) {
 /// Scalars are wrapped to convert to JSONValue.
 /// Structs/arrays of structs compile selection sets.
 ExprBase compileFieldResult(ResultExpr)(ResultExpr resultExpr, SelectionSet ss, JSONValue variables) {
-    import graphqld2.core.expr : ExprResultType;
+    import graphqld2.core.expr : ExprResultType, UnwrapNullableExpr, finalizeNullableObjectExpr;
 
     alias ResultType = ExprResultType!ResultExpr;
 
@@ -958,6 +958,20 @@ ExprBase compileFieldResult(ResultExpr)(ResultExpr resultExpr, SelectionSet ss, 
             }
             return compileMapExpr!E(resultExpr, ss, variables);
         }
+    }
+    // Nullable structs - handle null case specially
+    else static if (is(ResultType == Nullable!T, T) && is(T == struct) && !isCustomScalar!T) {
+        if (ss is null) {
+            throw new CompilerException(
+                "Field returning " ~ T.stringof ~ " requires a selection set");
+        }
+        // Create unwrapper expression that forwards to the nullable input
+        // This preserves the chain for optimization (findMapExprFromChain)
+        auto unwrapper = new UnwrapNullableExpr!T(resultExpr);
+        // Compile selection set using the unwrapper as input
+        auto innerExpr = compileSelectionSetBody!T(unwrapper, ss, variables);
+        // Wrap in nullable handler
+        return finalizeNullableObjectExpr!T(resultExpr, unwrapper, innerExpr);
     }
     // Structs (non-CustomScalar) require selection sets
     else static if (is(ResultType == struct) && !isCustomScalar!ResultType) {

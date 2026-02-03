@@ -365,6 +365,28 @@ class QueryResult {
         return (column in _columns) !is null;
     }
 
+    /// Get raw JSONValue for a column (for FK lookups)
+    JSONValue[] getColumnRaw(string column, AnyRef[] refs) {
+        auto colData = _columns.get(column, null);
+        if (colData is null) {
+            JSONValue[] result;
+            result.length = refs.length;
+            foreach (ref r; result) r = JSONValue(null);
+            return result;
+        }
+
+        JSONValue[] result;
+        result.reserve(refs.length);
+        foreach (r; refs) {
+            if (auto valPtr = r.nodeId in colData) {
+                result ~= *valPtr;
+            } else {
+                result ~= JSONValue(null);
+            }
+        }
+        return result;
+    }
+
     /// Check if a ref exists in this result
     bool hasRef(AnyRef r) {
         // Check if ref is in _allRefs
