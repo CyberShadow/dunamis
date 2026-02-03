@@ -1,4 +1,4 @@
-# graphqld2
+# Dynamo
 
 Exploratory project for a next major version of a D GraphQL server library.
 
@@ -197,9 +197,9 @@ Different data sources register their own optimizers. The relational package con
 ## Example
 
 ```d
-import graphqld2.core;
-import graphqld2.relational;
-import graphqld2.graphql;
+import dynamo.core;
+import dynamo.relational;
+import dynamo.graphql;
 
 // Data source - static variable bound to entities via DemoEntity mixin
 // Options: MockDB (testing), PostgresDB, SQLiteDB, MySQLDB
@@ -405,7 +405,7 @@ This distinction is semantic (handled in your resolver logic), not schema-levelâ
 Use `compileQuery` to compile GraphQL query strings at runtime:
 
 ```d
-import graphqld2.graphql : compileQuery;
+import dynamo.graphql : compileQuery;
 
 db = new MockDB!();  // Initialize the static db
 auto executor = new Executor();

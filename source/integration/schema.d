@@ -9,11 +9,11 @@ module integration.schema;
 import std.json : JSONValue;
 import std.typecons : Nullable;
 
-import graphqld2.core;
-import graphqld2.core.expr : ternary, some, every;
-import graphqld2.relational.schema : Table, ForeignKey, BelongsTo, HasMany, Col;
-import graphqld2.relational.demo : DemoEntity, CrudMutations;
-import graphqld2.relational.mutation : insert;
+import dynamo.core;
+import dynamo.core.expr : ternary, some, every;
+import dynamo.relational.schema : Table, ForeignKey, BelongsTo, HasMany, Col;
+import dynamo.relational.demo : DemoEntity, CrudMutations;
+import dynamo.relational.mutation : insert;
 
 import std.stdio : writeln, writefln;
 import integration.test_framework : graphql, assertNoErrors;
@@ -98,11 +98,11 @@ void seedDatabase() {
 mixin template TestSchema(alias db) {
     import std.json : JSONValue;
     import std.typecons : Nullable;
-    import graphqld2.core.expr : Expr;
-    import graphqld2.graphql : Schema, SortingPlugin;
-    import graphqld2.relational.schema : Table, ForeignKey, BelongsTo, HasMany, Col, getAll, hasMany;
-    import graphqld2.relational.demo : DemoEntity, CrudMutations;
-    import graphqld2.relational.mutation : insert;
+    import dynamo.core.expr : Expr;
+    import dynamo.graphql : Schema, SortingPlugin;
+    import dynamo.relational.schema : Table, ForeignKey, BelongsTo, HasMany, Col, getAll, hasMany;
+    import dynamo.relational.demo : DemoEntity, CrudMutations;
+    import dynamo.relational.mutation : insert;
 
     struct User {
         mixin DemoEntity!(db, "users");
@@ -128,21 +128,21 @@ mixin template TestSchema(alias db) {
 
         /// Computed field: age category based on ternary expressions
         static auto ageCategory(Expr!User u) {
-            import graphqld2.core.expr : ternary;
+            import dynamo.core.expr : ternary;
             return ternary(u.age.lt(13), "child",
                    ternary(u.age.lt(20), "teen", "adult"));
         }
 
         /// Computed field: does this user have any posts? (tests some)
         static auto hasPosts(Expr!User u) {
-            import graphqld2.core.expr : some;
+            import dynamo.core.expr : some;
             return some!((Expr!Post p) => p.title.ne(""))(u.posts);
         }
 
         /// Computed field: do all posts have titles? (tests every)
         /// Note: For users with no posts, this returns true (vacuous truth)
         static auto allPostsTitled(Expr!User u) {
-            import graphqld2.core.expr : every;
+            import dynamo.core.expr : every;
             return every!((Expr!Post p) => p.title.ne(""))(u.posts);
         }
 
@@ -172,7 +172,7 @@ mixin template TestSchema(alias db) {
 
         /// Computed field: author's age category (tests ternary pushdown through BelongsTo)
         static auto authorAgeCategory(Expr!Post p) {
-            import graphqld2.core.expr : ternary;
+            import dynamo.core.expr : ternary;
             return ternary(p.author.age.lt(13), "child",
                    ternary(p.author.age.lt(20), "teen", "adult"));
         }

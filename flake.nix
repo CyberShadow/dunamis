@@ -1,5 +1,5 @@
 {
-  description = "graphqld2 - GraphQL server with bulk data resolution";
+  description = "Dynamo - GraphQL server with bulk data resolution";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -13,7 +13,7 @@
 
         # Build the postgres integration test executable
         postgresTestBin = pkgs.buildDubPackage {
-          pname = "graphqld2-postgres-test";
+          pname = "dynamo-postgres-test";
           version = "0.0.1";
           src = self;
           dubLock = ./dub-lock.json;
@@ -23,14 +23,14 @@
           installPhase = ''
             runHook preInstall
             mkdir -p $out/bin
-            cp build/graphqld2 $out/bin/postgres_test
+            cp build/dynamo $out/bin/postgres_test
             runHook postInstall
           '';
         };
 
         # Build the sqlite integration test executable
         sqliteTestBin = pkgs.buildDubPackage {
-          pname = "graphqld2-sqlite-test";
+          pname = "dynamo-sqlite-test";
           version = "0.0.1";
           src = self;
           dubLock = ./dub-lock.json;
@@ -41,14 +41,14 @@
           installPhase = ''
             runHook preInstall
             mkdir -p $out/bin
-            cp build/graphqld2 $out/bin/sqlite_test
+            cp build/dynamo $out/bin/sqlite_test
             runHook postInstall
           '';
         };
 
         # Build the mysql integration test executable
         mysqlTestBin = pkgs.buildDubPackage {
-          pname = "graphqld2-mysql-test";
+          pname = "dynamo-mysql-test";
           version = "0.0.1";
           src = self;
           dubLock = ./dub-lock.json;
@@ -58,7 +58,7 @@
           installPhase = ''
             runHook preInstall
             mkdir -p $out/bin
-            cp build/graphqld2 $out/bin/mysql_test
+            cp build/dynamo $out/bin/mysql_test
             runHook postInstall
           '';
         };
@@ -66,7 +66,7 @@
         checks = {
           # D unit tests via dub
           unit-tests = pkgs.buildDubPackage {
-            pname = "graphqld2-unit-tests";
+            pname = "dynamo-unit-tests";
             version = "0.0.1";
             src = self;
 
@@ -87,7 +87,7 @@
 
           # PostgreSQL integration tests
           postgres-integration = pkgs.stdenv.mkDerivation {
-            name = "graphqld2-postgres-integration";
+            name = "dynamo-postgres-integration";
             dontUnpack = true;
             nativeBuildInputs = [ pkgs.postgresql ];
 
@@ -123,7 +123,7 @@
 
           # SQLite integration tests
           sqlite-integration = pkgs.stdenv.mkDerivation {
-            name = "graphqld2-sqlite-integration";
+            name = "dynamo-sqlite-integration";
             dontUnpack = true;
 
             buildPhase = ''
@@ -138,7 +138,7 @@
 
           # MySQL integration tests
           mysql-integration = pkgs.stdenv.mkDerivation {
-            name = "graphqld2-mysql-integration";
+            name = "dynamo-mysql-integration";
             dontUnpack = true;
             nativeBuildInputs = [ pkgs.mariadb ];
 
@@ -201,7 +201,7 @@
           ];
 
           shellHook = ''
-            echo "graphqld2 development shell"
+            echo "Dynamo development shell"
             echo "Run 'dub test' for unit tests"
             echo "Run 'nix flake check' for all tests (unit + integration)"
           '';
