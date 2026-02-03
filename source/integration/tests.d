@@ -367,6 +367,126 @@ void testSortWithoutOrderBy() {
 }
 
 // ============================================================================
+// Logic Expression Tests (Boolean operators, NOT, Ternary)
+// ============================================================================
+
+void testQueryIsAdultField() {
+    auto response = graphql(`{
+        users {
+            firstName
+            age
+            isAdult
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 3, "Expected at least 3 users for age testing");
+
+    // Verify isAdult logic: age >= 18
+    foreach (user; users) {
+        auto age = user["age"].integer;
+        auto isAdult = user["isAdult"].boolean;
+        auto name = user["firstName"].str;
+
+        bool expectedAdult = age >= 18;
+        assertTrue(isAdult == expectedAdult,
+            "isAdult for " ~ name ~ " (age=" ~ user["age"].toString() ~ ") should be " ~
+            (expectedAdult ? "true" : "false") ~ " but got " ~ (isAdult ? "true" : "false"));
+    }
+}
+
+void testQueryIsTeenagerField() {
+    auto response = graphql(`{
+        users {
+            firstName
+            age
+            isTeenager
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 3, "Expected at least 3 users for age testing");
+
+    // Verify isTeenager logic: age >= 13 AND age < 20
+    foreach (user; users) {
+        auto age = user["age"].integer;
+        auto isTeenager = user["isTeenager"].boolean;
+        auto name = user["firstName"].str;
+
+        bool expectedTeenager = age >= 13 && age < 20;
+        assertTrue(isTeenager == expectedTeenager,
+            "isTeenager for " ~ name ~ " (age=" ~ user["age"].toString() ~ ") should be " ~
+            (expectedTeenager ? "true" : "false") ~ " but got " ~ (isTeenager ? "true" : "false"));
+    }
+}
+
+void testQueryAgeCategoryField() {
+    auto response = graphql(`{
+        users {
+            firstName
+            age
+            ageCategory
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 3, "Expected at least 3 users for age testing");
+
+    // Verify ageCategory logic: age < 13 -> "child", age < 20 -> "teen", else "adult"
+    foreach (user; users) {
+        auto age = user["age"].integer;
+        auto category = user["ageCategory"].str;
+        auto name = user["firstName"].str;
+
+        string expectedCategory;
+        if (age < 13) expectedCategory = "child";
+        else if (age < 20) expectedCategory = "teen";
+        else expectedCategory = "adult";
+
+        assertTrue(category == expectedCategory,
+            "ageCategory for " ~ name ~ " (age=" ~ user["age"].toString() ~ ") should be '" ~
+            expectedCategory ~ "' but got '" ~ category ~ "'");
+    }
+}
+
+void testQueryCombinedLogicFields() {
+    // Test that all logic fields work together in one query
+    auto response = graphql(`{
+        users {
+            firstName
+            age
+            isAdult
+            isTeenager
+            ageCategory
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 1, "Expected at least 1 user");
+
+    // Just verify the fields are present and have correct types
+    foreach (user; users) {
+        assertTrue(("firstName" in user) !is null, "User should have firstName");
+        assertTrue(("age" in user) !is null, "User should have age");
+        assertTrue(("isAdult" in user) !is null, "User should have isAdult");
+        assertTrue(("isTeenager" in user) !is null, "User should have isTeenager");
+        assertTrue(("ageCategory" in user) !is null, "User should have ageCategory");
+
+        // Verify types
+        assertTrue(user["age"].type == JSONType.integer, "age should be integer");
+        assertTrue(user["isAdult"].type == JSONType.true_ || user["isAdult"].type == JSONType.false_,
+            "isAdult should be boolean");
+        assertTrue(user["isTeenager"].type == JSONType.true_ || user["isTeenager"].type == JSONType.false_,
+            "isTeenager should be boolean");
+        assertTrue(user["ageCategory"].type == JSONType.string, "ageCategory should be string");
+    }
+}
+
+// ============================================================================
 // Test Registration
 // ============================================================================
 
@@ -392,4 +512,10 @@ static this() {
     registerTest("Sort posts by title", "tests", &testSortPostsByTitle);
     registerTest("Sort tasks by status", "tests", &testSortTasksByStatus);
     registerTest("Sort without orderBy", "tests", &testSortWithoutOrderBy);
+
+    // Logic expression tests (Boolean AND/OR, NOT, Ternary)
+    registerTest("Query isAdult computed field (comparison)", "tests", &testQueryIsAdultField);
+    registerTest("Query isTeenager computed field (AND)", "tests", &testQueryIsTeenagerField);
+    registerTest("Query ageCategory computed field (ternary)", "tests", &testQueryAgeCategoryField);
+    registerTest("Query combined logic fields", "tests", &testQueryCombinedLogicFields);
 }

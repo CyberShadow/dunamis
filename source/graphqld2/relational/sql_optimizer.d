@@ -134,6 +134,22 @@ class SqlOptimizer : ExprOptimizer {
                     parent.replaceDependency(i, replacement);
                 }
             }
+
+            // Check if this dependency is a unary operation that could be pushed down
+            if (auto unaryOp = cast(UnaryOpInfo) dep) {
+                auto replacement = tryPushDownUnaryOp(dep, unaryOp, ctx);
+                if (replacement !is null && replacement !is dep) {
+                    parent.replaceDependency(i, replacement);
+                }
+            }
+
+            // Check if this dependency is a ternary operation that could be pushed down
+            if (auto ternaryOp = cast(TernaryInfo) dep) {
+                auto replacement = tryPushDownTernaryOp(dep, ternaryOp, ctx);
+                if (replacement !is null && replacement !is dep) {
+                    parent.replaceDependency(i, replacement);
+                }
+            }
         }
     }
 
@@ -149,6 +165,18 @@ class SqlOptimizer : ExprOptimizer {
         // Recurse into binary ops
         if (auto binOp = cast(BinaryOpInfo) expr) {
             return hasJoinedColumnExpr(binOp.left) || hasJoinedColumnExpr(binOp.right);
+        }
+
+        // Recurse into unary ops
+        if (auto unaryOp = cast(UnaryOpInfo) expr) {
+            return hasJoinedColumnExpr(unaryOp.operand);
+        }
+
+        // Recurse into ternary ops
+        if (auto ternaryOp = cast(TernaryInfo) expr) {
+            return hasJoinedColumnExpr(ternaryOp.condition) ||
+                   hasJoinedColumnExpr(ternaryOp.trueExpr) ||
+                   hasJoinedColumnExpr(ternaryOp.falseExpr);
         }
 
         // Constants don't have joined columns
@@ -220,15 +248,129 @@ class SqlOptimizer : ExprOptimizer {
         return createProjectComputedExpr(queryNodeId, alias_, expr.resultType, input, prefetch);
     }
 
-    /// Extract the input expression from a projection or binary op.
+    /// Try to push down a unary operation to SQL
+    protected ExprBase tryPushDownUnaryOp(ExprBase expr, UnaryOpInfo unaryOp, OptimizeContext ctx) {
+        // Check if operand involves joined columns - skip push-down if so
+        if (hasJoinedColumnExpr(unaryOp.operand)) {
+            return null;
+        }
+
+        // Check if operand can be translated to SQL
+        int queryNodeId = -1;
+        auto operandSql = tryGetSqlExpr(unaryOp.operand, queryNodeId);
+
+        if (operandSql.isNull || queryNodeId < 0) {
+            return null;
+        }
+
+        // Extract input and prefetch from the operand
+        auto input = extractInputFromExpr(unaryOp.operand);
+        if (input is null) {
+            return null;
+        }
+
+        auto prefetch = extractPrefetchFromExpr(unaryOp.operand);
+        if (prefetch is null) {
+            return null;
+        }
+
+        // Build the SQL expression using dialect-specific formatting
+        auto sqlExpr = _dialect.unaryOp(unaryOp.operator, operandSql.get);
+
+        // Create computed column alias
+        auto alias_ = "computed_" ~ (_nextComputedAlias++).to!string;
+
+        // Register the computed column
+        if (queryNodeId !in _computedColumns) {
+            _computedColumns[queryNodeId] = [];
+        }
+        _computedColumns[queryNodeId] ~= ComputedColumn(alias_, sqlExpr, expr.resultType);
+
+        // Create and return projection for computed column
+        return createProjectComputedExpr(queryNodeId, alias_, expr.resultType, input, prefetch);
+    }
+
+    /// Try to push down a ternary operation to SQL
+    protected ExprBase tryPushDownTernaryOp(ExprBase expr, TernaryInfo ternaryOp, OptimizeContext ctx) {
+        // Check if any operand involves joined columns - skip push-down if so
+        if (hasJoinedColumnExpr(ternaryOp.condition) ||
+            hasJoinedColumnExpr(ternaryOp.trueExpr) ||
+            hasJoinedColumnExpr(ternaryOp.falseExpr)) {
+            return null;
+        }
+
+        // Check if all operands can be translated to SQL and come from the same QueryNode
+        int queryNodeId = -1;
+        auto condSql = tryGetSqlExpr(ternaryOp.condition, queryNodeId);
+        auto trueSql = tryGetSqlExpr(ternaryOp.trueExpr, queryNodeId);
+        auto falseSql = tryGetSqlExpr(ternaryOp.falseExpr, queryNodeId);
+
+        if (condSql.isNull || trueSql.isNull || falseSql.isNull || queryNodeId < 0) {
+            return null;
+        }
+
+        // Extract input and prefetch from one of the operands
+        auto input = extractInputFromExpr(ternaryOp.condition);
+        if (input is null) {
+            input = extractInputFromExpr(ternaryOp.trueExpr);
+        }
+        if (input is null) {
+            input = extractInputFromExpr(ternaryOp.falseExpr);
+        }
+        if (input is null) {
+            return null;
+        }
+
+        auto prefetch = extractPrefetchFromExpr(ternaryOp.condition);
+        if (prefetch is null) {
+            prefetch = extractPrefetchFromExpr(ternaryOp.trueExpr);
+        }
+        if (prefetch is null) {
+            prefetch = extractPrefetchFromExpr(ternaryOp.falseExpr);
+        }
+        if (prefetch is null) {
+            return null;
+        }
+
+        // Build the SQL expression using dialect-specific formatting
+        auto sqlExpr = _dialect.caseWhen(condSql.get, trueSql.get, falseSql.get);
+
+        // Create computed column alias
+        auto alias_ = "computed_" ~ (_nextComputedAlias++).to!string;
+
+        // Register the computed column
+        if (queryNodeId !in _computedColumns) {
+            _computedColumns[queryNodeId] = [];
+        }
+        _computedColumns[queryNodeId] ~= ComputedColumn(alias_, sqlExpr, expr.resultType);
+
+        // Create and return projection for computed column
+        return createProjectComputedExpr(queryNodeId, alias_, expr.resultType, input, prefetch);
+    }
+
+    /// Extract the input expression from a projection, binary op, unary op, or ternary op.
     /// Returns the entity ref source (e.g., EveryItemOfExpr) that provides the
     /// refs for looking up computed column values.
     private ExprBase extractInputFromExpr(ExprBase expr) {
-        // First check for binary ops and recurse
+        // Check for binary ops and recurse
         if (auto binOp = cast(BinaryOpInfo) expr) {
             auto left = extractInputFromExpr(binOp.left);
             if (left !is null) return left;
             return extractInputFromExpr(binOp.right);
+        }
+
+        // Check for unary ops and recurse
+        if (auto unaryOp = cast(UnaryOpInfo) expr) {
+            return extractInputFromExpr(unaryOp.operand);
+        }
+
+        // Check for ternary ops and recurse
+        if (auto ternaryOp = cast(TernaryInfo) expr) {
+            auto result = extractInputFromExpr(ternaryOp.condition);
+            if (result !is null) return result;
+            result = extractInputFromExpr(ternaryOp.trueExpr);
+            if (result !is null) return result;
+            return extractInputFromExpr(ternaryOp.falseExpr);
         }
 
         // Check for projection expressions - they have input as first dependency
@@ -247,14 +389,28 @@ class SqlOptimizer : ExprOptimizer {
         return null;
     }
 
-    /// Extract the PrefetchExpr from a projection or binary op.
+    /// Extract the PrefetchExpr from a projection, binary op, unary op, or ternary op.
     /// Returns the PrefetchExpr that ensures data is loaded before reading.
     private PrefetchExpr extractPrefetchFromExpr(ExprBase expr) {
-        // First check for binary ops and recurse
+        // Check for binary ops and recurse
         if (auto binOp = cast(BinaryOpInfo) expr) {
             auto left = extractPrefetchFromExpr(binOp.left);
             if (left !is null) return left;
             return extractPrefetchFromExpr(binOp.right);
+        }
+
+        // Check for unary ops and recurse
+        if (auto unaryOp = cast(UnaryOpInfo) expr) {
+            return extractPrefetchFromExpr(unaryOp.operand);
+        }
+
+        // Check for ternary ops and recurse
+        if (auto ternaryOp = cast(TernaryInfo) expr) {
+            auto result = extractPrefetchFromExpr(ternaryOp.condition);
+            if (result !is null) return result;
+            result = extractPrefetchFromExpr(ternaryOp.trueExpr);
+            if (result !is null) return result;
+            return extractPrefetchFromExpr(ternaryOp.falseExpr);
         }
 
         // Check for projection expressions - they have prefetch as second dependency
@@ -307,6 +463,24 @@ class SqlOptimizer : ExprOptimizer {
             auto rightSql = tryGetSqlExpr(binOp.right, queryNodeId);
             if (!leftSql.isNull && !rightSql.isNull) {
                 return Nullable!string(_dialect.binaryOp(binOp.operator, leftSql.get, rightSql.get));
+            }
+        }
+
+        // Check if it's a nested unary op
+        if (auto unaryOp = cast(UnaryOpInfo) expr) {
+            auto operandSql = tryGetSqlExpr(unaryOp.operand, queryNodeId);
+            if (!operandSql.isNull) {
+                return Nullable!string(_dialect.unaryOp(unaryOp.operator, operandSql.get));
+            }
+        }
+
+        // Check if it's a nested ternary op
+        if (auto ternaryOp = cast(TernaryInfo) expr) {
+            auto condSql = tryGetSqlExpr(ternaryOp.condition, queryNodeId);
+            auto trueSql = tryGetSqlExpr(ternaryOp.trueExpr, queryNodeId);
+            auto falseSql = tryGetSqlExpr(ternaryOp.falseExpr, queryNodeId);
+            if (!condSql.isNull && !trueSql.isNull && !falseSql.isNull) {
+                return Nullable!string(_dialect.caseWhen(condSql.get, trueSql.get, falseSql.get));
             }
         }
 
@@ -639,6 +813,13 @@ unittest {
         override string binaryOp(string op, string leftSql, string rightSql) {
             return "(" ~ leftSql ~ " " ~ op ~ " " ~ rightSql ~ ")";
         }
+        override string unaryOp(string op, string operandSql) {
+            if (op == "!") return "(NOT " ~ operandSql ~ ")";
+            return "(" ~ op ~ operandSql ~ ")";
+        }
+        override string caseWhen(string conditionSql, string trueSql, string falseSql) {
+            return "(CASE WHEN " ~ conditionSql ~ " THEN " ~ trueSql ~ " ELSE " ~ falseSql ~ " END)";
+        }
         override string name() { return "Test"; }
     }
     auto optimizer = new SqlOptimizer(new TestDialect());
@@ -678,6 +859,13 @@ unittest {
     static class TestDialect : SqlDialect {
         override string binaryOp(string op, string leftSql, string rightSql) {
             return "(" ~ leftSql ~ " " ~ op ~ " " ~ rightSql ~ ")";
+        }
+        override string unaryOp(string op, string operandSql) {
+            if (op == "!") return "(NOT " ~ operandSql ~ ")";
+            return "(" ~ op ~ operandSql ~ ")";
+        }
+        override string caseWhen(string conditionSql, string trueSql, string falseSql) {
+            return "(CASE WHEN " ~ conditionSql ~ " THEN " ~ trueSql ~ " ELSE " ~ falseSql ~ " END)";
         }
         override string name() { return "Test"; }
     }

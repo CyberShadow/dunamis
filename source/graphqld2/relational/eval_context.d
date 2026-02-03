@@ -450,7 +450,19 @@ class QueryResult {
             }
             return cast(int)val.integer;
         } else static if (is(T == bool)) {
-            return val.boolean;
+            // Handle different representations of boolean in SQL results:
+            // - JSON boolean (true/false)
+            // - Integer (0/1) - common in SQLite
+            // - String ("true"/"false", "t"/"f", "1"/"0") - common in PostgreSQL
+            if (val.type == JSONType.true_ || val.type == JSONType.false_) {
+                return val.boolean;
+            } else if (val.type == JSONType.integer) {
+                return val.integer != 0;
+            } else if (val.type == JSONType.string) {
+                auto s = val.str;
+                return s == "true" || s == "t" || s == "1" || s == "TRUE" || s == "T";
+            }
+            return false;
         } else static if (is(T == double)) {
             if (val.type == JSONType.integer) return cast(double)val.integer;
             return val.floating;
@@ -879,7 +891,19 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
             }
             return cast(int)val.integer;
         } else static if (is(T == bool)) {
-            return val.boolean;
+            // Handle different representations of boolean in SQL results:
+            // - JSON boolean (true/false)
+            // - Integer (0/1) - common in SQLite
+            // - String ("true"/"false", "t"/"f", "1"/"0") - common in PostgreSQL
+            if (val.type == JSONType.true_ || val.type == JSONType.false_) {
+                return val.boolean;
+            } else if (val.type == JSONType.integer) {
+                return val.integer != 0;
+            } else if (val.type == JSONType.string) {
+                auto s = val.str;
+                return s == "true" || s == "t" || s == "1" || s == "TRUE" || s == "T";
+            }
+            return false;
         } else static if (is(T == double)) {
             if (val.type == JSONType.integer) return cast(double)val.integer;
             return val.floating;

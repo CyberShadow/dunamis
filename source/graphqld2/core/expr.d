@@ -209,6 +209,39 @@ abstract class Expr(T) : ExprBase {
     }
 
     // =========================================================================
+    // Boolean Logic Operators (only for Expr!bool)
+    // =========================================================================
+
+    static if (is(T == bool)) {
+        /// Logical AND - combines two boolean expressions
+        /// Note: D's && operator cannot be overloaded, so we use a method
+        auto and(Expr!bool rhs) {
+            return new BinaryOpExpr!(bool, "&&", bool)(this, rhs);
+        }
+
+        /// Logical AND with literal bool
+        auto and(bool rhs) {
+            return new BinaryOpExpr!(bool, "&&", bool)(this, constant(rhs, this));
+        }
+
+        /// Logical OR - combines two boolean expressions
+        /// Note: D's || operator cannot be overloaded, so we use a method
+        auto or(Expr!bool rhs) {
+            return new BinaryOpExpr!(bool, "||", bool)(this, rhs);
+        }
+
+        /// Logical OR with literal bool
+        auto or(bool rhs) {
+            return new BinaryOpExpr!(bool, "||", bool)(this, constant(rhs, this));
+        }
+
+        /// Logical NOT - negates this boolean expression
+        auto not() {
+            return new UnaryOpExpr!(bool, "!")(this);
+        }
+    }
+
+    // =========================================================================
     // Field Access via opDispatch
     // =========================================================================
 
@@ -533,6 +566,169 @@ class BinaryOpExpr(L, string op, R = L) : Expr!(typeof(mixin("L.init " ~ op ~ " 
     override string operator() { return op; }
     override ExprBase left() { return _left; }
     override ExprBase right() { return _right; }
+}
+
+// ============================================================================
+// Unary Operation Expression
+// ============================================================================
+
+/// Interface for unary operation expressions - allows optimizer to inspect and transform
+interface UnaryOpInfo {
+    /// The operator ("!" for NOT, "-" for negation)
+    string operator();
+
+    /// Operand (type-erased)
+    ExprBase operand();
+}
+
+/// Expression representing a unary operation (logical NOT, negation).
+/// Can be evaluated in D or pushed down to SQL.
+class UnaryOpExpr(T, string op) : Expr!(typeof(mixin(op ~ "T.init"))), UnaryOpInfo {
+    alias ResultT = typeof(mixin(op ~ "T.init"));
+
+    private ExprBase _operand;
+
+    this(Expr!T operand) {
+        _operand = operand;
+    }
+
+    override ExprBase[] dependencies() {
+        return [_operand];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0)
+            _operand = newDep;
+    }
+
+    override Expr!ResultT optimize(OptimizeContext ctx) {
+        _operand = cast(ExprBase) (cast(Expr!T) _operand).optimize(ctx);
+        return this;
+    }
+
+    override Promise!(ResultT[]) eval(EvalContext ctx) {
+        auto operand = _operand;
+
+        return evalAs!T(operand, ctx).then((T[] vals) {
+            ResultT[] result = new ResultT[vals.length];
+            foreach (i, v; vals) {
+                result[i] = mixin(op ~ "v");
+            }
+            return result;
+        });
+    }
+
+    /// Generate SQL expression for this operation
+    string toSqlExpr(string operandSql) const {
+        if (op == "!") return "(NOT " ~ operandSql ~ ")";
+        return "(" ~ op ~ operandSql ~ ")";
+    }
+
+    // UnaryOpInfo implementation
+    override string operator() { return op; }
+    override ExprBase operand() { return _operand; }
+}
+
+// ============================================================================
+// Ternary (Conditional) Expression
+// ============================================================================
+
+/// Interface for ternary (conditional) expressions - allows optimizer to inspect and transform
+interface TernaryInfo {
+    /// Condition expression (type-erased, returns bool)
+    ExprBase condition();
+
+    /// Expression evaluated when condition is true (type-erased)
+    ExprBase trueExpr();
+
+    /// Expression evaluated when condition is false (type-erased)
+    ExprBase falseExpr();
+}
+
+/// Expression representing a ternary/conditional operation.
+/// Evaluates to trueExpr when condition is true, falseExpr otherwise.
+/// SQL: CASE WHEN condition THEN trueVal ELSE falseVal END
+class TernaryExpr(T) : Expr!T, TernaryInfo {
+    private ExprBase _condition;
+    private ExprBase _trueExpr;
+    private ExprBase _falseExpr;
+
+    this(Expr!bool condition, Expr!T trueExpr, Expr!T falseExpr) {
+        _condition = condition;
+        _trueExpr = trueExpr;
+        _falseExpr = falseExpr;
+    }
+
+    override ExprBase[] dependencies() {
+        return [_condition, _trueExpr, _falseExpr];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0)
+            _condition = newDep;
+        else if (index == 1)
+            _trueExpr = newDep;
+        else if (index == 2)
+            _falseExpr = newDep;
+    }
+
+    override Expr!T optimize(OptimizeContext ctx) {
+        _condition = cast(ExprBase) (cast(Expr!bool) _condition).optimize(ctx);
+        _trueExpr = cast(ExprBase) (cast(Expr!T) _trueExpr).optimize(ctx);
+        _falseExpr = cast(ExprBase) (cast(Expr!T) _falseExpr).optimize(ctx);
+        return this;
+    }
+
+    override Promise!(T[]) eval(EvalContext ctx) {
+        auto condition = _condition;
+        auto trueExpr = _trueExpr;
+        auto falseExpr = _falseExpr;
+
+        // Evaluate all three expressions, then combine based on condition
+        return evalAs!bool(condition, ctx).then((bool[] conds) {
+            return evalAs!T(trueExpr, ctx).then((T[] trueVals) {
+                return evalAs!T(falseExpr, ctx).then((T[] falseVals) {
+                    T[] result = new T[conds.length];
+                    foreach (i, c; conds) {
+                        result[i] = c ? trueVals[i] : falseVals[i];
+                    }
+                    return result;
+                });
+            });
+        });
+    }
+
+    // TernaryInfo implementation
+    override ExprBase condition() { return _condition; }
+    override ExprBase trueExpr() { return _trueExpr; }
+    override ExprBase falseExpr() { return _falseExpr; }
+}
+
+/// Create a ternary conditional expression.
+/// Returns trueVal when condition is true, falseVal otherwise.
+auto ternary(T)(Expr!bool condition, Expr!T trueVal, Expr!T falseVal) {
+    return new TernaryExpr!T(condition, trueVal, falseVal);
+}
+
+/// Ternary with literal true value
+auto ternary(T)(Expr!bool condition, T trueVal, Expr!T falseVal)
+    if (!is(T : Expr!U, U))
+{
+    return new TernaryExpr!T(condition, constant(trueVal, condition), falseVal);
+}
+
+/// Ternary with literal false value
+auto ternary(T)(Expr!bool condition, Expr!T trueVal, T falseVal)
+    if (!is(T : Expr!U, U))
+{
+    return new TernaryExpr!T(condition, trueVal, constant(falseVal, condition));
+}
+
+/// Ternary with both literal values
+auto ternary(T)(Expr!bool condition, T trueVal, T falseVal)
+    if (!is(T : Expr!U, U))
+{
+    return new TernaryExpr!T(condition, constant(trueVal, condition), constant(falseVal, condition));
 }
 
 // ============================================================================
@@ -1308,6 +1504,137 @@ unittest {
         (Expr!TestEntity item) {
             auto val = use((TestEntity e) => e.localId.to!long, item);
             return val.gt(7);  // 5 > 7 = false, 10 > 7 = true, 15 > 7 = true
+        }
+    )(collection);
+
+    auto ctx = new EvalContext();
+    ctx.setCurrentRefs(null, [queryRoot]);
+    auto result = awaitSync(query.eval(ctx));
+
+    assert(result.length == 1);
+    assert(result[0] == [false, true, true]);
+}
+
+unittest {
+    import std.conv : to;
+
+    // Test boolean AND operator
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("Test:5"), TestEntity("Test:10"), TestEntity("Test:15")]);
+
+    auto query = map!(
+        (Expr!TestEntity item) {
+            auto val = use((TestEntity e) => e.localId.to!long, item);
+            return val.gt(5).and(val.lt(15));  // 5>5 && 5<15 = false, 10>5 && 10<15 = true, 15>5 && 15<15 = false
+        }
+    )(collection);
+
+    auto ctx = new EvalContext();
+    ctx.setCurrentRefs(null, [queryRoot]);
+    auto result = awaitSync(query.eval(ctx));
+
+    assert(result.length == 1);
+    assert(result[0] == [false, true, false]);
+}
+
+unittest {
+    import std.conv : to;
+
+    // Test boolean OR operator
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("Test:5"), TestEntity("Test:10"), TestEntity("Test:15")]);
+
+    auto query = map!(
+        (Expr!TestEntity item) {
+            auto val = use((TestEntity e) => e.localId.to!long, item);
+            return val.lt(8).or(val.gt(12));  // 5<8 || 5>12 = true, 10<8 || 10>12 = false, 15<8 || 15>12 = true
+        }
+    )(collection);
+
+    auto ctx = new EvalContext();
+    ctx.setCurrentRefs(null, [queryRoot]);
+    auto result = awaitSync(query.eval(ctx));
+
+    assert(result.length == 1);
+    assert(result[0] == [true, false, true]);
+}
+
+unittest {
+    import std.conv : to;
+
+    // Test boolean NOT operator
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("Test:5"), TestEntity("Test:10"), TestEntity("Test:15")]);
+
+    auto query = map!(
+        (Expr!TestEntity item) {
+            auto val = use((TestEntity e) => e.localId.to!long, item);
+            return val.gt(8).not();  // !(5>8) = true, !(10>8) = false, !(15>8) = false
+        }
+    )(collection);
+
+    auto ctx = new EvalContext();
+    ctx.setCurrentRefs(null, [queryRoot]);
+    auto result = awaitSync(query.eval(ctx));
+
+    assert(result.length == 1);
+    assert(result[0] == [true, false, false]);
+}
+
+unittest {
+    import std.conv : to;
+
+    // Test ternary expression
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("Test:5"), TestEntity("Test:15"), TestEntity("Test:25")]);
+
+    auto query = map!(
+        (Expr!TestEntity item) {
+            auto val = use((TestEntity e) => e.localId.to!long, item);
+            return ternary(val.ge(18), "adult", "minor");  // 5>=18 ? adult : minor, etc.
+        }
+    )(collection);
+
+    auto ctx = new EvalContext();
+    ctx.setCurrentRefs(null, [queryRoot]);
+    auto result = awaitSync(query.eval(ctx));
+
+    assert(result.length == 1);
+    assert(result[0] == ["minor", "minor", "adult"]);
+}
+
+unittest {
+    import std.conv : to;
+
+    // Test nested ternary expression (chained conditions)
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("Test:5"), TestEntity("Test:15"), TestEntity("Test:25")]);
+
+    auto query = map!(
+        (Expr!TestEntity item) {
+            auto val = use((TestEntity e) => e.localId.to!long, item);
+            // age < 13 -> "child", age < 20 -> "teen", else "adult"
+            return ternary(val.lt(13), "child", ternary(val.lt(20), "teen", "adult"));
+        }
+    )(collection);
+
+    auto ctx = new EvalContext();
+    ctx.setCurrentRefs(null, [queryRoot]);
+    auto result = awaitSync(query.eval(ctx));
+
+    assert(result.length == 1);
+    assert(result[0] == ["child", "teen", "adult"]);
+}
+
+unittest {
+    import std.conv : to;
+
+    // Test combined boolean operators: (a AND b) OR c
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("Test:5"), TestEntity("Test:10"), TestEntity("Test:20")]);
+
+    auto query = map!(
+        (Expr!TestEntity item) {
+            auto val = use((TestEntity e) => e.localId.to!long, item);
+            // (val > 5 AND val < 15) OR val > 18
+            // 5: (false AND true) OR false = false
+            // 10: (true AND true) OR false = true
+            // 20: (true AND false) OR true = true
+            return val.gt(5).and(val.lt(15)).or(val.gt(18));
         }
     )(collection);
 

@@ -10,6 +10,7 @@ import std.json : JSONValue;
 import std.typecons : Nullable;
 
 import graphqld2.core;
+import graphqld2.core.expr : ternary;
 import graphqld2.relational.schema : Table, ForeignKey, BelongsTo, HasMany, Col;
 import graphqld2.relational.demo : DemoEntity, CrudMutations;
 import graphqld2.relational.mutation : insert;
@@ -30,16 +31,24 @@ enum TaskStatus {
 void seedDatabase() {
     writeln("Seeding data via mutations...");
 
-    // Create users
-    auto alice = graphql(`mutation { createUserWithName(firstName: "Alice", lastName: "Smith") { id } }`);
+    // Create users with different ages for testing logic expressions
+    // Alice: age 25 (adult)
+    auto alice = graphql(`mutation { createUserWithAge(firstName: "Alice", lastName: "Smith", age: 25) { id } }`);
     assertNoErrors(alice);
-    auto aliceId = alice["data"]["createUserWithName"]["id"];
-    writefln("  Created Alice (id=%s)", aliceId);
+    auto aliceId = alice["data"]["createUserWithAge"]["id"];
+    writefln("  Created Alice age=25 (id=%s)", aliceId);
 
-    auto bob = graphql(`mutation { createUserWithName(firstName: "Bob", lastName: "Jones") { id } }`);
+    // Bob: age 15 (teenager)
+    auto bob = graphql(`mutation { createUserWithAge(firstName: "Bob", lastName: "Jones", age: 15) { id } }`);
     assertNoErrors(bob);
-    auto bobId = bob["data"]["createUserWithName"]["id"];
-    writefln("  Created Bob (id=%s)", bobId);
+    auto bobId = bob["data"]["createUserWithAge"]["id"];
+    writefln("  Created Bob age=15 (id=%s)", bobId);
+
+    // Charlie: age 8 (child)
+    auto charlie = graphql(`mutation { createUserWithAge(firstName: "Charlie", lastName: "Brown", age: 8) { id } }`);
+    assertNoErrors(charlie);
+    auto charlieId = charlie["data"]["createUserWithAge"]["id"];
+    writefln("  Created Charlie age=8 (id=%s)", charlieId);
 
     // Create posts
     auto post1 = graphql(`mutation { createPost(input: {title: "Hello World", author_id: ` ~ aliceId.toString() ~ `}) { id } }`);
@@ -85,10 +94,29 @@ mixin template TestSchema(alias db) {
         mixin DemoEntity!(db, "users");
         mixin Col!("firstName", string);
         mixin Col!("lastName", string);
+        mixin Col!("age", int);
         mixin HasMany!("posts", Post, "author_id");
 
+        /// Computed field: full name concatenation
         static auto fullName(Expr!User u) {
             return u.firstName ~ " " ~ u.lastName;
+        }
+
+        /// Computed field: is user an adult (age >= 18)?
+        static auto isAdult(Expr!User u) {
+            return u.age.ge(18);
+        }
+
+        /// Computed field: is user a teenager (13 <= age < 20)?
+        static auto isTeenager(Expr!User u) {
+            return u.age.ge(13).and(u.age.lt(20));
+        }
+
+        /// Computed field: age category based on ternary expressions
+        static auto ageCategory(Expr!User u) {
+            import graphqld2.core.expr : ternary;
+            return ternary(u.age.lt(13), "child",
+                   ternary(u.age.lt(20), "teen", "adult"));
         }
     }
 
@@ -121,7 +149,17 @@ mixin template TestSchema(alias db) {
         static auto createUserWithName(Expr!Mutation parent, string firstName, string lastName) {
             return insert!User([
                 "first_name": JSONValue(firstName),
-                "last_name": JSONValue(lastName)
+                "last_name": JSONValue(lastName),
+                "age": JSONValue(25)  // Default age
+            ]);
+        }
+
+        /// Create user with explicit age for testing logic expressions
+        static auto createUserWithAge(Expr!Mutation parent, string firstName, string lastName, int age) {
+            return insert!User([
+                "first_name": JSONValue(firstName),
+                "last_name": JSONValue(lastName),
+                "age": JSONValue(age)
             ]);
         }
     }

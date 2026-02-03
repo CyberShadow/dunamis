@@ -14,6 +14,15 @@ class MySQLDialect : SqlDialect {
         return "(" ~ leftSql ~ " " ~ sqlOp ~ " " ~ rightSql ~ ")";
     }
 
+    override string unaryOp(string op, string operandSql) {
+        if (op == "!") return "(NOT " ~ operandSql ~ ")";
+        return "(" ~ op ~ operandSql ~ ")";
+    }
+
+    override string caseWhen(string conditionSql, string trueSql, string falseSql) {
+        return "(CASE WHEN " ~ conditionSql ~ " THEN " ~ trueSql ~ " ELSE " ~ falseSql ~ " END)";
+    }
+
     override string name() { return "MySQL"; }
 
     private static string toSqlOp(string op) {
@@ -59,4 +68,12 @@ unittest {
     // Logical operators
     assert(dialect.binaryOp("&&", "a", "b") == "(a AND b)");
     assert(dialect.binaryOp("||", "a", "b") == "(a OR b)");
+
+    // Unary operators
+    assert(dialect.unaryOp("!", "a") == "(NOT a)");
+    assert(dialect.unaryOp("-", "5") == "(-5)");
+
+    // Case when
+    assert(dialect.caseWhen("a > 0", "'positive'", "'negative'") ==
+           "(CASE WHEN a > 0 THEN 'positive' ELSE 'negative' END)");
 }

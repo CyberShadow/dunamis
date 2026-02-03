@@ -29,6 +29,13 @@ private class TestDialect : SqlDialect {
         }
         return "(" ~ leftSql ~ " " ~ sqlOp ~ " " ~ rightSql ~ ")";
     }
+    override string unaryOp(string op, string operandSql) {
+        if (op == "!") return "(NOT " ~ operandSql ~ ")";
+        return "(" ~ op ~ operandSql ~ ")";
+    }
+    override string caseWhen(string conditionSql, string trueSql, string falseSql) {
+        return "(CASE WHEN " ~ conditionSql ~ " THEN " ~ trueSql ~ " ELSE " ~ falseSql ~ " END)";
+    }
     override string name() { return "Test"; }
 }
 
@@ -562,6 +569,13 @@ unittest {
         override string binaryOp(string op, string leftSql, string rightSql) {
             if (op == "~") return "(" ~ leftSql ~ " || " ~ rightSql ~ ")";
             return "(" ~ leftSql ~ " " ~ op ~ " " ~ rightSql ~ ")";
+        }
+        override string unaryOp(string op, string operandSql) {
+            if (op == "!") return "(NOT " ~ operandSql ~ ")";
+            return "(" ~ op ~ operandSql ~ ")";
+        }
+        override string caseWhen(string conditionSql, string trueSql, string falseSql) {
+            return "(CASE WHEN " ~ conditionSql ~ " THEN " ~ trueSql ~ " ELSE " ~ falseSql ~ " END)";
         }
         override string name() { return "Test"; }
     }
