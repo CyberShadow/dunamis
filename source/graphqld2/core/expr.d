@@ -999,14 +999,37 @@ class EveryItemOfExpr(Entity) : Expr!Entity, EveryItemOfExprInfo {
             // Void entity type - shouldn't be used in practice
             static assert(false, "EveryItemOfExpr!void should not be evaluated directly");
         } else {
-            return resolve(ctx.getCurrentRefs(_parentMap).map!(r => Entity(r.nodeId)).array);
+            // First try batch refs (for map expressions)
+            auto refs = ctx.getCurrentRefs(_parentMap);
+            if (refs.length > 0) {
+                return resolve(refs.map!(r => Entity(r.nodeId)).array);
+            }
+
+            // Fallback: single predicate item (for some/every expressions)
+            auto singleRef = ctx.getPredicateItem(_parentMap);
+            if (singleRef.isValid) {
+                return resolve([Entity(singleRef.nodeId)]);
+            }
+
+            return resolve(cast(Entity[])[]);
         }
     }
 
     /// Evaluate and return as AnyRef[] (for type-agnostic internal use)
     Promise!(AnyRef[]) evalAsAnyRef(EvalContext ctx) {
-        // Return the refs directly from context (already stored as AnyRef)
-        return resolve(ctx.getCurrentRefs(_parentMap));
+        // First try batch refs (for map expressions)
+        auto refs = ctx.getCurrentRefs(_parentMap);
+        if (refs.length > 0) {
+            return resolve(refs);
+        }
+
+        // Fallback: single predicate item (for some/every expressions)
+        auto singleRef = ctx.getPredicateItem(_parentMap);
+        if (singleRef.isValid) {
+            return resolve([singleRef]);
+        }
+
+        return resolve(cast(AnyRef[])[]);
     }
 }
 
@@ -1131,6 +1154,271 @@ auto map(alias fn, Coll)(Coll collection)
     item._parentMap = mapExpr;
 
     return mapExpr;
+}
+
+// ============================================================================
+// SomeExpr/EveryExpr: Collection Predicate Expressions
+// ============================================================================
+
+/// Interface for some/every expressions (for optimizer pattern matching).
+/// Used by SqlOptimizer to detect and push down collection predicates.
+interface CollectionPredicateInfo {
+    /// Get the collection being tested (type-erased Expr!(Entity[]))
+    ExprBase collection();
+
+    /// Get the predicate expression (Expr!bool)
+    ExprBase predicate();
+
+    /// Get the item placeholder (EveryItemOfExpr)
+    Object itemPlaceholder();
+
+    /// true for every(), false for some()
+    bool isEvery();
+}
+
+/// Expression: returns true if ANY item in collection satisfies predicate.
+/// Similar to JavaScript's Array.some() or SQL EXISTS.
+///
+/// Example:
+///   some!((Expr!Post p) => p.isPublished)(user.posts)
+///   // Returns true if user has at least one published post
+class SomeExpr(Entity, Body) : Expr!bool, CollectionPredicateInfo
+    if (is(Body : Expr!bool))
+{
+    private ExprBase _collection;           // Expr!(Entity[])
+    private EveryItemOfExpr!Entity _item;   // Placeholder
+    private ExprBase _predicate;            // Expr!bool
+
+    this(Expr!(Entity[]) collection, EveryItemOfExpr!Entity item, Body predicate) {
+        _collection = collection;
+        _item = item;
+        _predicate = predicate;
+    }
+
+    override ExprBase[] dependencies() {
+        return [_collection, _predicate];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0)
+            _collection = newDep;
+        else if (index == 1)
+            _predicate = newDep;
+    }
+
+    override Expr!bool optimize(OptimizeContext ctx) {
+        // Optimize collection (creates QueryNodes for nested hasMany)
+        _collection = optimizeExpr(_collection, ctx);
+        // Don't optimize predicate - it will be analyzed for SQL pushdown
+        return this;
+    }
+
+    override Promise!(bool[]) eval(EvalContext ctx) {
+        auto predicate = cast(Expr!bool) _predicate;
+        auto self = this;  // Key for refs map (EveryItemOfExpr._parentMap points to this)
+
+        // Evaluate collection for each parent ref
+        return evalAs!(Entity[])(_collection, ctx).then((Entity[][] collectionResults) {
+            // Flatten all entities for batch evaluation
+            AnyRef[] flatRefs;
+            size_t[] groupLengths;
+            foreach (group; collectionResults) {
+                groupLengths ~= group.length;
+                foreach (e; group) {
+                    flatRefs ~= AnyRef(e.nodeId.id);
+                }
+            }
+
+            // Handle empty case
+            if (flatRefs.length == 0) {
+                // No items to check - some() returns false for each group
+                bool[] results;
+                results.length = collectionResults.length;
+                results[] = false;  // some() on empty = false
+                return resolve(results);
+            }
+
+            // Set refs for batch evaluation (keyed by SomeExpr, which is _parentMap for EveryItemOfExpr)
+            ctx.setCurrentRefs(self, flatRefs);
+
+            // Evaluate predicate for all items in batch
+            return evalAs!bool(predicate, ctx).then((bool[] predicateResults) {
+                // Reduce flat results back to per-group booleans
+                bool[] results;
+                results.length = groupLengths.length;
+
+                size_t offset = 0;
+                foreach (i, len; groupLengths) {
+                    bool anyTrue = false;
+                    foreach (j; 0 .. len) {
+                        if (predicateResults[offset + j]) {
+                            anyTrue = true;
+                            break;
+                        }
+                    }
+                    results[i] = anyTrue;
+                    offset += len;
+                }
+
+                return results;
+            });
+        });
+    }
+
+    // CollectionPredicateInfo implementation
+    ExprBase collection() { return _collection; }
+    ExprBase predicate() { return _predicate; }
+    Object itemPlaceholder() { return _item; }
+    bool isEvery() { return false; }
+}
+
+/// Expression: returns true if ALL items in collection satisfy predicate.
+/// Similar to JavaScript's Array.every() or SQL NOT EXISTS (... WHERE NOT ...).
+///
+/// Example:
+///   every!((Expr!Post p) => p.isPublished)(user.posts)
+///   // Returns true if all of user's posts are published
+class EveryExpr(Entity, Body) : Expr!bool, CollectionPredicateInfo
+    if (is(Body : Expr!bool))
+{
+    private ExprBase _collection;           // Expr!(Entity[])
+    private EveryItemOfExpr!Entity _item;   // Placeholder
+    private ExprBase _predicate;            // Expr!bool
+
+    this(Expr!(Entity[]) collection, EveryItemOfExpr!Entity item, Body predicate) {
+        _collection = collection;
+        _item = item;
+        _predicate = predicate;
+    }
+
+    override ExprBase[] dependencies() {
+        return [_collection, _predicate];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0)
+            _collection = newDep;
+        else if (index == 1)
+            _predicate = newDep;
+    }
+
+    override Expr!bool optimize(OptimizeContext ctx) {
+        // Optimize collection (creates QueryNodes for nested hasMany)
+        _collection = optimizeExpr(_collection, ctx);
+        // Don't optimize predicate - it will be analyzed for SQL pushdown
+        return this;
+    }
+
+    override Promise!(bool[]) eval(EvalContext ctx) {
+        auto predicate = cast(Expr!bool) _predicate;
+        auto self = this;  // Key for refs map (EveryItemOfExpr._parentMap points to this)
+
+        // Evaluate collection for each parent ref
+        return evalAs!(Entity[])(_collection, ctx).then((Entity[][] collectionResults) {
+            // Flatten all entities for batch evaluation
+            AnyRef[] flatRefs;
+            size_t[] groupLengths;
+            foreach (group; collectionResults) {
+                groupLengths ~= group.length;
+                foreach (e; group) {
+                    flatRefs ~= AnyRef(e.nodeId.id);
+                }
+            }
+
+            // Handle empty case
+            if (flatRefs.length == 0) {
+                // No items to check - every() returns true for each group (vacuous truth)
+                bool[] results;
+                results.length = collectionResults.length;
+                results[] = true;  // every() on empty = true
+                return resolve(results);
+            }
+
+            // Set refs for batch evaluation (keyed by EveryExpr, which is _parentMap for EveryItemOfExpr)
+            ctx.setCurrentRefs(self, flatRefs);
+
+            // Evaluate predicate for all items in batch
+            return evalAs!bool(predicate, ctx).then((bool[] predicateResults) {
+                // Reduce flat results back to per-group booleans
+                bool[] results;
+                results.length = groupLengths.length;
+
+                size_t offset = 0;
+                foreach (i, len; groupLengths) {
+                    // Empty group: every() returns true (vacuous truth)
+                    bool allTrue = true;
+                    foreach (j; 0 .. len) {
+                        if (!predicateResults[offset + j]) {
+                            allTrue = false;
+                            break;
+                        }
+                    }
+                    results[i] = allTrue;
+                    offset += len;
+                }
+
+                return results;
+            });
+        });
+    }
+
+    // CollectionPredicateInfo implementation
+    ExprBase collection() { return _collection; }
+    ExprBase predicate() { return _predicate; }
+    Object itemPlaceholder() { return _item; }
+    bool isEvery() { return true; }
+}
+
+/// Test if ANY item in collection satisfies the predicate.
+///
+/// Example:
+/// ---
+/// auto hasPublished = some!((Expr!Post p) => p.isPublished)(user.posts);
+/// ---
+auto some(alias pred, Coll)(Coll collection)
+    if (is(Coll : Expr!(E[]), E))
+{
+    alias Entity = CollectionEntityType!Coll;
+
+    // Create placeholder (shares type with collection items)
+    auto item = new EveryItemOfExpr!Entity();
+
+    // Build predicate using placeholder
+    auto predicate = pred(item);
+    static assert(is(typeof(predicate) : Expr!bool),
+        "some() predicate must return Expr!bool, got " ~ typeof(predicate).stringof);
+
+    // Create SomeExpr and link
+    auto expr = new SomeExpr!(Entity, typeof(predicate))(collection, item, predicate);
+    item._parentMap = expr;  // Reuse _parentMap for predicate item lookup
+
+    return expr;
+}
+
+/// Test if ALL items in collection satisfy the predicate.
+///
+/// Example:
+/// ---
+/// auto allPublished = every!((Expr!Post p) => p.isPublished)(user.posts);
+/// ---
+auto every(alias pred, Coll)(Coll collection)
+    if (is(Coll : Expr!(E[]), E))
+{
+    alias Entity = CollectionEntityType!Coll;
+
+    // Create placeholder
+    auto item = new EveryItemOfExpr!Entity();
+
+    // Build predicate using placeholder
+    auto predicate = pred(item);
+    static assert(is(typeof(predicate) : Expr!bool),
+        "every() predicate must return Expr!bool, got " ~ typeof(predicate).stringof);
+
+    // Create EveryExpr and link
+    auto expr = new EveryExpr!(Entity, typeof(predicate))(collection, item, predicate);
+    item._parentMap = expr;  // Reuse _parentMap for predicate item lookup
+
+    return expr;
 }
 
 

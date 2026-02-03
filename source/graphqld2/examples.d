@@ -39,6 +39,12 @@ private class TestDialect : SqlDialect {
     override string isNullOp(string operandSql) {
         return "(" ~ operandSql ~ " IS NULL)";
     }
+    override string existsSubquery(string subquery) {
+        return "EXISTS (" ~ subquery ~ ")";
+    }
+    override string notExistsSubquery(string subquery) {
+        return "NOT EXISTS (" ~ subquery ~ ")";
+    }
     override string name() { return "Test"; }
 }
 
@@ -583,6 +589,12 @@ unittest {
         override string isNullOp(string operandSql) {
             return "(" ~ operandSql ~ " IS NULL)";
         }
+        override string existsSubquery(string subquery) {
+            return "EXISTS (" ~ subquery ~ ")";
+        }
+        override string notExistsSubquery(string subquery) {
+            return "NOT EXISTS (" ~ subquery ~ ")";
+        }
         override string name() { return "Test"; }
     }
     auto sqlOpt = new SqlOptimizer(new TestDialect());
@@ -1020,5 +1032,141 @@ unittest {
         writeln("\n=== Test: Sorting + pagination ===");
         db.printSQL();
     }
+}
+
+// ============================================================================
+// some/every Tests
+// ============================================================================
+
+// Test some() - basic predicate matching
+unittest {
+    auto mock = new MockDB!()();
+    mock.setTableData("users", `[
+        {"id": 1, "first_name": "Alice"},
+        {"id": 2, "first_name": "Bob"}
+    ]`);
+    mock.setTableData("posts", `[
+        {"id": 1, "author_id": 1, "title": "Hello", "body": "World"},
+        {"id": 2, "author_id": 1, "title": "", "body": "Empty title"},
+        {"id": 3, "author_id": 2, "title": "", "body": "Bob's post"}
+    ]`);
+
+    db = new DebugSqlDB!()(mock, testDialect());
+    auto executor = new Executor();
+
+    // Test: which users have at least one post with non-empty title
+    auto query = map!(
+        (Expr!User u) => jsonObject(
+            "name", u.firstName,
+            "hasTitledPost", some!((Expr!Post p) => p.title.ne(""))(u.posts)
+        )
+    )(getByIds!User([1, 2]));
+
+    auto result = awaitSync(executor.execute(query));
+
+    assert(result.length == 2);
+    // Alice has post with title "Hello" → true
+    assert(result[0]["name"].str == "Alice");
+    assert(result[0]["hasTitledPost"].boolean == true, "Alice should have at least one post with title");
+    // Bob has only posts with empty titles → false
+    assert(result[1]["name"].str == "Bob");
+    assert(result[1]["hasTitledPost"].boolean == false, "Bob should not have any posts with title");
+
+    debug(sql) {
+        import std.stdio : writeln;
+        writeln("\n=== Test: some() with title predicate ===");
+        db.printSQL();
+    }
+}
+
+// Test every() - all items must match
+unittest {
+    auto mock = new MockDB!()();
+    mock.setTableData("users", `[
+        {"id": 1, "first_name": "Alice"},
+        {"id": 2, "first_name": "Bob"},
+        {"id": 3, "first_name": "Charlie"}
+    ]`);
+    mock.setTableData("posts", `[
+        {"id": 1, "author_id": 1, "title": "Post 1", "body": "Content"},
+        {"id": 2, "author_id": 1, "title": "Post 2", "body": "Content"},
+        {"id": 3, "author_id": 2, "title": "Hello", "body": "Content"},
+        {"id": 4, "author_id": 2, "title": "", "body": "No title"}
+    ]`);
+    // Charlie has no posts
+
+    db = new DebugSqlDB!()(mock, testDialect());
+    auto executor = new Executor();
+
+    // Test: which users have ALL posts with non-empty title
+    auto query = map!(
+        (Expr!User u) => jsonObject(
+            "name", u.firstName,
+            "allPostsTitled", every!((Expr!Post p) => p.title.ne(""))(u.posts)
+        )
+    )(getByIds!User([1, 2, 3]));
+
+    auto result = awaitSync(executor.execute(query));
+
+    assert(result.length == 3);
+    // Alice: all posts have titles → true
+    assert(result[0]["name"].str == "Alice");
+    assert(result[0]["allPostsTitled"].boolean == true, "Alice's posts should all have titles");
+    // Bob: has one post without title → false
+    assert(result[1]["name"].str == "Bob");
+    assert(result[1]["allPostsTitled"].boolean == false, "Bob should have at least one untitled post");
+    // Charlie: no posts (vacuous truth) → true
+    assert(result[2]["name"].str == "Charlie");
+    assert(result[2]["allPostsTitled"].boolean == true, "Charlie with no posts should satisfy every()");
+
+    debug(sql) {
+        import std.stdio : writeln;
+        writeln("\n=== Test: every() with title predicate ===");
+        db.printSQL();
+    }
+}
+
+// Test some() with empty collection
+unittest {
+    auto mock = new MockDB!()();
+    mock.setTableData("users", `[
+        {"id": 1, "first_name": "Alice"}
+    ]`);
+    mock.setTableData("posts", `[]`);  // No posts at all
+
+    db = new DebugSqlDB!()(mock, testDialect());
+    auto executor = new Executor();
+
+    // Test: some() on empty collection should return false
+    auto query = map!(
+        (Expr!User u) => some!((Expr!Post p) => p.title.ne(""))(u.posts)
+    )(getByIds!User([1]));
+
+    auto result = awaitSync(executor.execute(query));
+
+    assert(result.length == 1);
+    assert(result[0] == false, "some() on empty collection should be false");
+}
+
+// Test every() with empty collection (vacuous truth)
+unittest {
+    auto mock = new MockDB!()();
+    mock.setTableData("users", `[
+        {"id": 1, "first_name": "Alice"}
+    ]`);
+    mock.setTableData("posts", `[]`);  // No posts at all
+
+    db = new DebugSqlDB!()(mock, testDialect());
+    auto executor = new Executor();
+
+    // Test: every() on empty collection should return true (vacuous truth)
+    auto query = map!(
+        (Expr!User u) => every!((Expr!Post p) => p.title.ne(""))(u.posts)
+    )(getByIds!User([1]));
+
+    auto result = awaitSync(executor.execute(query));
+
+    assert(result.length == 1);
+    assert(result[0] == true, "every() on empty collection should be true (vacuous truth)");
 }
 

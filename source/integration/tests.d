@@ -5,6 +5,7 @@
  */
 module integration.tests;
 
+import std.conv : to;
 import std.json : JSONType, JSONValue;
 import integration.test_framework;
 
@@ -613,6 +614,86 @@ void testQueryIsNullField() {
 }
 
 // ============================================================================
+// Collection Predicate Tests (some/every)
+// ============================================================================
+
+void testQueryHasPostsField() {
+    auto response = graphql(`{
+        users {
+            firstName
+            hasPosts
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 3, "Expected at least 3 users");
+
+    // Check hasPosts for each user
+    // Alice and Bob have posts, Charlie does not
+    foreach (user; users) {
+        auto name = user["firstName"].str;
+        auto hasPosts = user["hasPosts"].boolean;
+
+        if (name == "Alice" || name == "Bob") {
+            assertTrue(hasPosts, name ~ " should have posts");
+        } else if (name == "Charlie") {
+            assertTrue(!hasPosts, "Charlie should not have posts");
+        }
+    }
+}
+
+void testQueryAllPostsTitledField() {
+    auto response = graphql(`{
+        users {
+            firstName
+            allPostsTitled
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 3, "Expected at least 3 users");
+
+    // All seeded posts have titles, and every() on empty collection is vacuous truth
+    foreach (user; users) {
+        auto name = user["firstName"].str;
+        auto allTitled = user["allPostsTitled"].boolean;
+        assertTrue(allTitled, name ~ " should have allPostsTitled=true");
+    }
+}
+
+void testQuerySomeEveryWithPostDetails() {
+    // Test that some/every work alongside regular post queries
+    auto response = graphql(`{
+        users {
+            firstName
+            hasPosts
+            allPostsTitled
+            posts {
+                title
+            }
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 3, "Expected at least 3 users");
+
+    // Verify consistency between hasPosts and actual posts array
+    foreach (user; users) {
+        auto name = user["firstName"].str;
+        auto hasPosts = user["hasPosts"].boolean;
+        auto posts = user["posts"].array;
+
+        bool actuallyHasPosts = posts.length > 0;
+        assertTrue(hasPosts == actuallyHasPosts,
+            name ~ ": hasPosts=" ~ (hasPosts ? "true" : "false") ~
+            " but posts.length=" ~ posts.length.to!string);
+    }
+}
+
+// ============================================================================
 // Test Registration
 // ============================================================================
 
@@ -652,4 +733,9 @@ static this() {
 
     // Null check tests (isNull/isNotNull)
     registerTest("Query isNull/isNotNull fields", "tests", &testQueryIsNullField);
+
+    // Collection predicate tests (some/every)
+    registerTest("Query hasPosts (some)", "tests", &testQueryHasPostsField);
+    registerTest("Query allPostsTitled (every)", "tests", &testQueryAllPostsTitledField);
+    registerTest("Query some/every with post details", "tests", &testQuerySomeEveryWithPostDetails);
 }

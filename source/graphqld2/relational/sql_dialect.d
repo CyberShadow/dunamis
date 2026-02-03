@@ -27,6 +27,14 @@ interface SqlDialect {
     /// Returns: (operand IS NULL)
     string isNullOp(string operandSql);
 
+    /// Generate SQL for EXISTS subquery.
+    /// Returns: EXISTS (subquery)
+    string existsSubquery(string subquery);
+
+    /// Generate SQL for NOT EXISTS subquery.
+    /// Returns: NOT EXISTS (subquery)
+    string notExistsSubquery(string subquery);
+
     /// Get the dialect name for debugging
     string name();
 }

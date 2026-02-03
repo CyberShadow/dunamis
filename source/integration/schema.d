@@ -10,7 +10,7 @@ import std.json : JSONValue;
 import std.typecons : Nullable;
 
 import graphqld2.core;
-import graphqld2.core.expr : ternary;
+import graphqld2.core.expr : ternary, some, every;
 import graphqld2.relational.schema : Table, ForeignKey, BelongsTo, HasMany, Col;
 import graphqld2.relational.demo : DemoEntity, CrudMutations;
 import graphqld2.relational.mutation : insert;
@@ -117,6 +117,19 @@ mixin template TestSchema(alias db) {
             import graphqld2.core.expr : ternary;
             return ternary(u.age.lt(13), "child",
                    ternary(u.age.lt(20), "teen", "adult"));
+        }
+
+        /// Computed field: does this user have any posts? (tests some)
+        static auto hasPosts(Expr!User u) {
+            import graphqld2.core.expr : some;
+            return some!((Expr!Post p) => p.title.ne(""))(u.posts);
+        }
+
+        /// Computed field: do all posts have titles? (tests every)
+        /// Note: For users with no posts, this returns true (vacuous truth)
+        static auto allPostsTitled(Expr!User u) {
+            import graphqld2.core.expr : every;
+            return every!((Expr!Post p) => p.title.ne(""))(u.posts);
         }
     }
 

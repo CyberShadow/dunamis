@@ -27,6 +27,14 @@ class MySQLDialect : SqlDialect {
         return "(" ~ operandSql ~ " IS NULL)";
     }
 
+    override string existsSubquery(string subquery) {
+        return "EXISTS (" ~ subquery ~ ")";
+    }
+
+    override string notExistsSubquery(string subquery) {
+        return "NOT EXISTS (" ~ subquery ~ ")";
+    }
+
     override string name() { return "MySQL"; }
 
     private static string toSqlOp(string op) {
@@ -83,4 +91,10 @@ unittest {
 
     // IS NULL
     assert(dialect.isNullOp("a") == "(a IS NULL)");
+
+    // EXISTS / NOT EXISTS
+    assert(dialect.existsSubquery("SELECT 1 FROM posts WHERE author_id = users.id") ==
+           "EXISTS (SELECT 1 FROM posts WHERE author_id = users.id)");
+    assert(dialect.notExistsSubquery("SELECT 1 FROM posts WHERE author_id = users.id") ==
+           "NOT EXISTS (SELECT 1 FROM posts WHERE author_id = users.id)");
 }

@@ -36,6 +36,13 @@ class EvalContext {
     /// - SortItemExpr calls getSortItem(_parentSort, _isLeftItem) to get its ref
     private AnyRef[2][void*] _sortItemsMap;
 
+    /// Predicate evaluation items keyed by SomeExpr/EveryExpr identity.
+    /// Communication between SomeExpr/EveryExpr and EveryItemOfExpr:
+    /// - SomeExpr/EveryExpr calls setPredicateItem(this, ref) before evaluating predicate
+    /// - EveryItemOfExpr calls getPredicateItem(_parentMap) if getCurrentRefs is empty
+    /// Unlike map which evaluates all items at once, some/every evaluates one at a time.
+    private AnyRef[void*] _predicateItemMap;
+
     /// Expression evaluation cache, keyed by expression object identity.
     /// Used by evalAs() to automatically memoize expression evaluation.
     /// When the same expression is evaluated multiple times (e.g., via
@@ -73,6 +80,21 @@ class EvalContext {
         return AnyRef.init;
     }
 
+    /// Set single predicate item for SomeExpr/EveryExpr.
+    /// Used during some/every predicate evaluation (one item at a time).
+    void setPredicateItem(Object predicateExpr, AnyRef item) {
+        _predicateItemMap[cast(void*) predicateExpr] = item;
+    }
+
+    /// Get single predicate item for EveryItemOfExpr in some/every context.
+    /// Returns AnyRef.init if not set.
+    AnyRef getPredicateItem(Object predicateExpr) {
+        if (auto p = cast(void*) predicateExpr in _predicateItemMap) {
+            return *p;
+        }
+        return AnyRef.init;
+    }
+
     /// Get cached Promise for an expression, or null if not cached.
     /// Used internally by evalAs() for automatic memoization.
     Object getCachedEval(Object expr) {
@@ -86,6 +108,18 @@ class EvalContext {
     /// Used internally by evalAs() for automatic memoization.
     void setCachedEval(Object expr, Object promise) {
         _exprCache[cast(void*) expr] = promise;
+    }
+
+    /// Clear the cached eval for a specific expression.
+    /// Used by some/every to invalidate placeholder cache between iterations.
+    void clearCachedEval(Object expr) {
+        _exprCache.remove(cast(void*) expr);
+    }
+
+    /// Clear all cached evaluations.
+    /// Used when context state changes in ways that invalidate all cached results.
+    void clearAllCachedEvals() {
+        _exprCache.clear();
     }
 }
 

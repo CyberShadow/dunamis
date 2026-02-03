@@ -158,6 +158,14 @@ class SqlOptimizer : ExprOptimizer {
                     parent.replaceDependency(i, replacement);
                 }
             }
+
+            // Check if this dependency is a some/every predicate that could be pushed down
+            if (auto collPred = cast(CollectionPredicateInfo) dep) {
+                auto replacement = tryPushDownCollectionPredicate(dep, collPred, ctx);
+                if (replacement !is null && replacement !is dep) {
+                    parent.replaceDependency(i, replacement);
+                }
+            }
         }
     }
 
@@ -377,6 +385,190 @@ class SqlOptimizer : ExprOptimizer {
 
         // Create and return projection for computed column
         return createProjectComputedExpr(queryNodeId, alias_, typeid(bool), input, prefetch);
+    }
+
+    /// Try to push down a collection predicate (some/every) to SQL EXISTS subquery.
+    ///
+    /// Converts:
+    ///   some!((p) => p.isPublished)(user.posts)
+    /// To:
+    ///   EXISTS (SELECT 1 FROM posts WHERE posts.author_id = users.id AND posts.is_published = TRUE)
+    protected ExprBase tryPushDownCollectionPredicate(ExprBase expr, CollectionPredicateInfo collPred, OptimizeContext ctx) {
+        import graphqld2.relational.optimize_context : RelationalOptimizeContext;
+
+        // The collection must be a HasMany relationship
+        auto hasManyInfo = cast(HasManyInfo) collPred.collection;
+        if (hasManyInfo is null) {
+            return null;  // Can only push down HasMany collections
+        }
+
+        // Get info about the relationship
+        auto childTable = hasManyInfo.childTable;
+        auto fkColumn = hasManyInfo.fkColumn;
+
+        // Try to convert the predicate to SQL (operating on the child table)
+        auto predicateSql = tryGetPredicateSql(collPred.predicate, collPred.itemPlaceholder, childTable);
+        if (predicateSql.isNull) {
+            return null;  // Can't convert predicate to SQL
+        }
+
+        // Find the parent QueryNode from the HasMany's input expression
+        auto relCtx = ctx.getSourceContext!RelationalOptimizeContext();
+        if (relCtx is null) {
+            return null;
+        }
+
+        // Get the parent table name - walk up to find the MapExpr's QueryNode
+        JoinHop[] joinPath;
+        ExprBase baseInput;
+        auto parentMapExpr = findMapExprFromChain(hasManyInfo.inputExpr, joinPath, baseInput);
+        if (parentMapExpr is null) {
+            return null;
+        }
+
+        auto parentNode = relCtx.getNode(parentMapExpr);
+        if (parentNode is null) {
+            return null;
+        }
+
+        auto parentTable = parentNode.table;
+        auto prefetch = relCtx.getPrefetchExpr(parentNode);
+
+        // Build the EXISTS subquery
+        // SELECT 1 FROM childTable WHERE childTable.fk = parentTable.id AND predicate
+        string subquery = "SELECT 1 FROM " ~ childTable ~
+                         " WHERE " ~ childTable ~ "." ~ fkColumn ~ " = " ~ parentTable ~ ".id";
+
+        if (predicateSql.get.length > 0) {
+            subquery ~= " AND " ~ predicateSql.get;
+        }
+
+        // Build the final SQL expression
+        string sqlExpr;
+        if (collPred.isEvery) {
+            // every() = NOT EXISTS (... WHERE NOT predicate)
+            // But we have the positive predicate, so we need to negate it for the subquery
+            auto negatedSubquery = "SELECT 1 FROM " ~ childTable ~
+                                  " WHERE " ~ childTable ~ "." ~ fkColumn ~ " = " ~ parentTable ~ ".id" ~
+                                  " AND NOT (" ~ predicateSql.get ~ ")";
+            sqlExpr = _dialect.notExistsSubquery(negatedSubquery);
+        } else {
+            // some() = EXISTS (... WHERE predicate)
+            sqlExpr = _dialect.existsSubquery(subquery);
+        }
+
+        // Create computed column alias
+        auto alias_ = "computed_" ~ (_nextComputedAlias++).to!string;
+
+        // Register the computed column on the parent QueryNode
+        if (parentNode.id !in _computedColumns) {
+            _computedColumns[parentNode.id] = [];
+        }
+        _computedColumns[parentNode.id] ~= ComputedColumn(alias_, sqlExpr, typeid(bool));
+
+        // Find the input expression that provides parent entity refs
+        auto input = extractInputFromChain(hasManyInfo.inputExpr);
+
+        // Create and return projection for computed column
+        return createProjectComputedExpr(parentNode.id, alias_, typeid(bool), input, prefetch);
+    }
+
+    /// Try to convert a predicate expression to SQL for use in EXISTS subquery.
+    /// The predicate operates on child entities, so column accesses on the placeholder
+    /// are converted to references to the child table.
+    private Nullable!string tryGetPredicateSql(ExprBase predicate, Object itemPlaceholder, string childTable) {
+        // Check if it's a column access on the placeholder
+        if (auto colAccess = cast(ColumnAccessInfo) predicate) {
+            // Check if the input is the placeholder (or reaches it through the chain)
+            if (isPlaceholderAccess(colAccess.inputExpr, itemPlaceholder)) {
+                return Nullable!string(childTable ~ "." ~ colAccess.sqlColumn);
+            }
+        }
+
+        // Check if it's a binary operation
+        if (auto binOp = cast(BinaryOpInfo) predicate) {
+            auto leftSql = tryGetPredicateSql(binOp.left, itemPlaceholder, childTable);
+            auto rightSql = tryGetPredicateSql(binOp.right, itemPlaceholder, childTable);
+            if (!leftSql.isNull && !rightSql.isNull) {
+                return Nullable!string(_dialect.binaryOp(binOp.operator, leftSql.get, rightSql.get));
+            }
+        }
+
+        // Check if it's a unary operation
+        if (auto unaryOp = cast(UnaryOpInfo) predicate) {
+            auto operandSql = tryGetPredicateSql(unaryOp.operand, itemPlaceholder, childTable);
+            if (!operandSql.isNull) {
+                return Nullable!string(_dialect.unaryOp(unaryOp.operator, operandSql.get));
+            }
+        }
+
+        // Check if it's a ternary operation
+        if (auto ternaryOp = cast(TernaryInfo) predicate) {
+            auto condSql = tryGetPredicateSql(ternaryOp.condition, itemPlaceholder, childTable);
+            auto trueSql = tryGetPredicateSql(ternaryOp.trueExpr, itemPlaceholder, childTable);
+            auto falseSql = tryGetPredicateSql(ternaryOp.falseExpr, itemPlaceholder, childTable);
+            if (!condSql.isNull && !trueSql.isNull && !falseSql.isNull) {
+                return Nullable!string(_dialect.caseWhen(condSql.get, trueSql.get, falseSql.get));
+            }
+        }
+
+        // Check if it's an isNull check
+        if (auto isNullOp = cast(IsNullInfo) predicate) {
+            auto operandSql = tryGetPredicateSql(isNullOp.operand, itemPlaceholder, childTable);
+            if (!operandSql.isNull) {
+                return Nullable!string(_dialect.isNullOp(operandSql.get));
+            }
+        }
+
+        // Check if it's a constant
+        if (auto constInfo = cast(ConstantInfo) predicate) {
+            return Nullable!string(constantToSqlLiteral(constInfo));
+        }
+
+        return Nullable!string.init;
+    }
+
+    /// Check if an expression is or reaches the placeholder through the chain.
+    private bool isPlaceholderAccess(ExprBase expr, Object placeholder) {
+        if (expr is null) return false;
+
+        // Direct match
+        if (cast(Object) expr is placeholder) {
+            return true;
+        }
+
+        // Check if it's EveryItemOfExpr with matching parent
+        if (auto everyItem = cast(EveryItemOfExprInfo) expr) {
+            if (everyItem.parentMap is placeholder) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// Extract input expression from a chain (for computed column lookup).
+    private ExprBase extractInputFromChain(ExprBase expr) {
+        // Walk through the chain to find EveryItemOfExpr
+        while (expr !is null) {
+            if (cast(EveryItemOfExprInfo) expr !is null) {
+                return expr;
+            }
+            if (auto colAccess = cast(ColumnAccessInfo) expr) {
+                expr = colAccess.inputExpr;
+                continue;
+            }
+            if (auto hasManyAccess = cast(HasManyInfo) expr) {
+                expr = hasManyAccess.inputExpr;
+                continue;
+            }
+            if (auto belongsTo = cast(BelongsToInfo) expr) {
+                expr = belongsTo.inputExpr;
+                continue;
+            }
+            break;
+        }
+        return expr;
     }
 
     /// Extract the input expression from a projection, binary op, unary op, or ternary op.
@@ -601,6 +793,18 @@ class CapturingSqlOptimizer : SqlOptimizer {
     /// Override to capture original expression before replacement
     override protected ExprBase tryPushDownBinaryOp(ExprBase expr, BinaryOpInfo binOp, OptimizeContext ctx) {
         auto replacement = super.tryPushDownBinaryOp(expr, binOp, ctx);
+        if (replacement !is null && replacement !is expr) {
+            // Capture the original expression
+            if (auto projComputed = cast(ProjectComputedInfo) replacement) {
+                _originalExprs[projComputed.columnAlias] = expr;
+            }
+        }
+        return replacement;
+    }
+
+    /// Override to capture original expression before replacement (for some/every)
+    override protected ExprBase tryPushDownCollectionPredicate(ExprBase expr, CollectionPredicateInfo collPred, OptimizeContext ctx) {
+        auto replacement = super.tryPushDownCollectionPredicate(expr, collPred, ctx);
         if (replacement !is null && replacement !is expr) {
             // Capture the original expression
             if (auto projComputed = cast(ProjectComputedInfo) replacement) {
@@ -872,6 +1076,12 @@ unittest {
         override string isNullOp(string operandSql) {
             return "(" ~ operandSql ~ " IS NULL)";
         }
+        override string existsSubquery(string subquery) {
+            return "EXISTS (" ~ subquery ~ ")";
+        }
+        override string notExistsSubquery(string subquery) {
+            return "NOT EXISTS (" ~ subquery ~ ")";
+        }
         override string name() { return "Test"; }
     }
     auto optimizer = new SqlOptimizer(new TestDialect());
@@ -921,6 +1131,12 @@ unittest {
         }
         override string isNullOp(string operandSql) {
             return "(" ~ operandSql ~ " IS NULL)";
+        }
+        override string existsSubquery(string subquery) {
+            return "EXISTS (" ~ subquery ~ ")";
+        }
+        override string notExistsSubquery(string subquery) {
+            return "NOT EXISTS (" ~ subquery ~ ")";
         }
         override string name() { return "Test"; }
     }
