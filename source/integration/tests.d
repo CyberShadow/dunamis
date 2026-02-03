@@ -368,6 +368,157 @@ void testSortWithoutOrderBy() {
 }
 
 // ============================================================================
+// Nested Sorting Tests (HasMany relationships)
+// ============================================================================
+
+void testNestedSortPostsByTitleAscending() {
+    // Test sorting posts within a user (HasMany relationship)
+    auto response = graphql(`{
+        users {
+            firstName
+            posts(orderBy: [{field: title, direction: ASC}]) {
+                title
+            }
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 1, "Expected at least 1 user");
+
+    // Find a user with posts and verify they're sorted
+    foreach (user; users) {
+        auto posts = user["posts"].array;
+        if (posts.length >= 2) {
+            // Verify ascending order by title
+            for (size_t i = 1; i < posts.length; i++) {
+                auto prev = posts[i - 1]["title"].str;
+                auto curr = posts[i]["title"].str;
+                assertTrue(prev <= curr,
+                    "Posts should be sorted by title ascending for user " ~ user["firstName"].str);
+            }
+            return; // Found a user with sortable posts
+        }
+    }
+    // It's OK if no user has multiple posts
+}
+
+void testNestedSortPostsByTitleDescending() {
+    // Test sorting posts in descending order within a user
+    auto response = graphql(`{
+        users {
+            firstName
+            posts(orderBy: [{field: title, direction: DESC}]) {
+                title
+            }
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 1, "Expected at least 1 user");
+
+    // Find a user with posts and verify they're sorted descending
+    foreach (user; users) {
+        auto posts = user["posts"].array;
+        if (posts.length >= 2) {
+            // Verify descending order by title
+            for (size_t i = 1; i < posts.length; i++) {
+                auto prev = posts[i - 1]["title"].str;
+                auto curr = posts[i]["title"].str;
+                assertTrue(prev >= curr,
+                    "Posts should be sorted by title descending for user " ~ user["firstName"].str);
+            }
+            return; // Found a user with sortable posts
+        }
+    }
+}
+
+void testNestedSortWithoutOrderBy() {
+    // Verify that nested queries without orderBy still work
+    auto response = graphql(`{
+        users {
+            firstName
+            posts {
+                title
+            }
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 1, "Expected at least 1 user");
+
+    // Just verify the query works and posts are returned
+    foreach (user; users) {
+        // posts should be an array (even if empty)
+        assertTrue(user["posts"].type == JSONType.array, "posts should be an array");
+    }
+}
+
+void testNestedSortCombinedWithRootSort() {
+    // Test sorting at both root and nested levels
+    auto response = graphql(`{
+        users(orderBy: [{field: firstName, direction: ASC}]) {
+            firstName
+            posts(orderBy: [{field: title, direction: DESC}]) {
+                title
+            }
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 2, "Expected at least 2 users");
+
+    // Verify root users are sorted ascending by firstName
+    for (size_t i = 1; i < users.length; i++) {
+        auto prev = users[i - 1]["firstName"].str;
+        auto curr = users[i]["firstName"].str;
+        assertTrue(prev <= curr, "Users should be sorted by firstName ascending");
+    }
+
+    // Verify nested posts are sorted descending by title (if any user has multiple posts)
+    foreach (user; users) {
+        auto posts = user["posts"].array;
+        if (posts.length >= 2) {
+            for (size_t i = 1; i < posts.length; i++) {
+                auto prev = posts[i - 1]["title"].str;
+                auto curr = posts[i]["title"].str;
+                assertTrue(prev >= curr,
+                    "Posts should be sorted by title descending for user " ~ user["firstName"].str);
+            }
+        }
+    }
+}
+
+void testNestedSortDeepNesting() {
+    // Test sorting at multiple nested levels (posts -> author relationship exists)
+    auto response = graphql(`{
+        posts(orderBy: [{field: title, direction: ASC}]) {
+            title
+            author {
+                firstName
+                posts(orderBy: [{field: title, direction: DESC}]) {
+                    title
+                }
+            }
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto posts = response["data"]["posts"].array;
+    assertTrue(posts.length >= 1, "Expected at least 1 post");
+
+    // Verify root posts are sorted ascending
+    for (size_t i = 1; i < posts.length; i++) {
+        auto prev = posts[i - 1]["title"].str;
+        auto curr = posts[i]["title"].str;
+        assertTrue(prev <= curr, "Root posts should be sorted by title ascending");
+    }
+}
+
+// ============================================================================
 // Logic Expression Tests (Boolean operators, NOT, Ternary)
 // ============================================================================
 
@@ -803,6 +954,13 @@ static this() {
     registerTest("Sort posts by title", "tests", &testSortPostsByTitle);
     registerTest("Sort tasks by status", "tests", &testSortTasksByStatus);
     registerTest("Sort without orderBy", "tests", &testSortWithoutOrderBy);
+
+    // Nested sorting tests (HasMany relationships)
+    registerTest("Nested sort posts ascending", "tests", &testNestedSortPostsByTitleAscending);
+    registerTest("Nested sort posts descending", "tests", &testNestedSortPostsByTitleDescending);
+    registerTest("Nested sort without orderBy", "tests", &testNestedSortWithoutOrderBy);
+    registerTest("Nested sort combined with root", "tests", &testNestedSortCombinedWithRootSort);
+    registerTest("Nested sort deep nesting", "tests", &testNestedSortDeepNesting);
 
     // Logic expression tests (Boolean AND/OR, NOT, Ternary)
     registerTest("Query isAdult computed field (comparison)", "tests", &testQueryIsAdultField);

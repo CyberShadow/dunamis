@@ -24,22 +24,24 @@ import dynamo.graphql.schema : isSchema;
 // PaginationPlugin
 // ============================================================================
 
-/// Plugin that adds first/offset pagination arguments to all array-returning fields.
+/// Plugin that adds first/offset pagination arguments to all array-returning fields,
+/// including nested HasMany relationships.
 ///
-/// Transforms:
+/// Transforms root Query fields:
 ///   users: [User!]!
 /// Into:
 ///   users(first: Int, offset: Int): [User!]!
+///
+/// And nested entity fields:
+///   User.posts: [Post!]!
+/// Into:
+///   User.posts(first: Int, offset: Int): [Post!]!
 ///
 /// Example:
 /// ---
 /// struct Query {
 ///     mixin Table!(User, "users");
 ///     mixin Table!(Post, "posts");
-///
-///     static auto apiVersion(Expr!Query q) {
-///         return constant("1.0", q);
-///     }
 /// }
 ///
 /// alias BaseSchema = Schema!Query;
@@ -47,25 +49,133 @@ import dynamo.graphql.schema : isSchema;
 ///
 /// // Now:
 /// //   users(first: Int, offset: Int): [User!]!
-/// //   posts(first: Int, offset: Int): [Post!]!
-/// //   apiVersion: String!  (unchanged - not an array)
+/// //   User.posts(first: Int, offset: Int): [Post!]!
 /// ---
 template PaginationPlugin(alias S) if (isSchema!S) {
-    // Generate PaginatedQuery struct with transformed fields
+    import std.meta : AliasSeq, staticMap;
+    import dynamo.graphql.schema : getAllEntityTypes, getGraphQLTypeName, GqlName;
+    import dynamo.graphql.transform : isTypeInList, IdentityTypeMap;
+
+    // Get all entity types discovered from the schema
+    alias _OriginalQuery = S.Query;
+    alias _AllEntityTypes = getAllEntityTypes!_OriginalQuery;
+
+    // Generate PaginatedQuery struct with transformed fields.
+    // Array fields get pagination arguments added.
     struct PaginatedQuery {
-        static foreach (member; getFieldMembers!(S.Query)) {
-            static if (isArrayReturningField!(__traits(getMember, S.Query, member))) {
+        static foreach (member; getFieldMembers!(_OriginalQuery)) {
+            static if (isArrayReturningField!(__traits(getMember, _OriginalQuery, member))) {
                 // Array field: add pagination arguments
-                mixin PaginatedArrayField!(S.Query, member);
+                mixin PaginatedArrayField!(_OriginalQuery, member);
             } else {
                 // Non-array field: forward unchanged
-                mixin ForwardField!(S.Query, member);
+                mixin ForwardField!(_OriginalQuery, member);
             }
+        }
+    }
+
+    // Generate paginated versions of each entity type.
+    // Each paginated entity type:
+    // 1. Has @GqlName to preserve the original GraphQL type name
+    // 2. Has pagination arguments on array-returning fields
+    template PaginatedEntity(Entity) {
+        // Use @GqlName to ensure the paginated type has the same GraphQL name as the original
+        @GqlName(getGraphQLTypeName!Entity)
+        struct PaginatedEntity {
+            // Copy entity infrastructure
+            static if (__traits(hasMember, Entity, "nodeId")) {
+                typeof(Entity.nodeId) nodeId;
+                this(string id) { nodeId = typeof(nodeId)(id); }
+                string toString() const { return nodeId.toString(); }
+            }
+
+            // Copy all fields with pagination on array fields
+            static foreach (member; getFieldMembers!Entity) {
+                static if (isArrayReturningField!(__traits(getMember, Entity, member))) {
+                    mixin PaginatedEntityArrayField!(Entity, member);
+                } else {
+                    mixin ForwardField!(Entity, member);
+                }
+            }
+        }
+    }
+
+    // Map all entity types to their paginated versions
+    alias AllEntityTypes = staticMap!(PaginatedEntity, _AllEntityTypes);
+
+    /// Entity type map: maps original entity types to their paginated versions.
+    /// Used by the compiler to resolve fields on transformed types.
+    template EntityTypeMap(T) {
+        static if (isTypeInList!(T, _AllEntityTypes)) {
+            alias EntityTypeMap = PaginatedEntity!T;
+        } else {
+            alias EntityTypeMap = T;  // Identity for non-entity types
         }
     }
 
     alias Query = PaginatedQuery;
     alias Mutation = S.Mutation;
+}
+
+/// Mixin for paginated array field on an entity (adds first/offset arguments).
+/// Similar to PaginatedArrayField but for entity types.
+mixin template PaginatedEntityArrayField(Entity, string fieldName) {
+    import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
+    import std.meta : AliasSeq;
+    import dynamo.core.expr : Expr, ExprResultType, entityCast;
+    import dynamo.core.pagination : limit, offset;
+    import std.typecons : Nullable;
+
+    alias _srcFn = __traits(getMember, Entity, fieldName);
+    alias _SrcParams = Parameters!_srcFn;
+    alias _SrcDefaults = ParameterDefaults!_srcFn;
+    enum string[] _srcParamNames = [ParameterIdentifierTuple!_srcFn];
+
+    alias _SrcFirstParam = _SrcParams[0];
+    alias _SrcEntity = ExprResultType!_SrcFirstParam;
+
+    // Build parameter list - first param is Expr!(typeof(this)) for the wrapper entity
+    enum string _paramListStr = () {
+        string result = "Expr!(typeof(this)) " ~ _srcParamNames[0];
+        static foreach (i; 1 .. _SrcParams.length) {{
+            result ~= ", ";
+            result ~= _SrcParams[i].stringof ~ " " ~ _srcParamNames[i];
+            static if (!is(_SrcDefaults[i] == void)) {
+                result ~= " = " ~ _SrcDefaults[i].stringof;
+            }
+        }}
+        result ~= ", Nullable!int first = Nullable!int.init";
+        result ~= ", Nullable!int offset = Nullable!int.init";
+        return result;
+    }();
+
+    // Build argument list - cast wrapper entity back to original
+    enum string _argListStr = () {
+        string result = "entityCast!_SrcEntity(" ~ _srcParamNames[0] ~ ")";
+        static foreach (i; 1 .. _SrcParams.length) {
+            result ~= ", " ~ _srcParamNames[i];
+        }
+        return result;
+    }();
+
+    alias _ElementType = ArrayFieldElementType!_srcFn;
+
+    // Apply pagination
+    private static Expr!(_ElementType[]) _applyPagination(T)(T base, Nullable!int first, Nullable!int offset_) {
+        if (offset_.isNull && first.isNull) {
+            return base;
+        } else if (offset_.isNull) {
+            return base.limit(cast(size_t) first.get);
+        } else if (first.isNull) {
+            return base.offset(cast(size_t) offset_.get);
+        } else {
+            return base.offset(cast(size_t) offset_.get).limit(cast(size_t) first.get);
+        }
+    }
+
+    @(__traits(getAttributes, _srcFn))
+    mixin("static auto " ~ fieldName ~ "(" ~ _paramListStr ~ ") { " ~
+          "return _applyPagination(_srcFn(" ~ _argListStr ~ "), first, offset); }");
 }
 
 // ============================================================================
@@ -289,4 +399,225 @@ unittest {
 
     // Should return all users
     assert(result["users"].array.length == 3, "Should have all 3 users");
+}
+
+// Test nested HasMany pagination - SDL should show pagination args on nested fields
+unittest {
+    import dynamo.relational.schema;
+    import dynamo.relational.demo;
+    import dynamo.graphql.schema : Schema, generateSchemaSDL;
+    import std.algorithm : canFind;
+
+    static MockDB!() db;
+
+    // For circular references (User -> Post -> User), we need forward declaration pattern.
+    // In D, we can use a mixin template with string for deferred resolution.
+
+    // Simple test case: User has posts (no back-reference to avoid circular issue)
+    static struct Post {
+        mixin DemoEntity!(db, "posts");
+        mixin Col!("title", string);
+    }
+
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("name", string);
+        mixin HasMany!("posts", Post, "author_id");
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    alias PaginatedSchema = PaginationPlugin!(Schema!Query);
+
+    // Verify SDL shows pagination arguments on NESTED array fields
+    enum sdl = generateSchemaSDL!PaginatedSchema;
+
+    // Debug: print SDL
+    // pragma(msg, "=== PAGINATED SDL ===");
+    // pragma(msg, sdl);
+
+    // Root Query fields should have pagination
+    static assert(sdl.canFind("users("), "Query.users should have arguments: " ~ sdl);
+
+    // User.posts (HasMany) should have pagination
+    // Look for the pattern in the User type definition
+    // The User type should have: posts(first: Int, offset: Int): [Post!]!
+    static assert(sdl.canFind("posts(first: Int"), "User.posts should have first arg: " ~ sdl);
+}
+
+// Test nested HasMany pagination - runtime execution with per-parent pagination
+unittest {
+    import std.json;
+    import std.conv : to;
+    import ae.utils.promise.await : awaitSync;
+    import dynamo.core;
+    import dynamo.relational.schema;
+    import dynamo.relational.demo;
+    import dynamo.relational.eval_context;
+    import dynamo.graphql.schema : Schema, GqlHidden;
+    import dynamo.graphql.compiler : compileQuery;
+
+    // Wrap in struct to allow forward references
+    struct TestSchema {
+        static MockDB!() db;
+
+        struct Post {
+            mixin DemoEntity!(db, "posts");
+            mixin Col!("title", string);
+            @GqlHidden mixin Col!("authorId", long, "author_id");
+        }
+
+        struct User {
+            mixin DemoEntity!(db, "users");
+            mixin Col!("name", string);
+            mixin HasMany!("posts", Post, "author_id");
+        }
+
+        struct Query {
+            mixin Table!(User, "users");
+        }
+    }
+
+    alias db = TestSchema.db;
+    alias Query = TestSchema.Query;
+
+    alias PaginatedSchema = PaginationPlugin!(Schema!Query);
+
+    // Set up mock data: 2 users, 5 posts each
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "name": "Alice"},
+        {"id": 2, "name": "Bob"}
+    ]`);
+    db.setTableData("posts", `[
+        {"id": 1, "title": "Alice Post 1", "author_id": 1},
+        {"id": 2, "title": "Alice Post 2", "author_id": 1},
+        {"id": 3, "title": "Alice Post 3", "author_id": 1},
+        {"id": 4, "title": "Alice Post 4", "author_id": 1},
+        {"id": 5, "title": "Alice Post 5", "author_id": 1},
+        {"id": 6, "title": "Bob Post 1", "author_id": 2},
+        {"id": 7, "title": "Bob Post 2", "author_id": 2},
+        {"id": 8, "title": "Bob Post 3", "author_id": 2},
+        {"id": 9, "title": "Bob Post 4", "author_id": 2},
+        {"id": 10, "title": "Bob Post 5", "author_id": 2}
+    ]`);
+
+    // Query with nested pagination: get first 2 posts for each user
+    auto query = compileQuery!PaginatedSchema(`{
+        users {
+            name
+            posts(first: 2) {
+                title
+            }
+        }
+    }`);
+
+    auto result = awaitSync(new Executor().execute(query));
+
+    // Debug output
+    string debugInfo = "Result: " ~ result.to!string;
+
+    // Should have 2 users
+    assert(result["users"].array.length == 2, "Should have 2 users. " ~ debugInfo);
+
+    // Each user should have at most 2 posts (per-parent pagination)
+    foreach (i, user; result["users"].array) {
+        auto posts = user["posts"].array;
+        assert(posts.length == 2,
+            "User " ~ i.to!string ~ " should have 2 posts, got " ~ posts.length.to!string ~ ". " ~ debugInfo);
+    }
+
+    // Check specific posts - Alice's first 2 posts
+    auto alicePosts = result["users"][0]["posts"].array;
+    assert(alicePosts[0]["title"].str == "Alice Post 1",
+        "First post should be 'Alice Post 1'. " ~ debugInfo);
+    assert(alicePosts[1]["title"].str == "Alice Post 2",
+        "Second post should be 'Alice Post 2'. " ~ debugInfo);
+
+    // Check Bob's first 2 posts
+    auto bobPosts = result["users"][1]["posts"].array;
+    assert(bobPosts[0]["title"].str == "Bob Post 1",
+        "First post should be 'Bob Post 1'. " ~ debugInfo);
+    assert(bobPosts[1]["title"].str == "Bob Post 2",
+        "Second post should be 'Bob Post 2'. " ~ debugInfo);
+}
+
+// Test nested pagination with offset - skip first N posts per user
+unittest {
+    import std.json;
+    import std.conv : to;
+    import ae.utils.promise.await : awaitSync;
+    import dynamo.core;
+    import dynamo.relational.schema;
+    import dynamo.relational.demo;
+    import dynamo.relational.eval_context;
+    import dynamo.graphql.schema : Schema, GqlHidden;
+    import dynamo.graphql.compiler : compileQuery;
+
+    // Wrap in struct to allow forward references
+    struct TestSchema {
+        static MockDB!() db;
+
+        struct Post {
+            mixin DemoEntity!(db, "posts");
+            mixin Col!("title", string);
+            @GqlHidden mixin Col!("authorId", long, "author_id");
+        }
+
+        struct User {
+            mixin DemoEntity!(db, "users");
+            mixin Col!("name", string);
+            mixin HasMany!("posts", Post, "author_id");
+        }
+
+        struct Query {
+            mixin Table!(User, "users");
+        }
+    }
+
+    alias db = TestSchema.db;
+    alias Query = TestSchema.Query;
+
+    alias PaginatedSchema = PaginationPlugin!(Schema!Query);
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "name": "Alice"}
+    ]`);
+    db.setTableData("posts", `[
+        {"id": 1, "title": "Post 1", "author_id": 1},
+        {"id": 2, "title": "Post 2", "author_id": 1},
+        {"id": 3, "title": "Post 3", "author_id": 1},
+        {"id": 4, "title": "Post 4", "author_id": 1},
+        {"id": 5, "title": "Post 5", "author_id": 1}
+    ]`);
+
+    // Query with offset: skip first 2, take next 2
+    auto query = compileQuery!PaginatedSchema(`{
+        users {
+            name
+            posts(first: 2, offset: 2) {
+                title
+            }
+        }
+    }`);
+
+    auto result = awaitSync(new Executor().execute(query));
+
+    string debugInfo = "Result: " ~ result.to!string;
+
+    // Should have 1 user
+    assert(result["users"].array.length == 1, "Should have 1 user. " ~ debugInfo);
+
+    // User should have 2 posts (skip 2, take 2 from 5 total)
+    auto posts = result["users"][0]["posts"].array;
+    assert(posts.length == 2, "Should have 2 posts. " ~ debugInfo);
+
+    // Posts should be Post 3 and Post 4 (skipped first 2)
+    assert(posts[0]["title"].str == "Post 3",
+        "First post should be 'Post 3'. " ~ debugInfo);
+    assert(posts[1]["title"].str == "Post 4",
+        "Second post should be 'Post 4'. " ~ debugInfo);
 }

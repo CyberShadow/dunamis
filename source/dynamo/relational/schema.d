@@ -1290,6 +1290,20 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
                         auto parentNode = relCtx.getNode(parentMapExpr);
                         if (parentNode !is null) {
                             node.setParent(parentNode, hasManyExpr.fkColumn, hasManyExpr.parentTypeName);
+
+                            // For HasMany with pagination, use per-parent pagination (window functions)
+                            // Move global limit/offset to per-parent limit/offset
+                            if (!node.limit_.isNull || !node.offset_.isNull) {
+                                if (!node.limit_.isNull) {
+                                    node.perParentLimit_ = node.limit_;
+                                    node.limit_.nullify();
+                                }
+                                if (!node.offset_.isNull) {
+                                    node.perParentOffset_ = node.offset_;
+                                    node.offset_.nullify();
+                                }
+                                node.useWindowFunction = true;
+                            }
                         }
                     }
                 }

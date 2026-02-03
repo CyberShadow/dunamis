@@ -109,8 +109,12 @@ GraphQLResult compileQuery(alias SchemaOrQuery)(string queryString, JSONValue va
             throw new CompilerException("Mutation operations require a Schema with Mutation type");
         }
     } else {
-        // Query operation
-        return compileRootSelectionSet!QueryType(op.ss, variables);
+        // Query operation - use schema-aware compilation if EntityTypeMap is available
+        static if (isSchema!SchemaOrQuery && __traits(hasMember, SchemaOrQuery, "EntityTypeMap")) {
+            return compileRootSelectionSetWithSchema!(QueryType, SchemaOrQuery)(op.ss, variables);
+        } else {
+            return compileRootSelectionSet!QueryType(op.ss, variables);
+        }
     }
 }
 
@@ -928,6 +932,83 @@ DynamicJsonObjectExpr compileRootSelectionSet(Query)(SelectionSet ss, JSONValue 
     return buildDynamicJsonObject(fieldNames, fieldExprs);
 }
 
+/// Schema-aware root selection set compilation.
+/// Uses Schema.EntityTypeMap to resolve entity field types.
+DynamicJsonObjectExpr compileRootSelectionSetWithSchema(Query, alias Schema)(SelectionSet ss, JSONValue variables) {
+    auto selections = iterateSelections(ss);
+
+    if (selections.length == 0) {
+        throw new CompilerException("Empty selection set");
+    }
+
+    string[] fieldNames;
+    ExprBase[] fieldExprs;
+
+    foreach (sel; selections) {
+        if (sel.ruleSelection != SelectionEnum.Field) continue;
+        auto field = sel.field;
+        fieldNames ~= getOutputName(field);
+        fieldExprs ~= compileRootFieldWithSchema!(Query, Schema)(field, variables);
+    }
+
+    if (fieldNames.length == 0) {
+        throw new CompilerException("No fields in root selection set");
+    }
+
+    return buildDynamicJsonObject(fieldNames, fieldExprs);
+}
+
+/// Schema-aware root field compilation.
+ExprBase compileRootFieldWithSchema(Parent, alias Schema)(Field field, JSONValue variables) {
+    auto fieldName = getFieldName(field);
+    auto parentExpr = singleton(Parent.init);
+
+    static foreach (member; __traits(allMembers, Parent)) {{
+        static if (!isInternalMember!member) {
+            alias memberSym = __traits(getMember, Parent, member);
+            static if (is(typeof(memberSym) == function)) {
+                enum gqlName = getGqlName!(memberSym, member);
+                if (fieldName == gqlName) {
+                    return callRootFieldWithSchema!(memberSym, Parent, Schema)(parentExpr, field.args, field.ss, variables);
+                }
+            }
+        }
+    }}
+
+    throw new CompilerException("Unknown field: " ~ fieldName);
+}
+
+/// Schema-aware call to root field.
+ExprBase callRootFieldWithSchema(alias fn, Parent, alias Schema)(Expr!Parent parent, Arguments args, SelectionSet ss, JSONValue variables) {
+    import std.traits : Parameters, ReturnType, ParameterDefaults, ParameterIdentifierTuple;
+    import std.typecons : tuple;
+    import dynamo.core.expr : toJsonValue, Expr, ExprResultType, isExpr;
+
+    alias Params = Parameters!fn;
+    alias Return = ReturnType!fn;
+
+    static assert(isExpr!Return,
+        "Root field " ~ __traits(identifier, fn) ~ " must return an Expr type, got " ~ Return.stringof);
+
+    static if (Params.length == 1) {
+        auto resultExpr = fn(parent);
+    } else {
+        auto argTuple = mixin(() {
+            string code = "tuple(";
+            static foreach (i; 1 .. Params.length) {
+                code ~= (i > 1 ? ", " : "") ~
+                    "extractArg!(Params[" ~ i.stringof ~ "], ParameterDefaults!fn[" ~ i.stringof ~ "])" ~
+                    "(args, [ParameterIdentifierTuple!fn][" ~ i.stringof ~ "], variables)";
+            }
+            code ~= ")";
+            return code;
+        }());
+        auto resultExpr = fn(parent, argTuple.expand);
+    }
+
+    return compileFieldResultWithSchema!(typeof(resultExpr), Schema)(resultExpr, ss, variables);
+}
+
 // ============================================================================
 // Selection Set Compilation (for entity types)
 // ============================================================================
@@ -1069,6 +1150,130 @@ ExprBase compileFieldAccess(T)(Expr!T ref_, Field field, JSONValue variables) {
                         auto resultExpr = callComputedField!(memberSym, T)(ref_, field.args, variables);
                         // Handle the result based on return type
                         return compileFieldResult(resultExpr, field.ss, variables);
+                    }
+                }
+            }
+        }
+    }}
+
+    throw new CompilerException("Unknown field '" ~ fieldName ~ "' on type " ~ T.stringof);
+}
+
+// ============================================================================
+// Schema-Aware Field Compilation
+// ============================================================================
+
+/// Schema-aware version of compileFieldResult.
+/// Uses Schema.EntityTypeMap to determine field resolution type for entity arrays.
+ExprBase compileFieldResultWithSchema(ResultExpr, alias Schema)(ResultExpr resultExpr, SelectionSet ss, JSONValue variables) {
+    import dynamo.core.expr : ExprResultType, UnwrapNullableExpr, finalizeNullableObjectExpr;
+
+    alias ResultType = ExprResultType!ResultExpr;
+
+    static if (is(ResultType == E[], E)) {
+        static if (isCustomScalar!E || !is(E == struct)) {
+            return wrapAsJsonExpr(resultExpr);
+        } else {
+            if (ss is null) {
+                throw new CompilerException(
+                    "Field returning [" ~ E.stringof ~ "] requires a selection set");
+            }
+            // Use EntityTypeMap to get the field resolution type
+            alias FieldType = Schema.EntityTypeMap!E;
+            return compileMapExprWithSchema!(E, FieldType, Schema)(resultExpr, ss, variables);
+        }
+    }
+    else static if (is(ResultType == Nullable!T, T) && is(T == struct) && !isCustomScalar!T) {
+        if (ss is null) {
+            throw new CompilerException(
+                "Field returning " ~ T.stringof ~ " requires a selection set");
+        }
+        auto unwrapper = new UnwrapNullableExpr!T(resultExpr);
+        alias FieldType = Schema.EntityTypeMap!T;
+        auto innerExpr = compileSelectionSetBodyWithSchema!(T, FieldType, Schema)(unwrapper, ss, variables);
+        return finalizeNullableObjectExpr!T(resultExpr, unwrapper, innerExpr);
+    }
+    else static if (is(ResultType == struct) && !isCustomScalar!ResultType) {
+        if (ss is null) {
+            throw new CompilerException(
+                "Field returning " ~ ResultType.stringof ~ " requires a selection set");
+        }
+        alias FieldType = Schema.EntityTypeMap!ResultType;
+        return compileSelectionSetBodyWithSchema!(ResultType, FieldType, Schema)(resultExpr, ss, variables);
+    }
+    else {
+        return wrapAsJsonExpr(resultExpr);
+    }
+}
+
+/// Schema-aware map expression compilation.
+/// Entity is the actual expression type, FieldType is used for field resolution.
+MapExpr!(Entity, DynamicJsonObjectExpr) compileMapExprWithSchema(Entity, FieldType, alias Schema, Coll)(
+    Coll collection, SelectionSet ss, JSONValue variables
+) {
+    import dynamo.core.expr : Expr, map, entityCast;
+
+    return map!(
+        (Expr!Entity entity) {
+            // Cast to FieldType for field lookup, then compile with schema awareness
+            auto fieldRef = entityCast!FieldType(entity);
+            return compileSelectionSetBodyWithSchema!(FieldType, FieldType, Schema)(fieldRef, ss, variables);
+        }
+    )(collection);
+}
+
+/// Schema-aware selection set body compilation.
+/// T is the expression type, FieldType is used for field resolution.
+DynamicJsonObjectExpr compileSelectionSetBodyWithSchema(T, FieldType, alias Schema)(Expr!T ref_, SelectionSet ss, JSONValue variables) {
+    import dynamo.core.expr : entityCast;
+
+    auto selections = iterateSelections(ss);
+    if (selections.length == 0) {
+        throw new CompilerException("Empty selection set for " ~ T.stringof);
+    }
+
+    // Cast to FieldType if different from T
+    static if (is(T == FieldType)) {
+        return compileFieldsToJsonObjectWithSchema!(FieldType, Schema)(ref_, selections, variables);
+    } else {
+        auto fieldRef = entityCast!FieldType(ref_);
+        return compileFieldsToJsonObjectWithSchema!(FieldType, Schema)(fieldRef, selections, variables);
+    }
+}
+
+/// Schema-aware fields compilation.
+DynamicJsonObjectExpr compileFieldsToJsonObjectWithSchema(T, alias Schema)(Expr!T ref_, Selection[] selections, JSONValue variables) {
+    ExprBase[] fieldExprs;
+    string[] fieldNames;
+
+    foreach (sel; selections) {
+        if (sel.ruleSelection != SelectionEnum.Field) continue;
+        auto field = sel.field;
+        auto name = getFieldName(field);
+        auto outputName = getOutputName(field);
+
+        fieldNames ~= outputName;
+        fieldExprs ~= compileFieldAccessWithSchema!(T, Schema)(ref_, field, variables);
+    }
+
+    return buildDynamicJsonObject(fieldNames, fieldExprs);
+}
+
+/// Schema-aware field access.
+/// Looks up field methods on type T and uses Schema.EntityTypeMap for nested field resolution.
+ExprBase compileFieldAccessWithSchema(T, alias Schema)(Expr!T ref_, Field field, JSONValue variables) {
+    auto fieldName = getFieldName(field);
+
+    static foreach (member; __traits(allMembers, T)) {{
+        static if (!isInternalMember!member) {
+            alias memberSym = __traits(getMember, T, member);
+            static if (isFieldMethod!(T, memberSym)) {
+                static if (!hasGqlHidden!memberSym) {
+                    enum gqlName = getGqlName!(memberSym, member);
+
+                    if (fieldName == gqlName) {
+                        auto resultExpr = callComputedField!(memberSym, T)(ref_, field.args, variables);
+                        return compileFieldResultWithSchema!(typeof(resultExpr), Schema)(resultExpr, field.ss, variables);
                     }
                 }
             }

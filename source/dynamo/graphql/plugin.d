@@ -109,6 +109,7 @@ template ArrayFieldElementType(alias fn) {
 mixin template ForwardField(SourceType, string fieldName) {
     import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
     import std.meta : AliasSeq;
+    import std.conv : to;
     import dynamo.core.expr : Expr, ExprResultType, entityCast;
 
     // Get the source function and its metadata
@@ -121,17 +122,23 @@ mixin template ForwardField(SourceType, string fieldName) {
     alias _SrcFirstParam = _SrcParams[0];
     alias _SrcEntity = ExprResultType!_SrcFirstParam;
 
+    // Create type aliases for each parameter to avoid stringof scope issues.
+    // This ensures types like NodeInput* are properly referenced.
+    static foreach (i; 1 .. _SrcParams.length) {
+        mixin("alias _ParamType" ~ i.to!string ~ " = _SrcParams[" ~ i.to!string ~ "];");
+    }
+
     // Build parameter list string at compile time
     // First param: Expr!(typeof(this)) instead of Expr!SourceType
-    // Rest: same types with defaults preserved
+    // Rest: use the generated _ParamTypeN aliases
     enum string _paramListStr = () {
         string result = "Expr!(typeof(this)) " ~ _srcParamNames[0];
         static foreach (i; 1 .. _SrcParams.length) {{
             result ~= ", ";
-            result ~= _SrcParams[i].stringof ~ " " ~ _srcParamNames[i];
+            result ~= "_ParamType" ~ i.to!string ~ " " ~ _srcParamNames[i];
             // Add default value if present
             static if (!is(_SrcDefaults[i] == void)) {
-                result ~= " = " ~ _SrcDefaults[i].stringof;
+                result ~= " = _SrcDefaults[" ~ i.to!string ~ "]";
             }
         }}
         return result;

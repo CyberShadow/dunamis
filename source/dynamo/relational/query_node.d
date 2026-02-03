@@ -79,14 +79,24 @@ class QueryNode {
     /// Columns needed from each joined table (alias -> columns)
     string[][string] joinedColumns;
 
-    /// Pagination: limit number of results
+    /// Pagination: limit number of results (global, for root queries)
     Nullable!size_t limit_;
 
-    /// Pagination: skip first N results
+    /// Pagination: skip first N results (global, for root queries)
     Nullable!size_t offset_;
 
     /// Sorting: order results by columns
     OrderBySpec[] orderBy_;
+
+    /// Per-parent pagination (for child/hasMany nodes): limit per parent
+    Nullable!size_t perParentLimit_;
+
+    /// Per-parent pagination (for child/hasMany nodes): offset per parent
+    Nullable!size_t perParentOffset_;
+
+    /// True when window functions should be used for per-parent pagination
+    /// Set when this is a child node with perParentLimit_ or perParentOffset_
+    bool useWindowFunction = false;
 
     /// Next join alias counter
     private int _nextJoinAlias = 0;

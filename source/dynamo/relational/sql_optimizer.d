@@ -958,6 +958,11 @@ string toSQL(QueryNode[] nodes, SqlOptimizer sqlOpt) {
 private string toCTEWithComputed(QueryNode node, SqlOptimizer sqlOpt) {
     import std.format : format;
 
+    // Use window function for per-parent pagination on child nodes
+    if (node.useWindowFunction) {
+        return toCTEWithWindowFunction(node, sqlOpt);
+    }
+
     auto sql = appender!string;
 
     sql ~= format("  layer%d AS (\n", node.id);
@@ -1014,29 +1019,120 @@ private string toCTEWithComputed(QueryNode node, SqlOptimizer sqlOpt) {
     return sql.data;
 }
 
-/// Generate SQL SELECT clause including computed columns
-string toSelectWithComputed(QueryNode node, SqlOptimizer sqlOpt) {
+/// Generate CTE for a child node with per-parent pagination using window functions.
+///
+/// Generates SQL like:
+/// ```sql
+/// layer1 AS (
+///   SELECT id, title, author_id FROM (
+///     SELECT posts.*, ROW_NUMBER() OVER (PARTITION BY author_id ORDER BY id) as _rn
+///     FROM posts WHERE author_id IN (SELECT id FROM layer0)
+///   ) t WHERE _rn > offset AND _rn <= offset + limit
+/// )
+/// ```
+private string toCTEWithWindowFunction(QueryNode node, SqlOptimizer sqlOpt) {
+    import std.format : format;
+
+    assert(!node.isRoot, "Window function pagination only applies to child nodes");
+
+    auto sql = appender!string;
+
+    // Build ORDER BY for window function (defaults to id if not specified)
+    string windowOrderBy;
+    if (node.orderBy_.length > 0) {
+        string[] orderParts;
+        foreach (spec; node.orderBy_) {
+            orderParts ~= format("%s%s", spec.column, spec.descending ? " DESC" : "");
+        }
+        windowOrderBy = orderParts.join(", ");
+    } else {
+        windowOrderBy = "id";
+    }
+
+    sql ~= format("  layer%d AS (\n", node.id);
+
+    // Outer SELECT: project needed columns from the windowed subquery
+    sql ~= "    SELECT ";
+    sql ~= toSelectWithComputed(node, sqlOpt, "_inner");  // Use _inner alias prefix
+    sql ~= " FROM (\n";
+
+    // Inner SELECT: compute row numbers partitioned by parent FK
+    sql ~= format("      SELECT %s.*, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS _rn\n",
+        node.table, node.parentFk, windowOrderBy);
+    sql ~= format("      FROM %s\n", node.table);
+
+    // Add JOINs for belongsTo relationships in the inner query
+    foreach (joinInfo; node.joins) {
+        sql ~= format("      LEFT JOIN %s %s ON %s.%s = %s.id\n",
+            joinInfo.targetTable, joinInfo.alias_,
+            node.table, joinInfo.fk, joinInfo.alias_);
+    }
+
+    // WHERE clause for inner query
+    sql ~= format("      WHERE %s.%s IN (SELECT id FROM layer%d)\n",
+        node.table, node.parentFk, node.parent.id);
+
+    sql ~= "    ) _inner\n";
+
+    // WHERE clause for outer query: filter by row number
+    sql ~= "    WHERE ";
+    if (!node.perParentOffset_.isNull && !node.perParentLimit_.isNull) {
+        // Both offset and limit: _rn > offset AND _rn <= offset + limit
+        auto offset = node.perParentOffset_.get;
+        auto limit = node.perParentLimit_.get;
+        sql ~= format("_rn > %d AND _rn <= %d", offset, offset + limit);
+    } else if (!node.perParentOffset_.isNull) {
+        // Only offset: _rn > offset
+        sql ~= format("_rn > %d", node.perParentOffset_.get);
+    } else if (!node.perParentLimit_.isNull) {
+        // Only limit: _rn <= limit
+        sql ~= format("_rn <= %d", node.perParentLimit_.get);
+    } else {
+        // No pagination (shouldn't happen if useWindowFunction is true)
+        sql ~= "1=1";
+    }
+
+    sql ~= "\n  )";
+    return sql.data;
+}
+
+/// Generate SQL SELECT clause including computed columns.
+/// If tableAlias is provided, uses that instead of node.table for column references.
+/// For window function CTEs, this is used to select from the inner subquery.
+string toSelectWithComputed(QueryNode node, SqlOptimizer sqlOpt, string tableAlias = null) {
     import std.format : format;
 
     string[] selectParts;
 
+    // Use provided alias or default to table name
+    auto tableName = tableAlias !is null ? tableAlias : node.table;
+
     // Regular columns from main table
     foreach (col; node.columns) {
-        selectParts ~= format("%s.%s", node.table, col);
+        selectParts ~= format("%s.%s", tableName, col);
     }
 
     // Columns from JOINed tables
+    // For window function queries, joined columns are already computed in the inner subquery
+    // and appear as aliased columns (e.g., j0__id)
     foreach (joinInfo; node.joins) {
         if (auto cols = joinInfo.alias_ in node.joinedColumns) {
             foreach (col; *cols) {
-                selectParts ~= format("%s.%s AS %s__%s",
-                    joinInfo.alias_, col, joinInfo.alias_, col);
+                if (tableAlias !is null) {
+                    // From window subquery: columns are already aliased
+                    selectParts ~= format("%s.%s__%s AS %s__%s",
+                        tableName, joinInfo.alias_, col, joinInfo.alias_, col);
+                } else {
+                    selectParts ~= format("%s.%s AS %s__%s",
+                        joinInfo.alias_, col, joinInfo.alias_, col);
+                }
             }
         }
     }
 
     // Computed columns (if SqlOptimizer is provided)
-    if (sqlOpt !is null) {
+    // Note: Computed columns are not supported with window functions yet
+    if (sqlOpt !is null && tableAlias is null) {
         foreach (computed; sqlOpt.getComputedColumns(node.id)) {
             selectParts ~= format("%s AS %s", computed.sqlExpr, computed.alias_);
         }

@@ -1401,6 +1401,8 @@ private template getAllCustomScalarNames(Entities...) {
 
 /// Generate complete GraphQL schema SDL.
 /// Accepts either a Schema type or a raw Query type (for backwards compatibility).
+/// If the Schema provides an AllEntityTypes member, it will be used instead of
+/// auto-discovering entity types. This allows plugins to provide transformed types.
 template generateSchemaSDL(alias SchemaOrQuery) {
     // Determine if we have a Schema or raw Query type
     static if (isSchema!SchemaOrQuery) {
@@ -1411,7 +1413,13 @@ template generateSchemaSDL(alias SchemaOrQuery) {
         struct MutationType {}
     }
 
-    alias AllTypes = getAllEntityTypes!QueryType;
+    // Use Schema-provided AllEntityTypes if available (for plugins like PaginationPlugin),
+    // otherwise discover entity types from Query
+    static if (isSchema!SchemaOrQuery && __traits(hasMember, SchemaOrQuery, "AllEntityTypes")) {
+        alias AllTypes = SchemaOrQuery.AllEntityTypes;
+    } else {
+        alias AllTypes = getAllEntityTypes!QueryType;
+    }
 
     // Collect input types from entities AND mutations (if any)
     // Both are expanded to discover nested types (handles recursive types)

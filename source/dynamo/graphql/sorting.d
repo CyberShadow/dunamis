@@ -25,16 +25,22 @@ import dynamo.graphql.schema : isSchema, GqlHidden;
 // SortingPlugin
 // ============================================================================
 
-/// Plugin that adds orderBy sorting arguments to all array-returning fields.
+/// Plugin that adds orderBy sorting arguments to all array-returning fields,
+/// including nested HasMany relationships.
 ///
 /// For each entity type E, generates:
 /// - enum EOrderByField { id, field1, field2, ... } - all sortable column fields
 /// - struct EOrderBy { EOrderByField field; SortDirection direction = SortDirection.ASC; }
 ///
-/// Transforms:
+/// Transforms root Query fields:
 ///   users: [User!]!
 /// Into:
 ///   users(orderBy: [UserOrderBy!]): [User!]!
+///
+/// And nested entity fields:
+///   User.posts: [Post!]!
+/// Into:
+///   User.posts(orderBy: [PostOrderBy!]): [Post!]!
 ///
 /// Example:
 /// ---
@@ -47,19 +53,66 @@ import dynamo.graphql.schema : isSchema, GqlHidden;
 /// alias SortedSchema = SortingPlugin!BaseSchema;
 ///
 /// // Query with sorting:
-/// // { users(orderBy: [{field: lastName, direction: DESC}]) { name } }
+/// // { users(orderBy: [{field: lastName, direction: DESC}]) { posts(orderBy: [{field: title}]) { title } } }
 /// ---
 template SortingPlugin(alias S) if (isSchema!S) {
+    import std.meta : AliasSeq, staticMap;
+    import dynamo.graphql.schema : getAllEntityTypes, getGraphQLTypeName, GqlName;
+    import dynamo.graphql.transform : isTypeInList;
+
+    // Get all entity types discovered from the schema
+    alias _OriginalQuery = S.Query;
+    alias _AllEntityTypes = getAllEntityTypes!_OriginalQuery;
+
     // Generate SortedQuery struct with transformed fields
     struct SortedQuery {
-        static foreach (member; getFieldMembers!(S.Query)) {
-            static if (isArrayReturningField!(__traits(getMember, S.Query, member))) {
+        static foreach (member; getFieldMembers!(_OriginalQuery)) {
+            static if (isArrayReturningField!(__traits(getMember, _OriginalQuery, member))) {
                 // Array field: add sorting arguments
-                mixin SortedArrayField!(S.Query, member);
+                mixin SortedArrayField!(_OriginalQuery, member);
             } else {
                 // Non-array field: forward unchanged
-                mixin ForwardField!(S.Query, member);
+                mixin ForwardField!(_OriginalQuery, member);
             }
+        }
+    }
+
+    // Generate sorted versions of each entity type.
+    // Each sorted entity type:
+    // 1. Has @GqlName to preserve the original GraphQL type name
+    // 2. Has orderBy arguments on array-returning fields
+    template SortedEntity(Entity) {
+        // Use @GqlName to ensure the sorted type has the same GraphQL name as the original
+        @GqlName(getGraphQLTypeName!Entity)
+        struct SortedEntity {
+            // Copy entity infrastructure
+            static if (__traits(hasMember, Entity, "nodeId")) {
+                typeof(Entity.nodeId) nodeId;
+                this(string id) { nodeId = typeof(nodeId)(id); }
+                string toString() const { return nodeId.toString(); }
+            }
+
+            // Copy all fields with sorting on array fields
+            static foreach (member; getFieldMembers!Entity) {
+                static if (isArrayReturningField!(__traits(getMember, Entity, member))) {
+                    mixin SortedEntityArrayField!(Entity, member);
+                } else {
+                    mixin ForwardField!(Entity, member);
+                }
+            }
+        }
+    }
+
+    // Map all entity types to their sorted versions
+    alias AllEntityTypes = staticMap!(SortedEntity, _AllEntityTypes);
+
+    /// Entity type map: maps original entity types to their sorted versions.
+    /// Used by the compiler to resolve fields on transformed types.
+    template EntityTypeMap(T) {
+        static if (isTypeInList!(T, _AllEntityTypes)) {
+            alias EntityTypeMap = SortedEntity!T;
+        } else {
+            alias EntityTypeMap = T;  // Identity for non-entity types
         }
     }
 
@@ -125,6 +178,111 @@ mixin template GenerateOrderByStruct(Entity, string structName, string fieldEnum
 // ============================================================================
 // Mixin Template for Sorted Array Fields
 // ============================================================================
+
+/// Mixin for sorted array field on an entity (adds orderBy arguments).
+/// Similar to SortedArrayField but for entity types.
+mixin template SortedEntityArrayField(Entity, string fieldName) {
+    import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
+    import std.meta : AliasSeq;
+    import dynamo.core.expr : Expr, ExprResultType, entityCast;
+    import dynamo.core.sorting : orderBy, OrderBySpec, SortDirection;
+    import dynamo.relational.schema : getSqlColumn;
+
+    alias _srcFn = __traits(getMember, Entity, fieldName);
+    alias _SrcParams = Parameters!_srcFn;
+    alias _SrcDefaults = ParameterDefaults!_srcFn;
+    enum string[] _srcParamNames = [ParameterIdentifierTuple!_srcFn];
+
+    alias _SrcFirstParam = _SrcParams[0];
+    alias _SrcEntity = ExprResultType!_SrcFirstParam;
+
+    // Extract element type from array expression
+    alias _ElementType = ArrayFieldElementType!_srcFn;
+
+    // Generate the OrderBy types for this entity's child
+    enum _orderByFieldEnumName = __traits(identifier, _ElementType) ~ "OrderByField";
+    enum _orderByStructName = __traits(identifier, _ElementType) ~ "OrderBy";
+
+    // Only generate if we have sortable fields
+    static if (getSortableFields!_ElementType.length > 0) {
+        mixin GenerateOrderByFieldEnum!(_ElementType, _orderByFieldEnumName);
+        mixin GenerateOrderByStruct!(_ElementType, _orderByStructName, _orderByFieldEnumName);
+
+        alias _OrderByFieldEnum = mixin(_orderByFieldEnumName);
+        alias _OrderByStruct = mixin(_orderByStructName);
+    }
+
+    // Build parameter list - first param is Expr!(typeof(this)) for the wrapper entity
+    enum string _paramListStr = () {
+        string result = "Expr!(typeof(this)) " ~ _srcParamNames[0];
+        static foreach (i; 1 .. _SrcParams.length) {{
+            result ~= ", ";
+            result ~= _SrcParams[i].stringof ~ " " ~ _srcParamNames[i];
+            static if (!is(_SrcDefaults[i] == void)) {
+                result ~= " = " ~ _SrcDefaults[i].stringof;
+            }
+        }}
+        // Add orderBy param
+        static if (getSortableFields!_ElementType.length > 0) {
+            result ~= ", " ~ _orderByStructName ~ "[] orderBy = null";
+        }
+        return result;
+    }();
+
+    // Build argument list - cast wrapper entity back to original
+    enum string _argListStr = () {
+        string result = "entityCast!_SrcEntity(" ~ _srcParamNames[0] ~ ")";
+        static foreach (i; 1 .. _SrcParams.length) {
+            result ~= ", " ~ _srcParamNames[i];
+        }
+        return result;
+    }();
+
+    // Apply sorting
+    static if (getSortableFields!_ElementType.length > 0) {
+        private static Expr!(_ElementType[]) _applySorting(T)(T base, _OrderByStruct[] orderBySpecs) {
+            if (orderBySpecs is null || orderBySpecs.length == 0) {
+                return base;
+            }
+
+            OrderBySpec[] specs;
+            foreach (ob; orderBySpecs) {
+                string columnName = _getColumnName(ob.field);
+                specs ~= OrderBySpec(columnName, ob.direction);
+            }
+
+            return base.orderBy(specs);
+        }
+
+        // Generate column name lookup
+        private static string _getColumnName(_OrderByFieldEnum field) {
+            final switch (field) {
+                static foreach (member; getSortableFields!_ElementType) {{
+                    static if (__traits(compiles, __traits(getMember, _ElementType, member)) &&
+                               is(typeof(__traits(getMember, _ElementType, member)) == function)) {
+                        alias method = __traits(getMember, _ElementType, member);
+                        enum sqlCol = getSqlColumn!method;
+                        case mixin(_orderByFieldEnumName ~ "." ~ member):
+                            static if (sqlCol.length > 0) {
+                                return sqlCol;
+                            } else {
+                                return member;
+                            }
+                    }
+                }}
+            }
+        }
+
+        @(__traits(getAttributes, _srcFn))
+        mixin("static auto " ~ fieldName ~ "(" ~ _paramListStr ~ ") { " ~
+              "return _applySorting(_srcFn(" ~ _argListStr ~ "), orderBy); }");
+    } else {
+        // No sortable fields - just forward the field without orderBy
+        @(__traits(getAttributes, _srcFn))
+        mixin("static auto " ~ fieldName ~ "(" ~ _paramListStr ~ ") { " ~
+              "return _srcFn(" ~ _argListStr ~ "); }");
+    }
+}
 
 /// Mixin template to create a sorted version of an array-returning field.
 /// Adds orderBy parameter and wraps the result with orderBy expressions.
@@ -449,6 +607,170 @@ unittest {
 
     // Should return all users (order may vary)
     assert(result["users"].array.length == 3, "Should have all 3 users");
+}
+
+// Test nested HasMany sorting - SDL should show orderBy args on nested fields
+unittest {
+    import dynamo.relational.schema;
+    import dynamo.relational.demo;
+    import dynamo.graphql.schema : Schema, generateSchemaSDL;
+    import std.algorithm : canFind;
+
+    static MockDB!() db;
+
+    static struct Post {
+        mixin DemoEntity!(db, "posts");
+        mixin Col!("title", string);
+    }
+
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("name", string);
+        mixin HasMany!("posts", Post, "author_id");
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    alias SortedSchema = SortingPlugin!(Schema!Query);
+
+    // Verify SDL shows sorting arguments on NESTED array fields
+    enum sdl = generateSchemaSDL!SortedSchema;
+
+    // Root Query fields should have sorting
+    static assert(sdl.canFind("users("), "Query.users should have arguments: " ~ sdl);
+
+    // User.posts (HasMany) should have sorting
+    static assert(sdl.canFind("posts(orderBy:"), "User.posts should have orderBy arg: " ~ sdl);
+}
+
+// Test nested HasMany sorting - runtime execution
+unittest {
+    import std.json;
+    import std.conv : to;
+    import ae.utils.promise.await : awaitSync;
+    import dynamo.core;
+    import dynamo.relational.schema;
+    import dynamo.relational.demo;
+    import dynamo.relational.eval_context;
+    import dynamo.graphql.schema : Schema, GqlHidden;
+    import dynamo.graphql.compiler : compileQuery;
+
+    // Wrap in struct to allow forward references
+    struct TestSchema {
+        static MockDB!() db;
+
+        struct Post {
+            mixin DemoEntity!(db, "posts");
+            mixin Col!("title", string);
+            @GqlHidden mixin Col!("authorId", long, "author_id");
+        }
+
+        struct User {
+            mixin DemoEntity!(db, "users");
+            mixin Col!("name", string);
+            mixin HasMany!("posts", Post, "author_id");
+        }
+
+        struct Query {
+            mixin Table!(User, "users");
+        }
+    }
+
+    alias db = TestSchema.db;
+    alias Query = TestSchema.Query;
+
+    alias SortedSchema = SortingPlugin!(Schema!Query);
+
+    // Set up mock data
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "name": "Alice"}
+    ]`);
+    db.setTableData("posts", `[
+        {"id": 1, "title": "Zebra", "author_id": 1},
+        {"id": 2, "title": "Apple", "author_id": 1},
+        {"id": 3, "title": "Mango", "author_id": 1}
+    ]`);
+
+    // Query with nested sorting: sort posts by title ASC
+    auto query = compileQuery!SortedSchema(`{
+        users {
+            name
+            posts(orderBy: [{field: title, direction: ASC}]) {
+                title
+            }
+        }
+    }`);
+
+    auto result = awaitSync(new Executor().execute(query));
+
+    string debugInfo = "Result: " ~ result.to!string;
+
+    // Should have 1 user
+    assert(result["users"].array.length == 1, "Should have 1 user. " ~ debugInfo);
+
+    // Posts should be sorted alphabetically
+    auto posts = result["users"][0]["posts"].array;
+    assert(posts.length == 3, "Should have 3 posts. " ~ debugInfo);
+    assert(posts[0]["title"].str == "Apple", "First should be Apple. " ~ debugInfo);
+    assert(posts[1]["title"].str == "Mango", "Second should be Mango. " ~ debugInfo);
+    assert(posts[2]["title"].str == "Zebra", "Third should be Zebra. " ~ debugInfo);
+}
+
+// Test multiple entity types with nested HasMany (User -> Post -> Comment chain)
+unittest {
+    import dynamo.relational.schema;
+    import dynamo.relational.demo;
+    import dynamo.graphql.schema : Schema, generateSchemaSDL;
+    import std.algorithm : canFind;
+
+    // Wrap in struct to allow forward references between types
+    struct TestSchema {
+        static MockDB!() db;
+
+        struct Comment {
+            mixin DemoEntity!(db, "comments");
+            mixin Col!("text", string);
+        }
+
+        struct Post {
+            mixin DemoEntity!(db, "posts");
+            mixin Col!("title", string);
+            mixin HasMany!("comments", Comment, "post_id");
+        }
+
+        struct User {
+            mixin DemoEntity!(db, "users");
+            mixin Col!("name", string);
+            mixin HasMany!("posts", Post, "author_id");
+        }
+
+        struct Query {
+            mixin Table!(User, "users");
+            mixin Table!(Post, "posts");
+        }
+    }
+
+    alias Query = TestSchema.Query;
+
+    // This should compile without infinite recursion
+    alias SortedSchema = SortingPlugin!(Schema!Query);
+
+    // Verify it's a valid schema
+    static assert(isSchema!SortedSchema);
+
+    // Verify SDL is generated correctly
+    enum sdl = generateSchemaSDL!SortedSchema;
+
+    // Root fields should have sorting
+    static assert(sdl.canFind("users(orderBy:"), "Query.users should have orderBy: " ~ sdl);
+    static assert(sdl.canFind("posts(orderBy:"), "Query.posts should have orderBy: " ~ sdl);
+
+    // Nested HasMany should have sorting
+    // User.posts and Post.comments
+    static assert(sdl.canFind("comments(orderBy:"), "HasMany fields should have orderBy: " ~ sdl);
 }
 
 // Test that verifies firstName is correctly converted to first_name SQL column
