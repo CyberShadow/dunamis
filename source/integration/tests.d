@@ -272,6 +272,101 @@ void testEnumPersistence() {
 }
 
 // ============================================================================
+// Sorting Tests
+// ============================================================================
+
+void testSortUsersAscending() {
+    auto response = graphql(`{
+        users(orderBy: [{field: firstName, direction: ASC}]) {
+            firstName
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 2, "Expected at least 2 users");
+
+    // Verify ascending order
+    for (size_t i = 1; i < users.length; i++) {
+        auto prev = users[i - 1]["firstName"].str;
+        auto curr = users[i]["firstName"].str;
+        assertTrue(prev <= curr, "Users should be sorted by firstName ascending");
+    }
+}
+
+void testSortUsersDescending() {
+    auto response = graphql(`{
+        users(orderBy: [{field: firstName, direction: DESC}]) {
+            firstName
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 2, "Expected at least 2 users");
+
+    // Verify descending order
+    for (size_t i = 1; i < users.length; i++) {
+        auto prev = users[i - 1]["firstName"].str;
+        auto curr = users[i]["firstName"].str;
+        assertTrue(prev >= curr, "Users should be sorted by firstName descending");
+    }
+}
+
+void testSortPostsByTitle() {
+    auto response = graphql(`{
+        posts(orderBy: [{field: title, direction: ASC}]) {
+            title
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto posts = response["data"]["posts"].array;
+    assertTrue(posts.length >= 2, "Expected at least 2 posts");
+
+    // Verify ascending order by title
+    for (size_t i = 1; i < posts.length; i++) {
+        auto prev = posts[i - 1]["title"].str;
+        auto curr = posts[i]["title"].str;
+        assertTrue(prev <= curr, "Posts should be sorted by title ascending");
+    }
+}
+
+void testSortTasksByStatus() {
+    auto response = graphql(`{
+        tasks(orderBy: [{field: status, direction: ASC}]) {
+            title
+            status
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto tasks = response["data"]["tasks"].array;
+    assertTrue(tasks.length >= 2, "Expected at least 2 tasks");
+
+    // Verify ascending order by status (enum values)
+    for (size_t i = 1; i < tasks.length; i++) {
+        auto prev = tasks[i - 1]["status"].str;
+        auto curr = tasks[i]["status"].str;
+        assertTrue(prev <= curr, "Tasks should be sorted by status ascending");
+    }
+}
+
+void testSortWithoutOrderBy() {
+    // Verify that queries without orderBy still work
+    auto response = graphql(`{
+        users {
+            firstName
+            lastName
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 2, "Expected at least 2 users");
+}
+
+// ============================================================================
 // Test Registration
 // ============================================================================
 
@@ -290,4 +385,11 @@ static this() {
     registerTest("Query task with nullable assignee", "tests", &testQueryTaskWithNullableAssignee);
     registerTest("Mutation: create task with enum", "tests", &testCreateTaskWithEnumStatus);
     registerTest("Enum persistence", "tests", &testEnumPersistence);
+
+    // Sorting tests
+    registerTest("Sort users ascending", "tests", &testSortUsersAscending);
+    registerTest("Sort users descending", "tests", &testSortUsersDescending);
+    registerTest("Sort posts by title", "tests", &testSortPostsByTitle);
+    registerTest("Sort tasks by status", "tests", &testSortTasksByStatus);
+    registerTest("Sort without orderBy", "tests", &testSortWithoutOrderBy);
 }

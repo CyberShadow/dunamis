@@ -10,7 +10,6 @@ import std.json : JSONValue;
 import std.typecons : Nullable;
 
 import graphqld2.core;
-import graphqld2.graphql : Schema;
 import graphqld2.relational.schema : Table, ForeignKey, BelongsTo, HasMany, Col;
 import graphqld2.relational.demo : DemoEntity, CrudMutations;
 import graphqld2.relational.mutation : insert;
@@ -77,7 +76,7 @@ mixin template TestSchema(alias db) {
     import std.json : JSONValue;
     import std.typecons : Nullable;
     import graphqld2.core.expr : Expr;
-    import graphqld2.graphql : Schema;
+    import graphqld2.graphql : Schema, SortingPlugin;
     import graphqld2.relational.schema : Table, ForeignKey, BelongsTo, HasMany, Col, getAll, hasMany;
     import graphqld2.relational.demo : DemoEntity, CrudMutations;
     import graphqld2.relational.mutation : insert;
@@ -127,5 +126,6 @@ mixin template TestSchema(alias db) {
         }
     }
 
-    alias MySchema = Schema!(Query, Mutation);
+    alias BaseSchema = Schema!(Query, Mutation);
+    alias MySchema = SortingPlugin!BaseSchema;
 }

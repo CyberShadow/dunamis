@@ -435,6 +435,16 @@ T extractValueFromJson(T)(JSONValue json) {
         return enumFromString!T(json.str);
     } else static if (isInputType!T) {
         return extractInputObjectFromJson!T(json);
+    } else static if (is(T : U[], U) && !is(T == string)) {
+        // Array type - extract each element
+        if (json.type != JSONType.array) {
+            throw new CompilerException("Expected array for " ~ T.stringof ~ ", got " ~ json.type.to!string);
+        }
+        U[] result;
+        foreach (item; json.array) {
+            result ~= extractValueFromJson!U(item);
+        }
+        return result;
     } else static if (is(T == JSONValue[string])) {
         // Raw JSON object - pass through directly
         if (json.type != JSONType.object) {
@@ -513,6 +523,27 @@ T extractValue(T)(Value val, T defaultValue = T.init) {
         );
     } else static if (isInputType!T) {
         return extractInputObject!T(val);
+    } else static if (is(T : U[], U) && !is(T == string)) {
+        // Array type - extract each element from GraphQL list literal
+        import graphql.ast : ValueEnum, Values;
+        if (val is null || val.ruleSelection != ValueEnum.ARR) {
+            throw new CompilerException("Expected array for " ~ T.stringof);
+        }
+        U[] result;
+        // Traverse the linked list of array values
+        void processValues(Values v) {
+            if (v is null) return;
+            if (v.val !is null) {
+                result ~= extractValue!U(v.val);
+            }
+            if (v.follow !is null) {
+                processValues(v.follow);
+            }
+        }
+        if (val.arr !is null && val.arr.vals !is null) {
+            processValues(val.arr.vals);
+        }
+        return result;
     } else static if (is(T == JSONValue[string])) {
         // Raw JSON object - convert Value to JSONValue.object
         auto json = valueToJson(val);

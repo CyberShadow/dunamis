@@ -4,3 +4,4 @@ public import graphqld2.graphql.compiler;
 public import graphqld2.graphql.pagination;
 public import graphqld2.graphql.plugin;
 public import graphqld2.graphql.schema;
+public import graphqld2.graphql.sorting;
