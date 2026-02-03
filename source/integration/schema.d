@@ -125,6 +125,18 @@ mixin template TestSchema(alias db) {
         mixin Col!("title", string);
         mixin Col!("authorId", ForeignKey!User);
         mixin BelongsTo!("author", "authorId");
+
+        /// Computed field: is the author an adult? (tests pushdown through BelongsTo)
+        static auto authorIsAdult(Expr!Post p) {
+            return p.author.age.ge(18);
+        }
+
+        /// Computed field: author's age category (tests ternary pushdown through BelongsTo)
+        static auto authorAgeCategory(Expr!Post p) {
+            import graphqld2.core.expr : ternary;
+            return ternary(p.author.age.lt(13), "child",
+                   ternary(p.author.age.lt(20), "teen", "adult"));
+        }
     }
 
     struct Task {

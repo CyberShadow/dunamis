@@ -196,13 +196,6 @@ class SqlOptimizer : ExprOptimizer {
 
     /// Try to push down a binary operation to SQL
     protected ExprBase tryPushDownBinaryOp(ExprBase expr, BinaryOpInfo binOp, OptimizeContext ctx) {
-        // Check if any operand involves joined columns - skip push-down if so.
-        // Joined columns are already fetched via JOINs, and ProjectComputedExpr
-        // doesn't handle their evaluation correctly.
-        if (hasJoinedColumnExpr(binOp.left) || hasJoinedColumnExpr(binOp.right)) {
-            return null;
-        }
-
         // Check if both operands can be translated to SQL
         int queryNodeId = -1;
         auto leftSql = tryGetSqlExpr(binOp.left, queryNodeId);
@@ -250,11 +243,6 @@ class SqlOptimizer : ExprOptimizer {
 
     /// Try to push down a unary operation to SQL
     protected ExprBase tryPushDownUnaryOp(ExprBase expr, UnaryOpInfo unaryOp, OptimizeContext ctx) {
-        // Check if operand involves joined columns - skip push-down if so
-        if (hasJoinedColumnExpr(unaryOp.operand)) {
-            return null;
-        }
-
         // Check if operand can be translated to SQL
         int queryNodeId = -1;
         auto operandSql = tryGetSqlExpr(unaryOp.operand, queryNodeId);
@@ -292,13 +280,6 @@ class SqlOptimizer : ExprOptimizer {
 
     /// Try to push down a ternary operation to SQL
     protected ExprBase tryPushDownTernaryOp(ExprBase expr, TernaryInfo ternaryOp, OptimizeContext ctx) {
-        // Check if any operand involves joined columns - skip push-down if so
-        if (hasJoinedColumnExpr(ternaryOp.condition) ||
-            hasJoinedColumnExpr(ternaryOp.trueExpr) ||
-            hasJoinedColumnExpr(ternaryOp.falseExpr)) {
-            return null;
-        }
-
         // Check if all operands can be translated to SQL and come from the same QueryNode
         int queryNodeId = -1;
         auto condSql = tryGetSqlExpr(ternaryOp.condition, queryNodeId);

@@ -487,6 +487,100 @@ void testQueryCombinedLogicFields() {
 }
 
 // ============================================================================
+// Transitive Field Access Tests (Pushdown through BelongsTo)
+// ============================================================================
+
+void testQueryAuthorIsAdultField() {
+    auto response = graphql(`{
+        posts {
+            title
+            authorIsAdult
+            author { firstName age }
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto posts = response["data"]["posts"].array;
+    assertTrue(posts.length >= 3, "Expected at least 3 posts");
+
+    // Verify authorIsAdult matches author's age >= 18
+    foreach (post; posts) {
+        auto authorAge = post["author"]["age"].integer;
+        auto authorIsAdult = post["authorIsAdult"].boolean;
+        auto title = post["title"].str;
+
+        bool expectedAdult = authorAge >= 18;
+        assertTrue(authorIsAdult == expectedAdult,
+            "authorIsAdult for post '" ~ title ~ "' (author age=" ~ post["author"]["age"].toString() ~
+            ") should be " ~ (expectedAdult ? "true" : "false") ~ " but got " ~ (authorIsAdult ? "true" : "false"));
+    }
+}
+
+void testQueryAuthorAgeCategoryField() {
+    auto response = graphql(`{
+        posts {
+            title
+            authorAgeCategory
+            author { firstName age }
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto posts = response["data"]["posts"].array;
+    assertTrue(posts.length >= 3, "Expected at least 3 posts");
+
+    // Verify authorAgeCategory matches: age < 13 -> "child", age < 20 -> "teen", else "adult"
+    foreach (post; posts) {
+        auto authorAge = post["author"]["age"].integer;
+        auto category = post["authorAgeCategory"].str;
+        auto title = post["title"].str;
+
+        string expectedCategory;
+        if (authorAge < 13) expectedCategory = "child";
+        else if (authorAge < 20) expectedCategory = "teen";
+        else expectedCategory = "adult";
+
+        assertTrue(category == expectedCategory,
+            "authorAgeCategory for post '" ~ title ~ "' (author age=" ~ post["author"]["age"].toString() ~
+            ") should be '" ~ expectedCategory ~ "' but got '" ~ category ~ "'");
+    }
+}
+
+void testQueryTransitiveFieldsCombined() {
+    // Test querying multiple transitive fields in one query
+    auto response = graphql(`{
+        posts {
+            title
+            authorIsAdult
+            authorAgeCategory
+            author {
+                firstName
+                age
+                isAdult
+                ageCategory
+            }
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto posts = response["data"]["posts"].array;
+    assertTrue(posts.length >= 1, "Expected at least 1 post");
+
+    // Verify transitive fields match author's direct fields
+    foreach (post; posts) {
+        auto authorIsAdultDirect = post["author"]["isAdult"].boolean;
+        auto authorIsAdultTransitive = post["authorIsAdult"].boolean;
+        assertTrue(authorIsAdultDirect == authorIsAdultTransitive,
+            "authorIsAdult should match author.isAdult");
+
+        auto authorAgeCategoryDirect = post["author"]["ageCategory"].str;
+        auto authorAgeCategoryTransitive = post["authorAgeCategory"].str;
+        assertTrue(authorAgeCategoryDirect == authorAgeCategoryTransitive,
+            "authorAgeCategory should match author.ageCategory");
+    }
+}
+
+// ============================================================================
 // Test Registration
 // ============================================================================
 
@@ -518,4 +612,9 @@ static this() {
     registerTest("Query isTeenager computed field (AND)", "tests", &testQueryIsTeenagerField);
     registerTest("Query ageCategory computed field (ternary)", "tests", &testQueryAgeCategoryField);
     registerTest("Query combined logic fields", "tests", &testQueryCombinedLogicFields);
+
+    // Transitive field access tests (pushdown through BelongsTo)
+    registerTest("Query authorIsAdult (transitive comparison)", "tests", &testQueryAuthorIsAdultField);
+    registerTest("Query authorAgeCategory (transitive ternary)", "tests", &testQueryAuthorAgeCategoryField);
+    registerTest("Query transitive fields combined", "tests", &testQueryTransitiveFieldsCombined);
 }

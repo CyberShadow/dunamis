@@ -355,9 +355,9 @@ class QueryResult {
         return result;
     }
 
-    /// Get column from JOINed data (aliased columns like "j0.first_name")
+    /// Get column from JOINed data (aliased columns like "j0__first_name")
     T[] getJoinedColumn(T)(string joinAlias, string column, AnyRef[] refs) {
-        auto fullColumn = joinAlias ~ "." ~ column;
+        auto fullColumn = joinAlias ~ "__" ~ column;
         return getColumn!T(fullColumn, refs);
     }
 
@@ -683,7 +683,7 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
             // Load each joined column
             foreach (column; joinedCols) {
                 auto values = fetchColumnJsonSync(joinInfo.targetTable, column, joinedRefs);
-                result.loadColumn(joinAlias ~ "." ~ column, refs, values);
+                result.loadColumn(joinAlias ~ "__" ~ column, refs, values);
             }
         }
 
