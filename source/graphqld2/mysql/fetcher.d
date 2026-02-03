@@ -157,9 +157,23 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
     override Promise!(string[]) fetchColumnString(string table, string column, AnyRef[] refs) {
         if (refs.length == 0) return resolve(cast(string[])[]);
 
-        auto ids = refs.map!(r => r.localId).array;
+        // Filter to valid refs only
+        string[] validIds;
+        foreach (r; refs) {
+            if (r.isValid && r.localId.length > 0) {
+                validIds ~= r.localId;
+            }
+        }
+
+        if (validIds.length == 0) {
+            // All refs were invalid - return empty strings
+            string[] result;
+            result.length = refs.length;
+            return resolve(result);
+        }
+
         auto sql = "SELECT id, " ~ column ~ " FROM " ~ table ~
-                   " WHERE id IN (" ~ ids.join(",") ~ ")";
+                   " WHERE id IN (" ~ validIds.join(",") ~ ")";
 
         return _conn.query(sql).array().then((MySqlConnection.Row[] rows) {
             // Build lookup map
@@ -169,17 +183,31 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
                 auto val = row.column!string(1);
                 values[id] = val;
             }
-            // Return in ref order
-            return refs.map!(r => values.get(r.localId, "")).array;
+            // Return in ref order (invalid refs get empty string)
+            return refs.map!(r => r.isValid ? values.get(r.localId, "") : "").array;
         });
     }
 
     override Promise!(long[]) fetchColumnLong(string table, string column, AnyRef[] refs) {
         if (refs.length == 0) return resolve(cast(long[])[]);
 
-        auto ids = refs.map!(r => r.localId).array;
+        // Filter to valid refs only
+        string[] validIds;
+        foreach (r; refs) {
+            if (r.isValid && r.localId.length > 0) {
+                validIds ~= r.localId;
+            }
+        }
+
+        if (validIds.length == 0) {
+            // All refs were invalid - return zeros
+            long[] result;
+            result.length = refs.length;
+            return resolve(result);
+        }
+
         auto sql = "SELECT id, " ~ column ~ " FROM " ~ table ~
-                   " WHERE id IN (" ~ ids.join(",") ~ ")";
+                   " WHERE id IN (" ~ validIds.join(",") ~ ")";
 
         return _conn.query(sql).array().then((MySqlConnection.Row[] rows) {
             // Build lookup map
@@ -189,8 +217,8 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
                 auto val = row.column!long(1);
                 values[id] = val;
             }
-            // Return in ref order
-            return refs.map!(r => values.get(r.localId, 0L)).array;
+            // Return in ref order (invalid refs get 0)
+            return refs.map!(r => r.isValid ? values.get(r.localId, 0L) : 0L).array;
         });
     }
 
@@ -212,10 +240,22 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
             return resolve(cast(AnyRef[][])[]);
         }
 
+        // Filter to valid parent refs only
+        string[] validIds;
+        foreach (r; parentRefs) {
+            if (r.isValid && r.localId.length > 0) {
+                validIds ~= r.localId;
+            }
+        }
+
+        if (validIds.length == 0) {
+            // All refs were invalid - return empty arrays
+            return resolve(parentRefs.map!(_ => cast(AnyRef[])[]).array);
+        }
+
         // Naive path: query children grouped by parent FK
-        auto parentIds = parentRefs.map!(r => r.localId).array;
         auto sql = "SELECT id, " ~ fk ~ " FROM " ~ childTable ~
-                   " WHERE " ~ fk ~ " IN (" ~ parentIds.join(",") ~ ")";
+                   " WHERE " ~ fk ~ " IN (" ~ validIds.join(",") ~ ")";
 
         return _conn.query(sql).array().then((MySqlConnection.Row[] rows) {
             // Group children by parent
@@ -225,8 +265,8 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
                 auto parentId = row.column!string(1);
                 childrenByParent[parentId] ~= makeAnyRef(childType, childId);
             }
-            // Return in parent ref order
-            return parentRefs.map!(p => childrenByParent.get(p.localId, [])).array;
+            // Return in parent ref order (invalid refs get empty array)
+            return parentRefs.map!(p => p.isValid ? childrenByParent.get(p.localId, []) : cast(AnyRef[])[]).array;
         });
     }
 
@@ -253,28 +293,46 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
             }
         }
 
+        // Filter to valid child refs only
+        string[] validIds;
+        foreach (r; childRefs) {
+            if (r.isValid && r.localId.length > 0) {
+                validIds ~= r.localId;
+            }
+        }
+
+        if (validIds.length == 0) {
+            // All refs were invalid - return invalid refs
+            return resolve(childRefs.map!(_ => AnyRef.init).array);
+        }
+
         // Naive path: query FK values
-        auto ids = childRefs.map!(r => r.localId).array;
         auto sql = "SELECT id, " ~ fk ~ " FROM " ~ childTable ~
-                   " WHERE id IN (" ~ ids.join(",") ~ ")";
+                   " WHERE id IN (" ~ validIds.join(",") ~ ")";
 
         return _conn.query(sql).array().then((MySqlConnection.Row[] rows) {
+            import std.typecons : Nullable;
             // Build lookup map
             string[string] fkValues;
             foreach (row; rows) {
                 auto id = row.column!string(0);
-                auto fkVal = row.column!string(1);
-                fkValues[id] = fkVal;
+                // FK column may be NULL
+                auto fkVal = row.column!(Nullable!string)(1);
+                fkValues[id] = fkVal.isNull ? "" : fkVal.get;
             }
-            // Return in ref order
+            // Return in ref order (invalid refs get AnyRef.init)
             AnyRef[] result;
             result.reserve(childRefs.length);
             foreach (r; childRefs) {
-                auto fkVal = fkValues.get(r.localId, "");
-                if (fkVal.length > 0) {
-                    result ~= makeAnyRef(parentType, fkVal);
-                } else {
+                if (!r.isValid || r.localId.length == 0) {
                     result ~= AnyRef.init;
+                } else {
+                    auto fkVal = fkValues.get(r.localId, "");
+                    if (fkVal.length > 0) {
+                        result ~= makeAnyRef(parentType, fkVal);
+                    } else {
+                        result ~= AnyRef.init;
+                    }
                 }
             }
             return result;
@@ -297,9 +355,24 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
             return resolve(cast(JSONValue[])[]);
         }
 
-        auto ids = refs.map!(r => r.localId).array;
+        // Filter to valid refs only
+        string[] validIds;
+        foreach (r; refs) {
+            if (r.isValid && r.localId.length > 0) {
+                validIds ~= r.localId;
+            }
+        }
+
+        if (validIds.length == 0) {
+            // All refs were invalid - return nulls
+            JSONValue[] result;
+            result.length = refs.length;
+            foreach (ref r; result) r = JSONValue(null);
+            return resolve(result);
+        }
+
         auto sql = "SELECT id, " ~ column ~ " FROM " ~ table ~
-                   " WHERE id IN (" ~ ids.join(",") ~ ")";
+                   " WHERE id IN (" ~ validIds.join(",") ~ ")";
 
         return _conn.query(sql).array().then((MySqlConnection.Row[] rows) {
             // Build lookup map
@@ -319,11 +392,11 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
                     }
                 }
             }
-            // Return in ref order
+            // Return in ref order (invalid refs get null)
             JSONValue[] result;
             result.reserve(refs.length);
             foreach (r; refs) {
-                result ~= values.get(r.localId, JSONValue(null));
+                result ~= r.isValid ? values.get(r.localId, JSONValue(null)) : JSONValue(null);
             }
             return result;
         });
