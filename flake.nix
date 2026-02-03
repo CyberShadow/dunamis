@@ -17,7 +17,9 @@
           version = "0.0.1";
           src = self;
           dubLock = ./dub-lock.json;
+          dubBuildType = "debug";
           dubBuildFlags = [ "--config=postgres-integration" ];
+          dontStrip = true;
           installPhase = ''
             runHook preInstall
             mkdir -p $out/bin
@@ -32,7 +34,9 @@
           version = "0.0.1";
           src = self;
           dubLock = ./dub-lock.json;
+          dubBuildType = "debug";
           dubBuildFlags = [ "--config=sqlite-integration" ];
+          dontStrip = true;
           buildInputs = [ pkgs.sqlite ];
           installPhase = ''
             runHook preInstall
@@ -48,7 +52,9 @@
           version = "0.0.1";
           src = self;
           dubLock = ./dub-lock.json;
+          dubBuildType = "debug";
           dubBuildFlags = [ "--config=mysql-integration" ];
+          dontStrip = true;
           installPhase = ''
             runHook preInstall
             mkdir -p $out/bin
