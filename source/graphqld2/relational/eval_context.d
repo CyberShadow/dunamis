@@ -95,6 +95,13 @@ abstract class DataFetcher {
         return null;
     }
 
+    /// Returns true if this fetcher supports the naive (unoptimized) evaluation path.
+    /// Some async databases (PostgreSQL, MySQL) only support the optimized path.
+    /// Default: true (assumes naive path is supported).
+    bool supportsNaivePath() {
+        return true;
+    }
+
     /// Execute a QueryNode as a single query and return all results.
     /// This is the main entry point for the optimized path.
     ///
