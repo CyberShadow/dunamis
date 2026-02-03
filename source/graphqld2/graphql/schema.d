@@ -176,9 +176,13 @@ private template isValidFieldMethodForType(T, string member) {
 
 /// Map D types to GraphQL type strings (including nullability suffix).
 /// Non-nullable types include "!", Nullable types do not.
+/// Pointers are treated as nullable (they can be null).
 template graphqlTypeName(T) {
     static if (is(T == Nullable!U, U)) {
         // Nullable types - no "!" suffix
+        enum graphqlTypeName = graphqlBaseTypeName!U;
+    } else static if (is(T == U*, U)) {
+        // Pointer types - nullable (no "!" suffix)
         enum graphqlTypeName = graphqlBaseTypeName!U;
     } else {
         // Non-nullable types - add "!" suffix
@@ -217,6 +221,9 @@ template graphqlBaseTypeName(T) {
         enum graphqlBaseTypeName = "Float";
     } else static if (is(T == Nullable!U, U)) {
         // Unwrap Nullable
+        enum graphqlBaseTypeName = graphqlBaseTypeName!U;
+    } else static if (is(T == U*, U)) {
+        // Pointer - treat as nullable reference (enables recursive types)
         enum graphqlBaseTypeName = graphqlBaseTypeName!U;
     } else static if (is(T == E[], E)) {
         // Array type
@@ -594,12 +601,16 @@ template getInputTypeFields(T) if (isInputType!T) {
                         // Determine GraphQL type based on D type
                         // Nullable!(Nullable!T) → T (three-state, same GraphQL repr as Nullable!T)
                         // Nullable!T → T (optional, absent = null)
+                        // T* → T (pointer - nullable reference for recursive types)
                         // T → T! (required)
                         static if (is(MemberType == Nullable!(Nullable!U), U)) {
                             // Three-state: absent/null/value - GraphQL type is nullable
                             enum gqlType = graphqlInputTypeName!U;
                         } else static if (is(MemberType == Nullable!U, U)) {
                             // Two-state: null/value (absent = null) - GraphQL type is nullable
+                            enum gqlType = graphqlInputTypeName!U;
+                        } else static if (is(MemberType == U*, U)) {
+                            // Pointer - nullable reference (enables recursive types)
                             enum gqlType = graphqlInputTypeName!U;
                         } else {
                             // Required non-null
@@ -634,6 +645,9 @@ template graphqlInputTypeName(T) {
         enum graphqlInputTypeName = "Float";
     } else static if (is(T == Nullable!U, U)) {
         enum graphqlInputTypeName = graphqlInputTypeName!U;
+    } else static if (is(T == U*, U)) {
+        // Pointer - treat as nullable reference (enables recursive types)
+        enum graphqlInputTypeName = graphqlInputTypeName!U;
     } else static if (is(T == E[], E)) {
         // Array type - elements are non-null by default in input
         enum graphqlInputTypeName = "[" ~ graphqlInputTypeName!E ~ "!]";
@@ -665,17 +679,38 @@ template UnwrapNullable(T) {
     }
 }
 
+/// Extract the base input type from a type (unwraps arrays, Nullable, and pointers).
+/// Returns void if no input type is found.
+template extractInputTypeFromType(T) {
+    static if (is(T == E[], E)) {
+        // Array - extract from element type
+        alias extractInputTypeFromType = extractInputTypeFromType!E;
+    } else static if (is(T == Nullable!U, U)) {
+        // Nullable - unwrap
+        alias extractInputTypeFromType = extractInputTypeFromType!U;
+    } else static if (is(T == U*, U)) {
+        // Pointer - unwrap (enables recursive types)
+        alias extractInputTypeFromType = extractInputTypeFromType!U;
+    } else static if (isInputType!T) {
+        // Base case: input type struct
+        alias extractInputTypeFromType = T;
+    } else {
+        // Not an input type
+        alias extractInputTypeFromType = void;
+    }
+}
+
 /// Helper to extract input types from function parameters (iterative)
 template getInputTypesFromParamsImpl(size_t idx, Params...) {
     static if (idx >= Params.length) {
         alias getInputTypesFromParamsImpl = AliasSeq!();
     } else {
         alias P = Params[idx];
-        alias Unwrapped = UnwrapNullable!P;
+        alias Extracted = extractInputTypeFromType!P;
         alias Rest = getInputTypesFromParamsImpl!(idx + 1, Params);
 
-        static if (isInputType!Unwrapped) {
-            alias getInputTypesFromParamsImpl = AliasSeq!(Unwrapped, Rest);
+        static if (!is(Extracted == void)) {
+            alias getInputTypesFromParamsImpl = AliasSeq!(Extracted, Rest);
         } else {
             alias getInputTypesFromParamsImpl = Rest;
         }
@@ -707,10 +742,10 @@ template getNestedInputTypesImpl(T, size_t idx, Members...) {
             alias MemberType = typeof(__traits(getMember, T, member));
 
             static if (!is(MemberType == function) && !is(MemberType == void)) {
-                alias Unwrapped = UnwrapNullable!MemberType;
+                alias Extracted = extractInputTypeFromType!MemberType;
 
-                static if (isInputType!Unwrapped) {
-                    alias getNestedInputTypesImpl = AliasSeq!(Unwrapped, Rest);
+                static if (!is(Extracted == void)) {
+                    alias getNestedInputTypesImpl = AliasSeq!(Extracted, Rest);
                 } else {
                     alias getNestedInputTypesImpl = Rest;
                 }
@@ -726,6 +761,45 @@ template getNestedInputTypesImpl(T, size_t idx, Members...) {
 /// Get nested input types from an input type's fields
 template getNestedInputTypes(T) if (isInputType!T) {
     alias getNestedInputTypes = getNestedInputTypesImpl!(T, 0, __traits(allMembers, T));
+}
+
+/// Expand one level: get all nested input types from a set of input types
+template expandInputOneLevel(Types...) {
+    static if (Types.length == 0) {
+        alias expandInputOneLevel = AliasSeq!();
+    } else {
+        alias First = getNestedInputTypes!(Types[0]);
+        alias Rest = expandInputOneLevel!(Types[1..$]);
+        alias expandInputOneLevel = AliasSeq!(First, Rest);
+    }
+}
+
+/// Forward declaration helper for uniqueTypes (defined later)
+private template uniqueTypesForExpand(Types...) {
+    static if (Types.length == 0) {
+        alias uniqueTypesForExpand = AliasSeq!();
+    } else static if (staticContains!(Types[0], Types[1..$])) {
+        alias uniqueTypesForExpand = uniqueTypesForExpand!(Types[1..$]);
+    } else {
+        alias uniqueTypesForExpand = AliasSeq!(Types[0], uniqueTypesForExpand!(Types[1..$]));
+    }
+}
+
+/// Expand all input types - performs BFS to discover nested types up to 4 levels deep.
+/// This is sufficient for most recursive type structures.
+template expandAllInputTypes(InputTypes...) {
+    // Level 0: direct input types
+    alias Level0 = InputTypes;
+    // Level 1: add types nested in Level0
+    alias Level1 = uniqueTypesForExpand!(AliasSeq!(Level0, expandInputOneLevel!Level0));
+    // Level 2: add types nested in Level1
+    alias Level2 = uniqueTypesForExpand!(AliasSeq!(Level1, expandInputOneLevel!Level1));
+    // Level 3: add types nested in Level2
+    alias Level3 = uniqueTypesForExpand!(AliasSeq!(Level2, expandInputOneLevel!Level2));
+    // Level 4: add types nested in Level3
+    alias Level4 = uniqueTypesForExpand!(AliasSeq!(Level3, expandInputOneLevel!Level3));
+
+    alias expandAllInputTypes = Level4;
 }
 
 /// Helper to collect input types from entity members (iterative)
@@ -768,12 +842,13 @@ template getInputTypesFromEntitiesImpl(Entities...) {
     }
 }
 
-/// Collect all input types from all entities in the schema
+/// Collect all input types from all entities in the schema.
+/// Uses BFS expansion to discover nested input types including recursive ones.
 template getAllInputTypes(Query) {
     alias AllEntityTypes = getAllEntityTypes!Query;
-    alias AllInputTypes = getInputTypesFromEntitiesImpl!AllEntityTypes;
-    // Note: uniqueTypes is defined later in the file, but should work due to D's template instantiation order
-    alias getAllInputTypes = uniqueTypes!AllInputTypes;
+    alias DirectInputTypes = getInputTypesFromEntitiesImpl!AllEntityTypes;
+    // Expand to discover nested input types (handles recursive types via fixed-depth BFS)
+    alias getAllInputTypes = expandAllInputTypes!(uniqueTypesForExpand!DirectInputTypes);
 }
 
 /// Helper to get input types from mutation parameters (iterative)
@@ -1339,10 +1414,12 @@ template generateSchemaSDL(alias SchemaOrQuery) {
     alias AllTypes = getAllEntityTypes!QueryType;
 
     // Collect input types from entities AND mutations (if any)
+    // Both are expanded to discover nested types (handles recursive types)
     alias EntityInputTypes = getAllInputTypes!QueryType;
     static if (getFields!MutationType.length > 0) {
-        alias MutationInputTypes = getInputTypesFromMutation!MutationType;
-        alias AllInputTypes = uniqueTypes!(AliasSeq!(EntityInputTypes, MutationInputTypes));
+        alias MutationDirectTypes = getInputTypesFromMutation!MutationType;
+        alias MutationInputTypes = expandAllInputTypes!(uniqueTypesForExpand!MutationDirectTypes);
+        alias AllInputTypes = uniqueTypesForExpand!(AliasSeq!(EntityInputTypes, MutationInputTypes));
     } else {
         alias AllInputTypes = EntityInputTypes;
     }
@@ -1784,4 +1861,163 @@ unittest {
 
     // Task type should have status field
     static assert(sdl.canFind("status: Status!"), "Task should have status: Status! field: " ~ sdl);
+}
+
+// Test nested input type discovery
+unittest {
+    import std.algorithm : canFind;
+    import graphqld2.relational.demo : DemoEntity, MockDB;
+    import graphqld2.relational.schema : Col, Table;
+
+    // Nested input types
+    static struct Inner {
+        string x;
+    }
+
+    static struct Outer {
+        string y;
+        Inner inner;
+    }
+
+    static MockDB!() db;
+
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("name", string);
+
+        // Computed field with nested input type
+        static auto format(Expr!User u, Outer options) {
+            return u.name;
+        }
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    enum sdl = generateSchemaSDL!Query;
+
+    // Both input types should be discovered
+    static assert(sdl.canFind("input Outer"), "SDL should contain input Outer: " ~ sdl);
+    static assert(sdl.canFind("input Inner"), "SDL should contain input Inner: " ~ sdl);
+    static assert(sdl.canFind("inner: Inner!"), "Outer should have inner: Inner! field: " ~ sdl);
+}
+
+// Test self-referential input type via array
+unittest {
+    import std.algorithm : canFind;
+    import graphqld2.relational.demo : DemoEntity, MockDB;
+    import graphqld2.relational.schema : Col, Table;
+
+    // Self-referential via array
+    static struct FilterInput {
+        string field;
+        FilterInput[] and;  // Self-reference via array
+    }
+
+    static MockDB!() db;
+
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("name", string);
+
+        static auto filter(Expr!User u, FilterInput f) {
+            return u.name;
+        }
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    enum sdl = generateSchemaSDL!Query;
+
+    // FilterInput should appear in SDL
+    static assert(sdl.canFind("input FilterInput"), "SDL should contain input FilterInput: " ~ sdl);
+    static assert(sdl.canFind("and: [FilterInput!]!"), "FilterInput should have and field: " ~ sdl);
+}
+
+// Test self-referential input type via pointer
+unittest {
+    import std.algorithm : canFind;
+    import graphqld2.relational.demo : DemoEntity, MockDB;
+    import graphqld2.relational.schema : Col, Table;
+
+    // Self-referential via pointer (nullable reference)
+    static struct NodeInput {
+        string value;
+        NodeInput* next;  // Self-reference via pointer
+    }
+
+    static MockDB!() db;
+
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("name", string);
+
+        static auto traverse(Expr!User u, NodeInput* head) {
+            return u.name;
+        }
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    enum sdl = generateSchemaSDL!Query;
+
+    // NodeInput should appear in SDL
+    static assert(sdl.canFind("input NodeInput"), "SDL should contain input NodeInput: " ~ sdl);
+    // next should be nullable (pointer = nullable reference)
+    static assert(sdl.canFind("next: NodeInput") && !sdl.canFind("next: NodeInput!"),
+        "NodeInput.next should be nullable: " ~ sdl);
+}
+
+// Test deeply nested input types via pointer
+unittest {
+    import std.algorithm : canFind;
+    import graphqld2.relational.demo : DemoEntity, MockDB;
+    import graphqld2.relational.schema : Col, Table;
+
+    // Deeply nested via pointer (A -> B -> C via pointers)
+    static struct TypeC {
+        string z;
+    }
+
+    static struct TypeB {
+        string y;
+        TypeC* c;
+    }
+
+    static struct TypeA {
+        string x;
+        TypeB* b;
+    }
+
+    static MockDB!() db;
+
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("name", string);
+
+        static auto process(Expr!User u, TypeA input) {
+            return u.name;
+        }
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    enum sdl = generateSchemaSDL!Query;
+
+    // All three types should be discovered
+    static assert(sdl.canFind("input TypeA"), "SDL should contain input TypeA: " ~ sdl);
+    static assert(sdl.canFind("input TypeB"), "SDL should contain input TypeB: " ~ sdl);
+    static assert(sdl.canFind("input TypeC"), "SDL should contain input TypeC: " ~ sdl);
+    // Pointer references should be nullable
+    static assert(sdl.canFind("b: TypeB") && !sdl.canFind("b: TypeB!"),
+        "TypeA.b should be nullable: " ~ sdl);
+    static assert(sdl.canFind("c: TypeC") && !sdl.canFind("c: TypeC!"),
+        "TypeB.c should be nullable: " ~ sdl);
 }

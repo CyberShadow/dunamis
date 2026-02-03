@@ -26,6 +26,20 @@ enum TaskStatus {
     cancelled
 }
 
+/// Recursive filter input type (tests self-referential via array)
+struct FilterInput {
+    Nullable!string field;
+    Nullable!string equals;
+    FilterInput[] and;  // Self-reference via array
+    FilterInput[] or;   // Self-reference via array
+}
+
+/// Linked list node (tests self-referential via pointer)
+struct NodeInput {
+    string value;
+    NodeInput* next;  // Self-reference via pointer
+}
+
 /// Seed the database with test data via GraphQL mutations.
 /// Works with any backend since it uses the HTTP API.
 void seedDatabase() {
@@ -130,6 +144,18 @@ mixin template TestSchema(alias db) {
         static auto allPostsTitled(Expr!User u) {
             import graphqld2.core.expr : every;
             return every!((Expr!Post p) => p.title.ne(""))(u.posts);
+        }
+
+        /// Test recursive input: returns user's firstName (simplified test)
+        /// Real impl would apply filter logic
+        static auto matchesFilter(Expr!User u, FilterInput filter) {
+            return u.firstName;
+        }
+
+        /// Test pointer input: returns user's firstName (simplified test)
+        /// Real impl would traverse the linked list
+        static auto traverseList(Expr!User u, NodeInput* head) {
+            return u.firstName;
         }
     }
 

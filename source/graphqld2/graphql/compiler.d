@@ -381,6 +381,8 @@ T extractValueFromJson(T)(JSONValue json) {
     if (json.type == JSONType.null_) {
         static if (is(T == Nullable!U, U)) {
             return T.init;
+        } else static if (is(T == U*, U)) {
+            return null;  // Pointer is nullable
         } else {
             throw new CompilerException("Null value for non-nullable type " ~ T.stringof);
         }
@@ -424,6 +426,14 @@ T extractValueFromJson(T)(JSONValue json) {
             return T.init;
         }
         return T(extractValueFromJson!U(json));
+    } else static if (is(T == U*, U)) {
+        // Pointer - allocate and extract if not null (enables recursive types)
+        if (json.type == JSONType.null_) {
+            return null;
+        }
+        T result = new U;
+        *result = extractValueFromJson!U(json);
+        return result;
     } else static if (isCustomScalar!T) {
         // CustomScalar handles its own JSON deserialization
         return T.fromJsonValue(json);
@@ -507,6 +517,14 @@ T extractValue(T)(Value val, T defaultValue = T.init) {
             return T.init;  // null
         }
         return T(extractValue!U(val));
+    } else static if (is(T == U*, U)) {
+        // Pointer - allocate and extract if not null (enables recursive types)
+        if (isNullValue(val)) {
+            return null;
+        }
+        T result = new U;
+        *result = extractValue!U(val);
+        return result;
     } else static if (isCustomScalar!T) {
         // CustomScalar handles its own JSON deserialization
         return T.fromJsonValue(valueToJson(val));
@@ -629,11 +647,25 @@ template isSupportedArgType(T) {
         enum isSupportedArgType = true;
     } else static if (is(T == Nullable!U, U)) {
         enum isSupportedArgType = isSupportedArgType!U;
+    } else static if (is(T == U*, U)) {
+        // Pointer - nullable reference (enables recursive types)
+        enum isSupportedArgType = isSupportedArgType!U;
     } else static if (isInputType!T) {
         // Input object - check all fields are supported
         enum isSupportedArgType = allInputFieldsSupported!T;
     } else {
         enum isSupportedArgType = false;
+    }
+}
+
+/// Unwrap pointers and nullables to get the base type for field checking
+private template UnwrapForCheck(T) {
+    static if (is(T == Nullable!U, U)) {
+        alias UnwrapForCheck = UnwrapForCheck!U;
+    } else static if (is(T == U*, U)) {
+        alias UnwrapForCheck = UnwrapForCheck!U;
+    } else {
+        alias UnwrapForCheck = T;
     }
 }
 
@@ -644,7 +676,7 @@ template allInputFieldsSupported(T) if (isInputType!T) {
             static if (!isInternalMember!member) {
                 alias MemberType = typeof(__traits(getMember, T, member));
                 static if (!is(MemberType == function) && !is(MemberType == void)) {
-                    alias Unwrapped = UnwrapNullable!MemberType;
+                    alias Unwrapped = UnwrapForCheck!MemberType;
                     if (!isSupportedArgType!Unwrapped) {
                         return false;
                     }
@@ -2248,4 +2280,186 @@ unittest {
     assert(tasks[0]["status"].str == "pending", "First task status should be pending");
     assert(tasks[1]["status"].str == "inProgress", "Second task status should be inProgress");
     assert(tasks[2]["status"].str == "completed", "Third task status should be completed");
+}
+
+// Test pointer input type extraction (self-referential via pointer)
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import graphqld2.core;
+    import graphqld2.relational.schema;
+    import graphqld2.relational.demo;
+    import graphqld2.relational.eval_context;
+
+    // Self-referential input type via pointer
+    static struct NodeInput {
+        string value;
+        NodeInput* next;
+    }
+
+    static MockDB!() db;
+
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("name", string);
+
+        // Computed field taking recursive pointer input
+        static auto traverseList(Expr!User u, NodeInput* head) {
+            // For testing, just return the user's name
+            // Real impl would use the input
+            return u.name;
+        }
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[{"id": 1, "name": "Alice"}]`);
+
+    // Test null pointer input
+    auto query1 = compileQuery!Query(`{
+        users {
+            traverseList(head: null)
+        }
+    }`);
+    auto executor = new Executor();
+    auto result1 = awaitSync(executor.execute(query1));
+    auto users1 = result1["users"].array;
+    assert(users1.length == 1);
+    assert(users1[0]["traverseList"].str == "Alice");
+
+    // Test pointer with value (single node)
+    auto query2 = compileQuery!Query(`{
+        users {
+            traverseList(head: {value: "first", next: null})
+        }
+    }`);
+    auto result2 = awaitSync(executor.execute(query2));
+    auto users2 = result2["users"].array;
+    assert(users2.length == 1);
+    assert(users2[0]["traverseList"].str == "Alice");
+
+    // Test pointer with nested value (linked list)
+    auto query3 = compileQuery!Query(`{
+        users {
+            traverseList(head: {value: "first", next: {value: "second", next: null}})
+        }
+    }`);
+    auto result3 = awaitSync(executor.execute(query3));
+    auto users3 = result3["users"].array;
+    assert(users3.length == 1);
+    assert(users3[0]["traverseList"].str == "Alice");
+}
+
+// Test pointer input type via JSON variable
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import graphqld2.core;
+    import graphqld2.relational.schema;
+    import graphqld2.relational.demo;
+    import graphqld2.relational.eval_context;
+
+    static struct NodeInput {
+        string value;
+        NodeInput* next;
+    }
+
+    static MockDB!() db;
+
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("name", string);
+
+        static auto traverseList(Expr!User u, NodeInput* head) {
+            return u.name;
+        }
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[{"id": 1, "name": "Alice"}]`);
+
+    // Test with variable containing nested pointer structure
+    auto variables = JSONValue([
+        "node": JSONValue([
+            "value": JSONValue("first"),
+            "next": JSONValue([
+                "value": JSONValue("second"),
+                "next": JSONValue(null)
+            ])
+        ])
+    ]);
+
+    auto query = compileQuery!Query(`
+        query TestPointer($node: NodeInput) {
+            users {
+                traverseList(head: $node)
+            }
+        }
+    `, variables);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query));
+    auto users = result["users"].array;
+    assert(users.length == 1);
+    assert(users[0]["traverseList"].str == "Alice");
+}
+
+// Test array self-reference input type
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import graphqld2.core;
+    import graphqld2.relational.schema;
+    import graphqld2.relational.demo;
+    import graphqld2.relational.eval_context;
+
+    // Self-referential via array
+    static struct FilterInput {
+        string field;
+        FilterInput[] and;
+    }
+
+    static MockDB!() db;
+
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("name", string);
+
+        static auto matchFilter(Expr!User u, FilterInput filter) {
+            return u.name;
+        }
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[{"id": 1, "name": "Alice"}]`);
+
+    // Test with nested array recursion
+    auto query = compileQuery!Query(`{
+        users {
+            matchFilter(filter: {
+                field: "name",
+                and: [
+                    {field: "age", and: []},
+                    {field: "email", and: [{field: "domain", and: []}]}
+                ]
+            })
+        }
+    }`);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query));
+    auto users = result["users"].array;
+    assert(users.length == 1);
+    assert(users[0]["matchFilter"].str == "Alice");
 }

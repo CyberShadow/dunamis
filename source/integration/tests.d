@@ -694,6 +694,90 @@ void testQuerySomeEveryWithPostDetails() {
 }
 
 // ============================================================================
+// Recursive Input Type Tests
+// ============================================================================
+
+void testRecursiveFilterInput() {
+    // Test with simple nested filter (and: [{field: "name", equals: "Alice"}])
+    auto response = graphql(`{
+        users {
+            matchesFilter(filter: {
+                field: "name",
+                equals: "Alice",
+                and: [{field: "age", equals: "25", and: [], or: []}],
+                or: []
+            })
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 1, "Expected at least 1 user");
+    // matchesFilter just returns firstName, so verify we got results
+    assertTrue(users[0]["matchesFilter"].type == JSONType.string, "matchesFilter should return string");
+}
+
+void testDeepNestedFilterInput() {
+    // Test 3-level nesting
+    auto response = graphql(`{
+        users {
+            matchesFilter(filter: {
+                and: [{
+                    or: [{field: "a", and: [], or: []}, {field: "b", and: [], or: []}],
+                    and: []
+                }],
+                or: []
+            })
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 1, "Expected at least 1 user");
+}
+
+void testPointerInputNull() {
+    // Test null pointer input
+    auto response = graphql(`{
+        users {
+            traverseList(head: null)
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 1, "Expected at least 1 user");
+    assertTrue(users[0]["traverseList"].type == JSONType.string, "traverseList should return string");
+}
+
+void testPointerInputWithValue() {
+    // Test pointer with nested value (linked list)
+    auto response = graphql(`{
+        users {
+            traverseList(head: {value: "first", next: {value: "second", next: null}})
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 1, "Expected at least 1 user");
+    assertTrue(users[0]["traverseList"].type == JSONType.string, "traverseList should return string");
+}
+
+void testEmptyRecursiveArrays() {
+    // Test with empty recursive arrays
+    auto response = graphql(`{
+        users {
+            matchesFilter(filter: {field: "name", and: [], or: []})
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 1, "Expected at least 1 user");
+}
+
+// ============================================================================
 // Test Registration
 // ============================================================================
 
@@ -738,4 +822,11 @@ static this() {
     registerTest("Query hasPosts (some)", "tests", &testQueryHasPostsField);
     registerTest("Query allPostsTitled (every)", "tests", &testQueryAllPostsTitledField);
     registerTest("Query some/every with post details", "tests", &testQuerySomeEveryWithPostDetails);
+
+    // Recursive input type tests
+    registerTest("Recursive filter input", "tests", &testRecursiveFilterInput);
+    registerTest("Deep nested filter input", "tests", &testDeepNestedFilterInput);
+    registerTest("Pointer input null", "tests", &testPointerInputNull);
+    registerTest("Pointer input with value", "tests", &testPointerInputWithValue);
+    registerTest("Empty recursive arrays", "tests", &testEmptyRecursiveArrays);
 }
