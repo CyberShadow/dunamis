@@ -30,6 +30,12 @@ class EvalContext {
     /// Uses AnyRef for storage since different MapExpr scopes may have different entity types.
     private AnyRef[][void*] _refsMap;
 
+    /// Sort comparison items keyed by SortByExpr identity.
+    /// Communication between SortByExpr and SortItemExpr:
+    /// - SortByExpr calls setSortItems(this, left, right) before evaluating predicate
+    /// - SortItemExpr calls getSortItem(_parentSort, _isLeftItem) to get its ref
+    private AnyRef[2][void*] _sortItemsMap;
+
     /// Expression evaluation cache, keyed by expression object identity.
     /// Used by evalAs() to automatically memoize expression evaluation.
     /// When the same expression is evaluated multiple times (e.g., via
@@ -50,6 +56,21 @@ class EvalContext {
             return *p;
         }
         return [];
+    }
+
+    /// Set comparison items for a SortByExpr.
+    /// Used during sort predicate evaluation.
+    void setSortItems(Object sortExpr, AnyRef left, AnyRef right) {
+        _sortItemsMap[cast(void*) sortExpr] = [left, right];
+    }
+
+    /// Get a comparison item for a SortItemExpr.
+    /// isLeft: true for left item (a), false for right item (b)
+    AnyRef getSortItem(Object sortExpr, bool isLeft) {
+        if (auto p = cast(void*) sortExpr in _sortItemsMap) {
+            return (*p)[isLeft ? 0 : 1];
+        }
+        return AnyRef.init;
     }
 
     /// Get cached Promise for an expression, or null if not cached.

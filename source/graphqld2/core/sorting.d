@@ -11,14 +11,16 @@ module graphqld2.core.sorting;
 import std.algorithm : sort, map;
 import std.array : array;
 import std.conv : to;
-import std.json : JSONValue;
+import std.json : JSONValue, JSONType;
 import std.range : iota;
 
 import ae.utils.promise;
+import ae.utils.promise.await : async;
 
 import graphqld2.core.expr;
 import graphqld2.core.eval;
 import graphqld2.core.optimize;
+import graphqld2.core.types : AnyRef;
 
 // ============================================================================
 // Types
@@ -108,11 +110,15 @@ class SortItemExpr(Entity) : Expr!Entity, SortItemInfo {
     }
 
     override Promise!(Entity[]) eval(EvalContext ctx) {
-        // Sort placeholders should not be evaluated directly.
-        // They exist only for building the predicate expression tree.
-        // The predicate is analyzed at optimization time, not evaluated.
-        throw new Exception("SortItemExpr should not be evaluated directly - " ~
-            "predicate should be pattern-matched during optimization");
+        // During naive path sorting, the predicate is evaluated with comparison items.
+        // Get the current comparison item (left or right) from context.
+        auto ref_ = ctx.getSortItem(_parentSort, _isLeftItem);
+        if (ref_ == AnyRef.init) {
+            // Fallback: shouldn't happen if SortByExpr sets up context correctly
+            throw new Exception("SortItemExpr: no comparison item in context - " ~
+                "ensure SortByExpr.eval() sets up sort items before predicate evaluation");
+        }
+        return resolve([Entity(ref_.nodeId)]);
     }
 }
 
@@ -178,13 +184,58 @@ class SortByExpr(Entity, Pred) : Expr!(Entity[]), SortByInfo
     }
 
     override Promise!(Entity[][]) eval(EvalContext ctx) {
-        // Fallback: in-memory sorting
-        // This is reached when SQL push-down wasn't possible
-        return evalAs!(Entity[])(_source, ctx).then((Entity[][] groups) {
-            // For in-memory sorting, we need actual values.
-            // Since entities are just proxies without data, this fallback
-            // only works if the optimizer couldn't push down to SQL.
-            // Return unsorted as fallback (relational layer handles actual sorting).
+        import ae.utils.promise.await : async, await;
+
+        // Naive path: in-memory sorting using predicate evaluation
+        // Uses fibers via async/await for clean sequential code
+        auto predicate = _predicate;
+        auto self = this;
+
+        return async({
+            // Evaluate source to get entity groups
+            Entity[][] groups = evalAs!(Entity[])(_source, ctx).await;
+
+            // Sort each group using insertion sort with async comparisons
+            foreach (ref group; groups) {
+                if (group.length <= 1) continue;
+
+                // Insertion sort with async predicate evaluation
+                Entity[] sorted;
+                sorted.reserve(group.length);
+                sorted ~= group[0];
+
+                foreach (item; group[1 .. $]) {
+                    // Find insertion position
+                    size_t pos = 0;
+                    while (pos < sorted.length) {
+                        // Compare: is item < sorted[pos]?
+                        ctx.setSortItems(self, AnyRef(item.nodeId.id), AnyRef(sorted[pos].nodeId.id));
+
+                        bool itemIsLess;
+                        static if (is(Pred : Expr!bool)) {
+                            bool[] results = evalAs!bool(predicate, ctx).await;
+                            itemIsLess = results.length > 0 ? results[0] : false;
+                        } else static if (is(Pred : Expr!int)) {
+                            int[] results = evalAs!int(predicate, ctx).await;
+                            itemIsLess = results.length > 0 ? results[0] < 0 : false;
+                        }
+
+                        if (itemIsLess) break;
+                        pos++;
+                    }
+
+                    // Insert at position
+                    Entity[] newSorted;
+                    newSorted.reserve(sorted.length + 1);
+                    newSorted ~= sorted[0 .. pos];
+                    newSorted ~= item;
+                    newSorted ~= sorted[pos .. $];
+                    sorted = newSorted;
+                }
+
+                group = sorted;
+            }
+
             return groups;
         });
     }
@@ -243,9 +294,131 @@ class OrderByExpr(T) : Expr!(T[]), OrderByInfo {
     }
 
     override Promise!(T[][]) eval(EvalContext ctx) {
-        // Fallback: pass through to source (actual sorting in SQL or MockDB)
-        return evalAs!(T[])(source, ctx);
+        import ae.utils.promise.await : async, await;
+
+        auto src = source;
+        auto specs = _specs;
+
+        return async({
+            // Evaluate source to get entity groups
+            T[][] groups = evalAs!(T[])(src, ctx).await;
+
+            // Sort each group using naive path sorting if available
+            foreach (ref group; groups) {
+                if (group.length <= 1 || specs.length == 0) continue;
+
+                // Get table name from first entity's typeName
+                static if (__traits(hasMember, T, "nodeId")) {
+                    string tableName = getTableFromTypeName(group[0].nodeId.typeName);
+                    AnyRef[] refs = group.map!(e => AnyRef(e.nodeId.id)).array;
+
+                    // Sort using fetched column values via the sorting helper
+                    group = sortByColumnsNaive!T(group, refs, specs, tableName, ctx);
+                }
+            }
+
+            return groups;
+        });
     }
+
+    /// Get table name from type name (snake_case pluralization)
+    private static string getTableFromTypeName(string typeName) {
+        // Simple conversion: "User" -> "users"
+        import std.uni : toLower;
+
+        if (typeName.length == 0) return "";
+
+        // Convert camelCase to snake_case and pluralize
+        string result;
+        foreach (i, c; typeName) {
+            if (i > 0 && c >= 'A' && c <= 'Z') {
+                result ~= '_';
+            }
+            result ~= toLower(c);
+        }
+        return result ~ "s";
+    }
+}
+
+// ============================================================================
+// Naive Path Sorting Helper
+// ============================================================================
+
+/// Sort entities by column values for naive evaluation path.
+/// Fetches column values via RelationalEvalContext if available.
+/// Must be called from within a fiber context (e.g., inside an async block).
+@async private T[] sortByColumnsNaive(T)(T[] items, AnyRef[] refs, const(OrderBySpec)[] specs,
+                                         string tableName, EvalContext ctx) {
+    import ae.utils.promise.await : await;
+
+    // Try to get relational context for DataFetcher access
+    try {
+        import graphqld2.relational.eval_context : RelationalEvalContext;
+
+        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+        if (relCtx is null || relCtx.fetcher is null) {
+            return items;  // No fetcher available - return unsorted
+        }
+
+        // Fetch all sort column values (using await since we're in a fiber)
+        JSONValue[][] sortValues;
+        foreach (spec; specs) {
+            auto values = relCtx.fetcher.fetchColumnJson(tableName, spec.column, refs).await;
+            sortValues ~= values;
+        }
+
+        // Build index array and sort
+        size_t[] indices = iota(items.length).array;
+
+        indices.sort!((a, b) {
+            foreach (i, spec; specs) {
+                auto valA = sortValues[i][a];
+                auto valB = sortValues[i][b];
+                int cmp = compareJsonValues(valA, valB);
+                if (cmp != 0) {
+                    return spec.descending ? (cmp > 0) : (cmp < 0);
+                }
+            }
+            return false;  // Equal
+        });
+
+        // Reorder items according to sorted indices
+        T[] result;
+        result.reserve(items.length);
+        foreach (idx; indices) {
+            result ~= items[idx];
+        }
+        return result;
+    } catch (Exception e) {
+        // RelationalEvalContext not available - return unsorted
+        return items;
+    }
+}
+
+/// Compare two JSON values for sorting
+private int compareJsonValues(JSONValue a, JSONValue b) {
+    // Handle nulls
+    if (a.type == JSONType.null_ && b.type == JSONType.null_) return 0;
+    if (a.type == JSONType.null_) return -1;
+    if (b.type == JSONType.null_) return 1;
+
+    // Compare based on type
+    if (a.type == JSONType.integer && b.type == JSONType.integer) {
+        auto diff = a.integer - b.integer;
+        return diff < 0 ? -1 : (diff > 0 ? 1 : 0);
+    }
+    if (a.type == JSONType.string && b.type == JSONType.string) {
+        if (a.str < b.str) return -1;
+        if (a.str > b.str) return 1;
+        return 0;
+    }
+    if (a.type == JSONType.float_ && b.type == JSONType.float_) {
+        auto diff = a.floating - b.floating;
+        return diff < 0 ? -1 : (diff > 0 ? 1 : 0);
+    }
+
+    // Mixed types: convert to string
+    return 0;
 }
 
 // ============================================================================
