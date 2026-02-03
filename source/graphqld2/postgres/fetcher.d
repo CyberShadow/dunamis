@@ -158,27 +158,61 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
     // =========================================================================
     // Individual fetch methods (for naive/fallback path)
-    // These return Promises to support async operations.
-    // Currently returns stubs/cached data - could implement real async queries.
+    // These return Promises to support async database operations.
     // =========================================================================
 
     override Promise!(string[]) fetchColumnString(string table, string column, AnyRef[] refs) {
-        // Not used in optimized path - implemented for interface completeness
-        string[] result;
-        result.length = refs.length;
-        return resolve(result);
+        if (refs.length == 0) return resolve(cast(string[])[]);
+
+        auto ids = refs.map!(r => r.localId).array;
+        auto sql = "SELECT id, " ~ column ~ " FROM " ~ table ~
+                   " WHERE id IN (" ~ ids.join(",") ~ ")";
+
+        return _conn.prepare(sql).then((PreparedStatement stmt) {
+            return stmt.query().array();
+        }).then((PgSqlConnection.Row[] rows) {
+            // Build lookup map
+            string[string] values;
+            foreach (row; rows) {
+                auto id = row.column!string(0);
+                auto val = row.column!string(1);
+                values[id] = val;
+            }
+            // Return in ref order
+            return refs.map!(r => values.get(r.localId, "")).array;
+        });
     }
 
     override Promise!(long[]) fetchColumnLong(string table, string column, AnyRef[] refs) {
-        long[] result;
-        result.length = refs.length;
-        return resolve(result);
+        if (refs.length == 0) return resolve(cast(long[])[]);
+
+        auto ids = refs.map!(r => r.localId).array;
+        auto sql = "SELECT id, " ~ column ~ " FROM " ~ table ~
+                   " WHERE id IN (" ~ ids.join(",") ~ ")";
+
+        return _conn.prepare(sql).then((PreparedStatement stmt) {
+            return stmt.query().array();
+        }).then((PgSqlConnection.Row[] rows) {
+            // Build lookup map
+            long[string] values;
+            foreach (row; rows) {
+                auto id = row.column!string(0);
+                auto val = row.column!long(1);
+                values[id] = val;
+            }
+            // Return in ref order
+            return refs.map!(r => values.get(r.localId, 0L)).array;
+        });
     }
 
     override Promise!(long[]) fetchAllIds(string table) {
-        // Not used in optimized path - data is fetched via executeQueryNode
-        // Returning empty triggers the caller to use the optimized path
-        return resolve(cast(long[])[]);
+        auto sql = "SELECT id FROM " ~ table;
+
+        return _conn.prepare(sql).then((PreparedStatement stmt) {
+            return stmt.query().array();
+        }).then((PgSqlConnection.Row[] rows) {
+            return rows.map!(r => r.column!long(0)).array;
+        });
     }
 
     override Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs) {
@@ -187,8 +221,28 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
             return resolve((*result).getChildRefs(parentRefs));
         }
 
-        // Fallback to empty arrays if no cached results
-        return resolve(parentRefs.map!(_ => cast(AnyRef[])[]).array);
+        if (parentRefs.length == 0) {
+            return resolve(cast(AnyRef[][])[]);
+        }
+
+        // Naive path: query children grouped by parent FK
+        auto parentIds = parentRefs.map!(r => r.localId).array;
+        auto sql = "SELECT id, " ~ fk ~ " FROM " ~ childTable ~
+                   " WHERE " ~ fk ~ " IN (" ~ parentIds.join(",") ~ ")";
+
+        return _conn.prepare(sql).then((PreparedStatement stmt) {
+            return stmt.query().array();
+        }).then((PgSqlConnection.Row[] rows) {
+            // Group children by parent
+            AnyRef[][string] childrenByParent;
+            foreach (row; rows) {
+                auto childId = row.column!string(0);
+                auto parentId = row.column!string(1);
+                childrenByParent[parentId] ~= makeAnyRef(childType, childId);
+            }
+            // Return in parent ref order
+            return parentRefs.map!(p => childrenByParent.get(p.localId, [])).array;
+        });
     }
 
     override Promise!(AnyRef[]) fetchBelongsTo(string childTable, string fk, string parentType, AnyRef[] childRefs) {
@@ -196,9 +250,7 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
             return resolve(cast(AnyRef[])[]);
         }
 
-        // fk is already the SQL column name (from @SqlColumn UDA via getSqlColumn)
         // Try to get FK values from cached query results first
-        // The FK column is included in the main query, so we can avoid an extra query
         foreach (result; _cachedResults.byValue) {
             if (result.hasColumn(fk)) {
                 // Found the FK column in cached results
@@ -216,9 +268,34 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
             }
         }
 
-        // Naive path: would need async query, return invalid refs
-        // (Optimized path uses ProjectTypedBelongsToExpr instead)
-        return resolve(childRefs.map!(_ => AnyRef.init).array);
+        // Naive path: query FK values
+        auto ids = childRefs.map!(r => r.localId).array;
+        auto sql = "SELECT id, " ~ fk ~ " FROM " ~ childTable ~
+                   " WHERE id IN (" ~ ids.join(",") ~ ")";
+
+        return _conn.prepare(sql).then((PreparedStatement stmt) {
+            return stmt.query().array();
+        }).then((PgSqlConnection.Row[] rows) {
+            // Build lookup map
+            string[string] fkValues;
+            foreach (row; rows) {
+                auto id = row.column!string(0);
+                auto fkVal = row.column!string(1);
+                fkValues[id] = fkVal;
+            }
+            // Return in ref order
+            AnyRef[] result;
+            result.reserve(childRefs.length);
+            foreach (r; childRefs) {
+                auto fkVal = fkValues.get(r.localId, "");
+                if (fkVal.length > 0) {
+                    result ~= makeAnyRef(parentType, fkVal);
+                } else {
+                    result ~= AnyRef.init;
+                }
+            }
+            return result;
+        });
     }
 
     /// Convert JSON value to ID string (handles integers and strings)
@@ -232,12 +309,43 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
         }
     }
 
-
     override Promise!(JSONValue[]) fetchColumnJson(string table, string column, AnyRef[] refs) {
-        JSONValue[] result;
-        result.length = refs.length;
-        foreach (ref r; result) r = JSONValue(null);
-        return resolve(result);
+        if (refs.length == 0) {
+            return resolve(cast(JSONValue[])[]);
+        }
+
+        auto ids = refs.map!(r => r.localId).array;
+        auto sql = "SELECT id, " ~ column ~ " FROM " ~ table ~
+                   " WHERE id IN (" ~ ids.join(",") ~ ")";
+
+        return _conn.prepare(sql).then((PreparedStatement stmt) {
+            return stmt.query().array();
+        }).then((PgSqlConnection.Row[] rows) {
+            // Build lookup map
+            JSONValue[string] values;
+            foreach (row; rows) {
+                auto id = row.column!string(0);
+                // Try to get as string first, then as other types
+                try {
+                    auto val = row.column!string(1);
+                    values[id] = JSONValue(val);
+                } catch (Exception e) {
+                    try {
+                        auto val = row.column!long(1);
+                        values[id] = JSONValue(val);
+                    } catch (Exception e2) {
+                        values[id] = JSONValue(null);
+                    }
+                }
+            }
+            // Return in ref order
+            JSONValue[] result;
+            result.reserve(refs.length);
+            foreach (r; refs) {
+                result ~= values.get(r.localId, JSONValue(null));
+            }
+            return result;
+        });
     }
 
     // =========================================================================
