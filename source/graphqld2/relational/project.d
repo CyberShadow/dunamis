@@ -15,6 +15,7 @@ import graphqld2.core.expr;
 import graphqld2.core.optimize;
 import graphqld2.relational.eval_context;
 import graphqld2.relational.query_node;
+import graphqld2.relational.schema : BelongsToInfo;
 
 // ============================================================================
 // Prefetch Expression
@@ -361,6 +362,62 @@ class ProjectBelongsToExpr : Expr!AnyRef {
     @property int queryNodeId() { return _queryNodeId; }
     @property string fkColumn() { return _fkColumn; }
     @property string parentTypeName() { return _parentTypeName; }
+}
+
+/// Typed wrapper for ProjectBelongsToExpr that converts AnyRef to entity type.
+/// Returns Parent[] for required FK, Nullable!Parent[] for optional FK.
+/// Used by BelongsToAccessExpr.optimize() to replace naive fetchBelongsTo path.
+///
+/// Implements BelongsToInfo to allow chain traversal for nested BelongsTo
+/// relationships (e.g., task.assignee.department).
+class ProjectTypedBelongsToExpr(Child, Parent, ResultType, string fk) : Expr!ResultType, AnyRefEvaluable, BelongsToInfo {
+    import std.typecons : Nullable;
+    import graphqld2.relational.schema : EntityID;
+
+    private ProjectBelongsToExpr _inner;
+    private ExprBase _baseInput;  // Original input for chain continuation
+
+    this(ProjectBelongsToExpr inner, ExprBase baseInput) {
+        _inner = inner;
+        _baseInput = baseInput;
+    }
+
+    override ExprBase[] dependencies() {
+        return [_inner];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0)
+            _inner = cast(ProjectBelongsToExpr) newDep;
+    }
+
+    override Promise!(ResultType[]) eval(EvalContext ctx) {
+        return _inner.eval(ctx).then((AnyRef[] refs) {
+            static if (is(ResultType == Parent)) {
+                // Required FK - convert AnyRef to Parent
+                return refs.map!(r => Parent(r.nodeId)).array;
+            } else static if (is(ResultType == Nullable!Parent)) {
+                // Optional FK - wrap valid refs in Nullable, invalid as null
+                return refs.map!(r => r.isValid ? Nullable!Parent(Parent(r.nodeId)) : Nullable!Parent.init).array;
+            } else {
+                static assert(false, "ResultType must be Parent or Nullable!Parent");
+            }
+        });
+    }
+
+    /// AnyRefEvaluable implementation for chain traversal
+    Promise!(AnyRef[]) evalAsAnyRef(EvalContext ctx) {
+        return _inner.eval(ctx);
+    }
+
+    // BelongsToInfo implementation for nested BelongsTo chain traversal
+    @property ExprBase inputExpr() { return _baseInput; }
+    @property string childTable() { return EntityID!Child.table; }
+    @property string parentTable() { return EntityID!Parent.table; }
+    @property string parentTypeName() { return EntityID!Parent.typeName; }
+    @property string fkColumn() { return fk; }
+
+    @property int queryNodeId() { return _inner.queryNodeId; }
 }
 
 // ============================================================================

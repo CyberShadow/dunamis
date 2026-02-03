@@ -1343,9 +1343,51 @@ class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultTyp
 
     static if (!is(Child == void)) {
         override Expr!ResultType optimize(OptimizeContext ctx) {
+            import std.typecons : Nullable;
+
             _input = (cast(Expr!Child) _input).optimize(ctx);
-            // BelongsTo stays as-is; column access through it uses JOINs
-            return this;
+
+            // Only optimize nullable BelongsTo to use projection.
+            // Non-nullable BelongsTo is never evaluated directly - only its
+            // columns are accessed via JOINs, so we need to keep the chain
+            // traversable for ColumnAccessExpr.optimize().
+            static if (!is(ResultType == Nullable!Parent)) {
+                return this;
+            } else {
+                // Find the MapExpr this belongsTo belongs to
+                JoinHop[] joinPath;
+                ExprBase baseInput;
+                auto mapExpr = findMapExprFromChain(_input, joinPath, baseInput);
+
+                if (mapExpr is null) {
+                    // Can't optimize, use naive path (fetchBelongsTo)
+                    return this;
+                }
+
+                // Get the relational optimization context
+                auto relCtx = ctx.getSourceContext!RelationalOptimizeContext();
+                if (relCtx is null) {
+                    return this;
+                }
+
+                // Get the QueryNode for this MapExpr
+                auto node = relCtx.getNode(mapExpr);
+                if (node is null) {
+                    // Node not created yet - let ColumnAccessExpr create it
+                    return this;
+                }
+
+                // Add the FK column to the query
+                node.addColumn(fk);
+
+                // Get the PrefetchExpr for this node
+                auto prefetch = relCtx.getPrefetchExpr(node);
+
+                // Create projection that reads FK from query results
+                import graphqld2.relational.project : ProjectBelongsToExpr, ProjectTypedBelongsToExpr;
+                auto innerProj = new ProjectBelongsToExpr(node.id, fk, EntityID!Parent.typeName, baseInput, prefetch);
+                return new ProjectTypedBelongsToExpr!(Child, Parent, ResultType, fk)(innerProj, baseInput);
+            }
         }
     } else {
         override Expr!ResultType optimize(OptimizeContext ctx) {

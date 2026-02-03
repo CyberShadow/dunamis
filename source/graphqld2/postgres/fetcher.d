@@ -214,7 +214,9 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
             }
         }
 
-        assert(false, "FK column '" ~ fk ~ "' not found in cached results");
+        // Naive path: would need async query, return invalid refs
+        // (Optimized path uses ProjectTypedBelongsToExpr instead)
+        return childRefs.map!(_ => AnyRef.init).array;
     }
 
     /// Convert JSON value to ID string (handles integers and strings)

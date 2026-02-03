@@ -206,7 +206,39 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
             }
         }
 
-        assert(false, "FK column '" ~ fk ~ "' not found in cached results");
+        // Naive path fallback: query the database directly
+        auto idList = childRefs.map!(r => r.localId).join(",");
+        if (idList.length == 0) {
+            return childRefs.map!(_ => AnyRef.init).array;
+        }
+
+        auto sql = format("SELECT id, %s FROM %s WHERE id IN (%s)", fk, childTable, idList);
+
+        // Build id -> fk value map from query results
+        string[string] fkByChildId;
+        foreach (cells, columns; _db.query(sql)) {
+            if (cells.length >= 2) {
+                auto childId = cells[0] !is null ? cells[0].idup : "";
+                auto fkValue = cells[1] !is null ? cells[1].idup : "";
+                fkByChildId[childId] = fkValue;
+            }
+        }
+
+        // Map child refs to parent refs
+        AnyRef[] result;
+        result.reserve(childRefs.length);
+        foreach (childRef; childRefs) {
+            if (auto fkPtr = childRef.localId in fkByChildId) {
+                if ((*fkPtr).length > 0) {
+                    result ~= makeAnyRef(parentType, *fkPtr);
+                } else {
+                    result ~= AnyRef.init;
+                }
+            } else {
+                result ~= AnyRef.init;
+            }
+        }
+        return result;
     }
 
     /// Convert JSON value to ID string (handles integers and strings)
