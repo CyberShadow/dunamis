@@ -1,6 +1,6 @@
 # Dynamo
 
-Exploratory project for a next major version of a D GraphQL server library.
+A GraphQL server for D that eliminates N+1 queries through expression-based query optimization.
 
 ## Problem
 

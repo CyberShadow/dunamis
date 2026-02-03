@@ -1,5 +1,5 @@
 {
-  description = "Dynamo - GraphQL server with bulk data resolution";
+  description = "Dynamo - GraphQL server for D that eliminates N+1 queries through expression-based query optimization";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

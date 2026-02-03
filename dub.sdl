@@ -1,5 +1,5 @@
 name "dynamo"
-description "GraphQL server with bulk data resolution"
+description "GraphQL server for D that eliminates N+1 queries through expression-based query optimization"
 authors "Vladimir"
 license "MIT"
 
