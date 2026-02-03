@@ -160,26 +160,148 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
     // =========================================================================
 
     override Promise!(string[]) fetchColumnString(string table, string column, AnyRef[] refs) {
+        if (refs.length == 0) {
+            return resolve(cast(string[])[]);
+        }
+
+        // Build ID -> index map for result ordering (only for valid refs)
+        size_t[string] idxByLocalId;
+        string[] validIds;
+        foreach (i, r; refs) {
+            if (r.isValid && r.localId.length > 0) {
+                idxByLocalId[r.localId] = i;
+                validIds ~= r.localId;
+            }
+        }
+
         string[] result;
         result.length = refs.length;
+
+        if (validIds.length == 0) {
+            return resolve(result);  // All refs were invalid
+        }
+
+        // Query the column values
+        auto idList = validIds.join(",");
+        auto sql = format("SELECT id, %s FROM %s WHERE id IN (%s)", column, table, idList);
+
+        foreach (cells, columns; _db.query(sql)) {
+            if (cells.length >= 2) {
+                auto id = cells[0] !is null ? cells[0].idup : "";
+                auto value = cells[1] !is null ? cells[1].idup : "";
+                if (auto idxPtr = id in idxByLocalId) {
+                    result[*idxPtr] = value;
+                }
+            }
+        }
+
         return resolve(result);
     }
 
     override Promise!(long[]) fetchColumnLong(string table, string column, AnyRef[] refs) {
+        if (refs.length == 0) {
+            return resolve(cast(long[])[]);
+        }
+
+        // Build ID -> index map for result ordering (only for valid refs)
+        size_t[string] idxByLocalId;
+        string[] validIds;
+        foreach (i, r; refs) {
+            if (r.isValid && r.localId.length > 0) {
+                idxByLocalId[r.localId] = i;
+                validIds ~= r.localId;
+            }
+        }
+
         long[] result;
         result.length = refs.length;
+
+        if (validIds.length == 0) {
+            return resolve(result);  // All refs were invalid
+        }
+
+        // Query the column values
+        auto idList = validIds.join(",");
+        auto sql = format("SELECT id, %s FROM %s WHERE id IN (%s)", column, table, idList);
+
+        foreach (cells, columns; _db.query(sql)) {
+            if (cells.length >= 2) {
+                auto id = cells[0] !is null ? cells[0].idup : "";
+                auto valueStr = cells[1] !is null ? cells[1].idup : "0";
+                if (auto idxPtr = id in idxByLocalId) {
+                    result[*idxPtr] = valueStr.to!long;
+                }
+            }
+        }
+
         return resolve(result);
     }
 
     override Promise!(long[]) fetchAllIds(string table) {
-        return resolve(cast(long[])[]);
+        auto sql = format("SELECT id FROM %s", table);
+        long[] result;
+
+        foreach (cells, columns; _db.query(sql)) {
+            if (cells.length >= 1 && cells[0] !is null) {
+                result ~= cells[0].idup.to!long;
+            }
+        }
+
+        return resolve(result);
     }
 
     override Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs) {
+        // Try cached results first (from optimized path)
         if (auto result = childType in _cachedResultsByType) {
             return resolve((*result).getChildRefs(parentRefs));
         }
-        return resolve(parentRefs.map!(_ => cast(AnyRef[])[]).array);
+
+        // Naive path: query the database directly
+        if (parentRefs.length == 0) {
+            return resolve(cast(AnyRef[][])[]);
+        }
+
+        // Filter to valid parent refs only
+        string[] validIds;
+        foreach (r; parentRefs) {
+            if (r.isValid && r.localId.length > 0) {
+                validIds ~= r.localId;
+            }
+        }
+
+        AnyRef[][string] childrenByParentId;
+
+        if (validIds.length > 0) {
+            auto idList = validIds.join(",");
+            auto sql = format("SELECT id, %s FROM %s WHERE %s IN (%s)", fk, childTable, fk, idList);
+
+            // Group children by parent FK
+            foreach (cells, columns; _db.query(sql)) {
+                if (cells.length >= 2) {
+                    auto childId = cells[0] !is null ? cells[0].idup : "";
+                    auto parentId = cells[1] !is null ? cells[1].idup : "";
+                    if (parentId.length > 0) {
+                        childrenByParentId[parentId] ~= makeAnyRef(childType, childId);
+                    }
+                }
+            }
+        }
+
+        // Map to result array (including empty arrays for invalid refs)
+        AnyRef[][] result;
+        result.reserve(parentRefs.length);
+        foreach (parentRef; parentRefs) {
+            if (parentRef.isValid && parentRef.localId.length > 0) {
+                if (auto children = parentRef.localId in childrenByParentId) {
+                    result ~= *children;
+                } else {
+                    result ~= cast(AnyRef[])[];
+                }
+            } else {
+                result ~= cast(AnyRef[])[];  // Invalid parent ref -> empty children
+            }
+        }
+        return resolve(result);
     }
 
     override Promise!(AnyRef[]) fetchBelongsTo(string childTable, string fk, string parentType, AnyRef[] childRefs) {
@@ -208,11 +330,19 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
         }
 
         // Naive path fallback: query the database directly
-        auto idList = childRefs.map!(r => r.localId).join(",");
-        if (idList.length == 0) {
+        // Filter to valid refs only
+        string[] validIds;
+        foreach (r; childRefs) {
+            if (r.isValid && r.localId.length > 0) {
+                validIds ~= r.localId;
+            }
+        }
+
+        if (validIds.length == 0) {
             return resolve(childRefs.map!(_ => AnyRef.init).array);
         }
 
+        auto idList = validIds.join(",");
         auto sql = format("SELECT id, %s FROM %s WHERE id IN (%s)", fk, childTable, idList);
 
         // Build id -> fk value map from query results
@@ -225,11 +355,13 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
             }
         }
 
-        // Map child refs to parent refs
+        // Map child refs to parent refs (including invalid refs)
         AnyRef[] result;
         result.reserve(childRefs.length);
         foreach (childRef; childRefs) {
-            if (auto fkPtr = childRef.localId in fkByChildId) {
+            if (!childRef.isValid || childRef.localId.length == 0) {
+                result ~= AnyRef.init;  // Invalid child ref -> null parent
+            } else if (auto fkPtr = childRef.localId in fkByChildId) {
                 if ((*fkPtr).length > 0) {
                     result ~= makeAnyRef(parentType, *fkPtr);
                 } else {
@@ -255,9 +387,54 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
 
     override Promise!(JSONValue[]) fetchColumnJson(string table, string column, AnyRef[] refs) {
+        import std.exception : collectException;
+
+        if (refs.length == 0) {
+            return resolve(cast(JSONValue[])[]);
+        }
+
+        // Build ID -> index map for result ordering (only for valid refs)
+        size_t[string] idxByLocalId;
+        string[] validIds;
+        foreach (i, r; refs) {
+            if (r.isValid && r.localId.length > 0) {
+                idxByLocalId[r.localId] = i;
+                validIds ~= r.localId;
+            }
+        }
+
         JSONValue[] result;
         result.length = refs.length;
         foreach (ref r; result) r = JSONValue(null);
+
+        if (validIds.length == 0) {
+            return resolve(result);  // All refs were invalid
+        }
+
+        // Query the column values
+        auto idList = validIds.join(",");
+        auto sql = format("SELECT id, %s FROM %s WHERE id IN (%s)", column, table, idList);
+
+        foreach (cells, columns; _db.query(sql)) {
+            if (cells.length >= 2) {
+                auto id = cells[0] !is null ? cells[0].idup : "";
+                if (auto idxPtr = id in idxByLocalId) {
+                    if (cells[1] is null) {
+                        result[*idxPtr] = JSONValue(null);
+                    } else {
+                        auto val = cells[1].idup;
+                        // Try to parse as number, otherwise use string
+                        long longVal;
+                        if (!collectException(val.to!long, longVal)) {
+                            result[*idxPtr] = JSONValue(longVal);
+                        } else {
+                            result[*idxPtr] = JSONValue(val);
+                        }
+                    }
+                }
+            }
+        }
+
         return resolve(result);
     }
 
