@@ -1188,6 +1188,12 @@ unittest {
         override string notExistsSubquery(string subquery) {
             return "NOT EXISTS (" ~ subquery ~ ")";
         }
+        override string likeOp(string operandSql, string pattern, bool caseInsensitive) {
+            if (caseInsensitive) {
+                return "(LOWER(" ~ operandSql ~ ") LIKE LOWER('" ~ pattern ~ `') ESCAPE '\')`;
+            }
+            return "(" ~ operandSql ~ " LIKE '" ~ pattern ~ `' ESCAPE '\')`;
+        }
         override string name() { return "Test"; }
     }
     auto optimizer = new SqlOptimizer(new TestDialect());
@@ -1243,6 +1249,12 @@ unittest {
         }
         override string notExistsSubquery(string subquery) {
             return "NOT EXISTS (" ~ subquery ~ ")";
+        }
+        override string likeOp(string operandSql, string pattern, bool caseInsensitive) {
+            if (caseInsensitive) {
+                return "(LOWER(" ~ operandSql ~ ") LIKE LOWER('" ~ pattern ~ `') ESCAPE '\')`;
+            }
+            return "(" ~ operandSql ~ " LIKE '" ~ pattern ~ `' ESCAPE '\')`;
         }
         override string name() { return "Test"; }
     }
