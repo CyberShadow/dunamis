@@ -163,6 +163,7 @@ abstract class IntegrationTestRunner(alias db, alias Schema) {
                 cleanup();
             });
         });
+        testThread.isDaemon = true; // Don't wait for a response that will never arrive if the server thread crashes
         testThread.start();
         return testThread;
     }
