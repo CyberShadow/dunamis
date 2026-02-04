@@ -1095,6 +1095,8 @@ template FilterPlugin(alias S) if (isSchema!S) {
 
     // Generate filtered versions of each entity type
     template FilteredEntity(Entity) {
+        import dynamo.core.types : isPlainField;
+
         @GqlName(getGraphQLTypeName!Entity)
         struct FilteredEntity {
             // Copy entity infrastructure
@@ -1102,6 +1104,13 @@ template FilterPlugin(alias S) if (isSchema!S) {
                 typeof(Entity.nodeId) nodeId;
                 this(string id) { nodeId = typeof(nodeId)(id); }
                 string toString() const { return nodeId.toString(); }
+            }
+
+            // Copy plain fields (struct instance fields)
+            static foreach (member; __traits(allMembers, Entity)) {
+                static if (isPlainField!(Entity, member)) {
+                    mixin("typeof(__traits(getMember, Entity.init, \"" ~ member ~ "\")) " ~ member ~ ";");
+                }
             }
 
             // Copy all fields with filter on array fields
