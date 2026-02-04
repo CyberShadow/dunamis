@@ -1638,27 +1638,44 @@ class EveryExpr(Entity, Body) : Expr!bool, CollectionPredicateInfo
 
         // Evaluate collection for each parent ref
         return evalAs!(Entity[])(_collection, ctx).then((Entity[][] collectionResults) {
-            // Flatten all entities for batch evaluation
-            AnyRef[] flatRefs;
+            // Flatten all items for batch evaluation
             size_t[] groupLengths;
+            size_t totalItems = 0;
             foreach (group; collectionResults) {
                 groupLengths ~= group.length;
-                foreach (e; group) {
-                    flatRefs ~= AnyRef(e.nodeId.id);
-                }
+                totalItems += group.length;
             }
 
             // Handle empty case
-            if (flatRefs.length == 0) {
-                // No items to check - every() returns true for each group (vacuous truth)
+            if (totalItems == 0) {
                 bool[] results;
                 results.length = collectionResults.length;
-                results[] = true;  // every() on empty = true
+                results[] = true;  // every() on empty = true (vacuous truth)
                 return resolve(results);
             }
 
-            // Set refs for batch evaluation (keyed by EveryExpr, which is _parentMap for EveryItemOfExpr)
-            ctx.setCurrentRefs(self, flatRefs);
+            // Store items based on type (entity vs scalar)
+            static if (isEntityType!Entity) {
+                // Entity path - use AnyRef storage
+                AnyRef[] flatRefs;
+                flatRefs.reserve(totalItems);
+                foreach (group; collectionResults) {
+                    foreach (e; group) {
+                        flatRefs ~= AnyRef(e.nodeId.id);
+                    }
+                }
+                ctx.setCurrentRefs(self, flatRefs);
+            } else {
+                // Scalar path - use typed storage (no JSON serialization)
+                Entity[] flatVals;
+                flatVals.reserve(totalItems);
+                foreach (group; collectionResults) {
+                    foreach (v; group) {
+                        flatVals ~= v;
+                    }
+                }
+                ctx.setScalarRefs(self, flatVals);
+            }
 
             // Evaluate predicate for all items in batch
             return evalAs!bool(predicate, ctx).then((bool[] predicateResults) {
