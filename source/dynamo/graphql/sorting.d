@@ -83,6 +83,8 @@ template SortingPlugin(alias S) if (isSchema!S) {
     // 2. Has orderBy arguments on array-returning fields
     // 3. Uses the inner schema's transformed type (for plugin composition)
     template SortedEntity(OriginalEntity) {
+        import dynamo.core.types : isPlainField;
+
         // Get the inner schema's transformed type (e.g., FilteredEntity!User)
         // If the inner schema has EntityTypeMap, use it; otherwise use identity
         static if (__traits(hasMember, S, "EntityTypeMap")) {
@@ -99,6 +101,13 @@ template SortingPlugin(alias S) if (isSchema!S) {
                 typeof(OriginalEntity.nodeId) nodeId;
                 this(string id) { nodeId = typeof(nodeId)(id); }
                 string toString() const { return nodeId.toString(); }
+            }
+
+            // Copy plain fields from the TRANSFORMED entity (preserves plugin composition)
+            static foreach (member; __traits(allMembers, Entity)) {
+                static if (isPlainField!(Entity, member)) {
+                    mixin("typeof(__traits(getMember, Entity.init, \"" ~ member ~ "\")) " ~ member ~ ";");
+                }
             }
 
             // Copy all fields from the TRANSFORMED entity (with inner schema's modifications)
