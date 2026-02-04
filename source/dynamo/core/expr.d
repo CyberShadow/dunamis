@@ -1498,35 +1498,74 @@ class SomeExpr(Entity, Body) : Expr!bool, CollectionPredicateInfo
     }
 
     override Promise!(bool[]) eval(EvalContext ctx) {
+        debug(filter) {
+            import std.stdio : writefln, stdout;
+            writefln("  >>SomeExpr.eval CALLED<<");
+            stdout.flush();
+        }
+
         auto predicate = cast(Expr!bool) _predicate;
         auto self = this;  // Key for refs map (EveryItemOfExpr._parentMap points to this)
 
         // Evaluate collection for each parent ref
         return evalAs!(Entity[])(_collection, ctx).then((Entity[][] collectionResults) {
-            // Flatten all entities for batch evaluation
-            AnyRef[] flatRefs;
+            // Flatten all items for batch evaluation
             size_t[] groupLengths;
+            size_t totalItems = 0;
             foreach (group; collectionResults) {
                 groupLengths ~= group.length;
-                foreach (e; group) {
-                    flatRefs ~= AnyRef(e.nodeId.id);
-                }
+                totalItems += group.length;
             }
 
             // Handle empty case
-            if (flatRefs.length == 0) {
-                // No items to check - some() returns false for each group
+            if (totalItems == 0) {
                 bool[] results;
                 results.length = collectionResults.length;
                 results[] = false;  // some() on empty = false
                 return resolve(results);
             }
 
-            // Set refs for batch evaluation (keyed by SomeExpr, which is _parentMap for EveryItemOfExpr)
-            ctx.setCurrentRefs(self, flatRefs);
+            // Store items based on type (entity vs scalar)
+            static if (isEntityType!Entity) {
+                // Entity path - use AnyRef storage
+                AnyRef[] flatRefs;
+                flatRefs.reserve(totalItems);
+                foreach (group; collectionResults) {
+                    foreach (e; group) {
+                        flatRefs ~= AnyRef(e.nodeId.id);
+                    }
+                }
+                debug(filter) {
+                    import std.stdio : writefln;
+                    import std.algorithm : map;
+                    import std.array : array;
+                    writefln("  SomeExpr.eval: %d groups, %d total items", collectionResults.length, flatRefs.length);
+                    writefln("    groupLengths=%s, flatRefs=%s", groupLengths, flatRefs.map!(r => r.nodeId).array);
+                }
+                ctx.setCurrentRefs(self, flatRefs);
+            } else {
+                // Scalar path - use typed storage (no JSON serialization)
+                Entity[] flatVals;
+                flatVals.reserve(totalItems);
+                foreach (group; collectionResults) {
+                    foreach (v; group) {
+                        flatVals ~= v;
+                    }
+                }
+                debug(filter) {
+                    import std.stdio : writefln;
+                    writefln("  SomeExpr.eval (scalar): %d groups, %d total items", collectionResults.length, flatVals.length);
+                }
+                ctx.setScalarRefs(self, flatVals);
+            }
 
             // Evaluate predicate for all items in batch
             return evalAs!bool(predicate, ctx).then((bool[] predicateResults) {
+                debug(filter) {
+                    import std.stdio : writefln;
+                    writefln("    predicate results=%s", predicateResults);
+                }
+
                 // Reduce flat results back to per-group booleans
                 bool[] results;
                 results.length = groupLengths.length;
