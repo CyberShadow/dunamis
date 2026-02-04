@@ -291,6 +291,24 @@ abstract class Expr(T) : ExprBase {
         auto endsWith(Expr!string suffix) {
             return new LikePatternExpr(this, suffix, LikePatternType.endsWith);
         }
+
+        /// Check if this string contains the given substring (case-insensitive).
+        /// Generates SQL ILIKE '%pattern%' (PostgreSQL) or LOWER() wrapper (MySQL/SQLite).
+        auto containsInsensitive(string pattern) {
+            return new LikeExpr(this, "%" ~ escapeLikePattern(pattern) ~ "%", true);
+        }
+
+        /// Check if this string starts with the given prefix (case-insensitive).
+        /// Generates SQL ILIKE 'pattern%' (PostgreSQL) or LOWER() wrapper (MySQL/SQLite).
+        auto startsWithInsensitive(string prefix) {
+            return new LikeExpr(this, escapeLikePattern(prefix) ~ "%", true);
+        }
+
+        /// Check if this string ends with the given suffix (case-insensitive).
+        /// Generates SQL ILIKE '%pattern' (PostgreSQL) or LOWER() wrapper (MySQL/SQLite).
+        auto endsWithInsensitive(string suffix) {
+            return new LikeExpr(this, "%" ~ escapeLikePattern(suffix), true);
+        }
     }
 
     // =========================================================================
@@ -801,6 +819,9 @@ interface LikeInfo {
 
     /// The LIKE pattern (with SQL wildcards % and _)
     string likePattern();
+
+    /// Whether this is a case-insensitive match (ILIKE in PostgreSQL)
+    bool caseInsensitive();
 }
 
 /// Type of dynamic LIKE pattern
@@ -824,13 +845,16 @@ interface LikePatternInfo {
 
 /// Expression for SQL LIKE with a static pattern.
 /// Used for contains, startsWith, endsWith operations.
+/// Set caseInsensitive=true for case-insensitive matching (ILIKE in PostgreSQL).
 class LikeExpr : Expr!bool, LikeInfo {
     private ExprBase _operand;
     private string _pattern;
+    private bool _caseInsensitive;
 
-    this(Expr!string operand, string pattern) {
+    this(Expr!string operand, string pattern, bool caseInsensitive = false) {
         _operand = operand;
         _pattern = pattern;
+        _caseInsensitive = caseInsensitive;
     }
 
     override ExprBase[] dependencies() {
@@ -845,16 +869,18 @@ class LikeExpr : Expr!bool, LikeInfo {
     override Promise!(bool[]) eval(EvalContext ctx) {
         import std.string : indexOf;
         import std.algorithm : startsWith, endsWith;
+        import std.uni : toLower;
 
         auto operand = _operand;
         auto pattern = _pattern;
+        auto caseInsens = _caseInsensitive;
 
         return evalAs!string(operand, ctx).then((string[] vals) {
             bool[] result = new bool[vals.length];
 
             debug(filter) {
                 import std.stdio : writefln;
-                writefln("    LikeExpr: pattern='%s', vals=%s", pattern, vals);
+                writefln("    LikeExpr: pattern='%s', caseInsensitive=%s, vals=%s", pattern, caseInsens, vals);
             }
 
             // Parse pattern to determine match type
@@ -865,26 +891,34 @@ class LikeExpr : Expr!bool, LikeInfo {
             if (startsWild && endsWild && pattern.length >= 2) {
                 // %pattern% - contains
                 searchStr = unescapeLikePattern(pattern[1..$-1]);
+                if (caseInsens) searchStr = toLower(searchStr);
                 foreach (i, v; vals) {
-                    result[i] = v.indexOf(searchStr) >= 0;
+                    string val = caseInsens ? toLower(v) : v;
+                    result[i] = val.indexOf(searchStr) >= 0;
                 }
             } else if (startsWild) {
                 // %pattern - endsWith
                 searchStr = unescapeLikePattern(pattern[1..$]);
+                if (caseInsens) searchStr = toLower(searchStr);
                 foreach (i, v; vals) {
-                    result[i] = v.endsWith(searchStr);
+                    string val = caseInsens ? toLower(v) : v;
+                    result[i] = val.endsWith(searchStr);
                 }
             } else if (endsWild) {
                 // pattern% - startsWith
                 searchStr = unescapeLikePattern(pattern[0..$-1]);
+                if (caseInsens) searchStr = toLower(searchStr);
                 foreach (i, v; vals) {
-                    result[i] = v.startsWith(searchStr);
+                    string val = caseInsens ? toLower(v) : v;
+                    result[i] = val.startsWith(searchStr);
                 }
             } else {
                 // Exact match
                 searchStr = unescapeLikePattern(pattern);
+                if (caseInsens) searchStr = toLower(searchStr);
                 foreach (i, v; vals) {
-                    result[i] = v == searchStr;
+                    string val = caseInsens ? toLower(v) : v;
+                    result[i] = val == searchStr;
                 }
             }
 
@@ -900,6 +934,7 @@ class LikeExpr : Expr!bool, LikeInfo {
     // LikeInfo implementation
     override ExprBase likeOperand() { return _operand; }
     override string likePattern() { return _pattern; }
+    override bool caseInsensitive() { return _caseInsensitive; }
 }
 
 /// Expression for SQL LIKE with a dynamic pattern expression.
