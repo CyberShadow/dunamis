@@ -99,7 +99,7 @@ mixin template TestSchema(alias db) {
     import std.json : JSONValue;
     import std.typecons : Nullable;
     import dynamo.core.expr : Expr;
-    import dynamo.graphql : Schema, SortingPlugin;
+    import dynamo.graphql : Schema, SortingPlugin, FilterPlugin;
     import dynamo.relational.schema : Table, ForeignKey, BelongsTo, HasMany, Col, getAll, hasMany;
     import dynamo.relational.demo : DemoEntity, CrudMutations;
     import dynamo.relational.mutation : insert;
@@ -226,5 +226,6 @@ mixin template TestSchema(alias db) {
     }
 
     alias BaseSchema = Schema!(Query, Mutation);
-    alias MySchema = SortingPlugin!BaseSchema;
+    // Compose FilterPlugin and SortingPlugin: filter first, then sort
+    alias MySchema = SortingPlugin!(FilterPlugin!BaseSchema);
 }

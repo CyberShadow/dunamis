@@ -929,6 +929,247 @@ void testEmptyRecursiveArrays() {
 }
 
 // ============================================================================
+// Filtering Tests
+// ============================================================================
+
+void testFilterUsersByFirstName() {
+    auto response = graphql(`{
+        users(filter: {firstName: {equalTo: "Alice"}}) {
+            firstName
+            lastName
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 1, "Expected at least 1 user matching filter");
+
+    // All returned users should be Alice
+    foreach (user; users) {
+        assertTrue(user["firstName"].str == "Alice",
+            "Expected firstName to be 'Alice', got '" ~ user["firstName"].str ~ "'");
+    }
+}
+
+void testFilterUsersByAge() {
+    auto response = graphql(`{
+        users(filter: {age: {greaterThan: 18}}) {
+            firstName
+            age
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+
+    // All returned users should have age > 18
+    foreach (user; users) {
+        assertTrue(user["age"].integer > 18,
+            "Expected age > 18, got " ~ user["age"].toString());
+    }
+}
+
+void testFilterWithAnd() {
+    // Filter users with age >= 18 AND firstName starts with 'A'
+    auto response = graphql(`{
+        users(filter: {
+            age: {greaterThanOrEqualTo: 18},
+            firstName: {startsWith: "A"}
+        }) {
+            firstName
+            age
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+
+    // All returned users should satisfy both conditions
+    foreach (user; users) {
+        assertTrue(user["age"].integer >= 18,
+            "Expected age >= 18, got " ~ user["age"].toString());
+        assertTrue(user["firstName"].str.length > 0 && user["firstName"].str[0] == 'A',
+            "Expected firstName to start with 'A', got '" ~ user["firstName"].str ~ "'");
+    }
+}
+
+void testFilterWithOr() {
+    // Filter users named Alice OR Bob
+    auto response = graphql(`{
+        users(filter: {
+            or: [
+                {firstName: {equalTo: "Alice"}},
+                {firstName: {equalTo: "Bob"}}
+            ]
+        }) {
+            firstName
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 2, "Expected at least 2 users (Alice and Bob)");
+
+    // All returned users should be Alice or Bob
+    foreach (user; users) {
+        auto name = user["firstName"].str;
+        assertTrue(name == "Alice" || name == "Bob",
+            "Expected 'Alice' or 'Bob', got '" ~ name ~ "'");
+    }
+}
+
+void testFilterWithNot() {
+    // Filter users NOT named Alice
+    auto response = graphql(`{
+        users(filter: {
+            not: {firstName: {equalTo: "Alice"}}
+        }) {
+            firstName
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+
+    // No returned users should be Alice
+    foreach (user; users) {
+        assertTrue(user["firstName"].str != "Alice",
+            "Expected not 'Alice', got '" ~ user["firstName"].str ~ "'");
+    }
+}
+
+void testFilterTasksByEnumStatus() {
+    auto response = graphql(`{
+        tasks(filter: {status: {equalTo: pending}}) {
+            title
+            status
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto tasks = response["data"]["tasks"].array;
+    assertTrue(tasks.length >= 1, "Expected at least 1 pending task");
+
+    // All returned tasks should have pending status
+    foreach (task; tasks) {
+        assertTrue(task["status"].str == "pending",
+            "Expected status 'pending', got '" ~ task["status"].str ~ "'");
+    }
+}
+
+void testFilterUsersWithPostsSome() {
+    // Filter users who have at least one post with "Hello" in title
+    auto response = graphql(`{
+        users(filter: {
+            posts: {
+                some: {title: {contains: "Hello"}}
+            }
+        }) {
+            firstName
+            posts { title }
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+
+    // Each returned user should have at least one post containing "Hello"
+    foreach (user; users) {
+        auto posts = user["posts"].array;
+        bool foundHello = false;
+        foreach (post; posts) {
+            import std.string : indexOf;
+            if (post["title"].str.indexOf("Hello") != -1) {
+                foundHello = true;
+                break;
+            }
+        }
+        assertTrue(foundHello,
+            "User " ~ user["firstName"].str ~ " should have a post containing 'Hello'");
+    }
+}
+
+void testFilterUsersWithPostsEvery() {
+    // Filter users where ALL their posts contain a specific pattern
+    // This is a vacuous truth for users with no posts
+    auto response = graphql(`{
+        users(filter: {
+            posts: {
+                every: {title: {notEqualTo: ""}}
+            }
+        }) {
+            firstName
+            posts { title }
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+
+    // All posts for each user should have non-empty titles (which they do)
+    foreach (user; users) {
+        auto posts = user["posts"].array;
+        foreach (post; posts) {
+            assertTrue(post["title"].str.length > 0,
+                "Post should have non-empty title");
+        }
+    }
+}
+
+void testFilterUsersWithPostsNone() {
+    // Filter users who have NO posts with "NonExistent" in title
+    // This should return all users since no posts have that title
+    auto response = graphql(`{
+        users(filter: {
+            posts: {
+                none: {title: {contains: "NonExistentTitle12345"}}
+            }
+        }) {
+            firstName
+            posts { title }
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+
+    // No user should have a post with that title
+    foreach (user; users) {
+        auto posts = user["posts"].array;
+        foreach (post; posts) {
+            import std.string : indexOf;
+            assertTrue(post["title"].str.indexOf("NonExistentTitle12345") == -1,
+                "Post should not contain 'NonExistentTitle12345'");
+        }
+    }
+}
+
+void testFilterNestedPosts() {
+    // Filter posts within a user query
+    auto response = graphql(`{
+        users {
+            firstName
+            posts(filter: {title: {contains: "GraphQL"}}) {
+                title
+            }
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+
+    // Each user's posts should only contain those with "GraphQL" in title
+    foreach (user; users) {
+        auto posts = user["posts"].array;
+        foreach (post; posts) {
+            import std.string : indexOf;
+            assertTrue(post["title"].str.indexOf("GraphQL") != -1,
+                "Post title should contain 'GraphQL', got '" ~ post["title"].str ~ "'");
+        }
+    }
+}
+
+// ============================================================================
 // Test Registration
 // ============================================================================
 
@@ -987,4 +1228,16 @@ static this() {
     registerTest("Pointer input null", "tests", &testPointerInputNull);
     registerTest("Pointer input with value", "tests", &testPointerInputWithValue);
     registerTest("Empty recursive arrays", "tests", &testEmptyRecursiveArrays);
+
+    // Filtering tests
+    registerTest("Filter users by firstName equalTo", "tests", &testFilterUsersByFirstName);
+    registerTest("Filter users by age greaterThan", "tests", &testFilterUsersByAge);
+    registerTest("Filter with AND combinator", "tests", &testFilterWithAnd);
+    registerTest("Filter with OR combinator", "tests", &testFilterWithOr);
+    registerTest("Filter with NOT combinator", "tests", &testFilterWithNot);
+    registerTest("Filter tasks by enum status", "tests", &testFilterTasksByEnumStatus);
+    registerTest("Filter users with posts (some)", "tests", &testFilterUsersWithPostsSome);
+    registerTest("Filter users with all posts matching (every)", "tests", &testFilterUsersWithPostsEvery);
+    registerTest("Filter users with no posts matching (none)", "tests", &testFilterUsersWithPostsNone);
+    registerTest("Filter nested posts", "tests", &testFilterNestedPosts);
 }
