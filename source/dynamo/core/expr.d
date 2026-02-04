@@ -1247,13 +1247,18 @@ interface EveryItemOfExprInfo : AnyRefEvaluable {
     @property Object parentMap();
 }
 
+/// Check if a type is an entity (has nodeId from Entity mixin).
+private template isEntityType(T) {
+    enum isEntityType = __traits(hasMember, T, "nodeId");
+}
+
 /// Placeholder representing "current item" within a map iteration.
 /// When MapExpr evaluates its body, it passes the flattened collection refs.
 /// EveryItemOfExpr just returns those refs unchanged - it's a pass-through
 /// that represents "the items being iterated over".
 ///
 /// Typed with the Entity being iterated. Returns Entity with nodeId populated.
-class EveryItemOfExpr(Entity) : Expr!Entity, EveryItemOfExprInfo {
+class EveryItemOfExpr(T) : Expr!T, EveryItemOfExprInfo {
     /// Back-reference to owning MapExpr (set at construction)
     Object _parentMap;  // Use Object to avoid template instantiation issues
 
@@ -1267,43 +1272,47 @@ class EveryItemOfExpr(Entity) : Expr!Entity, EveryItemOfExprInfo {
         // No dependencies to replace
     }
 
-    override Promise!(Entity[]) eval(EvalContext ctx) {
-        // Return entities with nodeIds set by our parent MapExpr (convert from AnyRef storage)
+    override Promise!(T[]) eval(EvalContext ctx) {
         import std.algorithm : map;
-        static if (is(Entity == void)) {
-            // Void entity type - shouldn't be used in practice
+        static if (is(T == void)) {
             static assert(false, "EveryItemOfExpr!void should not be evaluated directly");
-        } else {
-            // First try batch refs (for map expressions)
+        } else static if (isEntityType!T) {
+            // Entity path - use AnyRef storage (nodeId-based)
             auto refs = ctx.getCurrentRefs(_parentMap);
             if (refs.length > 0) {
-                return resolve(refs.map!(r => Entity(r.nodeId)).array);
+                return resolve(refs.map!(r => T(r.nodeId)).array);
             }
-
-            // Fallback: single predicate item (for some/every expressions)
             auto singleRef = ctx.getPredicateItem(_parentMap);
             if (singleRef.isValid) {
-                return resolve([Entity(singleRef.nodeId)]);
+                return resolve([T(singleRef.nodeId)]);
             }
-
-            return resolve(cast(Entity[])[]);
+            return resolve(cast(T[])[]);
+        } else {
+            // Scalar path - use typed SealedArray/SealedValue storage
+            auto vals = ctx.getScalarRefs!T(_parentMap);
+            if (vals.length > 0) {
+                return resolve(vals);
+            }
+            if (ctx.hasScalarItem(_parentMap)) {
+                return resolve([ctx.getScalarItem!T(_parentMap)]);
+            }
+            return resolve(cast(T[])[]);
         }
     }
 
-    /// Evaluate and return as AnyRef[] (for type-agnostic internal use)
+    /// Evaluate and return as AnyRef[] (for type-agnostic internal use).
+    /// Only valid for entity types.
     Promise!(AnyRef[]) evalAsAnyRef(EvalContext ctx) {
-        // First try batch refs (for map expressions)
-        auto refs = ctx.getCurrentRefs(_parentMap);
-        if (refs.length > 0) {
-            return resolve(refs);
+        static if (isEntityType!T) {
+            auto refs = ctx.getCurrentRefs(_parentMap);
+            if (refs.length > 0) {
+                return resolve(refs);
+            }
+            auto singleRef = ctx.getPredicateItem(_parentMap);
+            if (singleRef.isValid) {
+                return resolve([singleRef]);
+            }
         }
-
-        // Fallback: single predicate item (for some/every expressions)
-        auto singleRef = ctx.getPredicateItem(_parentMap);
-        if (singleRef.isValid) {
-            return resolve([singleRef]);
-        }
-
         return resolve(cast(AnyRef[])[]);
     }
 }
