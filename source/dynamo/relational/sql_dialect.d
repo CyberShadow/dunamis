@@ -35,6 +35,12 @@ interface SqlDialect {
     /// Returns: NOT EXISTS (subquery)
     string notExistsSubquery(string subquery);
 
+    /// Generate SQL for LIKE pattern matching.
+    /// For case-insensitive matching:
+    ///   - PostgreSQL uses ILIKE
+    ///   - MySQL/SQLite use LOWER() wrapper
+    string likeOp(string operandSql, string pattern, bool caseInsensitive);
+
     /// Get the dialect name for debugging
     string name();
 }
