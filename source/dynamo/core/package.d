@@ -5,6 +5,7 @@ public {
     import dynamo.core.eval;
     import dynamo.core.executor;
     import dynamo.core.expr;
+    import dynamo.core.filtering;
     import dynamo.core.optimize;
     import dynamo.core.pagination;
     import dynamo.core.sorting;
