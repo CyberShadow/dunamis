@@ -78,18 +78,28 @@ template PaginationPlugin(alias S) if (isSchema!S) {
     // Each paginated entity type:
     // 1. Has @GqlName to preserve the original GraphQL type name
     // 2. Has pagination arguments on array-returning fields
-    template PaginatedEntity(Entity) {
+    // 3. Uses the inner schema's transformed type (for plugin composition)
+    template PaginatedEntity(OriginalEntity) {
+        // Get the inner schema's transformed type (e.g., FilteredEntity!User)
+        // If the inner schema has EntityTypeMap, use it; otherwise use identity
+        static if (__traits(hasMember, S, "EntityTypeMap")) {
+            alias Entity = S.EntityTypeMap!OriginalEntity;
+        } else {
+            alias Entity = OriginalEntity;
+        }
+
         // Use @GqlName to ensure the paginated type has the same GraphQL name as the original
-        @GqlName(getGraphQLTypeName!Entity)
+        @GqlName(getGraphQLTypeName!OriginalEntity)
         struct PaginatedEntity {
-            // Copy entity infrastructure
-            static if (__traits(hasMember, Entity, "nodeId")) {
-                typeof(Entity.nodeId) nodeId;
+            // Copy entity infrastructure from ORIGINAL entity (for nodeId type consistency)
+            static if (__traits(hasMember, OriginalEntity, "nodeId")) {
+                typeof(OriginalEntity.nodeId) nodeId;
                 this(string id) { nodeId = typeof(nodeId)(id); }
                 string toString() const { return nodeId.toString(); }
             }
 
-            // Copy all fields with pagination on array fields
+            // Copy all fields from the TRANSFORMED entity (with inner schema's modifications)
+            // This ensures pagination is layered on top of filtering, etc.
             static foreach (member; getFieldMembers!Entity) {
                 static if (isArrayReturningField!(__traits(getMember, Entity, member))) {
                     mixin PaginatedEntityArrayField!(Entity, member);
@@ -108,6 +118,9 @@ template PaginationPlugin(alias S) if (isSchema!S) {
     template EntityTypeMap(T) {
         static if (isTypeInList!(T, _AllEntityTypes)) {
             alias EntityTypeMap = PaginatedEntity!T;
+        } else static if (__traits(hasMember, S, "EntityTypeMap")) {
+            // Delegate to inner schema for non-entity types
+            alias EntityTypeMap = S.EntityTypeMap!T;
         } else {
             alias EntityTypeMap = T;  // Identity for non-entity types
         }
@@ -119,9 +132,11 @@ template PaginationPlugin(alias S) if (isSchema!S) {
 
 /// Mixin for paginated array field on an entity (adds first/offset arguments).
 /// Similar to PaginatedArrayField but for entity types.
+/// Uses type aliases instead of stringof to preserve type scope across plugin composition.
 mixin template PaginatedEntityArrayField(Entity, string fieldName) {
     import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
     import std.meta : AliasSeq;
+    import std.conv : to;
     import dynamo.core.expr : Expr, ExprResultType, entityCast;
     import dynamo.core.pagination : limit, offset;
     import std.typecons : Nullable;
@@ -134,14 +149,19 @@ mixin template PaginatedEntityArrayField(Entity, string fieldName) {
     alias _SrcFirstParam = _SrcParams[0];
     alias _SrcEntity = ExprResultType!_SrcFirstParam;
 
-    // Build parameter list - first param is Expr!(typeof(this)) for the wrapper entity
+    // Generate type aliases for each parameter to preserve type scope
+    static foreach (i; 1 .. _SrcParams.length) {
+        mixin("alias _ParamType" ~ i.to!string ~ " = _SrcParams[" ~ i.to!string ~ "];");
+    }
+
+    // Build parameter list using type aliases
     enum string _paramListStr = () {
         string result = "Expr!(typeof(this)) " ~ _srcParamNames[0];
         static foreach (i; 1 .. _SrcParams.length) {{
             result ~= ", ";
-            result ~= _SrcParams[i].stringof ~ " " ~ _srcParamNames[i];
+            result ~= "_ParamType" ~ i.to!string ~ " " ~ _srcParamNames[i];
             static if (!is(_SrcDefaults[i] == void)) {
-                result ~= " = " ~ _SrcDefaults[i].stringof;
+                result ~= " = _SrcDefaults[" ~ i.to!string ~ "]";
             }
         }}
         result ~= ", Nullable!int first = Nullable!int.init";
@@ -149,7 +169,7 @@ mixin template PaginatedEntityArrayField(Entity, string fieldName) {
         return result;
     }();
 
-    // Build argument list - cast wrapper entity back to original
+    // Build argument list
     enum string _argListStr = () {
         string result = "entityCast!_SrcEntity(" ~ _srcParamNames[0] ~ ")";
         static foreach (i; 1 .. _SrcParams.length) {
@@ -184,9 +204,11 @@ mixin template PaginatedEntityArrayField(Entity, string fieldName) {
 
 /// Mixin template to create a paginated version of an array-returning field.
 /// Adds first/offset parameters and wraps the result with limit/offset expressions.
+/// Uses type aliases instead of stringof to preserve type scope across plugin composition.
 mixin template PaginatedArrayField(SourceQuery, string fieldName) {
     import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
     import std.meta : AliasSeq;
+    import std.conv : to;
     import dynamo.core.expr : Expr, ExprResultType, entityCast;
     import dynamo.core.pagination : limit, offset;
 
@@ -200,18 +222,19 @@ mixin template PaginatedArrayField(SourceQuery, string fieldName) {
     alias _SrcFirstParam = _SrcParams[0];
     alias _SrcEntity = ExprResultType!_SrcFirstParam;
 
-    // Build parameter list string at compile time
-    // First param: Expr!(typeof(this)) instead of Expr!SourceQuery
-    // Rest: same types with defaults preserved
-    // Finally: add first and offset params
+    // Generate type aliases for each parameter to preserve type scope
+    static foreach (i; 1 .. _SrcParams.length) {
+        mixin("alias _ParamType" ~ i.to!string ~ " = _SrcParams[" ~ i.to!string ~ "];");
+    }
+
+    // Build parameter list string using type aliases
     enum string _paramListStr = () {
         string result = "Expr!(typeof(this)) " ~ _srcParamNames[0];
         static foreach (i; 1 .. _SrcParams.length) {{
             result ~= ", ";
-            result ~= _SrcParams[i].stringof ~ " " ~ _srcParamNames[i];
-            // Add default value if present
+            result ~= "_ParamType" ~ i.to!string ~ " " ~ _srcParamNames[i];
             static if (!is(_SrcDefaults[i] == void)) {
-                result ~= " = " ~ _SrcDefaults[i].stringof;
+                result ~= " = _SrcDefaults[" ~ i.to!string ~ "]";
             }
         }}
         // Add pagination params
@@ -221,8 +244,6 @@ mixin template PaginatedArrayField(SourceQuery, string fieldName) {
     }();
 
     // Build argument list string for calling original function
-    // First arg: entityCast to convert Expr!(typeof(this)) -> Expr!SourceQuery
-    // Rest: pass through unchanged
     enum string _argListStr = () {
         string result = "entityCast!(_SrcEntity)(" ~ _srcParamNames[0] ~ ")";
         static foreach (i; 1 .. _SrcParams.length) {
@@ -235,9 +256,7 @@ mixin template PaginatedArrayField(SourceQuery, string fieldName) {
     alias _ElementType = ArrayFieldElementType!_srcFn;
 
     // Helper function to apply pagination (avoids type inference issues in mixin)
-    // Returns Expr!(_ElementType[]) which is the common base type
     private static Expr!(_ElementType[]) _applyPagination(T)(T base, Nullable!int first, Nullable!int offset) {
-        // Apply offset first, then limit
         if (offset.isNull && first.isNull) {
             return base;
         } else if (offset.isNull) {
