@@ -14,8 +14,9 @@ import graphql.parser;
 
 import ae.utils.promise : Promise;
 import dynamo.core;
-import dynamo.core.expr : SequentialJsonObjectExpr, SingletonExpr, isExpr, ExprResultType, Expr, singleton;
+import dynamo.core.expr : SequentialJsonObjectExpr, SingletonExpr, isExpr, ExprResultType, Expr, singleton, FieldAccessExpr;
 import dynamo.core.optimize : OptimizeContext;
+import dynamo.core.types : isPlainField;
 import dynamo.graphql.schema;
 
 // ============================================================================
@@ -1154,7 +1155,7 @@ ExprBase compileFieldResult(ResultExpr)(ResultExpr resultExpr, SelectionSet ss, 
             return compileMapExpr!E(resultExpr, ss, variables);
         }
     }
-    // Nullable structs - handle null case specially
+    // Nullable structs (entities) - handle null case specially
     else static if (is(ResultType == Nullable!T, T) && is(T == struct) && !isCustomScalar!T) {
         if (ss is null) {
             throw new CompilerException(
@@ -1168,7 +1169,11 @@ ExprBase compileFieldResult(ResultExpr)(ResultExpr resultExpr, SelectionSet ss, 
         // Wrap in nullable handler
         return finalizeNullableObjectExpr!T(resultExpr, unwrapper, innerExpr);
     }
-    // Structs (non-CustomScalar) require selection sets
+    // Nullable scalars (e.g., Nullable!string) - wrap to JSON
+    else static if (is(ResultType == Nullable!U, U)) {
+        return wrapAsJsonExpr(resultExpr);
+    }
+    // Structs (non-CustomScalar, non-Nullable) require selection sets
     else static if (is(ResultType == struct) && !isCustomScalar!ResultType) {
         if (ss is null) {
             throw new CompilerException(
@@ -1184,10 +1189,11 @@ ExprBase compileFieldResult(ResultExpr)(ResultExpr resultExpr, SelectionSet ss, 
 
 /// Compile access to a single field.
 /// Finds a method with signature (Expr!T, args...) -> Expr!U and calls it.
+/// Also handles plain fields (struct instance fields marked with plain fields).
 ExprBase compileFieldAccess(T)(Expr!T ref_, Field field, JSONValue variables) {
     auto fieldName = getFieldName(field);
 
-    // Find a field method matching the GraphQL field name
+    // First, find a field method matching the GraphQL field name
     static foreach (member; __traits(allMembers, T)) {{
         static if (!isInternalMember!member) {
             alias memberSym = __traits(getMember, T, member);
@@ -1202,6 +1208,20 @@ ExprBase compileFieldAccess(T)(Expr!T ref_, Field field, JSONValue variables) {
                         // Handle the result based on return type
                         return compileFieldResult(resultExpr, field.ss, variables);
                     }
+                }
+            }
+        }
+    }}
+
+    // Second, check for plain fields (struct instance fields)
+    static foreach (member; __traits(allMembers, T)) {{
+        static if (!isInternalMember!member) {
+            static if (isPlainField!(T, member)) {
+                // Eager field - use D field name directly (GraphQL uses camelCase like D)
+                if (fieldName == member) {
+                    // Create FieldAccessExpr to read the struct field
+                    auto resultExpr = new FieldAccessExpr!(T, member)(ref_);
+                    return compileFieldResult(resultExpr, field.ss, variables);
                 }
             }
         }
@@ -1234,6 +1254,7 @@ ExprBase compileFieldResultWithSchema(ResultExpr, alias Schema)(ResultExpr resul
             return compileMapExprWithSchema!(E, FieldType, Schema)(resultExpr, ss, variables);
         }
     }
+    // Nullable structs (entities) - handle null case specially
     else static if (is(ResultType == Nullable!T, T) && is(T == struct) && !isCustomScalar!T) {
         if (ss is null) {
             throw new CompilerException(
@@ -1244,6 +1265,11 @@ ExprBase compileFieldResultWithSchema(ResultExpr, alias Schema)(ResultExpr resul
         auto innerExpr = compileSelectionSetBodyWithSchema!(T, FieldType, Schema)(unwrapper, ss, variables);
         return finalizeNullableObjectExpr!T(resultExpr, unwrapper, innerExpr);
     }
+    // Nullable scalars (e.g., Nullable!string) - wrap to JSON
+    else static if (is(ResultType == Nullable!U, U)) {
+        return wrapAsJsonExpr(resultExpr);
+    }
+    // Structs (non-CustomScalar, non-Nullable) require selection sets
     else static if (is(ResultType == struct) && !isCustomScalar!ResultType) {
         if (ss is null) {
             throw new CompilerException(
@@ -1312,9 +1338,11 @@ DynamicJsonObjectExpr compileFieldsToJsonObjectWithSchema(T, alias Schema)(Expr!
 
 /// Schema-aware field access.
 /// Looks up field methods on type T and uses Schema.EntityTypeMap for nested field resolution.
+/// Also handles plain fields (struct instance fields marked with plain fields).
 ExprBase compileFieldAccessWithSchema(T, alias Schema)(Expr!T ref_, Field field, JSONValue variables) {
     auto fieldName = getFieldName(field);
 
+    // First, check field methods
     static foreach (member; __traits(allMembers, T)) {{
         static if (!isInternalMember!member) {
             alias memberSym = __traits(getMember, T, member);
@@ -1326,6 +1354,20 @@ ExprBase compileFieldAccessWithSchema(T, alias Schema)(Expr!T ref_, Field field,
                         auto resultExpr = callComputedField!(memberSym, T)(ref_, field.args, variables);
                         return compileFieldResultWithSchema!(typeof(resultExpr), Schema)(resultExpr, field.ss, variables);
                     }
+                }
+            }
+        }
+    }}
+
+    // Second, check for plain fields (struct instance fields)
+    static foreach (member; __traits(allMembers, T)) {{
+        static if (!isInternalMember!member) {
+            static if (isPlainField!(T, member)) {
+                // Eager field - use D field name directly (GraphQL uses camelCase like D)
+                if (fieldName == member) {
+                    // Create FieldAccessExpr to read the struct field
+                    auto resultExpr = new FieldAccessExpr!(T, member)(ref_);
+                    return compileFieldResultWithSchema!(typeof(resultExpr), Schema)(resultExpr, field.ss, variables);
                 }
             }
         }
