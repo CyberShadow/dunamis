@@ -110,6 +110,12 @@ class EvalContext {
     /// Fallback when batch refs aren't set (single-item predicate evaluation).
     private SealedValue[void*] _scalarItemMap;
 
+    /// Entity array storage keyed by MapExpr identity.
+    /// Unlike _refsMap which stores only AnyRef(nodeId), this stores
+    /// actual populated entities for naive mode evaluation.
+    /// Uses SealedArray for type-safe storage of any entity type.
+    private SealedArray[void*] _entityMap;
+
     /// Expression evaluation cache, keyed by expression object identity.
     /// Used by evalAs() to automatically memoize expression evaluation.
     /// When the same expression is evaluated multiple times (e.g., via
@@ -215,6 +221,23 @@ class EvalContext {
             return !p.empty;
         }
         return false;
+    }
+
+    /// Set entities for a specific MapExpr (populated entity data).
+    /// Used by MapExpr.eval() to preserve actual entity data (not just nodeIds).
+    void setCurrentEntities(T)(Object mapExpr, T[] entities) {
+        _entityMap[cast(void*) mapExpr] = SealedArray(entities);
+    }
+
+    /// Get entities for a specific MapExpr.
+    /// Returns the actual populated entities, or empty if not set.
+    T[] getCurrentEntities(T)(Object mapExpr) {
+        if (auto p = cast(void*) mapExpr in _entityMap) {
+            if (!p.empty) {
+                return p.get!T();
+            }
+        }
+        return [];
     }
 
     /// Get cached Promise for an expression, or null if not cached.
