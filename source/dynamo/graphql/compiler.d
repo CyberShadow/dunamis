@@ -486,12 +486,16 @@ T extractInputObjectFromJson(T)(JSONValue json) if (isInputType!T) {
     T result;
 
     // Set each field from the JSON object
+    // We need to check if we can get the type of the member first (skips type aliases)
     static foreach (member; __traits(allMembers, T)) {{
         static if (!isInternalMember!member) {
-            alias MemberType = typeof(__traits(getMember, T, member));
-            static if (!is(MemberType == function) && !is(MemberType == void)) {
-                if (member in json.object) {
-                    __traits(getMember, result, member) = extractValueFromJson!MemberType(json.object[member]);
+            // Check if this member is a valid field (not a type alias or other non-field member)
+            static if (__traits(compiles, typeof(__traits(getMember, T.init, member)))) {
+                alias MemberType = typeof(__traits(getMember, T, member));
+                static if (!is(MemberType == function) && !is(MemberType == void)) {
+                    if (member in json.object) {
+                        __traits(getMember, result, member) = extractValueFromJson!MemberType(json.object[member]);
+                    }
                 }
             }
         }
@@ -628,11 +632,14 @@ void setInputField(T)(ref T obj, string fieldName, Value val) if (isInputType!T)
     // Use compile-time introspection to find and set the matching field
     static foreach (member; __traits(allMembers, T)) {{
         static if (!isInternalMember!member) {
-            alias MemberType = typeof(__traits(getMember, T, member));
-            static if (!is(MemberType == function) && !is(MemberType == void)) {
-                if (fieldName == member) {
-                    __traits(getMember, obj, member) = extractValue!MemberType(val);
-                    return;
+            // Check if this member is a valid field (not a type alias or other non-field member)
+            static if (__traits(compiles, typeof(__traits(getMember, T.init, member)))) {
+                alias MemberType = typeof(__traits(getMember, T, member));
+                static if (!is(MemberType == function) && !is(MemberType == void)) {
+                    if (fieldName == member) {
+                        __traits(getMember, obj, member) = extractValue!MemberType(val);
+                        return;
+                    }
                 }
             }
         }
@@ -678,11 +685,14 @@ template allInputFieldsSupported(T) if (isInputType!T) {
     enum allInputFieldsSupported = () {
         static foreach (member; __traits(allMembers, T)) {{
             static if (!isInternalMember!member) {
-                alias MemberType = typeof(__traits(getMember, T, member));
-                static if (!is(MemberType == function) && !is(MemberType == void)) {
-                    alias Unwrapped = UnwrapForCheck!MemberType;
-                    if (!isSupportedArgType!Unwrapped) {
-                        return false;
+                // Check if this member is a valid field (not a type alias or other non-field member)
+                static if (__traits(compiles, typeof(__traits(getMember, T.init, member)))) {
+                    alias MemberType = typeof(__traits(getMember, T, member));
+                    static if (!is(MemberType == function) && !is(MemberType == void)) {
+                        alias Unwrapped = UnwrapForCheck!MemberType;
+                        if (!isSupportedArgType!Unwrapped) {
+                            return false;
+                        }
                     }
                 }
             }
