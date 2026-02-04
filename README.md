@@ -465,6 +465,82 @@ auto result = executor.execute(query);
 // Returns: {"users": [...], "posts": [...]}
 ```
 
+### Filtering
+
+Use the `FilterPlugin` to add filtering support to your schema. Filter types are auto-generated for each entity:
+
+```d
+import dynamo.graphql.filtering : FilterPlugin;
+
+// Wrap your schema with FilterPlugin to add filter arguments
+alias MySchema = FilterPlugin!(Schema!(Query, Mutation));
+
+auto query = compileQuery!MySchema(`{
+    users(filter: {firstName: {equalTo: "Alice"}}) {
+        firstName
+        age
+    }
+}`);
+```
+
+**Available filter operators:**
+
+| Type | Operators |
+|------|-----------|
+| String | `equalTo`, `notEqualTo`, `in`, `notIn`, `isNull`, `contains`, `startsWith`, `endsWith`, `containsInsensitive`, `startsWithInsensitive`, `endsWithInsensitive` |
+| Int/Float | `equalTo`, `notEqualTo`, `in`, `notIn`, `isNull`, `lessThan`, `lessThanOrEqualTo`, `greaterThan`, `greaterThanOrEqualTo` |
+| Boolean | `equalTo`, `notEqualTo`, `isNull` |
+| Enum | `equalTo`, `notEqualTo`, `in`, `notIn`, `isNull` |
+
+**Case-insensitive string matching:**
+
+```graphql
+# Find users with "ali" anywhere in firstName (matches "Alice", "Alicia", etc.)
+users(filter: {firstName: {containsInsensitive: "ali"}}) { ... }
+
+# Find users whose firstName starts with "a" (matches "Alice", "adam", etc.)
+users(filter: {firstName: {startsWithInsensitive: "a"}}) { ... }
+
+# Find users whose firstName ends with "CE" (matches "Alice", "Bruce", etc.)
+users(filter: {firstName: {endsWithInsensitive: "CE"}}) { ... }
+```
+
+PostgreSQL uses native `ILIKE` for case-insensitive matching; MySQL and SQLite use `LOWER()` wrappers.
+
+**Logical combinators:**
+
+```graphql
+# AND (implicit - multiple fields)
+users(filter: {firstName: {startsWith: "A"}, age: {greaterThan: 18}}) { ... }
+
+# OR (explicit array)
+users(filter: {or: [{firstName: {equalTo: "Alice"}}, {firstName: {equalTo: "Bob"}}]}) { ... }
+
+# NOT
+users(filter: {not: {firstName: {equalTo: "Alice"}}}) { ... }
+
+# Nested (AND, OR, NOT can be combined)
+users(filter: {
+    and: [
+        {age: {greaterThan: 18}},
+        {or: [{firstName: {startsWith: "A"}}, {firstName: {startsWith: "B"}}]}
+    ]
+}) { ... }
+```
+
+**Relationship filters:**
+
+```graphql
+# Users who have at least one post with "GraphQL" in the title
+users(filter: {posts: {some: {title: {contains: "GraphQL"}}}}) { ... }
+
+# Users where ALL posts have "Draft" in the title
+users(filter: {posts: {every: {title: {contains: "Draft"}}}}) { ... }
+
+# Users with NO posts containing "Spam"
+users(filter: {posts: {none: {title: {contains: "Spam"}}}}) { ... }
+```
+
 ## Current Status
 
 **Working:**
@@ -499,6 +575,17 @@ auto result = executor.execute(query);
   - Variables (scalars and input objects)
 - Mutations with `CrudMutations` mixin (INSERT/UPDATE/DELETE)
 - `Schema!(Query, Mutation)` template for bundling query and mutation types
+- Filtering with `FilterPlugin`:
+  - Auto-generated filter types for each entity
+  - String operators: `equalTo`, `contains`, `startsWith`, `endsWith` (and case-insensitive variants)
+  - Numeric operators: `lessThan`, `greaterThan`, `equalTo`, `in`, etc.
+  - Logical combinators: `and`, `or`, `not`
+  - Relationship filters: `some`, `every`, `none`
+- Sorting with `SortingPlugin`:
+  - `orderBy` argument with `asc`/`desc` direction
+  - Nested sorting for HasMany relationships
+- Pagination with `PaginationPlugin`:
+  - `first`/`after` cursor-based pagination
 
 ## Future Directions
 
@@ -513,7 +600,6 @@ auto result = executor.execute(query);
   ```
   This would enable in-memory objects alongside database entities, with field access automatically projected through `Expr`. Objects without external data sources wouldn't need IDs.
 - **Eager column fetching** - Option to fetch columns into entity structs at materialization time, useful when columns are small and frequently accessed together. Currently entities are lightweight proxies that only hold IDs; this would allow opting into traditional struct-with-data semantics where beneficial.
-- **Filtering/pagination** - WHERE clauses, LIMIT/OFFSET/cursor support
 - **Polymorphism** - GraphQL union and interface types for heterogeneous collections
 - **Expression deduplication** - Grafast-style peer analysis
 - **Plan caching** - Reuse optimized plans for repeated queries
