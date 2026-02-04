@@ -3,6 +3,57 @@ module dynamo.core.eval;
 import dynamo.core.types;
 
 // ============================================================================
+// Type-Safe Storage for Heterogeneous Values
+// ============================================================================
+
+/// Type-safe wrapper for storing arrays of any type with runtime type checking.
+/// Avoids serialization overhead of JSONValue while providing safety.
+struct SealedArray {
+    private void[] _data;
+    private TypeInfo _type;
+
+    /// Construct from a typed array.
+    this(T)(T[] arr) {
+        _data = cast(void[]) arr;
+        _type = typeid(T);
+    }
+
+    /// Retrieve as typed array. Asserts if type doesn't match.
+    T[] get(T)() {
+        assert(_type == typeid(T), "SealedArray type mismatch: expected " ~ _type.toString() ~ ", got " ~ typeid(T).toString());
+        return cast(T[]) _data;
+    }
+
+    /// Check if empty (uninitialized).
+    bool empty() const {
+        return _data.length == 0;
+    }
+}
+
+/// Type-safe wrapper for storing a single value of any type.
+struct SealedValue {
+    private void* _data;  // Heap-allocated value
+    private TypeInfo _type;
+
+    /// Construct from a typed value.
+    this(T)(T val) {
+        _data = [val].ptr;  // Allocate on heap via GC
+        _type = typeid(T);
+    }
+
+    /// Retrieve as typed value. Asserts if type doesn't match.
+    T get(T)() {
+        assert(_type == typeid(T), "SealedValue type mismatch: expected " ~ _type.toString() ~ ", got " ~ typeid(T).toString());
+        return *cast(T*) _data;
+    }
+
+    /// Check if empty (uninitialized).
+    bool empty() const {
+        return _data is null;
+    }
+}
+
+// ============================================================================
 // Eval Context - Data Source Agnostic
 // ============================================================================
 
