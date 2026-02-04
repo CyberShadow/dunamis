@@ -995,6 +995,11 @@ private string toCTEWithComputed(QueryNode node, SqlOptimizer sqlOpt) {
             node.table, node.parentFk, node.parent.id);
     }
 
+    // Add custom WHERE clause from filter predicates
+    if (node.whereClause_.length > 0) {
+        sql ~= format("\n      AND (%s)", node.whereClause_);
+    }
+
     // ORDER BY clause (sorting)
     if (node.orderBy_.length > 0) {
         string[] orderParts;
@@ -1069,10 +1074,15 @@ private string toCTEWithWindowFunction(QueryNode node, SqlOptimizer sqlOpt) {
     }
 
     // WHERE clause for inner query
-    sql ~= format("      WHERE %s.%s IN (SELECT id FROM layer%d)\n",
+    sql ~= format("      WHERE %s.%s IN (SELECT id FROM layer%d)",
         node.table, node.parentFk, node.parent.id);
 
-    sql ~= "    ) _inner\n";
+    // Add custom WHERE clause from filter predicates
+    if (node.whereClause_.length > 0) {
+        sql ~= format("\n        AND (%s)", node.whereClause_);
+    }
+
+    sql ~= "\n    ) _inner\n";
 
     // WHERE clause for outer query: filter by row number
     sql ~= "    WHERE ";
