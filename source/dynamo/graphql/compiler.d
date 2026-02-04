@@ -505,11 +505,11 @@ T extractInputObjectFromJson(T)(JSONValue json) if (isInputType!T) {
 }
 
 /// Extract a typed value from a GraphQL Value node
-T extractValue(T)(Value val, T defaultValue = T.init) {
+T extractValue(T)(Value val) {
     import graphql.ast : ValueEnum;
 
     if (val is null || val.ruleSelection == ValueEnum.N) {
-        return defaultValue;
+        return T.init;
     }
 
     static if (is(T == string)) {
@@ -637,7 +637,41 @@ void setInputField(T)(ref T obj, string fieldName, Value val) if (isInputType!T)
                 alias MemberType = typeof(__traits(getMember, T, member));
                 static if (!is(MemberType == function) && !is(MemberType == void)) {
                     if (fieldName == member) {
-                        __traits(getMember, obj, member) = extractValue!MemberType(val);
+                        // Special cases for self-referential types - handle inline to break
+                        // template instantiation cycle that would otherwise occur with extractValue
+                        static if (is(MemberType == T*)) {
+                            // Self-referential pointer (e.g., not: T*)
+                            if (isNullValue(val)) {
+                                __traits(getMember, obj, member) = null;
+                            } else {
+                                auto ptr = new T;
+                                *ptr = extractInputObject!T(val);
+                                __traits(getMember, obj, member) = ptr;
+                            }
+                        } else static if (is(MemberType == T[])) {
+                            // Self-referential array (e.g., and: T[], or: T[])
+                            import graphql.ast : ValueEnum, Values;
+                            if (val is null || val.ruleSelection != ValueEnum.ARR) {
+                                __traits(getMember, obj, member) = null;
+                            } else {
+                                T[] result;
+                                void processValues(Values v) {
+                                    if (v is null) return;
+                                    if (v.val !is null) {
+                                        result ~= extractInputObject!T(v.val);
+                                    }
+                                    if (v.follow !is null) {
+                                        processValues(v.follow);
+                                    }
+                                }
+                                if (val.arr !is null && val.arr.vals !is null) {
+                                    processValues(val.arr.vals);
+                                }
+                                __traits(getMember, obj, member) = result;
+                            }
+                        } else {
+                            __traits(getMember, obj, member) = extractValue!MemberType(val);
+                        }
                         return;
                     }
                 }
@@ -659,24 +693,13 @@ template isSupportedArgType(T) {
     } else static if (is(T == Nullable!U, U)) {
         enum isSupportedArgType = isSupportedArgType!U;
     } else static if (is(T == U*, U)) {
-        // Pointer - nullable reference (enables recursive types)
-        enum isSupportedArgType = isSupportedArgType!U;
+        // Pointer to input type - accept without recursive check (enables self-referential types)
+        enum isSupportedArgType = isInputType!U || isSupportedArgType!U;
     } else static if (isInputType!T) {
         // Input object - check all fields are supported
         enum isSupportedArgType = allInputFieldsSupported!T;
     } else {
         enum isSupportedArgType = false;
-    }
-}
-
-/// Unwrap pointers and nullables to get the base type for field checking
-private template UnwrapForCheck(T) {
-    static if (is(T == Nullable!U, U)) {
-        alias UnwrapForCheck = UnwrapForCheck!U;
-    } else static if (is(T == U*, U)) {
-        alias UnwrapForCheck = UnwrapForCheck!U;
-    } else {
-        alias UnwrapForCheck = T;
     }
 }
 
@@ -689,8 +712,9 @@ template allInputFieldsSupported(T) if (isInputType!T) {
                 static if (__traits(compiles, typeof(__traits(getMember, T.init, member)))) {
                     alias MemberType = typeof(__traits(getMember, T, member));
                     static if (!is(MemberType == function) && !is(MemberType == void)) {
-                        alias Unwrapped = UnwrapForCheck!MemberType;
-                        if (!isSupportedArgType!Unwrapped) {
+                        // Check member type directly - isSupportedArgType handles Nullable/pointer unwrapping
+                        // and avoids infinite recursion for self-referential types
+                        if (!isSupportedArgType!MemberType) {
                             return false;
                         }
                     }
@@ -753,33 +777,50 @@ auto callComputedField(alias fn, Entity)(Expr!Entity entityRef, Arguments args, 
 /// Handles both literal values and variable references.
 T extractArg(T, alias Default)(Arguments args, string name, JSONValue variables) {
     import std.json : JSONType;
+    import std.typecons : Nullable;
+
+    // Determine if argument is optional:
+    // - Has an explicit default value (Default != void), OR
+    // - Is a Nullable type (implicitly optional with T.init as default)
+    enum hasExplicitDefault = !is(Default == void);
+    enum isNullableType = is(T == Nullable!U, U);
+    enum isOptional = hasExplicitDefault || isNullableType;
 
     auto lookup = findArgumentValue(args, name);
 
     if (lookup.isNull) {
         // Argument not provided
-        static if (is(Default == void)) {
-            throw new CompilerException("Missing required argument: " ~ name);
-        } else {
+        static if (hasExplicitDefault) {
             return Default;
+        } else static if (isNullableType) {
+            // Nullable types default to null (T.init)
+            return T.init;
+        } else {
+            throw new CompilerException("Missing required argument: " ~ name);
         }
     }
 
     if (lookup.isVariable) {
         // Variable reference - look up in variables map
         if (variables.type != JSONType.object || lookup.variableName !in variables.object) {
-            static if (is(Default == void)) {
-                throw new CompilerException("Missing variable: $" ~ lookup.variableName);
-            } else {
+            static if (hasExplicitDefault) {
                 return Default;
+            } else static if (isNullableType) {
+                return T.init;
+            } else {
+                throw new CompilerException("Missing variable: $" ~ lookup.variableName);
             }
         }
         return extractValueFromJson!T(variables.object[lookup.variableName]);
     } else {
         // Literal value
-        static if (!is(Default == void)) {
+        static if (hasExplicitDefault) {
             if (isNullValue(lookup.value)) {
                 return Default;
+            }
+        } else static if (isNullableType) {
+            if (isNullValue(lookup.value)) {
+                return T.init;
             }
         }
         return extractValue!T(lookup.value);
