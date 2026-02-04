@@ -501,10 +501,30 @@ class EntityCastExpr(To, From) : Expr!To, AnyRefEvaluable {
     override Promise!(To[]) eval(EvalContext ctx) {
         return _source.eval(ctx).then((From[] items) {
             To[] result = new To[items.length];
-            foreach (i, from; items) {
+            foreach (i, ref from; items) {
                 static if (__traits(hasMember, From, "nodeId") && __traits(hasMember, To, "nodeId")) {
                     // Entity types - copy nodeId
                     result[i] = To(from.nodeId.id);
+                    // Copy all instance fields that exist in both types
+                    // Skip internal members (starting with _) and system members
+                    static foreach (member; __traits(allMembers, From)) {{
+                        static if (member.length > 0 && member[0] != '_' &&
+                                   member != "nodeId" &&
+                                   member != "toString" &&
+                                   member != "toHash" &&
+                                   member != "opEquals" &&
+                                   member != "opCmp" &&
+                                   member != "opAssign" &&
+                                   member != "factory" &&
+                                   member != "Monitor" &&
+                                   __traits(hasMember, To, member)) {
+                            // Check if it's an instance field (not a method/type/etc)
+                            static if (__traits(compiles, __traits(getMember, from, member)) &&
+                                       __traits(compiles, __traits(getMember, result[i], member) = __traits(getMember, from, member))) {
+                                __traits(getMember, result[i], member) = __traits(getMember, from, member);
+                            }
+                        }
+                    }}
                 } else {
                     // Non-entity types (Query, Mutation) - use default init
                     result[i] = To.init;
@@ -547,6 +567,55 @@ class EntityCastExpr(To, From) : Expr!To, AnyRefEvaluable {
 /// Used by plugin infrastructure to forward fields between schema types.
 auto entityCast(To, From)(Expr!From source) {
     return new EntityCastExpr!(To, From)(source);
+}
+
+// ============================================================================
+// Field Access Expression (Eager Fields)
+// ============================================================================
+
+/// Expression that accesses a field on an entity struct.
+/// This is a core concept - just reads from populated struct fields.
+/// Used for "eager" fields that are populated when entities are fetched.
+class FieldAccessExpr(Entity, string fieldName) : Expr!(typeof(__traits(getMember, Entity.init, fieldName))) {
+    alias T = typeof(__traits(getMember, Entity.init, fieldName));
+    private ExprBase _input;
+
+    this(Expr!Entity input) {
+        _input = input;
+    }
+
+    override ExprBase[] dependencies() {
+        return [_input];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0)
+            _input = newDep;
+    }
+
+    override Expr!T optimize(OptimizeContext ctx) {
+        _input = (cast(Expr!Entity) _input).optimize(ctx);
+        return this;
+    }
+
+    override Promise!(T[]) eval(EvalContext ctx) {
+        return evalAs!Entity(_input, ctx).then((Entity[] entities) {
+            T[] result;
+            foreach (ref e; entities) {
+                result ~= __traits(getMember, e, fieldName);
+            }
+            return result;
+        });
+    }
+
+    /// Access the input expression
+    @property ExprBase input() { return _input; }
+}
+
+/// Factory function for field access on entity structs.
+/// Creates an expression that reads a populated struct field.
+auto fieldAccess(string fieldName, Entity)(Expr!Entity input) {
+    return new FieldAccessExpr!(Entity, fieldName)(input);
 }
 
 // ============================================================================
@@ -1312,7 +1381,13 @@ class EveryItemOfExpr(T) : Expr!T, EveryItemOfExprInfo {
         static if (is(T == void)) {
             static assert(false, "EveryItemOfExpr!void should not be evaluated directly");
         } else static if (isEntityType!T) {
-            // Entity path - use AnyRef storage (nodeId-based)
+            // First try to get populated entities (preserves field data for naive mode)
+            auto entities = ctx.getCurrentEntities!T(_parentMap);
+            if (entities.length > 0) {
+                return resolve(entities);
+            }
+
+            // Fallback to ref-based reconstruction (for optimized mode or when entities not stored)
             auto refs = ctx.getCurrentRefs(_parentMap);
             if (refs.length > 0) {
                 return resolve(refs.map!(r => T(r.nodeId)).array);
@@ -1409,22 +1484,27 @@ class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
 
         // 1. Evaluate collection for each parent ref
         return evalAs!(Entity[])(_collection, ctx).then((Entity[][] collectionResults) {
-            // 2. Flatten for batch evaluation (convert to AnyRef for internal storage)
+            // 2. Flatten for batch evaluation
+            Entity[] flatEntities;
             AnyRef[] flatRefs;
             size_t[] lengths;
             foreach (group; collectionResults) {
                 lengths ~= group.length;
                 foreach (e; group) {
+                    flatEntities ~= e;
                     flatRefs ~= AnyRef(e.nodeId.id);
                 }
             }
 
-            if (flatRefs.length == 0) {
+            if (flatEntities.length == 0) {
                 // No items to process - return empty array for each parent
                 return resolve(std.algorithm.map!(_ => cast(R[])[])(iota(collectionResults.length)).array);
             }
 
-            // 3. Set current refs for this MapExpr (keyed by identity, stored as AnyRef)
+            // 3. Set current entities AND refs for this MapExpr
+            // Entities are stored for naive mode (preserves populated fields)
+            // Refs are stored for backward compatibility with evalRefAsAnyRef
+            ctx.setCurrentEntities!Entity(self, flatEntities);
             ctx.setCurrentRefs(self, flatRefs);
 
             // 4. Evaluate body with ALL refs at once
@@ -1804,12 +1884,20 @@ auto every(alias pred, Coll)(Coll collection)
 /// Convert a D value to JSONValue
 JSONValue toJsonValue(T)(T value) {
     import dynamo.core.types : isCustomScalar;
+    import std.typecons : Nullable;
 
     static if (is(T == JSONValue)) {
         return value;
     } else static if (isCustomScalar!T) {
         // CustomScalar has its own toJson method
         return T.toJson(value.value);
+    } else static if (is(T == Nullable!U, U)) {
+        // Nullable types - return JSON null if null, otherwise convert inner value
+        if (value.isNull) {
+            return JSONValue(null);
+        } else {
+            return toJsonValue(value.get);
+        }
     } else static if (is(T == enum)) {
         // D enum - convert to string using member name
         import std.conv : to;
