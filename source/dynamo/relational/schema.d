@@ -834,6 +834,163 @@ private SortColumnInfo extractSortColumnInfo(Object expr, Object leftItem, Objec
 }
 
 // ============================================================================
+// Filter Pattern Matching
+// ============================================================================
+
+/// Extract WHERE clause SQL from a FilterByInfo by pattern-matching its predicate.
+///
+/// Recognizes patterns like:
+/// - (e) => e.column.eq(value) → column = value
+/// - (e) => e.column.lt(value) → column < value
+/// - (e) => e.col1.eq(x).and(e.col2.lt(y)) → col1 = x AND col2 < y
+/// - (e) => e.col1.eq(x).or(e.col2.eq(y)) → col1 = x OR col2 = y
+/// - (e) => e.column.eq(x).not() → NOT (column = x)
+///
+/// Returns null if pattern doesn't match.
+private Nullable!string extractFilterWhereClause(FilterByInfo filterInfo) {
+    import dynamo.core.expr : BinaryOpInfo, UnaryOpInfo, ConstantInfo;
+    import dynamo.core.filtering : FilterItemInfo;
+
+    auto predicate = filterInfo.filterPredicate;
+    auto filterItem = filterInfo.filterItem;
+
+    return extractWhereFromExpr(predicate, filterItem);
+}
+
+/// Recursively extract WHERE SQL from an expression tree.
+private Nullable!string extractWhereFromExpr(Object expr, Object filterItem) {
+    import dynamo.core.expr : BinaryOpInfo, UnaryOpInfo, ConstantInfo;
+
+    // Handle binary operators: AND, OR, comparison operators
+    if (auto binOp = cast(BinaryOpInfo) expr) {
+        string op = binOp.operator;
+
+        // Logical operators: AND, OR
+        if (op == "&&" || op == "||") {
+            auto leftSql = extractWhereFromExpr(binOp.left, filterItem);
+            auto rightSql = extractWhereFromExpr(binOp.right, filterItem);
+            if (!leftSql.isNull && !rightSql.isNull) {
+                string sqlOp = (op == "&&") ? "AND" : "OR";
+                return Nullable!string("(" ~ leftSql.get ~ " " ~ sqlOp ~ " " ~ rightSql.get ~ ")");
+            }
+            return Nullable!string.init;
+        }
+
+        // Comparison operators: ==, !=, <, <=, >, >=
+        if (op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=") {
+            // Try to match: column op constant or constant op column
+            auto leftColInfo = extractFilterColumnInfo(binOp.left, filterItem);
+            auto rightColInfo = extractFilterColumnInfo(binOp.right, filterItem);
+            auto leftConst = extractConstant(binOp.left);
+            auto rightConst = extractConstant(binOp.right);
+
+            string column, value;
+            bool isColumnOnLeft = false;
+
+            if (!leftColInfo.isNull && !rightConst.isNull) {
+                column = leftColInfo.get;
+                value = rightConst.get;
+                isColumnOnLeft = true;
+            } else if (!rightColInfo.isNull && !leftConst.isNull) {
+                column = rightColInfo.get;
+                value = leftConst.get;
+                isColumnOnLeft = false;
+            } else {
+                return Nullable!string.init;
+            }
+
+            string sqlOp = translateComparisonOp(op, isColumnOnLeft);
+            return Nullable!string(column ~ " " ~ sqlOp ~ " " ~ value);
+        }
+    }
+
+    // Handle unary NOT operator
+    if (auto unaryOp = cast(UnaryOpInfo) expr) {
+        if (unaryOp.operator == "!") {
+            auto operandSql = extractWhereFromExpr(unaryOp.operand, filterItem);
+            if (!operandSql.isNull) {
+                return Nullable!string("NOT " ~ operandSql.get);
+            }
+        }
+    }
+
+    // Handle constant true/false
+    if (auto constInfo = cast(ConstantInfo) expr) {
+        if (constInfo.valueType == typeid(bool)) {
+            bool val = constInfo.valueAsString == "true";
+            return Nullable!string(val ? "1=1" : "1=0");
+        }
+    }
+
+    // Handle LIKE expressions (contains, startsWith, endsWith)
+    import dynamo.core.expr : LikeInfo;
+    if (auto likeInfo = cast(LikeInfo) expr) {
+        auto colInfo = extractFilterColumnInfo(likeInfo.likeOperand, filterItem);
+        if (!colInfo.isNull) {
+            // Escape single quotes in pattern and wrap in quotes
+            // The pattern already has % and _ escaped as \% and \_ by escapeLikePattern()
+            string escapedPattern = likeInfo.likePattern.replace("'", "''");
+            return Nullable!string(colInfo.get ~ " LIKE '" ~ escapedPattern ~ `' ESCAPE '\'`);
+        }
+    }
+
+    return Nullable!string.init;
+}
+
+/// Try to extract column name from an expression that should be a column access on the filter item.
+private Nullable!string extractFilterColumnInfo(Object expr, Object filterItem) {
+    // Check if this is a column access expression
+    auto colAccess = cast(ColumnAccessInfo) expr;
+    if (colAccess is null) return Nullable!string.init;
+
+    // Get the input expression and check if it's the filter item placeholder
+    auto inputExpr = colAccess.inputExpr();
+    if (cast(Object) inputExpr is filterItem) {
+        return Nullable!string(colAccess.sqlColumn);
+    }
+
+    return Nullable!string.init;
+}
+
+/// Extract SQL literal from a constant expression.
+private Nullable!string extractConstant(Object expr) {
+    import dynamo.core.expr : ConstantInfo;
+    import dynamo.relational.sql_optimizer : constantToSqlLiteral;
+
+    auto constInfo = cast(ConstantInfo) expr;
+    if (constInfo is null) return Nullable!string.init;
+
+    return Nullable!string(constantToSqlLiteral(constInfo));
+}
+
+/// Convert comparison operator to SQL, handling operand order.
+private string translateComparisonOp(string op, bool columnOnLeft) {
+    if (columnOnLeft) {
+        // column op value - use operator as-is
+        switch (op) {
+            case "==": return "=";
+            case "!=": return "<>";
+            case "<": return "<";
+            case "<=": return "<=";
+            case ">": return ">";
+            case ">=": return ">=";
+            default: return op;
+        }
+    } else {
+        // value op column - reverse operator
+        switch (op) {
+            case "==": return "=";
+            case "!=": return "<>";
+            case "<": return ">";    // value < column → column > value
+            case "<=": return ">=";
+            case ">": return "<";
+            case ">=": return "<=";
+            default: return op;
+        }
+    }
+}
+
+// ============================================================================
 // Base classes for runtime type checking
 // ============================================================================
 
@@ -1220,6 +1377,7 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
                 // We can't push this down as a single SQL query.
                 import dynamo.core.pagination : LimitInfo, OffsetInfo;
                 import dynamo.core.sorting : SortByInfo, OrderByInfo;
+                import dynamo.core.filtering : FilterByInfo;
                 bool seenSort = false;  // Track if we've seen ORDER BY (outside-in)
                 while (true) {
                     if (auto limitInfo = cast(LimitInfo) coll) {
@@ -1254,6 +1412,17 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
                             seenSort = true;
                         } else {
                             // Pattern matching failed - can't push down to SQL
+                            break;
+                        }
+                    } else if (auto filterByInfo = cast(FilterByInfo) coll) {
+                        // Predicate-based FilterBy - try to pattern-match for SQL push-down
+                        auto whereSql = extractFilterWhereClause(filterByInfo);
+                        if (!whereSql.isNull) {
+                            node.addWhereClause(whereSql.get);
+                            coll = filterByInfo.filterSource;
+                        } else {
+                            // Pattern matching failed - can't push down to SQL
+                            // FilterByExpr.eval() will handle it in-memory
                             break;
                         }
                     } else {
@@ -1350,6 +1519,14 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
 
         // Get the entity refs from the input chain, then fetch column
         return evalRefAsAnyRef(input, ctx).then((AnyRef[] entityRefs) {
+            debug(filter) {
+                import std.stdio : writefln;
+                import std.algorithm : map;
+                import std.array : array;
+                writefln("    ColumnAccessExpr.eval: table=%s, column=%s, refs=%s",
+                    EntityID!Entity.table, column, entityRefs.map!(r => r.nodeId).array);
+            }
+
             // First, check for mutation results (mutations store their results here)
             if (relCtx.hasMutationResult(EntityID!Entity.typeName)) {
                 return resolve(relCtx.getMutationColumnValues!T(EntityID!Entity.typeName, column, entityRefs));
@@ -1422,10 +1599,26 @@ class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Child[]), HasManyInfo 
 
         // Get the parent refs from the input chain, then fetch children
         return evalRefAsAnyRef(input, ctx).then((AnyRef[] parentRefs) {
+            debug(filter) {
+                import std.stdio : writefln, stdout;
+                import std.algorithm : map;
+                import std.array : array;
+                writefln("    HasManyAccessExpr.eval: parentRefs=%s, fk=%s, childTable=%s",
+                    parentRefs.map!(r => r.nodeId).array, fk, EntityID!Child.table);
+                stdout.flush();
+            }
             // Naive path: fetch children directly (async)
             if (relCtx.fetcher !is null) {
                 return relCtx.fetcher.fetchChildren(EntityID!Child.table, EntityID!Child.typeName, fk, parentRefs)
                     .then((AnyRef[][] children) {
+                        debug(filter) {
+                            import std.stdio : writefln, stdout;
+                            import std.algorithm : map;
+                            import std.array : array;
+                            writefln("    HasManyAccessExpr.eval: fetched children=%s",
+                                children.map!(g => g.map!(r => r.nodeId).array).array);
+                            stdout.flush();
+                        }
                         // Convert AnyRef[][] to Child[][]
                         return children.map!(group => group.map!(r => Child(r.nodeId)).array).array;
                     });
