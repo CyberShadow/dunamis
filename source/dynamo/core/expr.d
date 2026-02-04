@@ -255,6 +255,45 @@ abstract class Expr(T) : ExprBase {
     }
 
     // =========================================================================
+    // String-specific Operations (only for Expr!string)
+    // =========================================================================
+
+    static if (is(T == string)) {
+        /// Check if this string contains the given substring.
+        /// Generates SQL LIKE '%pattern%' ESCAPE '\'.
+        auto contains(string pattern) {
+            return new LikeExpr(this, "%" ~ escapeLikePattern(pattern) ~ "%");
+        }
+
+        /// Check if this string contains the given substring expression.
+        auto contains(Expr!string pattern) {
+            return new LikePatternExpr(this, pattern, LikePatternType.contains);
+        }
+
+        /// Check if this string starts with the given prefix.
+        /// Generates SQL LIKE 'pattern%' ESCAPE '\'.
+        auto startsWith(string prefix) {
+            return new LikeExpr(this, escapeLikePattern(prefix) ~ "%");
+        }
+
+        /// Check if this string starts with the given prefix expression.
+        auto startsWith(Expr!string prefix) {
+            return new LikePatternExpr(this, prefix, LikePatternType.startsWith);
+        }
+
+        /// Check if this string ends with the given suffix.
+        /// Generates SQL LIKE '%pattern' ESCAPE '\'.
+        auto endsWith(string suffix) {
+            return new LikeExpr(this, "%" ~ escapeLikePattern(suffix));
+        }
+
+        /// Check if this string ends with the given suffix expression.
+        auto endsWith(Expr!string suffix) {
+            return new LikePatternExpr(this, suffix, LikePatternType.endsWith);
+        }
+    }
+
+    // =========================================================================
     // Field Access via opDispatch
     // =========================================================================
 
