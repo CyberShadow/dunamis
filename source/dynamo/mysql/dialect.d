@@ -35,6 +35,14 @@ class MySQLDialect : SqlDialect {
         return "NOT EXISTS (" ~ subquery ~ ")";
     }
 
+    override string likeOp(string operandSql, string pattern, bool caseInsensitive) {
+        if (caseInsensitive) {
+            // Use LOWER() for consistent case-insensitive behavior across collations
+            return "(LOWER(" ~ operandSql ~ ") LIKE LOWER('" ~ pattern ~ `') ESCAPE '\')`;
+        }
+        return "(" ~ operandSql ~ " LIKE '" ~ pattern ~ `' ESCAPE '\')`;
+    }
+
     override string name() { return "MySQL"; }
 
     private static string toSqlOp(string op) {

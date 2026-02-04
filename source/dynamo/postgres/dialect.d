@@ -30,6 +30,11 @@ class PostgresDialect : SqlDialect {
         return "NOT EXISTS (" ~ subquery ~ ")";
     }
 
+    override string likeOp(string operandSql, string pattern, bool caseInsensitive) {
+        string op = caseInsensitive ? "ILIKE" : "LIKE";
+        return "(" ~ operandSql ~ " " ~ op ~ " '" ~ pattern ~ `' ESCAPE '\')`;
+    }
+
     override string name() { return "PostgreSQL"; }
 
     private static string toSqlOp(string op) {
