@@ -46,11 +46,11 @@ void seedDatabase() {
     writeln("Seeding data via mutations...");
 
     // Create users with different ages for testing logic expressions
-    // Alice: age 25 (adult)
-    auto alice = graphql(`mutation { createUserWithAge(firstName: "Alice", lastName: "Smith", age: 25) { id } }`);
+    // Alice: age 25 (adult), with nickname for testing eager fields
+    auto alice = graphql(`mutation { createUserWithNickname(firstName: "Alice", lastName: "Smith", age: 25, nickname: "Ally") { id } }`);
     assertNoErrors(alice);
-    auto aliceId = alice["data"]["createUserWithAge"]["id"];
-    writefln("  Created Alice age=25 (id=%s)", aliceId);
+    auto aliceId = alice["data"]["createUserWithNickname"]["id"];
+    writefln("  Created Alice age=25 nickname=Ally (id=%s)", aliceId);
 
     // Bob: age 15 (teenager)
     auto bob = graphql(`mutation { createUserWithAge(firstName: "Bob", lastName: "Jones", age: 15) { id } }`);
@@ -110,6 +110,9 @@ mixin template TestSchema(alias db) {
         mixin Col!("lastName", string);
         mixin Col!("age", int);
         mixin HasMany!("posts", Post, "author_id");
+
+        /// Plain field: populated when entity is fetched (not via lazy column access)
+        Nullable!string nickname;
 
         /// Computed field: full name concatenation
         static auto fullName(Expr!User u) {
@@ -221,6 +224,16 @@ mixin template TestSchema(alias db) {
                 "first_name": JSONValue(firstName),
                 "last_name": JSONValue(lastName),
                 "age": JSONValue(age)
+            ]);
+        }
+
+        /// Create user with nickname for testing eager fields
+        static auto createUserWithNickname(Expr!Mutation parent, string firstName, string lastName, int age, string nickname) {
+            return insert!User([
+                "first_name": JSONValue(firstName),
+                "last_name": JSONValue(lastName),
+                "age": JSONValue(age),
+                "nickname": JSONValue(nickname)
             ]);
         }
     }
