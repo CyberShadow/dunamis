@@ -41,6 +41,9 @@ struct StringFilter {
     Nullable!string contains;
     Nullable!string startsWith;
     Nullable!string endsWith;
+    Nullable!string containsInsensitive;
+    Nullable!string startsWithInsensitive;
+    Nullable!string endsWithInsensitive;
     Nullable!bool isNull;
 }
 
@@ -722,6 +725,25 @@ Expr!bool buildConditionFromScalarFilter(ColExpr, ScalarFilter)(ColExpr colExpr,
         }
     }
 
+    // Case-insensitive string operators
+    static if (__traits(hasMember, ScalarFilter, "containsInsensitive")) {
+        if (!filter.containsInsensitive.isNull) {
+            conditions ~= colExpr.containsInsensitive(filter.containsInsensitive.get);
+        }
+    }
+
+    static if (__traits(hasMember, ScalarFilter, "startsWithInsensitive")) {
+        if (!filter.startsWithInsensitive.isNull) {
+            conditions ~= colExpr.startsWithInsensitive(filter.startsWithInsensitive.get);
+        }
+    }
+
+    static if (__traits(hasMember, ScalarFilter, "endsWithInsensitive")) {
+        if (!filter.endsWithInsensitive.isNull) {
+            conditions ~= colExpr.endsWithInsensitive(filter.endsWithInsensitive.get);
+        }
+    }
+
     // Combine conditions with AND
     if (conditions.length == 0) {
         return null;
@@ -981,6 +1003,25 @@ private Expr!bool buildTypedCondition(ColType)(Expr!ColType colExpr, string op, 
         case "endsWith":
             static if (is(ColType == string)) {
                 return colExpr.endsWith(value.str);
+            } else {
+                return null;
+            }
+        // Case-insensitive string operators
+        case "containsInsensitive":
+            static if (is(ColType == string)) {
+                return colExpr.containsInsensitive(value.str);
+            } else {
+                return null;
+            }
+        case "startsWithInsensitive":
+            static if (is(ColType == string)) {
+                return colExpr.startsWithInsensitive(value.str);
+            } else {
+                return null;
+            }
+        case "endsWithInsensitive":
+            static if (is(ColType == string)) {
+                return colExpr.endsWithInsensitive(value.str);
             } else {
                 return null;
             }
