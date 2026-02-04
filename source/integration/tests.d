@@ -1169,6 +1169,96 @@ void testFilterNestedPosts() {
     }
 }
 
+void testFilterContainsInsensitive() {
+    // Filter users whose firstName contains "ali" (case-insensitive, should match "Alice")
+    auto response = graphql(`{
+        users(filter: {firstName: {containsInsensitive: "ali"}}) {
+            firstName
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 1, "Expected at least 1 user matching 'ali' case-insensitively");
+
+    // All returned users should have 'ali' in their name (case-insensitive)
+    foreach (user; users) {
+        import std.uni : toLower;
+        import std.string : indexOf;
+        auto name = user["firstName"].str.toLower;
+        assertTrue(name.indexOf("ali") != -1,
+            "Expected firstName to contain 'ali' (case-insensitive), got '" ~ user["firstName"].str ~ "'");
+    }
+}
+
+void testFilterStartsWithInsensitive() {
+    // Filter users whose firstName starts with "a" (case-insensitive, should match "Alice")
+    auto response = graphql(`{
+        users(filter: {firstName: {startsWithInsensitive: "a"}}) {
+            firstName
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 1, "Expected at least 1 user starting with 'a' case-insensitively");
+
+    // All returned users should have firstName starting with 'a' or 'A'
+    foreach (user; users) {
+        import std.uni : toLower;
+        auto name = user["firstName"].str;
+        assertTrue(name.length > 0 && (name[0] == 'A' || name[0] == 'a'),
+            "Expected firstName to start with 'a' (case-insensitive), got '" ~ name ~ "'");
+    }
+}
+
+void testFilterEndsWithInsensitive() {
+    // Filter users whose firstName ends with "CE" (case-insensitive, should match "Alice")
+    auto response = graphql(`{
+        users(filter: {firstName: {endsWithInsensitive: "CE"}}) {
+            firstName
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 1, "Expected at least 1 user ending with 'CE' case-insensitively");
+
+    // All returned users should have firstName ending with 'ce' (case-insensitive)
+    foreach (user; users) {
+        import std.uni : toLower;
+        import std.algorithm : endsWith;
+        auto name = user["firstName"].str.toLower;
+        assertTrue(name.endsWith("ce"),
+            "Expected firstName to end with 'ce' (case-insensitive), got '" ~ user["firstName"].str ~ "'");
+    }
+}
+
+void testFilterCaseSensitiveVsInsensitive() {
+    // Verify case-sensitive filter does NOT match different case
+    auto responseSensitive = graphql(`{
+        users(filter: {firstName: {contains: "ALICE"}}) {
+            firstName
+        }
+    }`);
+    assertNoErrors(responseSensitive);
+    auto usersSensitive = responseSensitive["data"]["users"].array;
+    // "ALICE" should not match "Alice" with case-sensitive contains
+    assertTrue(usersSensitive.length == 0,
+        "Case-sensitive 'contains: ALICE' should not match 'Alice'");
+
+    // Verify case-insensitive filter DOES match different case
+    auto responseInsensitive = graphql(`{
+        users(filter: {firstName: {containsInsensitive: "ALICE"}}) {
+            firstName
+        }
+    }`);
+    assertNoErrors(responseInsensitive);
+    auto usersInsensitive = responseInsensitive["data"]["users"].array;
+    assertTrue(usersInsensitive.length >= 1,
+        "Case-insensitive 'containsInsensitive: ALICE' should match 'Alice'");
+}
+
 // ============================================================================
 // Test Registration
 // ============================================================================
@@ -1240,4 +1330,10 @@ static this() {
     registerTest("Filter users with all posts matching (every)", "tests", &testFilterUsersWithPostsEvery);
     registerTest("Filter users with no posts matching (none)", "tests", &testFilterUsersWithPostsNone);
     registerTest("Filter nested posts", "tests", &testFilterNestedPosts);
+
+    // Case-insensitive filtering tests
+    registerTest("Filter containsInsensitive", "tests", &testFilterContainsInsensitive);
+    registerTest("Filter startsWithInsensitive", "tests", &testFilterStartsWithInsensitive);
+    registerTest("Filter endsWithInsensitive", "tests", &testFilterEndsWithInsensitive);
+    registerTest("Filter case-sensitive vs insensitive", "tests", &testFilterCaseSensitiveVsInsensitive);
 }
