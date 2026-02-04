@@ -57,7 +57,7 @@ template getDTypeName(T) {
 }
 
 /// Extract column definitions from an entity type.
-/// Scans for methods with @SqlColumn UDA.
+/// Scans for methods with @SqlColumn UDA and plain struct fields.
 template getColumnDefs(Entity) {
     import std.traits : hasUDA, getUDAs, ReturnType;
     import std.meta : staticIndexOf;
@@ -66,7 +66,7 @@ template getColumnDefs(Entity) {
     import dynamo.relational.schema : ForeignKeyRef, hasForeignKeyRef, extractForeignKeyRef;
     import dynamo.relational.schema : BelongsToFK, hasBelongsToFK, getBelongsToFK;
     import dynamo.relational.schema : BelongsToParent, hasBelongsToParent, extractBelongsToParent;
-    import dynamo.relational.schema : getSqlColumn;
+    import dynamo.relational.schema : getSqlColumn, isPlainField, getPlainFieldColumnName;
     import dynamo.core.expr : ExprResultType;
 
     enum getColumnDefs = () {
@@ -115,6 +115,29 @@ template getColumnDefs(Entity) {
                         }
                         seenColumns[columnName] = true;
                     }
+                }
+            }
+        }}
+
+        // Collect plain fields (struct instance fields)
+        static foreach (member; __traits(allMembers, Entity)) {{
+            static if (isPlainField!(Entity, member)) {
+                enum columnName = getPlainFieldColumnName!(Entity, member);
+                if (columnName !in seenColumns) {
+                    alias FieldType = typeof(__traits(getMember, Entity.init, member));
+
+                    // Check if nullable
+                    enum bool isNullable = is(FieldType == Nullable!U, U);
+
+                    columns ~= ColumnDef(
+                        columnName,
+                        getDTypeName!FieldType,
+                        isNullable,
+                        false,  // isPrimaryKey
+                        "",     // foreignKeyTable
+                        ""      // foreignKeyColumn
+                    );
+                    seenColumns[columnName] = true;
                 }
             }
         }}
@@ -287,4 +310,27 @@ unittest {
         }
     }
     assert(found, "manager_id column should exist");
+}
+
+// Test that plain fields are included in column definitions
+unittest {
+    import dynamo.relational.demo : DemoEntity, MockDB;
+
+    static MockDB!() db;
+
+    static struct Person {
+        mixin DemoEntity!(db, "persons");
+        string nickname;  // Plain field - automatically detected
+    }
+
+    auto cols = getColumnDefs!Person;
+    bool foundNickname = false;
+    foreach (col; cols) {
+        if (col.name == "nickname") {
+            foundNickname = true;
+            assert(col.dType == "string", "nickname should be string type");
+            assert(col.nullable == false, "nickname should be non-nullable");
+        }
+    }
+    assert(foundNickname, "nickname plain field should be in column definitions");
 }
