@@ -755,6 +755,173 @@ unittest {
     }
 }
 
+/// Interface for LIKE expressions - allows optimizer to inspect and transform
+interface LikeInfo {
+    /// The string expression being matched
+    ExprBase likeOperand();
+
+    /// The LIKE pattern (with SQL wildcards % and _)
+    string likePattern();
+}
+
+/// Type of dynamic LIKE pattern
+enum LikePatternType {
+    contains,    // %pattern%
+    startsWith,  // pattern%
+    endsWith     // %pattern
+}
+
+/// Interface for dynamic LIKE expressions where pattern is an expression
+interface LikePatternInfo {
+    /// The string expression being matched
+    ExprBase likeOperand();
+
+    /// The pattern expression
+    ExprBase patternExpr();
+
+    /// The pattern type (contains, startsWith, endsWith)
+    LikePatternType patternType();
+}
+
+/// Expression for SQL LIKE with a static pattern.
+/// Used for contains, startsWith, endsWith operations.
+class LikeExpr : Expr!bool, LikeInfo {
+    private ExprBase _operand;
+    private string _pattern;
+
+    this(Expr!string operand, string pattern) {
+        _operand = operand;
+        _pattern = pattern;
+    }
+
+    override ExprBase[] dependencies() {
+        return [_operand];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0)
+            _operand = newDep;
+    }
+
+    override Promise!(bool[]) eval(EvalContext ctx) {
+        import std.string : indexOf;
+        import std.algorithm : startsWith, endsWith;
+
+        auto operand = _operand;
+        auto pattern = _pattern;
+
+        return evalAs!string(operand, ctx).then((string[] vals) {
+            bool[] result = new bool[vals.length];
+
+            debug(filter) {
+                import std.stdio : writefln;
+                writefln("    LikeExpr: pattern='%s', vals=%s", pattern, vals);
+            }
+
+            // Parse pattern to determine match type
+            bool startsWild = pattern.length > 0 && pattern[0] == '%';
+            bool endsWild = pattern.length > 0 && pattern[$-1] == '%';
+
+            string searchStr;
+            if (startsWild && endsWild && pattern.length >= 2) {
+                // %pattern% - contains
+                searchStr = unescapeLikePattern(pattern[1..$-1]);
+                foreach (i, v; vals) {
+                    result[i] = v.indexOf(searchStr) >= 0;
+                }
+            } else if (startsWild) {
+                // %pattern - endsWith
+                searchStr = unescapeLikePattern(pattern[1..$]);
+                foreach (i, v; vals) {
+                    result[i] = v.endsWith(searchStr);
+                }
+            } else if (endsWild) {
+                // pattern% - startsWith
+                searchStr = unescapeLikePattern(pattern[0..$-1]);
+                foreach (i, v; vals) {
+                    result[i] = v.startsWith(searchStr);
+                }
+            } else {
+                // Exact match
+                searchStr = unescapeLikePattern(pattern);
+                foreach (i, v; vals) {
+                    result[i] = v == searchStr;
+                }
+            }
+
+            debug(filter) {
+                import std.stdio : writefln;
+                writefln("    LikeExpr result: %s", result);
+            }
+
+            return result;
+        });
+    }
+
+    // LikeInfo implementation
+    override ExprBase likeOperand() { return _operand; }
+    override string likePattern() { return _pattern; }
+}
+
+/// Expression for SQL LIKE with a dynamic pattern expression.
+class LikePatternExpr : Expr!bool, LikePatternInfo {
+    private ExprBase _operand;
+    private ExprBase _pattern;
+    private LikePatternType _patternType;
+
+    this(Expr!string operand, Expr!string pattern, LikePatternType patternType) {
+        _operand = operand;
+        _pattern = pattern;
+        _patternType = patternType;
+    }
+
+    override ExprBase[] dependencies() {
+        return [_operand, _pattern];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0)
+            _operand = newDep;
+        else if (index == 1)
+            _pattern = newDep;
+    }
+
+    override Promise!(bool[]) eval(EvalContext ctx) {
+        import std.string : indexOf;
+        import std.algorithm : startsWith, endsWith;
+
+        auto operand = _operand;
+        auto pattern = _pattern;
+        auto patternType = _patternType;
+
+        return evalAs!string(operand, ctx).then((string[] vals) {
+            return evalAs!string(pattern, ctx).then((string[] patterns) {
+                bool[] result = new bool[vals.length];
+                foreach (i, v; vals) {
+                    string p = i < patterns.length ? patterns[i] : (patterns.length > 0 ? patterns[0] : "");
+                    final switch (patternType) {
+                        case LikePatternType.contains:
+                            result[i] = v.indexOf(p) >= 0;
+                            break;
+                        case LikePatternType.startsWith:
+                            result[i] = v.startsWith(p);
+                            break;
+                        case LikePatternType.endsWith:
+                            result[i] = v.endsWith(p);
+                            break;
+                    }
+                }
+                return result;
+            });
+        });
+    }
+
+    // LikePatternInfo implementation
+    override ExprBase likeOperand() { return _operand; }
+    override ExprBase patternExpr() { return _pattern; }
+    override LikePatternType patternType() { return _patternType; }
+}
+
 // ============================================================================
 // Ternary (Conditional) Expression
 // ============================================================================
