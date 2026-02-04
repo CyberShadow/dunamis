@@ -94,6 +94,22 @@ class EvalContext {
     /// Unlike map which evaluates all items at once, some/every evaluates one at a time.
     private AnyRef[void*] _predicateItemMap;
 
+    /// Filter evaluation items keyed by FilterByExpr identity.
+    /// Communication between FilterByExpr and FilterItemExpr:
+    /// - FilterByExpr calls setFilterItem(this, ref) before evaluating predicate
+    /// - FilterItemExpr calls getFilterItem(_parentFilter) to get its ref
+    /// Similar to some/every, filter evaluates one item at a time.
+    private AnyRef[void*] _filterItemMap;
+
+    /// Scalar array batch refs keyed by SomeExpr/EveryExpr identity.
+    /// Used for scalar collections (string[], int[], etc.) similar to _refsMap for entities.
+    /// Uses SealedArray for type-safe storage without serialization overhead.
+    private SealedArray[void*] _scalarRefsMap;
+
+    /// Scalar array single item keyed by SomeExpr/EveryExpr identity.
+    /// Fallback when batch refs aren't set (single-item predicate evaluation).
+    private SealedValue[void*] _scalarItemMap;
+
     /// Expression evaluation cache, keyed by expression object identity.
     /// Used by evalAs() to automatically memoize expression evaluation.
     /// When the same expression is evaluated multiple times (e.g., via
@@ -112,6 +128,21 @@ class EvalContext {
     AnyRef[] getCurrentRefs(Object mapExpr) {
         if (auto p = cast(void*) mapExpr in _refsMap) {
             return *p;
+        }
+        return [];
+    }
+
+    /// Set scalar refs for batch evaluation of scalar arrays.
+    void setScalarRefs(T)(Object expr, T[] vals) {
+        _scalarRefsMap[cast(void*) expr] = SealedArray(vals);
+    }
+
+    /// Get scalar refs for batch evaluation.
+    T[] getScalarRefs(T)(Object expr) {
+        if (auto p = cast(void*) expr in _scalarRefsMap) {
+            if (!p.empty) {
+                return p.get!T();
+            }
         }
         return [];
     }
@@ -144,6 +175,46 @@ class EvalContext {
             return *p;
         }
         return AnyRef.init;
+    }
+
+    /// Set filter item for FilterByExpr.
+    /// Used during filter predicate evaluation (one item at a time).
+    void setFilterItem(Object filterExpr, AnyRef item) {
+        _filterItemMap[cast(void*) filterExpr] = item;
+    }
+
+    /// Get filter item for FilterItemExpr.
+    /// Returns AnyRef.init if not set.
+    AnyRef getFilterItem(Object filterExpr) {
+        if (auto p = cast(void*) filterExpr in _filterItemMap) {
+            return *p;
+        }
+        return AnyRef.init;
+    }
+
+    /// Set scalar item for SomeExpr/EveryExpr with scalar element types.
+    /// Used during scalar array predicate evaluation (one item at a time).
+    void setScalarItem(T)(Object scalarExpr, T item) {
+        _scalarItemMap[cast(void*) scalarExpr] = SealedValue(item);
+    }
+
+    /// Get scalar item for EveryItemOfExpr with scalar element types.
+    /// Returns T.init if not set.
+    T getScalarItem(T)(Object scalarExpr) {
+        if (auto p = cast(void*) scalarExpr in _scalarItemMap) {
+            if (!p.empty) {
+                return p.get!T();
+            }
+        }
+        return T.init;
+    }
+
+    /// Check if a scalar item is set for the given expression.
+    bool hasScalarItem(Object scalarExpr) {
+        if (auto p = cast(void*) scalarExpr in _scalarItemMap) {
+            return !p.empty;
+        }
+        return false;
     }
 
     /// Get cached Promise for an expression, or null if not cached.
