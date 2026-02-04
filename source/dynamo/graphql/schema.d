@@ -449,8 +449,11 @@ template getFields(T) {
     import dynamo.core.expr : ExprResultType;
 
     enum getFields = () {
+        import dynamo.core.types : isPlainField;
+
         FieldInfo[] fields;
 
+        // First pass: field methods (static functions)
         static foreach (member; __traits(allMembers, T)) {{
             static if (!isInternalMember!member) {
                 static if (is(typeof(__traits(getMember, T, member)) == function)) {
@@ -487,6 +490,28 @@ template getFields(T) {
                             "Add @GqlHidden to exclude this method from the schema.");
                     }
                     // @GqlHidden methods that don't conform are silently skipped
+                }
+            }
+        }}
+
+        // Second pass: plain fields (struct instance fields)
+        static foreach (member; __traits(allMembers, T)) {{
+            static if (!isInternalMember!member) {
+                static if (isPlainField!(T, member)) {
+                    alias FieldType = typeof(__traits(getMember, T.init, member));
+                    // Use D field name directly (GraphQL uses camelCase like D)
+                    enum gqlFieldName = member;
+                    enum gqlType = graphqlTypeName!FieldType;
+
+                    fields ~= FieldInfo(
+                        gqlFieldName,
+                        gqlType,
+                        false,  // isConnection
+                        false,  // isHidden
+                        "",     // description
+                        "",     // deprecation
+                        []      // arguments
+                    );
                 }
             }
         }}
@@ -1593,6 +1618,51 @@ unittest {
     enum sdl = generateObjectTypeSDL!User(getGraphQLTypeName!User);
     assert(sdl.canFind("name:"), "SDL should include name field");
     assert(!sdl.canFind("passwordHash"), "SDL should NOT include passwordHash field");
+}
+
+// Test that plain fields (struct instance fields) are detected by getFields
+unittest {
+    import std.algorithm : canFind;
+    import std.typecons : Nullable;
+    import dynamo.relational.demo : DemoEntity, MockDB;
+    import dynamo.relational.schema : Col;
+
+    static MockDB!() db;
+
+    static struct Person {
+        mixin DemoEntity!(db, "persons");
+        mixin Col!("name", string);  // Column field
+
+        // Plain fields (struct instance fields)
+        string nickname;
+        Nullable!string bio;
+    }
+
+    enum fields = getFields!Person;
+
+    // Should have: id (from DemoEntity), name (Col), nickname, bio
+    static assert(fields.length == 4, "Expected 4 fields (id, name, nickname, bio)");
+
+    // Check each field
+    bool foundNickname = false;
+    bool foundBio = false;
+    foreach (f; fields) {
+        if (f.name == "nickname") {
+            foundNickname = true;
+            assert(f.graphqlType == "String!", "nickname should be String! type");
+        }
+        if (f.name == "bio") {
+            foundBio = true;
+            assert(f.graphqlType == "String", "bio should be nullable String type");
+        }
+    }
+    assert(foundNickname, "nickname plain field should be detected");
+    assert(foundBio, "bio plain field should be detected");
+
+    // Verify SDL includes plain fields
+    enum sdl = generateObjectTypeSDL!Person(getGraphQLTypeName!Person);
+    assert(sdl.canFind("nickname:"), "SDL should include nickname field");
+    assert(sdl.canFind("bio:"), "SDL should include bio field");
 }
 
 // Test @GqlDescription and @GqlDeprecated UDAs
