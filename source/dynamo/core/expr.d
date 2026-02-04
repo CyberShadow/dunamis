@@ -687,6 +687,75 @@ class IsNullExpr(T) : Expr!bool, IsNullInfo {
 }
 
 // ============================================================================
+// LIKE Pattern Expressions (for string filtering)
+// ============================================================================
+
+/// Escape special characters in a LIKE pattern for SQL safety.
+/// Escapes: % → \%, _ → \_, \ → \\
+/// This allows literal matching of these characters in contains/startsWith/endsWith.
+string escapeLikePattern(string input) {
+    import std.array : appender;
+
+    auto result = appender!string();
+    result.reserve(input.length * 2);  // Worst case: every char escaped
+
+    foreach (c; input) {
+        switch (c) {
+            case '\\': result ~= `\\`; break;
+            case '%':  result ~= `\%`; break;
+            case '_':  result ~= `\_`; break;
+            default:   result ~= c; break;
+        }
+    }
+    return result[];
+}
+
+/// Unescape a LIKE pattern for in-memory string matching.
+/// Reverses the escaping done by escapeLikePattern.
+string unescapeLikePattern(string pattern) {
+    import std.array : appender;
+
+    auto result = appender!string();
+    result.reserve(pattern.length);
+
+    for (size_t i = 0; i < pattern.length; i++) {
+        if (pattern[i] == '\\' && i + 1 < pattern.length) {
+            char next = pattern[i + 1];
+            if (next == '\\' || next == '%' || next == '_') {
+                result ~= next;
+                i++;  // Skip the escaped character
+                continue;
+            }
+        }
+        result ~= pattern[i];
+    }
+    return result[];
+}
+
+unittest {
+    // Test escapeLikePattern
+    assert(escapeLikePattern("hello") == "hello");
+    assert(escapeLikePattern("100%") == `100\%`);
+    assert(escapeLikePattern("a_b") == `a\_b`);
+    assert(escapeLikePattern(`a\b`) == `a\\b`);
+    assert(escapeLikePattern(`50% off_sale\today`) == `50\% off\_sale\\today`);
+
+    // Test unescapeLikePattern
+    assert(unescapeLikePattern("hello") == "hello");
+    assert(unescapeLikePattern(`100\%`) == "100%");
+    assert(unescapeLikePattern(`a\_b`) == "a_b");
+    assert(unescapeLikePattern(`a\\b`) == `a\b`);
+    assert(unescapeLikePattern(`50\% off\_sale\\today`) == `50% off_sale\today`);
+
+    // Round-trip
+    string[] testCases = ["hello", "100%", "a_b", `a\b`, `50% off_sale\today`, "", "%_%"];
+    foreach (tc; testCases) {
+        assert(unescapeLikePattern(escapeLikePattern(tc)) == tc,
+            "Round-trip failed for: " ~ tc);
+    }
+}
+
+// ============================================================================
 // Ternary (Conditional) Expression
 // ============================================================================
 
