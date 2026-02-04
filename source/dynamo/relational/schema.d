@@ -930,7 +930,12 @@ private Nullable!string extractWhereFromExpr(Object expr, Object filterItem) {
             // Escape single quotes in pattern and wrap in quotes
             // The pattern already has % and _ escaped as \% and \_ by escapeLikePattern()
             string escapedPattern = likeInfo.likePattern.replace("'", "''");
-            return Nullable!string(colInfo.get ~ " LIKE '" ~ escapedPattern ~ `' ESCAPE '\'`);
+            if (likeInfo.caseInsensitive) {
+                // Case-insensitive: use LOWER() on both sides (works on all databases)
+                return Nullable!string("LOWER(" ~ colInfo.get ~ ") LIKE LOWER('" ~ escapedPattern ~ `') ESCAPE '\'`);
+            } else {
+                return Nullable!string(colInfo.get ~ " LIKE '" ~ escapedPattern ~ `' ESCAPE '\'`);
+            }
         }
     }
 
