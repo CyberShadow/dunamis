@@ -6,6 +6,63 @@ import std.conv;
 import std.string : indexOf;
 
 // ============================================================================
+// Plain Field Support
+// ============================================================================
+
+/// Check if a member is a plain field (struct instance field, not a method).
+/// Plain fields are distinguished from computed fields (static methods).
+/// Excludes internal members (nodeId, _*, toString, etc.).
+template isPlainField(Entity, string fieldName) {
+    import std.algorithm : startsWith;
+
+    enum isPlainField = () {
+        // Skip internal members
+        if (fieldName == "nodeId" ||
+            fieldName == "toString" ||
+            fieldName == "toHash" ||
+            fieldName == "opEquals" ||
+            fieldName == "opCmp" ||
+            fieldName == "opAssign" ||
+            fieldName == "factory" ||
+            fieldName == "Monitor" ||
+            fieldName.startsWith("_") ||
+            fieldName.startsWith("__"))
+        {
+            return false;
+        }
+
+        // Must be readable on an instance
+        static if (!__traits(compiles, __traits(getMember, Entity.init, fieldName))) {
+            return false;
+        } else {
+            alias member = __traits(getMember, Entity, fieldName);
+            // Skip functions/methods
+            static if (is(typeof(member) == function) || is(typeof(&member) == delegate)) {
+                return false;
+            } else {
+                // It's a field - check if it's actually an instance field (not a type alias, enum, etc.)
+                static if (__traits(compiles, { auto x = __traits(getMember, Entity.init, fieldName); })) {
+                    return true;
+                } else {
+                    return false;
+                }
+            }
+        }
+    }();
+}
+
+/// Get a tuple of all plain field names for an entity.
+template getPlainFieldNames(Entity) {
+    import std.meta : Filter;
+
+    template isPlainFieldMember(string name) {
+        enum isPlainFieldMember = isPlainField!(Entity, name);
+    }
+
+    alias getPlainFieldNames = Filter!(isPlainFieldMember, __traits(allMembers, Entity));
+}
+
+// ============================================================================
 // Source Context Registry Mixin
 // ============================================================================
 
