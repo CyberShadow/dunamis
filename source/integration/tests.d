@@ -845,6 +845,58 @@ void testQuerySomeEveryWithPostDetails() {
 }
 
 // ============================================================================
+// Eager Field Tests
+// ============================================================================
+
+void testQueryEagerField() {
+    // Test that eager fields (struct instance fields with @EagerField) are populated
+    auto response = graphql(`{
+        users {
+            firstName
+            nickname
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 1, "Expected at least 1 user");
+
+    // Find Alice and check her nickname (set to "Ally" in seed data)
+    foreach (user; users) {
+        if (user["firstName"].str == "Alice") {
+            assertTrue(user["nickname"].str == "Ally",
+                "Alice's nickname should be 'Ally', got: " ~ user["nickname"].str);
+            return;
+        }
+    }
+    assertTrue(false, "Alice not found");
+}
+
+void testQueryEagerFieldWithComputedField() {
+    // Test that eager fields work alongside computed fields
+    auto response = graphql(`{
+        users {
+            fullName
+            nickname
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 1, "Expected at least 1 user");
+
+    // Find Alice and verify both fields
+    foreach (user; users) {
+        if (user["fullName"].str == "Alice Smith") {
+            assertTrue(user["nickname"].str == "Ally",
+                "Alice's nickname should be 'Ally'");
+            return;
+        }
+    }
+    assertTrue(false, "Alice not found");
+}
+
+// ============================================================================
 // Recursive Input Type Tests
 // ============================================================================
 
@@ -1311,6 +1363,10 @@ static this() {
     registerTest("Query hasPosts (some)", "tests", &testQueryHasPostsField);
     registerTest("Query allPostsTitled (every)", "tests", &testQueryAllPostsTitledField);
     registerTest("Query some/every with post details", "tests", &testQuerySomeEveryWithPostDetails);
+
+    // Eager field tests
+    registerTest("Query eager field (nickname)", "tests", &testQueryEagerField);
+    registerTest("Query eager field with computed field", "tests", &testQueryEagerFieldWithComputedField);
 
     // Recursive input type tests
     registerTest("Recursive filter input", "tests", &testRecursiveFilterInput);
