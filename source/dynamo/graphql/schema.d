@@ -534,7 +534,9 @@ template isValidFieldMethod(T, alias fn) {
 /// - Are not entities (no _typeName member from Entity mixin)
 /// - Are not Nullable wrappers
 /// - Are not built-in types (string, int, etc.)
+/// - Are not JSONValue (raw JSON pass-through)
 template isInputType(T) {
+    import std.json : JSONValue;
     static if (is(T == struct)) {
         // Must not be an entity (entities have _typeName)
         static if (__traits(hasMember, T, "_typeName")) {
@@ -546,6 +548,10 @@ template isInputType(T) {
         }
         // Must not be a custom scalar
         else static if (isCustomScalar!T) {
+            enum isInputType = false;
+        }
+        // Must not be JSONValue (raw JSON pass-through type)
+        else static if (is(T == JSONValue)) {
             enum isInputType = false;
         }
         else {
