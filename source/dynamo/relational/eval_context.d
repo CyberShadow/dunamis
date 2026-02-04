@@ -202,7 +202,13 @@ abstract class DataFetcher {
             return fetchColumnLong(table, column, refs);
         } else static if (is(T == int)) {
             return fetchColumnLong(table, column, refs).then((long[] longs) {
-                return cast(int[]) longs;
+                // Element-wise conversion, not binary cast
+                int[] result;
+                result.reserve(longs.length);
+                foreach (l; longs) {
+                    result ~= cast(int) l;
+                }
+                return result;
             });
         } else {
             static assert(false, "Unsupported column type: " ~ T.stringof);
