@@ -63,6 +63,88 @@ template getPlainFieldNames(Entity) {
 }
 
 // ============================================================================
+// Plain Method Support
+// ============================================================================
+
+/// Check if a member is a plain method (instance method returning non-Expr type).
+/// Plain methods are distinguished from:
+/// - Computed fields (static methods taking Expr!Entity, returning Expr!T)
+/// - Plain fields (struct instance fields)
+///
+/// A plain method:
+/// - Is callable on an entity instance with no arguments
+/// - Returns a non-Expr type (scalar, Nullable!scalar, arrays of scalars)
+/// - Is not a static method
+template isPlainMethod(Entity, string memberName) {
+    import std.algorithm : startsWith;
+    import dynamo.core.expr : isExpr;
+
+    enum isPlainMethod = () {
+        // Skip internal members
+        if (memberName == "nodeId" ||
+            memberName == "toString" ||
+            memberName == "toHash" ||
+            memberName == "opEquals" ||
+            memberName == "opCmp" ||
+            memberName == "opAssign" ||
+            memberName == "factory" ||
+            memberName == "Monitor" ||
+            memberName.startsWith("_") ||
+            memberName.startsWith("__"))
+        {
+            return false;
+        }
+
+        // Must be accessible
+        static if (!__traits(compiles, __traits(getMember, Entity, memberName))) {
+            return false;
+        } else {
+            alias member = __traits(getMember, Entity, memberName);
+
+            // Must be a function type
+            static if (!is(typeof(member) == function)) {
+                return false;
+            }
+            // Must NOT be a static function (plain methods are instance methods)
+            else static if (__traits(isStaticFunction, member)) {
+                return false;
+            } else {
+                import std.traits : Parameters, ReturnType;
+                alias Params = Parameters!member;
+                alias Return = ReturnType!member;
+
+                // Must take no parameters
+                static if (Params.length != 0) {
+                    return false;
+                }
+                // Return type must not be void
+                else static if (is(Return == void)) {
+                    return false;
+                }
+                // Return type must not be an Expr (those are computed fields)
+                else static if (isExpr!Return) {
+                    return false;
+                }
+                else {
+                    return true;
+                }
+            }
+        }
+    }();
+}
+
+/// Get a tuple of all plain method names for an entity.
+template getPlainMethodNames(Entity) {
+    import std.meta : Filter;
+
+    template isPlainMethodMember(string name) {
+        enum isPlainMethodMember = isPlainMethod!(Entity, name);
+    }
+
+    alias getPlainMethodNames = Filter!(isPlainMethodMember, __traits(allMembers, Entity));
+}
+
+// ============================================================================
 // Source Context Registry Mixin
 // ============================================================================
 
