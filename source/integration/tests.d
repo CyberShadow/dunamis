@@ -897,6 +897,90 @@ void testQueryEagerFieldWithComputedField() {
 }
 
 // ============================================================================
+// Plain Method Tests
+// ============================================================================
+
+void testQueryPlainMethod() {
+    // Test that plain methods (instance methods) work in queries
+    auto response = graphql(`{
+        users {
+            firstName
+            displayName
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 1, "Expected at least 1 user");
+
+    // Find Alice and check her displayName (should be "Ally" from nickname)
+    foreach (user; users) {
+        if (user["firstName"].str == "Alice") {
+            assertTrue(user["displayName"].str == "Ally",
+                "Alice's displayName should be 'Ally', got: " ~ user["displayName"].str);
+            return;
+        }
+    }
+    assertTrue(false, "Alice not found");
+}
+
+void testQueryPlainMethodWithComputedField() {
+    // Test that plain methods work alongside computed fields
+    auto response = graphql(`{
+        users {
+            fullName
+            displayName
+            hasNickname
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 1, "Expected at least 1 user");
+
+    // Find Alice - has nickname, so hasNickname=true
+    foreach (user; users) {
+        if (user["fullName"].str == "Alice Smith") {
+            assertTrue(user["hasNickname"].boolean == true,
+                "Alice's hasNickname should be true");
+            assertTrue(user["displayName"].str == "Ally",
+                "Alice's displayName should be 'Ally'");
+            return;
+        }
+    }
+    assertTrue(false, "Alice not found");
+}
+
+void testQueryPlainMethodNullNickname() {
+    // Test plain method behavior when underlying field is null
+    auto response = graphql(`{
+        users {
+            firstName
+            nickname
+            displayName
+            hasNickname
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+
+    // Find Bob who doesn't have a nickname
+    foreach (user; users) {
+        if (user["firstName"].str == "Bob") {
+            assertTrue(user["nickname"].type == JSONType.null_,
+                "Bob's nickname should be null");
+            assertTrue(user["displayName"].str == "Anonymous",
+                "Bob's displayName should be 'Anonymous' when no nickname");
+            assertTrue(user["hasNickname"].boolean == false,
+                "Bob's hasNickname should be false");
+            return;
+        }
+    }
+    assertTrue(false, "Bob not found");
+}
+
+// ============================================================================
 // Recursive Input Type Tests
 // ============================================================================
 
