@@ -248,6 +248,10 @@ struct User {
     // Plain field - eagerly populated when entity is fetched
     // Use for small, frequently-accessed data that doesn't need SQL optimization
     Nullable!string nickname;
+
+    // Plain method - instance method operating on fetched data
+    // Evaluated in D, not pushed to SQL
+    string displayName() => nickname.isNull ? "Anonymous" : nickname.get;
 }
 
 // Input types - regular D structs used as computed field arguments
@@ -404,6 +408,44 @@ struct User {
     @SqlColumn("display_name") string displayName;  // Custom column name
 }
 ```
+
+### Plain Methods
+
+Plain methods are instance methods that operate on populated entity data. Unlike computed fields (static methods taking `Expr!Entity`), plain methods work with concrete values and are evaluated in D at runtime.
+
+```d
+struct User {
+    mixin DemoEntity!(db, "users");
+    mixin Col!("firstName", string);
+    Nullable!string nickname;  // Plain field
+
+    // Plain method - operates on populated entity data
+    string displayName() {
+        return nickname.isNull ? "Anonymous" : nickname.get;
+    }
+
+    // Plain method - boolean helper
+    bool hasNickname() => !nickname.isNull;
+
+    // Computed field - uses Expr, can be optimized to SQL
+    static auto fullName(Expr!User u) => u.firstName ~ " " ~ u.lastName;
+}
+```
+
+**When to use each:**
+
+| Use Case | Approach |
+|----------|----------|
+| Logic that can be expressed in SQL | Computed field (`static auto fn(Expr!T)`) |
+| Complex D logic on fetched data | Plain method |
+| Simple derived values from plain fields | Plain method |
+| Expressions involving multiple columns | Computed field (SQL optimization) |
+
+Plain methods are:
+- Automatically exposed in the GraphQL schema
+- Evaluated after entity data is fetched from the database
+- Not optimized into SQL (run in D)
+- Support UDAs: `@GqlHidden`, `@GqlName`, `@GqlDescription`, `@GqlDeprecated`
 
 ### Input Types
 
@@ -592,6 +634,7 @@ users(filter: {posts: {none: {title: {contains: "Spam"}}}}) { ... }
 - Operator overloading (`~`, `==`, etc.)
 - Entity definition mixins (`Entity`, `Col`, `BelongsTo`, `HasMany`)
 - Plain fields (struct instance fields) as alternative to `Col` mixins for eager fetching
+- Plain methods (instance methods) for D-side computed values on fetched entities
 - `Table` mixin for Query root entry points
 - `ForeignKey!Entity` type for type-safe FK columns
 - `@GqlHidden` UDA to hide fields from GraphQL schema
@@ -637,12 +680,12 @@ users(filter: {posts: {none: {title: {contains: "Spam"}}}}) { ... }
   ```d
   struct Range {
       int start, end;
-      int length() => end - start;  // Regular method
+      int length() => end - start;  // Plain method (works on entities today)
       // Optionally opt-in to Expr for performance:
       static Expr!int fastLength(Expr!Range r) => r.end - r.start;
   }
   ```
-  This would enable in-memory objects alongside database entities, with field access automatically projected through `Expr`. Objects without external data sources wouldn't need IDs.
+  Plain methods on entities are now supported. This future direction extends that to non-entity structs, enabling in-memory objects alongside database entities with field access automatically projected through `Expr`. Objects without external data sources wouldn't need IDs.
 - **Polymorphism** - GraphQL union and interface types for heterogeneous collections
 - **Expression deduplication** - Grafast-style peer analysis
 - **Plan caching** - Reuse optimized plans for repeated queries
