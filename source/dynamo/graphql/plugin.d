@@ -44,6 +44,24 @@ template getFieldMembers(T) {
     }();
 }
 
+/// Check if a member is a computed field (static method taking Expr!T as first parameter).
+/// Computed fields can be forwarded via ForwardField mixin.
+/// Plain methods (instance methods with no Expr parameter) should use ForwardPlainMethod instead.
+template isComputedField(T, string member) {
+    static if (__traits(compiles, __traits(getMember, T, member)) &&
+               is(typeof(__traits(getMember, T, member)) == function)) {
+        alias fn = __traits(getMember, T, member);
+        alias Params = Parameters!fn;
+        static if (Params.length >= 1) {
+            enum isComputedField = isExpr!(Params[0]);
+        } else {
+            enum isComputedField = false;
+        }
+    } else {
+        enum isComputedField = false;
+    }
+}
+
 /// Check if a function returns an array type (wrapped in Expr).
 /// Useful for identifying fields that can be paginated.
 ///
