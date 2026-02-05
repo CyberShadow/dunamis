@@ -103,8 +103,11 @@ template PaginationPlugin(alias S) if (isSchema!S) {
             static foreach (member; getFieldMembers!Entity) {
                 static if (isArrayReturningField!(__traits(getMember, Entity, member))) {
                     mixin PaginatedEntityArrayField!(Entity, member);
-                } else {
+                } else static if (isComputedField!(Entity, member)) {
                     mixin ForwardField!(Entity, member);
+                } else {
+                    // Plain method (instance method with no Expr parameter)
+                    mixin ForwardPlainMethod!(Entity, member);
                 }
             }
         }
