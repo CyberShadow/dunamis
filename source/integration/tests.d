@@ -980,6 +980,68 @@ void testQueryPlainMethodNullNickname() {
     assertTrue(false, "Bob not found");
 }
 
+void testQueryPlainMethodReturningStruct() {
+    // Test plain method that returns a POD struct
+    auto response = graphql(`{
+        users {
+            firstName
+            stats {
+                postCount
+                commentCount
+            }
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 1, "Expected at least 1 user");
+
+    // All users should have stats with expected values
+    foreach (user; users) {
+        auto stats = user["stats"];
+        assertTrue(("postCount" in stats) !is null, "stats should have postCount");
+        assertTrue(("commentCount" in stats) !is null, "stats should have commentCount");
+        // Our test implementation returns UserStats(42, 99)
+        assertTrue(stats["postCount"].integer == 42,
+            "postCount should be 42, got: " ~ stats["postCount"].toString());
+        assertTrue(stats["commentCount"].integer == 99,
+            "commentCount should be 99, got: " ~ stats["commentCount"].toString());
+    }
+}
+
+void testQueryPlainMethodOnPodStruct() {
+    // Test querying a plain method on the POD struct itself
+    auto response = graphql(`{
+        users {
+            firstName
+            stats {
+                postCount
+                commentCount
+                totalActivity
+            }
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 1, "Expected at least 1 user");
+
+    // totalActivity should be postCount + commentCount = 42 + 99 = 141
+    foreach (user; users) {
+        auto stats = user["stats"];
+        auto postCount = stats["postCount"].integer;
+        auto commentCount = stats["commentCount"].integer;
+        auto totalActivity = stats["totalActivity"].integer;
+        auto expectedTotal = postCount + commentCount;
+        assertTrue(totalActivity == expectedTotal,
+            "totalActivity should be " ~ expectedTotal.to!string ~
+            ", got: " ~ totalActivity.to!string);
+        // Also verify the actual expected values
+        assertTrue(postCount == 42, "postCount should be 42, got: " ~ postCount.to!string);
+        assertTrue(totalActivity == 141, "totalActivity should be 141 (42+99), got: " ~ totalActivity.to!string);
+    }
+}
+
 // ============================================================================
 // Recursive Input Type Tests
 // ============================================================================
@@ -1451,6 +1513,13 @@ static this() {
     // Eager field tests
     registerTest("Query eager field (nickname)", "tests", &testQueryEagerField);
     registerTest("Query eager field with computed field", "tests", &testQueryEagerFieldWithComputedField);
+
+    // Plain method tests
+    registerTest("Query plain method", "tests", &testQueryPlainMethod);
+    registerTest("Query plain method with computed field", "tests", &testQueryPlainMethodWithComputedField);
+    registerTest("Query plain method null nickname", "tests", &testQueryPlainMethodNullNickname);
+    registerTest("Query plain method returning struct", "tests", &testQueryPlainMethodReturningStruct);
+    registerTest("Query plain method on POD struct", "tests", &testQueryPlainMethodOnPodStruct);
 
     // Recursive input type tests
     registerTest("Recursive filter input", "tests", &testRecursiveFilterInput);
