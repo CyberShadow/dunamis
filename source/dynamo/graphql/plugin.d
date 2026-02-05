@@ -179,6 +179,32 @@ mixin template ForwardField(SourceType, string fieldName) {
           "return _srcFn(" ~ _argListStr ~ "); }");
 }
 
+/// Mixin template to forward a plain method from a source type.
+/// Plain methods are instance methods that don't take Expr parameters.
+///
+/// Example:
+/// ---
+/// struct User {
+///     string displayName() { return "name"; }  // Plain method
+/// }
+///
+/// struct FilteredUser {
+///     mixin ForwardPlainMethod!(User, "displayName");
+///     // Now FilteredUser.displayName() calls User.displayName()
+/// }
+/// ---
+mixin template ForwardPlainMethod(SourceType, string methodName) {
+    import std.traits : ReturnType;
+
+    alias _srcMethod = __traits(getMember, SourceType, methodName);
+    alias _RetType = ReturnType!_srcMethod;
+
+    // Generate the forwarding method with UDAs preserved
+    @(__traits(getAttributes, _srcMethod))
+    mixin("_RetType " ~ methodName ~ "() { " ~
+          "return (cast(SourceType*) &this)." ~ methodName ~ "(); }");
+}
+
 /// Mixin template to copy all fields from SourceType.
 /// This creates forwarding methods for every field in the source.
 ///
