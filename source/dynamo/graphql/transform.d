@@ -183,13 +183,29 @@ mixin template ForwardFieldWithTypeMap(SourceType, string fieldName, alias TypeM
           "return _srcFn(" ~ _argListStr ~ "); }");
 }
 
+/// Mixin template to forward a plain method from SourceType (instance method with no Expr parameter).
+mixin template ForwardPlainMethodWithTypeMap(SourceType, string methodName, alias TypeMap) {
+    import std.traits : ReturnType;
+
+    alias _srcMethod = __traits(getMember, SourceType, methodName);
+    alias _RetType = ReturnType!_srcMethod;
+
+    @(__traits(getAttributes, _srcMethod))
+    mixin("_RetType " ~ methodName ~ "() { " ~
+          "return (cast(SourceType*) &this)." ~ methodName ~ "(); }");
+}
+
 /// Mixin template to copy all fields from SourceType with type substitution.
 mixin template CopyFieldsWithTypeMap(SourceType, alias TypeMap) {
-    import dynamo.graphql.plugin : getFieldMembers;
-    import dynamo.graphql.transform : ForwardFieldWithTypeMap;
+    import dynamo.graphql.plugin : getFieldMembers, isComputedField;
+    import dynamo.graphql.transform : ForwardFieldWithTypeMap, ForwardPlainMethodWithTypeMap;
 
     static foreach (member; getFieldMembers!SourceType) {
-        mixin ForwardFieldWithTypeMap!(SourceType, member, TypeMap);
+        static if (isComputedField!(SourceType, member)) {
+            mixin ForwardFieldWithTypeMap!(SourceType, member, TypeMap);
+        } else {
+            mixin ForwardPlainMethodWithTypeMap!(SourceType, member, TypeMap);
+        }
     }
 }
 
@@ -252,8 +268,8 @@ template AddPaginationArgs(SourceType, string fieldName) {
 mixin template AddPaginationArgsWithTypeMap(SourceType, string fieldName, alias TypeMap) {
     import dynamo.core.expr : Expr, ExprResultType, entityCast;
     import dynamo.core.pagination : limit, offset;
-    import dynamo.graphql.plugin : getFieldMembers, isArrayReturningField, ForwardField, ArrayFieldElementType;
-    import dynamo.graphql.transform : ForwardFieldWithTypeMap;
+    import dynamo.graphql.plugin : getFieldMembers, isArrayReturningField, ForwardField, ArrayFieldElementType, isComputedField;
+    import dynamo.graphql.transform : ForwardFieldWithTypeMap, ForwardPlainMethodWithTypeMap;
     import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple, ReturnType;
     import std.typecons : Nullable;
 
@@ -307,8 +323,11 @@ mixin template AddPaginationArgsWithTypeMap(SourceType, string fieldName, alias 
         @(__traits(getAttributes, _srcFn))
         mixin("static auto " ~ fieldName ~ "(" ~ _paramStr ~ ") { " ~
               "return _applyPagination(_srcFn(" ~ _argStr ~ "), first, offset); }");
-    } else {
+    } else static if (isComputedField!(SourceType, fieldName)) {
         mixin ForwardFieldWithTypeMap!(SourceType, fieldName, TypeMap);
+    } else {
+        // Plain method (instance method with no Expr parameter)
+        mixin ForwardPlainMethodWithTypeMap!(SourceType, fieldName, TypeMap);
     }
 }
 
