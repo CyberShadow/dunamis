@@ -207,6 +207,7 @@ mixin template ForwardPlainMethod(SourceType, string methodName) {
 
 /// Mixin template to copy all fields from SourceType.
 /// This creates forwarding methods for every field in the source.
+/// Handles both computed fields (via ForwardField) and plain methods (via ForwardPlainMethod).
 ///
 /// Example:
 /// ---
@@ -219,10 +220,14 @@ mixin template ForwardPlainMethod(SourceType, string methodName) {
 /// }
 /// ---
 mixin template CopyFields(SourceType) {
-    import dynamo.graphql.plugin : getFieldMembers, ForwardField;
+    import dynamo.graphql.plugin : getFieldMembers, ForwardField, ForwardPlainMethod, isComputedField;
 
     static foreach (member; getFieldMembers!SourceType) {
-        mixin ForwardField!(SourceType, member);
+        static if (isComputedField!(SourceType, member)) {
+            mixin ForwardField!(SourceType, member);
+        } else {
+            mixin ForwardPlainMethod!(SourceType, member);
+        }
     }
 }
 
