@@ -114,6 +114,14 @@ mixin template TestSchema(alias db) {
         /// Plain field: populated when entity is fetched (not via lazy column access)
         Nullable!string nickname;
 
+        /// Plain method: display name based on nickname
+        string displayName() {
+            return nickname.isNull ? "Anonymous" : nickname.get;
+        }
+
+        /// Plain method: check if user has a nickname
+        bool hasNickname() => !nickname.isNull;
+
         /// Computed field: full name concatenation
         static auto fullName(Expr!User u) {
             return u.firstName ~ " " ~ u.lastName;
