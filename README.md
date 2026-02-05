@@ -695,6 +695,7 @@ users(filter: {posts: {none: {title: {contains: "Spam"}}}}) { ... }
 - Plain fields (struct instance fields) as alternative to `Col` mixins for eager fetching
 - Plain methods (instance methods) for D-side computed values on fetched entities
 - POD types (plain D structs) discovered through plain method return types and plain field types
+- Custom `Expr!T` nodes returning POD structs work in map/collection contexts
 - `Table` mixin for Query root entry points
 - `ForeignKey!Entity` type for type-safe FK columns
 - `@GqlHidden` UDA to hide fields from GraphQL schema
@@ -736,21 +737,6 @@ users(filter: {posts: {none: {title: {contains: "Spam"}}}}) { ... }
 
 ## Future Directions
 
-- **Custom Expr nodes returning POD types** - Allow custom expression nodes to return POD structs:
-  ```d
-  struct Stats {
-      int count;
-      int total;
-  }
-
-  // Custom Expr node returning POD struct
-  class AggregateStatsExpr : Expr!Stats {
-      override Promise!(Stats[]) eval(EvalContext ctx) {
-          // Compute via SQL aggregation, return POD structs
-      }
-  }
-  ```
-  POD types work today through plain methods and plain fields. This future direction would extend `Expr!T` to support arbitrary POD struct return types, enabling custom expression nodes that compute structured data (e.g., aggregations, transformations) as part of the optimized expression tree.
 - **Polymorphism** - GraphQL union and interface types for heterogeneous collections
 - **Expression deduplication** - Grafast-style peer analysis
 - **Plan caching** - Reuse optimized plans for repeated queries
