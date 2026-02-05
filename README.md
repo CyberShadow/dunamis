@@ -427,8 +427,20 @@ struct User {
     // Plain method - boolean helper
     bool hasNickname() => !nickname.isNull;
 
+    // Plain method returning POD struct
+    UserStats stats() => UserStats(posts.length, comments.length);
+
     // Computed field - uses Expr, can be optimized to SQL
     static auto fullName(Expr!User u) => u.firstName ~ " " ~ u.lastName;
+}
+
+// POD struct returned by plain method - automatically discovered for schema
+struct UserStats {
+    int postCount;
+    int commentCount;
+
+    // Plain methods work on POD structs too
+    int totalActivity() => postCount + commentCount;
 }
 ```
 
@@ -439,13 +451,60 @@ struct User {
 | Logic that can be expressed in SQL | Computed field (`static auto fn(Expr!T)`) |
 | Complex D logic on fetched data | Plain method |
 | Simple derived values from plain fields | Plain method |
+| Returning structured data (POD structs) | Plain method |
 | Expressions involving multiple columns | Computed field (SQL optimization) |
 
 Plain methods are:
 - Automatically exposed in the GraphQL schema
 - Evaluated after entity data is fetched from the database
 - Not optimized into SQL (run in D)
+- Can return POD structs (automatically discovered for schema generation)
 - Support UDAs: `@GqlHidden`, `@GqlName`, `@GqlDescription`, `@GqlDeprecated`
+
+### POD Types
+
+Plain Old Data (POD) types are regular D structs without the `Entity` mixin. They can be used as return types from plain methods or as plain field types, and are automatically discovered and included in the GraphQL schema.
+
+```d
+// POD struct - no Entity mixin, no database table
+struct UserStats {
+    int postCount;
+    int commentCount;
+
+    // Plain methods work on POD structs
+    int totalActivity() => postCount + commentCount;
+    bool isActive() => totalActivity() > 10;
+}
+
+struct User {
+    mixin DemoEntity!(db, "users");
+
+    // Plain method returning POD struct
+    UserStats stats() => UserStats(42, 99);
+}
+```
+
+Generates GraphQL schema:
+
+```graphql
+type User {
+  stats: UserStats!
+}
+
+type UserStats {
+  postCount: Int!
+  commentCount: Int!
+  totalActivity: Int!
+  isActive: Boolean!
+}
+```
+
+POD types are:
+- Automatically discovered through plain method return types and plain field types
+- Included in GraphQL schema generation (as object types, not input types)
+- NOT included in DDL generation (they don't represent database tables)
+- Can have their own plain fields and plain methods
+- Can be nested (POD containing POD)
 
 ### Input Types
 
@@ -635,6 +694,7 @@ users(filter: {posts: {none: {title: {contains: "Spam"}}}}) { ... }
 - Entity definition mixins (`Entity`, `Col`, `BelongsTo`, `HasMany`)
 - Plain fields (struct instance fields) as alternative to `Col` mixins for eager fetching
 - Plain methods (instance methods) for D-side computed values on fetched entities
+- POD types (plain D structs) discovered through plain method return types and plain field types
 - `Table` mixin for Query root entry points
 - `ForeignKey!Entity` type for type-safe FK columns
 - `@GqlHidden` UDA to hide fields from GraphQL schema
@@ -676,16 +736,21 @@ users(filter: {posts: {none: {title: {contains: "Spam"}}}}) { ... }
 
 ## Future Directions
 
-- **POD type support** - Allow `Expr!T` for plain D structs without Entity mixins:
+- **Custom Expr nodes returning POD types** - Allow custom expression nodes to return POD structs:
   ```d
-  struct Range {
-      int start, end;
-      int length() => end - start;  // Plain method (works on entities today)
-      // Optionally opt-in to Expr for performance:
-      static Expr!int fastLength(Expr!Range r) => r.end - r.start;
+  struct Stats {
+      int count;
+      int total;
+  }
+
+  // Custom Expr node returning POD struct
+  class AggregateStatsExpr : Expr!Stats {
+      override Promise!(Stats[]) eval(EvalContext ctx) {
+          // Compute via SQL aggregation, return POD structs
+      }
   }
   ```
-  Plain methods on entities are now supported. This future direction extends that to non-entity structs, enabling in-memory objects alongside database entities with field access automatically projected through `Expr`. Objects without external data sources wouldn't need IDs.
+  POD types work today through plain methods and plain fields. This future direction would extend `Expr!T` to support arbitrary POD struct return types, enabling custom expression nodes that compute structured data (e.g., aggregations, transformations) as part of the optimized expression tree.
 - **Polymorphism** - GraphQL union and interface types for heterogeneous collections
 - **Expression deduplication** - Grafast-style peer analysis
 - **Plan caching** - Reuse optimized plans for repeated queries
