@@ -40,6 +40,15 @@ struct NodeInput {
     NodeInput* next;  // Self-reference via pointer
 }
 
+/// POD struct for testing type discovery (returned by plain method)
+struct UserStats {
+    int postCount;
+    int commentCount;
+
+    /// Plain method on POD struct
+    int totalActivity() => postCount + commentCount;
+}
+
 /// Seed the database with test data via GraphQL mutations.
 /// Works with any backend since it uses the HTTP API.
 void seedDatabase() {
@@ -121,6 +130,9 @@ mixin template TestSchema(alias db) {
 
         /// Plain method: check if user has a nickname
         bool hasNickname() => !nickname.isNull;
+
+        /// Plain method returning POD struct (tests type discovery)
+        UserStats stats() => UserStats(42, 99);
 
         /// Computed field: full name concatenation
         static auto fullName(Expr!User u) {
