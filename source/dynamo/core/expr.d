@@ -619,6 +619,57 @@ auto fieldAccess(string fieldName, Entity)(Expr!Entity input) {
 }
 
 // ============================================================================
+// Method Call Expression (Plain Methods)
+// ============================================================================
+
+/// Expression that calls an instance method on an entity struct.
+/// Used for "plain methods" - instance methods that operate on populated entities.
+/// Unlike computed fields, plain methods return concrete values (not Expr!T).
+class MethodCallExpr(Entity, string methodName) : Expr!(ReturnType!(__traits(getMember, Entity, methodName))) {
+    import std.traits : ReturnType;
+
+    alias T = ReturnType!(__traits(getMember, Entity, methodName));
+    private ExprBase _input;
+
+    this(Expr!Entity input) {
+        _input = input;
+    }
+
+    override ExprBase[] dependencies() {
+        return [_input];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0)
+            _input = newDep;
+    }
+
+    override Expr!T optimize(OptimizeContext ctx) {
+        _input = (cast(Expr!Entity) _input).optimize(ctx);
+        return this;
+    }
+
+    override Promise!(T[]) eval(EvalContext ctx) {
+        return evalAs!Entity(_input, ctx).then((Entity[] entities) {
+            T[] result;
+            foreach (ref e; entities) {
+                result ~= __traits(getMember, e, methodName)();
+            }
+            return result;
+        });
+    }
+
+    /// Access the input expression
+    @property ExprBase input() { return _input; }
+}
+
+/// Factory function for method call on entity structs.
+/// Creates an expression that calls an instance method.
+auto methodCall(string methodName, Entity)(Expr!Entity input) {
+    return new MethodCallExpr!(Entity, methodName)(input);
+}
+
+// ============================================================================
 // Binary Operation Expression
 // ============================================================================
 
