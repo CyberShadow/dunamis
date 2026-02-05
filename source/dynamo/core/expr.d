@@ -754,9 +754,12 @@ class BinaryOpExpr(L, string op, R = L) : Expr!(typeof(mixin("L.init " ~ op ~ " 
         auto left = _left;
         auto right = _right;
 
-        // Evaluate both operands sequentially, then combine
-        return evalAs!L(left, ctx).then((lefts) {
-            return evalAs!R(right, ctx).then((rights) {
+        // Evaluate both operands in parallel, then combine
+        return all(evalAs!L(left, ctx), evalAs!R(right, ctx))
+            .dmd21804workaround
+            .then((results) {
+                auto lefts = results[0];
+                auto rights = results[1];
                 auto count = lefts.length;
                 ResultT[] result = new ResultT[count];
                 foreach (i; 0 .. count) {
@@ -764,7 +767,6 @@ class BinaryOpExpr(L, string op, R = L) : Expr!(typeof(mixin("L.init " ~ op ~ " 
                 }
                 return result;
             });
-        });
     }
 
     /// Generate SQL expression for this operation

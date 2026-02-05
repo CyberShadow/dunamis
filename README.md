@@ -740,7 +740,6 @@ users(filter: {posts: {none: {title: {contains: "Spam"}}}}) { ... }
 - **Polymorphism** - GraphQL union and interface types for heterogeneous collections
 - **Expression deduplication** - Grafast-style peer analysis
 - **Plan caching** - Reuse optimized plans for repeated queries
-- **Async/parallel execution** - For independent fetches
 - **Runtime introspection** - `__schema`, `__type`, `__typename` queries
 - **Error path tracking** - Track field paths through nested selections for precise error reporting (e.g., `["users", 0, "posts", 2, "title"]`)
 - **Field override plugin layer** - Runtime mechanism to intercept and override any field resolution, enabling feature flags, A/B testing, gradual rollouts, or per-deployment customization without recompilation
