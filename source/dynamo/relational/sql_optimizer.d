@@ -443,19 +443,10 @@ class SqlOptimizer : ExprOptimizer {
             subquery ~= " AND " ~ predicateSql.get;
         }
 
-        // Build the final SQL expression
-        string sqlExpr;
-        if (collPred.isEvery) {
-            // every() = NOT EXISTS (... WHERE NOT predicate)
-            // But we have the positive predicate, so we need to negate it for the subquery
-            auto negatedSubquery = "SELECT 1 FROM " ~ childTable ~
-                                  " WHERE " ~ childTable ~ "." ~ fkColumn ~ " = " ~ parentTable ~ ".id" ~
-                                  " AND NOT (" ~ predicateSql.get ~ ")";
-            sqlExpr = _dialect.notExistsSubquery(negatedSubquery);
-        } else {
-            // some() = EXISTS (... WHERE predicate)
-            sqlExpr = _dialect.existsSubquery(subquery);
-        }
+        // Build the EXISTS SQL expression
+        // Note: every() is now implemented as not(some(not(pred))), so all collection
+        // predicates here are some(). The outer not() is pushed down separately.
+        string sqlExpr = _dialect.existsSubquery(subquery);
 
         // Create computed column alias
         auto alias_ = "computed_" ~ (_nextComputedAlias++).to!string;
@@ -683,6 +674,16 @@ class SqlOptimizer : ExprOptimizer {
                 return Nullable!string.init;
             }
             return Nullable!string(projJoin.joinAlias ~ "." ~ projJoin.column);
+        }
+
+        // Check if it's a computed column projection (e.g., EXISTS subquery)
+        if (auto projComputed = cast(ProjectComputedInfo) expr) {
+            if (queryNodeId < 0) {
+                queryNodeId = projComputed.queryNodeId;
+            } else if (queryNodeId != projComputed.queryNodeId) {
+                return Nullable!string.init;
+            }
+            return Nullable!string(projComputed.columnAlias);
         }
 
         // Check if it's a constant

@@ -467,7 +467,7 @@ mixin template GenerateEntityFilterType(Entity, string filterTypeName) {
 Expr!bool buildFilterPredicateFromStruct(Entity, FilterType, ItemExpr)(ItemExpr item, FilterType filter)
     if (is(ItemExpr : Expr!Entity))
 {
-    import dynamo.core.expr : constant, EveryItemOfExpr, SomeExpr, EveryExpr;
+    import dynamo.core.expr : constant, EveryItemOfExpr, SomeExpr;
 
     Expr!bool[] conditions;
 
@@ -530,13 +530,14 @@ Expr!bool buildFilterPredicateFromStruct(Entity, FilterType, ItemExpr)(ItemExpr 
                     }
                 }
 
-                // Handle 'every' - all children match
+                // Handle 'every' - all children match (= not(some(not(pred))))
                 if (listFilter.every !is null) {
                     auto childItem = new EveryItemOfExpr!ChildEntity();
                     auto childPred = buildFilterPredicateFromStruct!ChildEntity(childItem, *listFilter.every);
-                    auto everyExpr = new EveryExpr!(ChildEntity, typeof(childPred))(collectionExpr, childItem, childPred);
-                    childItem._parentMap = everyExpr;
-                    conditions ~= everyExpr;
+                    auto negPred = childPred.not();
+                    auto someExpr = new SomeExpr!(ChildEntity, typeof(negPred))(collectionExpr, childItem, negPred);
+                    childItem._parentMap = someExpr;
+                    conditions ~= someExpr.not();
                 }
 
                 // Handle 'none' - no children match (= not(some(...)))
@@ -591,14 +592,15 @@ Expr!bool buildFilterPredicateFromStruct(Entity, FilterType, ItemExpr)(ItemExpr 
                     }
                 }
 
-                // Handle 'every' - all elements match the scalar filter
+                // Handle 'every' - all elements match the scalar filter (= not(some(not(pred))))
                 if (listFilter.every !is null) {
                     auto elemItem = new EveryItemOfExpr!ElemType();
                     auto elemPred = buildConditionFromScalarFilter(elemItem, *listFilter.every, item);
                     if (elemPred !is null) {
-                        auto everyExpr = new EveryExpr!(ElemType, typeof(elemPred))(collectionExpr, elemItem, elemPred);
-                        elemItem._parentMap = everyExpr;
-                        conditions ~= everyExpr;
+                        auto negPred = elemPred.not();
+                        auto someExpr = new SomeExpr!(ElemType, typeof(negPred))(collectionExpr, elemItem, negPred);
+                        elemItem._parentMap = someExpr;
+                        conditions ~= someExpr.not();
                     }
                 }
 

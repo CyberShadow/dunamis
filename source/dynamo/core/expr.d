@@ -1606,7 +1606,7 @@ auto map(alias fn, Coll)(Coll collection)
 }
 
 // ============================================================================
-// SomeExpr/EveryExpr: Collection Predicate Expressions
+// SomeExpr: Collection Predicate Expression
 // ============================================================================
 
 /// Interface for some/every expressions (for optimizer pattern matching).
@@ -1620,9 +1620,6 @@ interface CollectionPredicateInfo {
 
     /// Get the item placeholder (EveryItemOfExpr)
     Object itemPlaceholder();
-
-    /// true for every(), false for some()
-    bool isEvery();
 }
 
 /// Expression: returns true if ANY item in collection satisfies predicate.
@@ -1737,108 +1734,6 @@ class SomeExpr(Entity, Body) : Expr!bool, CollectionPredicateInfo
     ExprBase collection() { return _collection; }
     ExprBase predicate() { return _predicate; }
     Object itemPlaceholder() { return _item; }
-    bool isEvery() { return false; }
-}
-
-/// Expression: returns true if ALL items in collection satisfy predicate.
-/// Similar to JavaScript's Array.every() or SQL NOT EXISTS (... WHERE NOT ...).
-///
-/// Example:
-///   every!((Expr!Post p) => p.isPublished)(user.posts)
-///   // Returns true if all of user's posts are published
-class EveryExpr(Entity, Body) : Expr!bool, CollectionPredicateInfo
-    if (is(Body : Expr!bool))
-{
-    private ExprBase _collection;           // Expr!(Entity[])
-    private EveryItemOfExpr!Entity _item;   // Placeholder
-    private ExprBase _predicate;            // Expr!bool
-
-    this(Expr!(Entity[]) collection, EveryItemOfExpr!Entity item, Body predicate) {
-        _collection = collection;
-        _item = item;
-        _predicate = predicate;
-    }
-
-    override ExprBase[] dependencies() {
-        return [_collection, _predicate];
-    }
-
-    override void replaceDependency(size_t index, ExprBase newDep) {
-        if (index == 0)
-            _collection = newDep;
-        else if (index == 1)
-            _predicate = newDep;
-    }
-
-    override Expr!bool optimize(OptimizeContext ctx) {
-        // Optimize collection (creates QueryNodes for nested hasMany)
-        _collection = optimizeExpr(_collection, ctx);
-        // Don't optimize predicate - it will be analyzed for SQL pushdown
-        return this;
-    }
-
-    override Promise!(bool[]) eval(EvalContext ctx) {
-        auto predicate = cast(Expr!bool) _predicate;
-        auto self = this;  // Key for refs map (EveryItemOfExpr._parentMap points to this)
-
-        // Evaluate collection for each parent ref
-        return evalAs!(Entity[])(_collection, ctx).then((Entity[][] collectionResults) {
-            // Flatten all items for batch evaluation
-            size_t[] groupLengths;
-            size_t totalItems = 0;
-            foreach (group; collectionResults) {
-                groupLengths ~= group.length;
-                totalItems += group.length;
-            }
-
-            // Handle empty case
-            if (totalItems == 0) {
-                bool[] results;
-                results.length = collectionResults.length;
-                results[] = true;  // every() on empty = true (vacuous truth)
-                return resolve(results);
-            }
-
-            // Store all items in unified value storage
-            Entity[] flatVals;
-            flatVals.reserve(totalItems);
-            foreach (group; collectionResults) {
-                foreach (v; group) {
-                    flatVals ~= v;
-                }
-            }
-            ctx.setValues!Entity(self, flatVals);
-
-            // Evaluate predicate for all items in batch
-            return evalAs!bool(predicate, ctx).then((bool[] predicateResults) {
-                // Reduce flat results back to per-group booleans
-                bool[] results;
-                results.length = groupLengths.length;
-
-                size_t offset = 0;
-                foreach (i, len; groupLengths) {
-                    // Empty group: every() returns true (vacuous truth)
-                    bool allTrue = true;
-                    foreach (j; 0 .. len) {
-                        if (!predicateResults[offset + j]) {
-                            allTrue = false;
-                            break;
-                        }
-                    }
-                    results[i] = allTrue;
-                    offset += len;
-                }
-
-                return results;
-            });
-        });
-    }
-
-    // CollectionPredicateInfo implementation
-    ExprBase collection() { return _collection; }
-    ExprBase predicate() { return _predicate; }
-    Object itemPlaceholder() { return _item; }
-    bool isEvery() { return true; }
 }
 
 /// Test if ANY item in collection satisfies the predicate.
@@ -1868,6 +1763,7 @@ auto some(alias pred, Coll)(Coll collection)
 }
 
 /// Test if ALL items in collection satisfy the predicate.
+/// Implemented as not(some(not(pred))) - De Morgan's law.
 ///
 /// Example:
 /// ---
@@ -1876,21 +1772,8 @@ auto some(alias pred, Coll)(Coll collection)
 auto every(alias pred, Coll)(Coll collection)
     if (is(Coll : Expr!(E[]), E))
 {
-    alias Entity = CollectionEntityType!Coll;
-
-    // Create placeholder
-    auto item = new EveryItemOfExpr!Entity();
-
-    // Build predicate using placeholder
-    auto predicate = pred(item);
-    static assert(is(typeof(predicate) : Expr!bool),
-        "every() predicate must return Expr!bool, got " ~ typeof(predicate).stringof);
-
-    // Create EveryExpr and link
-    auto expr = new EveryExpr!(Entity, typeof(predicate))(collection, item, predicate);
-    item._parentMap = expr;  // Reuse _parentMap for predicate item lookup
-
-    return expr;
+    // every(pred) = not(some(not(pred)))
+    return some!((item) => pred(item).not())(collection).not();
 }
 
 
