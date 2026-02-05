@@ -525,8 +525,28 @@ class EntityCastExpr(To, From) : Expr!To, AnyRefEvaluable {
                             }
                         }
                     }}
+                } else static if (is(From == struct) && is(To == struct)) {
+                    // POD types (structs without nodeId) - copy all matching fields
+                    result[i] = To.init;
+                    static foreach (member; __traits(allMembers, From)) {{
+                        static if (member.length > 0 && member[0] != '_' &&
+                                   member != "toString" &&
+                                   member != "toHash" &&
+                                   member != "opEquals" &&
+                                   member != "opCmp" &&
+                                   member != "opAssign" &&
+                                   member != "factory" &&
+                                   member != "Monitor" &&
+                                   __traits(hasMember, To, member)) {
+                            // Check if it's an instance field (not a method/type/etc)
+                            static if (__traits(compiles, __traits(getMember, from, member)) &&
+                                       __traits(compiles, __traits(getMember, result[i], member) = __traits(getMember, from, member))) {
+                                __traits(getMember, result[i], member) = __traits(getMember, from, member);
+                            }
+                        }
+                    }}
                 } else {
-                    // Non-entity types (Query, Mutation) - use default init
+                    // Non-struct types (Query, Mutation) - use default init
                     result[i] = To.init;
                 }
             }
