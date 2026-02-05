@@ -757,23 +757,11 @@ users(filter: {posts: {none: {title: {contains: "Spam"}}}}) { ... }
 ### Running Tests
 
 ```bash
-# Unit tests
-dub test
-
-# With SQL debug output
-dub test -d=sql
-
-# Show generated GraphQL schema
-dub test -d=graphql
-
-# Show generated SQL DDL
-dub test -d=ddl
-
-# All tests including database integration tests (requires Nix)
+# Full test suite (requires Nix)
 nix flake check
 ```
 
-The `nix flake check` command runs:
+This is the primary way to run tests. It runs:
 - Unit tests
 - PostgreSQL integration tests (spins up a real PostgreSQL instance)
 - SQLite integration tests (uses in-memory database)
@@ -781,3 +769,12 @@ The `nix flake check` command runs:
 
 Each integration test creates tables via DDL generation, seeds data via mutations,
 starts an HTTP server, and runs GraphQL queries to verify end-to-end functionality.
+
+**Quick iteration** (unit tests only, faster but incomplete):
+
+```bash
+dub test              # Unit tests only
+dub test -d=sql       # With SQL debug output
+dub test -d=graphql   # Show generated GraphQL schema
+dub test -d=ddl       # Show generated SQL DDL
+```
