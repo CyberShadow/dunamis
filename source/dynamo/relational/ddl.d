@@ -244,11 +244,21 @@ template generateForeignKeys(Dialect, Entity) {
     }();
 }
 
+/// Check if a type is a database entity (has Entity mixin, indicated by nodeId field)
+private template isDatabaseEntity(T) {
+    enum isDatabaseEntity = __traits(hasMember, T, "nodeId");
+}
+
 /// Generate DDL for all entities reachable from Query using the given dialect.
+/// Only generates tables for types that have the Entity mixin (not POD types).
 template generateDDL(Dialect, Query) {
     import dynamo.graphql.schema : getAllEntityTypes;
+    import std.meta : Filter;
 
     alias AllTypes = getAllEntityTypes!Query;
+
+    // Filter to only include database entities (types with Entity mixin)
+    alias DatabaseEntities = Filter!(isDatabaseEntity, AllTypes);
 
     enum generateDDL = () {
         string result;
@@ -260,8 +270,8 @@ template generateDDL(Dialect, Query) {
             result ~= "\n";
         }
 
-        // Create all tables
-        static foreach (Entity; AllTypes) {
+        // Create all tables (only for database entities)
+        static foreach (Entity; DatabaseEntities) {
             result ~= generateCreateTable!(Dialect, Entity);
             result ~= "\n";
         }
@@ -269,7 +279,7 @@ template generateDDL(Dialect, Query) {
         // Add FK constraints (if dialect uses ALTER TABLE)
         static if (Dialect.supportsAlterTableFK) {
             result ~= "-- Phase 2: Add foreign key constraints\n\n";
-            static foreach (Entity; AllTypes) {
+            static foreach (Entity; DatabaseEntities) {
                 result ~= generateForeignKeys!(Dialect, Entity);
             }
         }
