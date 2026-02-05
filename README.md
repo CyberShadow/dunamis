@@ -244,6 +244,10 @@ struct User {
     static auto formattedName(Expr!User u, FormatOptions options) {
         return options.prefix ~ u.firstName;
     }
+
+    // Plain field - eagerly populated when entity is fetched
+    // Use for small, frequently-accessed data that doesn't need SQL optimization
+    Nullable!string nickname;
 }
 
 // Input types - regular D structs used as computed field arguments
@@ -360,6 +364,45 @@ layer1 AS (
 )
 SELECT * FROM layer0;
 SELECT * FROM layer1;
+```
+
+### Plain Fields vs Col Mixins
+
+Dynamo offers two ways to define fields on entities:
+
+**Col mixins** (lazy, SQL-optimized):
+```d
+mixin Col!("firstName", string);  // Returns Expr!string, optimized into SQL
+```
+
+**Plain fields** (eager, in-memory):
+```d
+Nullable!string nickname;  // Populated when entity is fetched
+```
+
+**When to use each:**
+
+| Use Case | Approach |
+|----------|----------|
+| Large columns (BLOBs, long text) | `Col` - only fetched when selected |
+| Columns used in SQL expressions | `Col` - enables pushdown |
+| Small, frequently-accessed data | Plain field - simpler access |
+| Data that doesn't need SQL optimization | Plain field |
+
+Plain fields are:
+- Automatically included in DDL generation (column name derived from field name via snake_case, or override with `@SqlColumn`)
+- Populated when the entity is fetched from the database
+- Exposed in the GraphQL schema
+- Accessible directly (return `T`, not `Expr!T`)
+
+```d
+struct User {
+    mixin DemoEntity!(db, "users");
+    mixin Col!("firstName", string);     // Lazy: u.firstName returns Expr!string
+
+    Nullable!string nickname;             // Eager: populated on fetch
+    @SqlColumn("display_name") string displayName;  // Custom column name
+}
 ```
 
 ### Input Types
@@ -548,6 +591,7 @@ users(filter: {posts: {none: {title: {contains: "Spam"}}}}) { ... }
 - `use()` combinator for per-element computation
 - Operator overloading (`~`, `==`, etc.)
 - Entity definition mixins (`Entity`, `Col`, `BelongsTo`, `HasMany`)
+- Plain fields (struct instance fields) as alternative to `Col` mixins for eager fetching
 - `Table` mixin for Query root entry points
 - `ForeignKey!Entity` type for type-safe FK columns
 - `@GqlHidden` UDA to hide fields from GraphQL schema
@@ -599,7 +643,6 @@ users(filter: {posts: {none: {title: {contains: "Spam"}}}}) { ... }
   }
   ```
   This would enable in-memory objects alongside database entities, with field access automatically projected through `Expr`. Objects without external data sources wouldn't need IDs.
-- **Eager column fetching** - Option to fetch columns into entity structs at materialization time, useful when columns are small and frequently accessed together. Currently entities are lightweight proxies that only hold IDs; this would allow opting into traditional struct-with-data semantics where beneficial.
 - **Polymorphism** - GraphQL union and interface types for heterogeneous collections
 - **Expression deduplication** - Grafast-style peer analysis
 - **Plan caching** - Reuse optimized plans for repeated queries
