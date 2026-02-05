@@ -1566,6 +1566,13 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
             }
         }
 
+        // If the node wasn't configured with a valid root filter and has no parent,
+        // it means the collection isn't a relational expression (e.g., EffectExpr).
+        // Fall back to naive path so ColumnAccessExpr.eval() can handle it properly.
+        if (node.rootFilter == FilterType.none && node.parent is null) {
+            return this;
+        }
+
         // Get the PrefetchExpr for this node
         auto prefetch = relCtx.getPrefetchExpr(node);
 
