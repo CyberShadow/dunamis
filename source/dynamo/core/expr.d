@@ -1473,8 +1473,8 @@ class EveryItemOfExpr(T) : Expr!T, EveryItemOfExprInfo {
                 }
             }
         }
-        // Fallback: direct ref storage (optimized paths store refs directly)
-        auto refs = ctx.getCurrentRefs(_parentMap);
+        // Fallback: direct ref storage (optimized paths store AnyRef[] directly)
+        auto refs = ctx.getValues!AnyRef(_parentMap);
         if (refs.length > 0) {
             return resolve(refs);
         }
@@ -2135,7 +2135,7 @@ unittest {
     )(collection);
 
     auto ctx = new EvalContext();
-    ctx.setCurrentRefs(null, [queryRoot]);
+    ctx.setValues!AnyRef(null, [queryRoot]);
     auto result = awaitSync(query.eval(ctx));
 
     assert(result.length == 1);
@@ -2154,7 +2154,7 @@ unittest {
     )(collection);
 
     auto ctx = new EvalContext();
-    ctx.setCurrentRefs(null, [queryRoot]);
+    ctx.setValues!AnyRef(null, [queryRoot]);
     auto result = awaitSync(query.eval(ctx));
 
     assert(result.length == 1);
@@ -2173,7 +2173,7 @@ unittest {
     )(collection);
 
     auto ctx = new EvalContext();
-    ctx.setCurrentRefs(null, [queryRoot]);
+    ctx.setValues!AnyRef(null, [queryRoot]);
     auto result = awaitSync(query.eval(ctx));
 
     assert(result.length == 1);
@@ -2195,7 +2195,7 @@ unittest {
     )(collection);
 
     auto ctx = new EvalContext();
-    ctx.setCurrentRefs(null, [queryRoot]);
+    ctx.setValues!AnyRef(null, [queryRoot]);
     auto result = awaitSync(query.eval(ctx));
 
     assert(result.length == 1);
@@ -2216,7 +2216,7 @@ unittest {
     )(collection);
 
     auto ctx = new EvalContext();
-    ctx.setCurrentRefs(null, [queryRoot]);
+    ctx.setValues!AnyRef(null, [queryRoot]);
     auto result = awaitSync(query.eval(ctx));
 
     assert(result.length == 1);
@@ -2237,7 +2237,7 @@ unittest {
     )(collection);
 
     auto ctx = new EvalContext();
-    ctx.setCurrentRefs(null, [queryRoot]);
+    ctx.setValues!AnyRef(null, [queryRoot]);
     auto result = awaitSync(query.eval(ctx));
 
     assert(result.length == 1);
@@ -2258,7 +2258,7 @@ unittest {
     )(collection);
 
     auto ctx = new EvalContext();
-    ctx.setCurrentRefs(null, [queryRoot]);
+    ctx.setValues!AnyRef(null, [queryRoot]);
     auto result = awaitSync(query.eval(ctx));
 
     assert(result.length == 1);
@@ -2279,7 +2279,7 @@ unittest {
     )(collection);
 
     auto ctx = new EvalContext();
-    ctx.setCurrentRefs(null, [queryRoot]);
+    ctx.setValues!AnyRef(null, [queryRoot]);
     auto result = awaitSync(query.eval(ctx));
 
     assert(result.length == 1);
@@ -2300,7 +2300,7 @@ unittest {
     )(collection);
 
     auto ctx = new EvalContext();
-    ctx.setCurrentRefs(null, [queryRoot]);
+    ctx.setValues!AnyRef(null, [queryRoot]);
     auto result = awaitSync(query.eval(ctx));
 
     assert(result.length == 1);
@@ -2322,7 +2322,7 @@ unittest {
     )(collection);
 
     auto ctx = new EvalContext();
-    ctx.setCurrentRefs(null, [queryRoot]);
+    ctx.setValues!AnyRef(null, [queryRoot]);
     auto result = awaitSync(query.eval(ctx));
 
     assert(result.length == 1);
@@ -2347,7 +2347,7 @@ unittest {
     )(collection);
 
     auto ctx = new EvalContext();
-    ctx.setCurrentRefs(null, [queryRoot]);
+    ctx.setValues!AnyRef(null, [queryRoot]);
     auto result = awaitSync(query.eval(ctx));
 
     assert(result.length == 1);
@@ -2383,7 +2383,7 @@ unittest {
     )(statsExpr);
 
     auto ctx = new EvalContext();
-    ctx.setCurrentRefs(null, [queryRoot]);
+    ctx.setValues!AnyRef(null, [queryRoot]);
     auto result = awaitSync(query.eval(ctx));
 
     assert(result.length == 1, "Expected 1 group");

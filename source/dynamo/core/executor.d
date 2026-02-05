@@ -32,7 +32,7 @@ class Executor {
         }
 
         auto ctx = new EvalContext();
-        ctx.setCurrentRefs(null, [queryRoot]);  // null key for root level
+        ctx.setValues!AnyRef(null, [queryRoot]);  // null key for root level
         return toEval.eval(ctx).then((results) => results[0]);
     }
 

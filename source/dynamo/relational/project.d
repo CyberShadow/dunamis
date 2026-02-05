@@ -58,9 +58,9 @@ class PrefetchExpr : Expr!(AnyRef[]) {
         }
 
         // For mutation-returned entities: if this is a root node with no filter,
-        // get the refs from the MapExpr's currentRefs and use them as the filter
+        // get the refs from the MapExpr's stored values and use them as the filter
         if (_node.isRoot && _node.rootFilter == FilterType.none && _node.mapExpr !is null) {
-            auto currentRefs = ctx.getCurrentRefs(_node.mapExpr);
+            auto currentRefs = ctx.getValues!AnyRef(_node.mapExpr);
             if (currentRefs.length > 0) {
                 _node.setRootFilter(FilterType.byIds, currentRefs);
             }
@@ -452,7 +452,7 @@ unittest {
 
     // Create a mock input that returns the refs
     auto item = new EveryItemOfExpr!TestUser();
-    ctx.setCurrentRefs(null, [AnyRef("User:1"), AnyRef("User:2")]);
+    ctx.setValues!AnyRef(null, [AnyRef("User:1"), AnyRef("User:2")]);
 
     // Create projection with input and prefetch
     auto proj = new ProjectColumnExpr!string(0, "first_name", item, prefetch);
@@ -483,7 +483,7 @@ unittest {
     auto prefetch = new PrefetchExpr(node);
 
     auto proj = new ProjectRefsExpr(0, prefetch);
-    ctx.setCurrentRefs(null, [queryRoot]);
+    ctx.setValues!AnyRef(null, [queryRoot]);
     auto refArrays = awaitSync(proj.eval(ctx));
 
     assert(refArrays.length == 1);
@@ -518,7 +518,7 @@ unittest {
 
     // Create a mock input that returns the refs
     auto item = new EveryItemOfExpr!TestPost();
-    ctx.setCurrentRefs(null, [AnyRef("Post:1"), AnyRef("Post:2")]);
+    ctx.setValues!AnyRef(null, [AnyRef("Post:1"), AnyRef("Post:2")]);
 
     auto proj = new ProjectBelongsToExpr(0, "author_id", "User", item, prefetch);
     auto parentRefs = awaitSync(proj.eval(ctx));

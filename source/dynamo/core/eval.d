@@ -18,6 +18,11 @@ struct SealedArray {
         _type = typeid(T);
     }
 
+    /// Check if the stored type matches T.
+    bool hasType(T)() const {
+        return _type == typeid(T);
+    }
+
     /// Retrieve as typed array. Asserts if type doesn't match.
     T[] get(T)() {
         assert(_type == typeid(T), "SealedArray type mismatch: expected " ~ _type.toString() ~ ", got " ~ typeid(T).toString());
@@ -54,12 +59,8 @@ class EvalContext {
     /// - MapExpr stores N items for EveryItemOfExpr to retrieve
     /// - SortByExpr stores 2 items (left, right) for SortItemExpr
     /// - FilterByExpr stores 1 item for FilterItemExpr
+    /// - Optimized paths store AnyRef[] for column access
     private SealedArray[void*] _valueMap;
-
-    /// Ref storage for optimized column access paths.
-    /// Separate from _valueMap because refs and entities use the same keys
-    /// but are retrieved by different code paths.
-    private AnyRef[][void*] _refsMap;
 
     /// Expression evaluation cache, keyed by expression object identity.
     /// Used by evalAs() to automatically memoize expression evaluation.
@@ -73,25 +74,12 @@ class EvalContext {
     }
 
     /// Get values for an expression.
-    /// Returns empty array if not set.
+    /// Returns empty array if not set or if type doesn't match.
     T[] getValues(T)(Object key) {
         if (auto p = cast(void*) key in _valueMap) {
-            if (!p.empty) {
+            if (!p.empty && p.hasType!T) {
                 return p.get!T();
             }
-        }
-        return [];
-    }
-
-    /// Set refs for optimized column access paths.
-    void setCurrentRefs(Object key, AnyRef[] refs) {
-        _refsMap[cast(void*) key] = refs;
-    }
-
-    /// Get refs for optimized column access paths.
-    AnyRef[] getCurrentRefs(Object key) {
-        if (auto p = cast(void*) key in _refsMap) {
-            return *p;
         }
         return [];
     }
