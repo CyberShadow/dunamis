@@ -449,7 +449,7 @@ template getFields(T) {
     import dynamo.core.expr : ExprResultType;
 
     enum getFields = () {
-        import dynamo.core.types : isPlainField;
+        import dynamo.core.types : isPlainField, isPlainMethod;
 
         FieldInfo[] fields;
 
@@ -511,6 +511,35 @@ template getFields(T) {
                         "",     // description
                         "",     // deprecation
                         []      // arguments
+                    );
+                }
+            }
+        }}
+
+        // Third pass: plain methods (instance methods returning non-Expr types)
+        static foreach (member; __traits(allMembers, T)) {{
+            static if (!isInternalMember!member) {
+                static if (isPlainMethod!(T, member)) {
+                    import std.traits : ReturnType;
+                    alias MethodType = typeof(__traits(getMember, T, member));
+                    alias RetType = ReturnType!MethodType;
+
+                    // Get UDAs from the method
+                    alias methodSym = __traits(getMember, T, member);
+                    enum isHidden = hasGqlHidden!methodSym;
+                    enum gqlFieldName = getGqlName!(methodSym, member);
+                    enum description = getGqlDescription!methodSym;
+                    enum deprecation = getGqlDeprecated!methodSym;
+                    enum gqlType = graphqlTypeName!RetType;
+
+                    fields ~= FieldInfo(
+                        gqlFieldName,
+                        gqlType,
+                        false,  // isConnection
+                        isHidden,
+                        description,
+                        deprecation,
+                        []      // arguments (no arguments for plain methods yet)
                     );
                 }
             }
