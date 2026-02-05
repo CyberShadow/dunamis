@@ -69,23 +69,30 @@ class FilterItemExpr(Entity) : Expr!Entity, FilterItemInfo {
     override Promise!(Entity[]) eval(EvalContext ctx) {
         // During naive path filtering, the predicate is evaluated per item.
         // Get the current filter item from context.
-        auto ref_ = ctx.getFilterItem(_parentFilter);
-        if (ref_ == AnyRef.init) {
-            throw new Exception("FilterItemExpr: no filter item in context - " ~
-                "ensure FilterByExpr.eval() sets up filter item before predicate evaluation");
+        auto vals = ctx.getValues!Entity(_parentFilter);
+        if (vals.length > 0) {
+            return resolve([vals[0]]);
         }
-        return resolve([Entity(ref_.nodeId)]);
+        throw new Exception("FilterItemExpr: no filter item in context - " ~
+            "ensure FilterByExpr.eval() sets up filter item before predicate evaluation");
     }
 
-    /// AnyRefEvaluable implementation - returns current filter item as AnyRef.
+    /// AnyRefEvaluable implementation - derives refs from values on demand.
     /// Required for column access expressions to work during predicate evaluation.
     Promise!(AnyRef[]) evalAsAnyRef(EvalContext ctx) {
-        auto ref_ = ctx.getFilterItem(_parentFilter);
-        if (ref_ == AnyRef.init) {
-            throw new Exception("FilterItemExpr: no filter item in context - " ~
-                "ensure FilterByExpr.eval() sets up filter item before predicate evaluation");
+        static if (__traits(hasMember, Entity, "nodeId")) {
+            auto vals = ctx.getValues!Entity(_parentFilter);
+            if (vals.length > 0) {
+                // Handle both nodeId types: string or struct with .id
+                alias NodeIdType = typeof(Entity.init.nodeId);
+                static if (is(NodeIdType == string)) {
+                    return resolve([AnyRef(vals[0].nodeId)]);
+                } else static if (__traits(hasMember, NodeIdType, "id")) {
+                    return resolve([AnyRef(vals[0].nodeId.id)]);
+                }
+            }
         }
-        return resolve([ref_]);
+        return resolve(cast(AnyRef[])[]);
     }
 }
 
@@ -161,9 +168,6 @@ class FilterByExpr(Entity) : Expr!(Entity[]), FilterByInfo {
                 writefln("FilterByExpr.eval: %d groups", groups.length);
                 foreach (gi, g; groups) {
                     writefln("  group[%d]: %d items", gi, g.length);
-                    foreach (item; g) {
-                        writefln("    - %s", item.nodeId.id);
-                    }
                 }
             }
 
@@ -174,7 +178,7 @@ class FilterByExpr(Entity) : Expr!(Entity[]), FilterByInfo {
 
                 foreach (item; group) {
                     // Set current filter item in context
-                    ctx.setFilterItem(self, AnyRef(item.nodeId.id));
+                    ctx.setValues!Entity(self, [item]);
 
                     // Clear ALL cached evaluations - the entire predicate tree depends on the
                     // filter item, including nested BinaryOpExpr, ConstantExpr, column access, etc.
@@ -185,7 +189,7 @@ class FilterByExpr(Entity) : Expr!(Entity[]), FilterByInfo {
                     bool[] results = evalAs!bool(predicate, ctx).await;
                     debug(filter) {
                         import std.stdio : writefln;
-                        writefln("  predicate for %s: results=%s", item.nodeId.id, results);
+                        writefln("  predicate results=%s", results);
                     }
                     if (results.length > 0 && results[0]) {
                         filtered ~= item;

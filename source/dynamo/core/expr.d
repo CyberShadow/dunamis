@@ -1448,53 +1448,35 @@ class EveryItemOfExpr(T) : Expr!T, EveryItemOfExprInfo {
     }
 
     override Promise!(T[]) eval(EvalContext ctx) {
-        import std.algorithm : map;
-        static if (is(T == void)) {
-            static assert(false, "EveryItemOfExpr!void should not be evaluated directly");
-        } else static if (is(T == struct)) {
-            // Struct path (entities and POD structs) - retrieve from SealedArray
-            auto entities = ctx.getCurrentEntities!T(_parentMap);
-            if (entities.length > 0) {
-                return resolve(entities);
-            }
-
-            // Fallback for entities: ref-based reconstruction (optimized mode)
-            static if (isEntityType!T) {
-                auto refs = ctx.getCurrentRefs(_parentMap);
-                if (refs.length > 0) {
-                    return resolve(refs.map!(r => T(r.nodeId)).array);
-                }
-                auto singleRef = ctx.getPredicateItem(_parentMap);
-                if (singleRef.isValid) {
-                    return resolve([T(singleRef.nodeId)]);
-                }
-            }
-            return resolve(cast(T[])[]);
-        } else {
-            // Scalar path - use typed SealedArray/SealedValue storage
-            auto vals = ctx.getScalarRefs!T(_parentMap);
-            if (vals.length > 0) {
-                return resolve(vals);
-            }
-            if (ctx.hasScalarItem(_parentMap)) {
-                return resolve([ctx.getScalarItem!T(_parentMap)]);
-            }
-            return resolve(cast(T[])[]);
+        // Retrieve values from generic storage
+        auto vals = ctx.getValues!T(_parentMap);
+        if (vals.length > 0) {
+            return resolve(vals);
         }
+        return resolve(cast(T[])[]);
     }
 
     /// Evaluate and return as AnyRef[] (for type-agnostic internal use).
-    /// Only valid for entity types.
+    /// First tries to derive refs from stored values, then falls back to direct ref storage.
     Promise!(AnyRef[]) evalAsAnyRef(EvalContext ctx) {
-        static if (isEntityType!T) {
-            auto refs = ctx.getCurrentRefs(_parentMap);
-            if (refs.length > 0) {
-                return resolve(refs);
+        import std.algorithm : map;
+        static if (__traits(hasMember, T, "nodeId")) {
+            // First try: derive refs from stored entity values
+            auto vals = ctx.getValues!T(_parentMap);
+            if (vals.length > 0) {
+                // Handle both nodeId types: string or struct with .id
+                alias NodeIdType = typeof(T.init.nodeId);
+                static if (is(NodeIdType == string)) {
+                    return resolve(vals.map!(e => AnyRef(e.nodeId)).array);
+                } else static if (__traits(hasMember, NodeIdType, "id")) {
+                    return resolve(vals.map!(e => AnyRef(e.nodeId.id)).array);
+                }
             }
-            auto singleRef = ctx.getPredicateItem(_parentMap);
-            if (singleRef.isValid) {
-                return resolve([singleRef]);
-            }
+        }
+        // Fallback: direct ref storage (optimized paths store refs directly)
+        auto refs = ctx.getCurrentRefs(_parentMap);
+        if (refs.length > 0) {
+            return resolve(refs);
         }
         return resolve(cast(AnyRef[])[]);
     }
@@ -1572,17 +1554,8 @@ class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
                 return resolve(std.algorithm.map!(_ => cast(R[])[])(iota(collectionResults.length)).array);
             }
 
-            // 3. Store entities in SealedArray (works for all struct types)
-            ctx.setCurrentEntities!Entity(self, flatEntities);
-
-            // Also set refs for entities with nodeId (needed for relational optimization)
-            static if (__traits(hasMember, Entity, "nodeId")) {
-                AnyRef[] flatRefs;
-                foreach (e; flatEntities) {
-                    flatRefs ~= AnyRef(e.nodeId.id);
-                }
-                ctx.setCurrentRefs(self, flatRefs);
-            }
+            // 3. Store values for EveryItemOfExpr to retrieve
+            ctx.setValues!Entity(self, flatEntities);
 
             // 4. Evaluate body with ALL refs at once
             return evalAs!R(bodyExpr, ctx).then((R[] flatResults) {
@@ -1717,39 +1690,19 @@ class SomeExpr(Entity, Body) : Expr!bool, CollectionPredicateInfo
                 return resolve(results);
             }
 
-            // Store items based on type (entity vs scalar)
-            static if (isEntityType!Entity) {
-                // Entity path - use AnyRef storage
-                AnyRef[] flatRefs;
-                flatRefs.reserve(totalItems);
-                foreach (group; collectionResults) {
-                    foreach (e; group) {
-                        flatRefs ~= AnyRef(e.nodeId.id);
-                    }
+            // Store all items in unified value storage
+            Entity[] flatVals;
+            flatVals.reserve(totalItems);
+            foreach (group; collectionResults) {
+                foreach (v; group) {
+                    flatVals ~= v;
                 }
-                debug(filter) {
-                    import std.stdio : writefln;
-                    import std.algorithm : map;
-                    import std.array : array;
-                    writefln("  SomeExpr.eval: %d groups, %d total items", collectionResults.length, flatRefs.length);
-                    writefln("    groupLengths=%s, flatRefs=%s", groupLengths, flatRefs.map!(r => r.nodeId).array);
-                }
-                ctx.setCurrentRefs(self, flatRefs);
-            } else {
-                // Scalar path - use typed storage (no JSON serialization)
-                Entity[] flatVals;
-                flatVals.reserve(totalItems);
-                foreach (group; collectionResults) {
-                    foreach (v; group) {
-                        flatVals ~= v;
-                    }
-                }
-                debug(filter) {
-                    import std.stdio : writefln;
-                    writefln("  SomeExpr.eval (scalar): %d groups, %d total items", collectionResults.length, flatVals.length);
-                }
-                ctx.setScalarRefs(self, flatVals);
             }
+            debug(filter) {
+                import std.stdio : writefln;
+                writefln("  SomeExpr.eval: %d groups, %d total items", collectionResults.length, flatVals.length);
+            }
+            ctx.setValues!Entity(self, flatVals);
 
             // Evaluate predicate for all items in batch
             return evalAs!bool(predicate, ctx).then((bool[] predicateResults) {
@@ -1846,28 +1799,15 @@ class EveryExpr(Entity, Body) : Expr!bool, CollectionPredicateInfo
                 return resolve(results);
             }
 
-            // Store items based on type (entity vs scalar)
-            static if (isEntityType!Entity) {
-                // Entity path - use AnyRef storage
-                AnyRef[] flatRefs;
-                flatRefs.reserve(totalItems);
-                foreach (group; collectionResults) {
-                    foreach (e; group) {
-                        flatRefs ~= AnyRef(e.nodeId.id);
-                    }
+            // Store all items in unified value storage
+            Entity[] flatVals;
+            flatVals.reserve(totalItems);
+            foreach (group; collectionResults) {
+                foreach (v; group) {
+                    flatVals ~= v;
                 }
-                ctx.setCurrentRefs(self, flatRefs);
-            } else {
-                // Scalar path - use typed storage (no JSON serialization)
-                Entity[] flatVals;
-                flatVals.reserve(totalItems);
-                foreach (group; collectionResults) {
-                    foreach (v; group) {
-                        flatVals ~= v;
-                    }
-                }
-                ctx.setScalarRefs(self, flatVals);
             }
+            ctx.setValues!Entity(self, flatVals);
 
             // Evaluate predicate for all items in batch
             return evalAs!bool(predicate, ctx).then((bool[] predicateResults) {

@@ -112,13 +112,12 @@ class SortItemExpr(Entity) : Expr!Entity, SortItemInfo {
     override Promise!(Entity[]) eval(EvalContext ctx) {
         // During naive path sorting, the predicate is evaluated with comparison items.
         // Get the current comparison item (left or right) from context.
-        auto ref_ = ctx.getSortItem(_parentSort, _isLeftItem);
-        if (ref_ == AnyRef.init) {
-            // Fallback: shouldn't happen if SortByExpr sets up context correctly
-            throw new Exception("SortItemExpr: no comparison item in context - " ~
-                "ensure SortByExpr.eval() sets up sort items before predicate evaluation");
+        auto vals = ctx.getValues!Entity(_parentSort);
+        if (vals.length >= 2) {
+            return resolve([vals[_isLeftItem ? 0 : 1]]);
         }
-        return resolve([Entity(ref_.nodeId)]);
+        throw new Exception("SortItemExpr: no comparison items in context - " ~
+            "ensure SortByExpr.eval() sets up sort items before predicate evaluation");
     }
 }
 
@@ -209,7 +208,7 @@ class SortByExpr(Entity, Pred) : Expr!(Entity[]), SortByInfo
                     size_t pos = 0;
                     while (pos < sorted.length) {
                         // Compare: is item < sorted[pos]?
-                        ctx.setSortItems(self, AnyRef(item.nodeId.id), AnyRef(sorted[pos].nodeId.id));
+                        ctx.setValues!Entity(self, [item, sorted[pos]]);
 
                         bool itemIsLess;
                         static if (is(Pred : Expr!bool)) {
