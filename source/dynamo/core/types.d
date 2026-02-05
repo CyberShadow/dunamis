@@ -499,3 +499,58 @@ unittest {
     auto ref2 = makeAnyCompositeRef("OrderItem", ["order-1", "prod-2"]);
     assert(ref2.nodeId == "OrderItem:order-1,prod-2");
 }
+
+// Test isPlainMethod detection
+unittest {
+    import std.typecons : Nullable;
+
+    struct TestEntity {
+        int value;  // Plain field
+        Nullable!string nickname;  // Plain field (nullable)
+
+        int doubleValue() => value * 2;  // Plain method
+        bool isPositive() => value > 0;  // Plain method
+        string displayName() { return nickname.isNull ? "Anonymous" : nickname.get; }  // Plain method
+
+        static int staticMethod() => 42;  // NOT plain method (static, but also no params means not a computed field)
+
+        // Simulated computed field (takes Expr-like first param)
+        // We can't easily test this without importing dynamo.core.expr, so we skip
+    }
+
+    // Plain methods should be detected
+    static assert(isPlainMethod!(TestEntity, "doubleValue"), "doubleValue should be a plain method");
+    static assert(isPlainMethod!(TestEntity, "isPositive"), "isPositive should be a plain method");
+    static assert(isPlainMethod!(TestEntity, "displayName"), "displayName should be a plain method");
+
+    // Static methods are NOT plain methods (they can't be called on instance)
+    static assert(!isPlainMethod!(TestEntity, "staticMethod"), "staticMethod should NOT be a plain method");
+
+    // Fields are NOT methods
+    static assert(!isPlainMethod!(TestEntity, "value"), "value is a field, not a method");
+    static assert(!isPlainMethod!(TestEntity, "nickname"), "nickname is a field, not a method");
+
+    // Internal members are excluded
+    static assert(!isPlainMethod!(TestEntity, "nodeId"), "nodeId is internal");
+    static assert(!isPlainMethod!(TestEntity, "toString"), "toString is internal");
+
+    // Test getPlainMethodNames
+    enum plainMethods = getPlainMethodNames!TestEntity;
+    static assert(plainMethods.length == 3, "Should find 3 plain methods");
+
+    // Verify the method names using CTFE
+    enum hasDouble = () {
+        foreach (name; plainMethods) if (name == "doubleValue") return true;
+        return false;
+    }();
+    enum hasPositive = () {
+        foreach (name; plainMethods) if (name == "isPositive") return true;
+        return false;
+    }();
+    enum hasDisplay = () {
+        foreach (name; plainMethods) if (name == "displayName") return true;
+        return false;
+    }();
+    static assert(hasDouble && hasPositive && hasDisplay,
+        "Should find doubleValue, isPositive, and displayName");
+}
