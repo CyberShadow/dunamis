@@ -14,9 +14,9 @@ import graphql.parser;
 
 import ae.utils.promise : Promise;
 import dynamo.core;
-import dynamo.core.expr : SequentialJsonObjectExpr, SingletonExpr, isExpr, ExprResultType, Expr, singleton, FieldAccessExpr;
+import dynamo.core.expr : SequentialJsonObjectExpr, SingletonExpr, isExpr, ExprResultType, Expr, singleton, FieldAccessExpr, MethodCallExpr;
 import dynamo.core.optimize : OptimizeContext;
-import dynamo.core.types : isPlainField;
+import dynamo.core.types : isPlainField, isPlainMethod;
 import dynamo.graphql.schema;
 
 // ============================================================================
@@ -1227,6 +1227,22 @@ ExprBase compileFieldAccess(T)(Expr!T ref_, Field field, JSONValue variables) {
         }
     }}
 
+    // Third, check for plain methods (instance methods returning non-Expr types)
+    static foreach (member; __traits(allMembers, T)) {{
+        static if (!isInternalMember!member) {
+            static if (isPlainMethod!(T, member)) {
+                alias methodSym = __traits(getMember, T, member);
+                static if (!hasGqlHidden!methodSym) {
+                    enum gqlName = getGqlName!(methodSym, member);
+                    if (fieldName == gqlName) {
+                        auto resultExpr = new MethodCallExpr!(T, member)(ref_);
+                        return compileFieldResult(resultExpr, field.ss, variables);
+                    }
+                }
+            }
+        }
+    }}
+
     throw new CompilerException("Unknown field '" ~ fieldName ~ "' on type " ~ T.stringof);
 }
 
@@ -1368,6 +1384,22 @@ ExprBase compileFieldAccessWithSchema(T, alias Schema)(Expr!T ref_, Field field,
                     // Create FieldAccessExpr to read the struct field
                     auto resultExpr = new FieldAccessExpr!(T, member)(ref_);
                     return compileFieldResultWithSchema!(typeof(resultExpr), Schema)(resultExpr, field.ss, variables);
+                }
+            }
+        }
+    }}
+
+    // Third, check for plain methods (instance methods returning non-Expr types)
+    static foreach (member; __traits(allMembers, T)) {{
+        static if (!isInternalMember!member) {
+            static if (isPlainMethod!(T, member)) {
+                alias methodSym = __traits(getMember, T, member);
+                static if (!hasGqlHidden!methodSym) {
+                    enum gqlName = getGqlName!(methodSym, member);
+                    if (fieldName == gqlName) {
+                        auto resultExpr = new MethodCallExpr!(T, member)(ref_);
+                        return compileFieldResultWithSchema!(typeof(resultExpr), Schema)(resultExpr, field.ss, variables);
+                    }
                 }
             }
         }
