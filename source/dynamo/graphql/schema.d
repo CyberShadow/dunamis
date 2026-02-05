@@ -118,13 +118,29 @@ template getGraphQLTypeName(T) {
     }();
 }
 
-/// Check if a type is an "object type" (struct with valid field methods).
+/// Check if a type is an "object type" (struct with valid field methods, plain fields, or plain methods).
 /// This replaces the old isEntity check - now any struct with Expr-returning
-/// static methods is treated as a GraphQL object type.
+/// static methods, plain fields, or plain methods is treated as a GraphQL object type.
+///
+/// Exclusions:
+/// - JSONValue is treated as a scalar (passed through as raw JSON)
+/// - Custom scalars are treated as scalars
+/// - Input types (structs without valid field methods used as computed field arguments)
 template isObjectType(T) {
+    import std.json : JSONValue;
     static if (is(T == struct)) {
-        // Check if it has at least one valid field method
-        enum isObjectType = hasAnyValidFieldMethod!T;
+        // Exclude JSONValue (raw JSON pass-through)
+        static if (is(T == JSONValue)) {
+            enum isObjectType = false;
+        }
+        // Exclude custom scalars
+        else static if (isCustomScalar!T) {
+            enum isObjectType = false;
+        }
+        // Check if it has at least one valid field method, plain field, or plain method
+        else {
+            enum isObjectType = hasAnyValidFieldMethod!T || hasAnyPlainField!T || hasAnyPlainMethod!T;
+        }
     } else {
         enum isObjectType = false;
     }
@@ -137,6 +153,36 @@ private template hasAnyValidFieldMethod(T) {
             static if (!isInternalMember!member &&
                        is(typeof(__traits(getMember, T, member)) == function)) {
                 static if (isValidFieldMethodForType!(T, member)) {
+                    return true;
+                }
+            }
+        }}
+        return false;
+    }();
+}
+
+/// Check if type has any plain fields (struct instance fields)
+private template hasAnyPlainField(T) {
+    import dynamo.core.types : isPlainField;
+    enum hasAnyPlainField = () {
+        static foreach (member; __traits(allMembers, T)) {{
+            static if (!isInternalMember!member) {
+                static if (isPlainField!(T, member)) {
+                    return true;
+                }
+            }
+        }}
+        return false;
+    }();
+}
+
+/// Check if type has any plain methods (instance methods returning non-Expr types)
+private template hasAnyPlainMethod(T) {
+    import dynamo.core.types : isPlainMethod;
+    enum hasAnyPlainMethod = () {
+        static foreach (member; __traits(allMembers, T)) {{
+            static if (!isInternalMember!member) {
+                static if (isPlainMethod!(T, member)) {
                     return true;
                 }
             }
@@ -479,6 +525,10 @@ template getFields(T) {
                             deprecation,
                             arguments
                         );
+                    }
+                    // Skip plain methods here - they're handled in the third pass
+                    else static if (isPlainMethod!(T, member)) {
+                        // Handled in third pass
                     }
                     else static if (!isHidden) {
                         // Static method that doesn't conform and isn't hidden - compile error
@@ -1108,9 +1158,11 @@ template extractEntityFromType(T) {
 }
 
 /// Helper to get related types from a type by iterating over members.
-/// Scans for valid field methods and extracts object types from return types.
+/// Scans for valid field methods, plain fields, and plain methods,
+/// and extracts object types from return types.
 template getRelatedTypesImpl(T, size_t idx, Members...) {
     import dynamo.core.expr : ExprResultType;
+    import dynamo.core.types : isPlainField, isPlainMethod;
 
     static if (idx >= Members.length) {
         alias getRelatedTypesImpl = AliasSeq!();
@@ -1118,20 +1170,45 @@ template getRelatedTypesImpl(T, size_t idx, Members...) {
         enum member = Members[idx];
         alias Rest = getRelatedTypesImpl!(T, idx + 1, Members);
 
-        static if (!isInternalMember!member &&
-                   is(typeof(__traits(getMember, T, member)) == function)) {
-            alias fn = __traits(getMember, T, member);
+        static if (!isInternalMember!member) {
+            // 1. Check computed fields (static methods returning Expr!T)
+            static if (is(typeof(__traits(getMember, T, member)) == function)) {
+                alias fn = __traits(getMember, T, member);
 
-            // Check if it's a valid field method
-            static if (isValidFieldMethod!(T, fn)) {
-                alias RetType = ReturnType!fn;
-                alias ResultT = ExprResultType!RetType;
+                static if (isValidFieldMethod!(T, fn)) {
+                    alias RetType = ReturnType!fn;
+                    alias ResultT = ExprResultType!RetType;
 
-                // Extract object type from return type
-                alias EntityFromReturn = extractEntityFromType!ResultT;
+                    // Extract object type from return type
+                    alias EntityFromReturn = extractEntityFromType!ResultT;
 
-                static if (!is(EntityFromReturn == void)) {
-                    alias getRelatedTypesImpl = AliasSeq!(EntityFromReturn, Rest);
+                    static if (!is(EntityFromReturn == void)) {
+                        alias getRelatedTypesImpl = AliasSeq!(EntityFromReturn, Rest);
+                    } else {
+                        alias getRelatedTypesImpl = Rest;
+                    }
+                }
+                // 2. Check plain methods (instance methods returning non-Expr types)
+                else static if (isPlainMethod!(T, member)) {
+                    alias RetType = ReturnType!fn;
+                    alias EntityFromReturn = extractEntityFromType!RetType;
+
+                    static if (!is(EntityFromReturn == void)) {
+                        alias getRelatedTypesImpl = AliasSeq!(EntityFromReturn, Rest);
+                    } else {
+                        alias getRelatedTypesImpl = Rest;
+                    }
+                } else {
+                    alias getRelatedTypesImpl = Rest;
+                }
+            }
+            // 3. Check plain fields (struct instance fields)
+            else static if (isPlainField!(T, member)) {
+                alias FieldType = typeof(__traits(getMember, T.init, member));
+                alias EntityFromField = extractEntityFromType!FieldType;
+
+                static if (!is(EntityFromField == void)) {
+                    alias getRelatedTypesImpl = AliasSeq!(EntityFromField, Rest);
                 } else {
                     alias getRelatedTypesImpl = Rest;
                 }
@@ -2133,4 +2210,210 @@ unittest {
         "TypeA.b should be nullable: " ~ sdl);
     static assert(sdl.canFind("c: TypeC") && !sdl.canFind("c: TypeC!"),
         "TypeB.c should be nullable: " ~ sdl);
+}
+
+// Test POD type with only plain fields is recognized as object type
+unittest {
+    import std.algorithm : canFind;
+
+    // POD struct with only plain fields (no computed fields)
+    static struct Range {
+        int start;
+        int end;
+    }
+
+    // Range should be recognized as an object type (has plain fields)
+    static assert(isObjectType!Range, "Range should be an object type (has plain fields)");
+
+    // Range fields should be discoverable
+    enum rangeFields = getFields!Range;
+    static assert(rangeFields.length == 2, "Range should have 2 fields (start, end)");
+
+    // Verify field names using CTFE
+    enum foundStartEnd = () {
+        bool foundStart = false;
+        bool foundEnd = false;
+        foreach (f; rangeFields) {
+            if (f.name == "start") foundStart = true;
+            if (f.name == "end") foundEnd = true;
+        }
+        return foundStart && foundEnd;
+    }();
+    static assert(foundStartEnd, "Range should have start and end fields");
+}
+
+// Test POD type with plain methods is recognized as object type
+unittest {
+    import std.algorithm : canFind;
+
+    // POD struct with plain fields and plain methods
+    static struct Stats {
+        int count;
+        int total;
+
+        int average() => total / count;
+    }
+
+    // Stats should be recognized as an object type (has plain fields and methods)
+    static assert(isObjectType!Stats, "Stats should be an object type (has plain fields and methods)");
+
+    // Stats fields should include plain method
+    enum statsFields = getFields!Stats;
+    static assert(statsFields.length == 3, "Stats should have 3 fields (count, total, average)");
+}
+
+// Test POD type discovery through plain method return type
+unittest {
+    import std.algorithm : canFind;
+    import dynamo.relational.demo : DemoEntity, MockDB;
+    import dynamo.relational.schema : Col, Table;
+
+    // POD struct to be returned by plain method
+    static struct UserStats {
+        int postCount;
+        int commentCount;
+
+        int totalActivity() => postCount + commentCount;
+    }
+
+    static MockDB!() db;
+
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("name", string);
+
+        // Plain method returning POD struct
+        UserStats stats() => UserStats(1, 2);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    // UserStats should be recognized as an object type
+    static assert(isObjectType!UserStats, "UserStats should be an object type");
+
+    // UserStats should be discovered from User
+    alias relatedTypes = getRelatedTypes!User;
+    static assert(staticContains!(UserStats, relatedTypes),
+        "UserStats should be discovered from User via plain method return type");
+
+    // SDL should include UserStats type
+    enum sdl = generateSchemaSDL!Query;
+    static assert(sdl.canFind("type UserStats"), "SDL should contain type UserStats: " ~ sdl);
+    static assert(sdl.canFind("postCount: Int!"), "UserStats should have postCount field: " ~ sdl);
+    static assert(sdl.canFind("totalActivity: Int!"), "UserStats should have totalActivity method: " ~ sdl);
+}
+
+// Test POD type discovery through plain field type (schema-only test)
+// Note: POD types as plain fields is primarily for schema generation.
+// Runtime evaluation of nested POD types from SQL is not supported by the relational layer.
+unittest {
+    import std.algorithm : canFind;
+
+    // POD struct used as plain field type
+    static struct Coordinates {
+        int x;
+        int y;
+    }
+
+    // Container struct with POD field (no Entity mixin - just testing schema layer)
+    static struct Location {
+        string name;
+        Coordinates coords;  // Plain field with POD type
+    }
+
+    // Coordinates should be recognized as an object type
+    static assert(isObjectType!Coordinates, "Coordinates should be an object type");
+
+    // Location should also be an object type (has plain fields)
+    static assert(isObjectType!Location, "Location should be an object type");
+
+    // Coordinates should be discovered from Location
+    alias relatedTypes = getRelatedTypes!Location;
+    static assert(staticContains!(Coordinates, relatedTypes),
+        "Coordinates should be discovered from Location via plain field type");
+
+    // Verify Location fields are discovered
+    enum locationFields = getFields!Location;
+    static assert(locationFields.length == 2, "Location should have 2 fields (name, coords)");
+}
+
+// Test nested POD type discovery (schema-only test)
+unittest {
+    import std.algorithm : canFind;
+
+    // Nested POD structs
+    static struct Inner {
+        int value;
+    }
+
+    static struct Outer {
+        string label;
+        Inner inner;  // Nested POD
+    }
+
+    // Both should be object types
+    static assert(isObjectType!Inner, "Inner should be an object type");
+    static assert(isObjectType!Outer, "Outer should be an object type");
+
+    // Inner should be discovered from Outer
+    alias relatedTypes = getRelatedTypes!Outer;
+    static assert(staticContains!(Inner, relatedTypes),
+        "Inner should be discovered from Outer via plain field type");
+}
+
+// Test Nullable POD type discovery (schema-only test)
+unittest {
+    import std.algorithm : canFind;
+    import std.typecons : Nullable;
+
+    // POD struct
+    static struct Badge {
+        string name;
+        int level;
+    }
+
+    // Container with nullable POD field (no Entity mixin - just testing schema layer)
+    static struct Profile {
+        string username;
+        Nullable!Badge badge;  // Nullable POD field
+    }
+
+    // Badge should be recognized as object type
+    static assert(isObjectType!Badge, "Badge should be an object type");
+
+    // Badge should be discovered from Profile (through Nullable wrapper)
+    alias relatedTypes = getRelatedTypes!Profile;
+    static assert(staticContains!(Badge, relatedTypes),
+        "Badge should be discovered from Profile via Nullable plain field type");
+
+    // Verify fields
+    enum profileFields = getFields!Profile;
+    static assert(profileFields.length == 2, "Profile should have 2 fields (username, badge)");
+}
+
+// Test array of POD type discovery (schema-only test)
+unittest {
+    import std.algorithm : canFind;
+
+    // POD struct
+    static struct Tag {
+        string name;
+        string color;
+    }
+
+    // Container with array of POD (no Entity mixin - just testing schema layer)
+    static struct Article {
+        string title;
+        Tag[] tags;  // Array of POD
+    }
+
+    // Tag should be recognized as object type
+    static assert(isObjectType!Tag, "Tag should be an object type");
+
+    // Tag should be discovered from Article (through array)
+    alias relatedTypes = getRelatedTypes!Article;
+    static assert(staticContains!(Tag, relatedTypes),
+        "Tag should be discovered from Article via array plain field type");
 }
