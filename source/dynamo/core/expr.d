@@ -1451,21 +1451,23 @@ class EveryItemOfExpr(T) : Expr!T, EveryItemOfExprInfo {
         import std.algorithm : map;
         static if (is(T == void)) {
             static assert(false, "EveryItemOfExpr!void should not be evaluated directly");
-        } else static if (isEntityType!T) {
-            // First try to get populated entities (preserves field data for naive mode)
+        } else static if (is(T == struct)) {
+            // Struct path (entities and POD structs) - retrieve from SealedArray
             auto entities = ctx.getCurrentEntities!T(_parentMap);
             if (entities.length > 0) {
                 return resolve(entities);
             }
 
-            // Fallback to ref-based reconstruction (for optimized mode or when entities not stored)
-            auto refs = ctx.getCurrentRefs(_parentMap);
-            if (refs.length > 0) {
-                return resolve(refs.map!(r => T(r.nodeId)).array);
-            }
-            auto singleRef = ctx.getPredicateItem(_parentMap);
-            if (singleRef.isValid) {
-                return resolve([T(singleRef.nodeId)]);
+            // Fallback for entities: ref-based reconstruction (optimized mode)
+            static if (isEntityType!T) {
+                auto refs = ctx.getCurrentRefs(_parentMap);
+                if (refs.length > 0) {
+                    return resolve(refs.map!(r => T(r.nodeId)).array);
+                }
+                auto singleRef = ctx.getPredicateItem(_parentMap);
+                if (singleRef.isValid) {
+                    return resolve([T(singleRef.nodeId)]);
+                }
             }
             return resolve(cast(T[])[]);
         } else {
@@ -1557,13 +1559,11 @@ class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
         return evalAs!(Entity[])(_collection, ctx).then((Entity[][] collectionResults) {
             // 2. Flatten for batch evaluation
             Entity[] flatEntities;
-            AnyRef[] flatRefs;
             size_t[] lengths;
             foreach (group; collectionResults) {
                 lengths ~= group.length;
                 foreach (e; group) {
                     flatEntities ~= e;
-                    flatRefs ~= AnyRef(e.nodeId.id);
                 }
             }
 
@@ -1572,11 +1572,17 @@ class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
                 return resolve(std.algorithm.map!(_ => cast(R[])[])(iota(collectionResults.length)).array);
             }
 
-            // 3. Set current entities AND refs for this MapExpr
-            // Entities are stored for naive mode (preserves populated fields)
-            // Refs are stored for backward compatibility with evalRefAsAnyRef
+            // 3. Store entities in SealedArray (works for all struct types)
             ctx.setCurrentEntities!Entity(self, flatEntities);
-            ctx.setCurrentRefs(self, flatRefs);
+
+            // Also set refs for entities with nodeId (needed for relational optimization)
+            static if (__traits(hasMember, Entity, "nodeId")) {
+                AnyRef[] flatRefs;
+                foreach (e; flatEntities) {
+                    flatRefs ~= AnyRef(e.nodeId.id);
+                }
+                ctx.setCurrentRefs(self, flatRefs);
+            }
 
             // 4. Evaluate body with ALL refs at once
             return evalAs!R(bodyExpr, ctx).then((R[] flatResults) {
