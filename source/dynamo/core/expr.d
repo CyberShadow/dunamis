@@ -2531,6 +2531,43 @@ unittest {
     assert(result[0] == [false, true, true]);
 }
 
+// Test POD struct in map context
+unittest {
+    import std.conv : to;
+
+    // POD struct without nodeId
+    static struct Stats {
+        int count;
+        int total;
+    }
+
+    // Custom Expr returning POD struct array
+    static class ConstStatsExpr : Expr!(Stats[]) {
+        override ExprBase[] dependencies() { return []; }
+        override void replaceDependency(size_t index, ExprBase newDep) {}
+        override Expr!(Stats[]) optimize(OptimizeContext ctx) { return this; }
+
+        override Promise!(Stats[][]) eval(EvalContext ctx) {
+            // Return one group with two Stats items
+            return resolve([[Stats(10, 100), Stats(20, 200)]]);
+        }
+    }
+
+    // Map over POD structs and extract a field
+    auto statsExpr = new ConstStatsExpr();
+    auto query = map!(
+        (Expr!Stats s) => new FieldAccessExpr!(Stats, "count")(s)
+    )(statsExpr);
+
+    auto ctx = new EvalContext();
+    ctx.setCurrentRefs(null, [queryRoot]);
+    auto result = awaitSync(query.eval(ctx));
+
+    assert(result.length == 1, "Expected 1 group");
+    assert(result[0].length == 2, "Expected 2 items in group");
+    assert(result[0] == [10, 20], "Expected counts [10, 20], got " ~ result[0].to!string);
+}
+
 // ============================================================================
 // Nullable Object Expression
 // ============================================================================
