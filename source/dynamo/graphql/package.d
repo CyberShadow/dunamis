@@ -7,3 +7,4 @@ public import dynamo.graphql.pagination;
 public import dynamo.graphql.plugin;
 public import dynamo.graphql.schema;
 public import dynamo.graphql.sorting;
+public import dynamo.graphql.type_mapping;

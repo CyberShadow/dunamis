@@ -143,6 +143,8 @@ template SortingPlugin(alias S) if (isSchema!S) {
 
     alias Query = SortedQuery;
     alias Mutation = S.Mutation;
+
+    alias Config = S.Config;
 }
 
 // ============================================================================

@@ -8,7 +8,7 @@ import std.meta;
 import std.traits;
 import std.typecons : Nullable;
 
-import dynamo.core.types : isCustomScalar;
+import dynamo.core.types : isCustomScalar, NoSchemaConfig, ResolveType;
 import dynamo.core.expr : Expr, ExprResultType, isExpr;
 
 // ============================================================================
@@ -54,11 +54,16 @@ template Schema(QueryType, MutationType = void) {
     } else {
         alias Mutation = MutationType;
     }
+
+    /// Schema-level configuration. Initially empty; plugins can extend this
+    /// with type mappings and other settings.
+    alias Config = NoSchemaConfig;
 }
 
-/// Check if a type is a Schema (has Query and Mutation members)
+/// Check if a type is a Schema (has Query, Mutation, and Config members)
 template isSchema(alias T) {
-    enum isSchema = __traits(hasMember, T, "Query") && __traits(hasMember, T, "Mutation");
+    enum isSchema = __traits(hasMember, T, "Query") && __traits(hasMember, T, "Mutation")
+        && __traits(hasMember, T, "Config");
 }
 
 // ============================================================================
@@ -368,10 +373,11 @@ template getGqlDeprecated(alias member) {
 // ============================================================================
 
 /// Get the GraphQL return type of a computed field
-template computedFieldReturnType(alias member) {
+template computedFieldReturnType(alias member, alias cfg = NoSchemaConfig) {
     alias Return = ReturnType!(typeof(member));
-    // Extract T from Expr!T, then map to GraphQL type
-    alias ResultT = ExprResultType!Return;
+    // Extract T from Expr!T, then resolve through type mappings
+    alias RawResultT = ExprResultType!Return;
+    alias ResultT = ResolveType!(RawResultT, cfg);
 
     // Handle string specially (it's immutable(char)[] but should map to String)
     static if (is(ResultT == string)) {
@@ -381,7 +387,7 @@ template computedFieldReturnType(alias member) {
     else static if (is(ResultT == E[], E)) {
         static if (is(E : Expr!Inner, Inner)) {
             // Array of expressions (e.g., from map) - extract inner type
-            enum computedFieldReturnType = "[" ~ graphqlTypeName!Inner ~ "]!";
+            enum computedFieldReturnType = "[" ~ graphqlTypeName!(ResolveType!(Inner, cfg)) ~ "]!";
         } else {
             // Regular array
             enum computedFieldReturnType = "[" ~ graphqlTypeName!E ~ "]!";
@@ -392,7 +398,7 @@ template computedFieldReturnType(alias member) {
 }
 
 /// Extract arguments from a computed field (parameters after the first Expr!Entity)
-template getComputedFieldArguments(alias member) {
+template getComputedFieldArguments(alias member, alias cfg = NoSchemaConfig) {
     // Get parameter info - must use member directly, not typeof(member)
     // typeof(member) loses parameter names and default values
     alias Params = Parameters!member;
@@ -406,7 +412,8 @@ template getComputedFieldArguments(alias member) {
 
         // Skip first parameter (Expr!Entity), process rest as arguments
         static foreach (i; 1 .. Params.length) {{
-            alias P = Params[i];
+            alias RawP = Params[i];
+            alias P = ResolveType!(RawP, cfg);
 
             enum argName = paramNames[i];
 
@@ -489,7 +496,7 @@ template isInternalMember(string name) {
 /// Valid field methods:
 /// - Take Expr!T as first parameter
 /// - Return an Expr type
-template getFields(T) {
+template getFields(T, alias cfg = NoSchemaConfig) {
     import std.traits : hasUDA, getUDAs, ReturnType, Parameters;
     import std.meta : staticIndexOf;
     import dynamo.core.expr : ExprResultType;
@@ -513,8 +520,8 @@ template getFields(T) {
 
                     static if (isValidFieldMethod!(T, fn)) {
                         // Field method: computed field, relationship, or table entry point
-                        enum gqlType = computedFieldReturnType!fn;
-                        enum arguments = getComputedFieldArguments!fn;
+                        enum gqlType = computedFieldReturnType!(fn, cfg);
+                        enum arguments = getComputedFieldArguments!(fn, cfg);
 
                         fields ~= FieldInfo(
                             gqlFieldName,
@@ -548,7 +555,8 @@ template getFields(T) {
         static foreach (member; __traits(allMembers, T)) {{
             static if (!isInternalMember!member) {
                 static if (isPlainField!(T, member)) {
-                    alias FieldType = typeof(__traits(getMember, T.init, member));
+                    alias RawFieldType = typeof(__traits(getMember, T.init, member));
+                    alias FieldType = ResolveType!(RawFieldType, cfg);
                     // Use D field name directly (GraphQL uses camelCase like D)
                     enum gqlFieldName = member;
                     enum gqlType = graphqlTypeName!FieldType;
@@ -572,7 +580,8 @@ template getFields(T) {
                 static if (isPlainMethod!(T, member)) {
                     import std.traits : ReturnType;
                     alias MethodType = typeof(__traits(getMember, T, member));
-                    alias RetType = ReturnType!MethodType;
+                    alias RawRetType = ReturnType!MethodType;
+                    alias RetType = ResolveType!(RawRetType, cfg);
 
                     // Get UDAs from the method
                     alias methodSym = __traits(getMember, T, member);
@@ -693,13 +702,14 @@ struct InputFieldInfo {
 }
 
 /// Extract fields from an input type struct
-template getInputTypeFields(T) if (isInputType!T) {
+template getInputTypeFields(T, alias cfg = NoSchemaConfig) if (isInputType!T) {
     enum getInputTypeFields = () {
         InputFieldInfo[] fields;
 
         static foreach (member; __traits(allMembers, T)) {{
             static if (!isInternalMember!member) {
-                alias MemberType = typeof(__traits(getMember, T, member));
+                alias RawMemberType = typeof(__traits(getMember, T, member));
+                alias MemberType = ResolveType!(RawMemberType, cfg);
 
                 // Skip non-field members (functions, etc.)
                 static if (!is(MemberType == function) && !is(MemberType == void)) {
@@ -791,19 +801,20 @@ template UnwrapNullable(T) {
 
 /// Extract the base input type from a type (unwraps arrays, Nullable, and pointers).
 /// Returns void if no input type is found.
-template extractInputTypeFromType(T) {
-    static if (is(T == E[], E)) {
+template extractInputTypeFromType(T, alias cfg = NoSchemaConfig) {
+    alias Resolved = ResolveType!(T, cfg);
+    static if (is(Resolved == E[], E)) {
         // Array - extract from element type
-        alias extractInputTypeFromType = extractInputTypeFromType!E;
-    } else static if (is(T == Nullable!U, U)) {
+        alias extractInputTypeFromType = extractInputTypeFromType!(E, cfg);
+    } else static if (is(Resolved == Nullable!U, U)) {
         // Nullable - unwrap
-        alias extractInputTypeFromType = extractInputTypeFromType!U;
-    } else static if (is(T == U*, U)) {
+        alias extractInputTypeFromType = extractInputTypeFromType!(U, cfg);
+    } else static if (is(Resolved == U*, U)) {
         // Pointer - unwrap (enables recursive types)
-        alias extractInputTypeFromType = extractInputTypeFromType!U;
-    } else static if (isInputType!T) {
+        alias extractInputTypeFromType = extractInputTypeFromType!(U, cfg);
+    } else static if (isInputType!Resolved) {
         // Base case: input type struct
-        alias extractInputTypeFromType = T;
+        alias extractInputTypeFromType = Resolved;
     } else {
         // Not an input type
         alias extractInputTypeFromType = void;
@@ -811,13 +822,13 @@ template extractInputTypeFromType(T) {
 }
 
 /// Helper to extract input types from function parameters (iterative)
-template getInputTypesFromParamsImpl(size_t idx, Params...) {
+template getInputTypesFromParamsImpl(size_t idx, alias cfg = NoSchemaConfig, Params...) {
     static if (idx >= Params.length) {
         alias getInputTypesFromParamsImpl = AliasSeq!();
     } else {
         alias P = Params[idx];
-        alias Extracted = extractInputTypeFromType!P;
-        alias Rest = getInputTypesFromParamsImpl!(idx + 1, Params);
+        alias Extracted = extractInputTypeFromType!(P, cfg);
+        alias Rest = getInputTypesFromParamsImpl!(idx + 1, cfg, Params);
 
         static if (!is(Extracted == void)) {
             alias getInputTypesFromParamsImpl = AliasSeq!(Extracted, Rest);
@@ -828,23 +839,23 @@ template getInputTypesFromParamsImpl(size_t idx, Params...) {
 }
 
 /// Extract input types from computed field arguments (skip first Expr!Entity param)
-template getInputTypesFromArguments(alias member) {
+template getInputTypesFromArguments(alias member, alias cfg = NoSchemaConfig) {
     alias Params = Parameters!member;
     // Skip first parameter (index 0), start from index 1
     static if (Params.length > 1) {
-        alias getInputTypesFromArguments = getInputTypesFromParamsImpl!(1, Params);
+        alias getInputTypesFromArguments = getInputTypesFromParamsImpl!(1, cfg, Params);
     } else {
         alias getInputTypesFromArguments = AliasSeq!();
     }
 }
 
 /// Helper to get input types from struct fields (iterative)
-template getNestedInputTypesImpl(T, size_t idx, Members...) {
+template getNestedInputTypesImpl(T, size_t idx, alias cfg = NoSchemaConfig, Members...) {
     static if (idx >= Members.length) {
         alias getNestedInputTypesImpl = AliasSeq!();
     } else {
         enum member = Members[idx];
-        alias Rest = getNestedInputTypesImpl!(T, idx + 1, Members);
+        alias Rest = getNestedInputTypesImpl!(T, idx + 1, cfg, Members);
 
         static if (isInternalMember!member) {
             alias getNestedInputTypesImpl = Rest;
@@ -852,7 +863,7 @@ template getNestedInputTypesImpl(T, size_t idx, Members...) {
             alias MemberType = typeof(__traits(getMember, T, member));
 
             static if (!is(MemberType == function) && !is(MemberType == void)) {
-                alias Extracted = extractInputTypeFromType!MemberType;
+                alias Extracted = extractInputTypeFromType!(MemberType, cfg);
 
                 static if (!is(Extracted == void)) {
                     alias getNestedInputTypesImpl = AliasSeq!(Extracted, Rest);
@@ -869,17 +880,17 @@ template getNestedInputTypesImpl(T, size_t idx, Members...) {
 }
 
 /// Get nested input types from an input type's fields
-template getNestedInputTypes(T) if (isInputType!T) {
-    alias getNestedInputTypes = getNestedInputTypesImpl!(T, 0, __traits(allMembers, T));
+template getNestedInputTypes(T, alias cfg = NoSchemaConfig) if (isInputType!T) {
+    alias getNestedInputTypes = getNestedInputTypesImpl!(T, 0, cfg, __traits(allMembers, T));
 }
 
 /// Expand one level: get all nested input types from a set of input types
-template expandInputOneLevel(Types...) {
+template expandInputOneLevel(alias cfg = NoSchemaConfig, Types...) {
     static if (Types.length == 0) {
         alias expandInputOneLevel = AliasSeq!();
     } else {
-        alias First = getNestedInputTypes!(Types[0]);
-        alias Rest = expandInputOneLevel!(Types[1..$]);
+        alias First = getNestedInputTypes!(Types[0], cfg);
+        alias Rest = expandInputOneLevel!(cfg, Types[1..$]);
         alias expandInputOneLevel = AliasSeq!(First, Rest);
     }
 }
@@ -897,35 +908,35 @@ package template uniqueTypesForExpand(Types...) {
 
 /// Expand all input types - performs BFS to discover nested types up to 4 levels deep.
 /// This is sufficient for most recursive type structures.
-template expandAllInputTypes(InputTypes...) {
+template expandAllInputTypes(alias cfg = NoSchemaConfig, InputTypes...) {
     // Level 0: direct input types
     alias Level0 = InputTypes;
     // Level 1: add types nested in Level0
-    alias Level1 = uniqueTypesForExpand!(AliasSeq!(Level0, expandInputOneLevel!Level0));
+    alias Level1 = uniqueTypesForExpand!(AliasSeq!(Level0, expandInputOneLevel!(cfg, Level0)));
     // Level 2: add types nested in Level1
-    alias Level2 = uniqueTypesForExpand!(AliasSeq!(Level1, expandInputOneLevel!Level1));
+    alias Level2 = uniqueTypesForExpand!(AliasSeq!(Level1, expandInputOneLevel!(cfg, Level1)));
     // Level 3: add types nested in Level2
-    alias Level3 = uniqueTypesForExpand!(AliasSeq!(Level2, expandInputOneLevel!Level2));
+    alias Level3 = uniqueTypesForExpand!(AliasSeq!(Level2, expandInputOneLevel!(cfg, Level2)));
     // Level 4: add types nested in Level3
-    alias Level4 = uniqueTypesForExpand!(AliasSeq!(Level3, expandInputOneLevel!Level3));
+    alias Level4 = uniqueTypesForExpand!(AliasSeq!(Level3, expandInputOneLevel!(cfg, Level3)));
 
     alias expandAllInputTypes = Level4;
 }
 
 /// Helper to collect input types from entity members (iterative)
-template getInputTypesFromEntityImpl(Entity, size_t idx, Members...) {
+template getInputTypesFromEntityImpl(Entity, size_t idx, alias cfg = NoSchemaConfig, Members...) {
     static if (idx >= Members.length) {
         alias getInputTypesFromEntityImpl = AliasSeq!();
     } else {
         enum member = Members[idx];
-        alias Rest = getInputTypesFromEntityImpl!(Entity, idx + 1, Members);
+        alias Rest = getInputTypesFromEntityImpl!(Entity, idx + 1, cfg, Members);
 
         static if (isInternalMember!member) {
             alias getInputTypesFromEntityImpl = Rest;
         } else static if (__traits(compiles, isValidFieldMethod!(Entity, __traits(getMember, Entity, member)))) {
             static if (isValidFieldMethod!(Entity, __traits(getMember, Entity, member))) {
                 alias fn = __traits(getMember, Entity, member);
-                alias InputTypes = getInputTypesFromArguments!fn;
+                alias InputTypes = getInputTypesFromArguments!(fn, cfg);
                 alias getInputTypesFromEntityImpl = AliasSeq!(InputTypes, Rest);
             } else {
                 alias getInputTypesFromEntityImpl = Rest;
@@ -937,37 +948,37 @@ template getInputTypesFromEntityImpl(Entity, size_t idx, Members...) {
 }
 
 /// Collect all input types from an entity's computed fields
-template getInputTypesFromEntity(Entity) {
-    alias getInputTypesFromEntity = getInputTypesFromEntityImpl!(Entity, 0, __traits(allMembers, Entity));
+template getInputTypesFromEntity(Entity, alias cfg = NoSchemaConfig) {
+    alias getInputTypesFromEntity = getInputTypesFromEntityImpl!(Entity, 0, cfg, __traits(allMembers, Entity));
 }
 
 /// Helper to collect input types from multiple entities
-template getInputTypesFromEntitiesImpl(Entities...) {
+template getInputTypesFromEntitiesImpl(alias cfg = NoSchemaConfig, Entities...) {
     static if (Entities.length == 0) {
         alias getInputTypesFromEntitiesImpl = AliasSeq!();
     } else {
-        alias First = getInputTypesFromEntity!(Entities[0]);
-        alias Rest = getInputTypesFromEntitiesImpl!(Entities[1..$]);
+        alias First = getInputTypesFromEntity!(Entities[0], cfg);
+        alias Rest = getInputTypesFromEntitiesImpl!(cfg, Entities[1..$]);
         alias getInputTypesFromEntitiesImpl = AliasSeq!(First, Rest);
     }
 }
 
 /// Collect all input types from all entities in the schema.
 /// Uses BFS expansion to discover nested input types including recursive ones.
-template getAllInputTypes(Query) {
-    alias AllEntityTypes = getAllEntityTypes!Query;
-    alias DirectInputTypes = getInputTypesFromEntitiesImpl!AllEntityTypes;
+template getAllInputTypes(Query, alias cfg = NoSchemaConfig) {
+    alias _AllEntityTypes = getAllEntityTypes!(Query, cfg);
+    alias DirectInputTypes = getInputTypesFromEntitiesImpl!(cfg, _AllEntityTypes);
     // Expand to discover nested input types (handles recursive types via fixed-depth BFS)
-    alias getAllInputTypes = expandAllInputTypes!(uniqueTypesForExpand!DirectInputTypes);
+    alias getAllInputTypes = expandAllInputTypes!(cfg, uniqueTypesForExpand!DirectInputTypes);
 }
 
 /// Helper to get input types from mutation parameters (iterative)
-template getInputTypesFromMutationImpl(Mutation, size_t idx, Members...) {
+template getInputTypesFromMutationImpl(Mutation, size_t idx, alias cfg = NoSchemaConfig, Members...) {
     static if (idx >= Members.length) {
         alias getInputTypesFromMutationImpl = AliasSeq!();
     } else {
         enum member = Members[idx];
-        alias Rest = getInputTypesFromMutationImpl!(Mutation, idx + 1, Members);
+        alias Rest = getInputTypesFromMutationImpl!(Mutation, idx + 1, cfg, Members);
 
         static if (isInternalMember!member) {
             alias getInputTypesFromMutationImpl = Rest;
@@ -975,7 +986,7 @@ template getInputTypesFromMutationImpl(Mutation, size_t idx, Members...) {
             alias fn = __traits(getMember, Mutation, member);
             alias Params = Parameters!fn;
             // Get input types from parameters (skip first which is parent Expr!Mutation)
-            alias InputTypes = getInputTypesFromParamsImpl!(1, Params);
+            alias InputTypes = getInputTypesFromParamsImpl!(1, cfg, Params);
             alias getInputTypesFromMutationImpl = AliasSeq!(InputTypes, Rest);
         } else {
             alias getInputTypesFromMutationImpl = Rest;
@@ -984,8 +995,8 @@ template getInputTypesFromMutationImpl(Mutation, size_t idx, Members...) {
 }
 
 /// Collect all input types from a Mutation type's parameters
-template getInputTypesFromMutation(Mutation) {
-    alias getInputTypesFromMutation = getInputTypesFromMutationImpl!(Mutation, 0, __traits(allMembers, Mutation));
+template getInputTypesFromMutation(Mutation, alias cfg = NoSchemaConfig) {
+    alias getInputTypesFromMutation = getInputTypesFromMutationImpl!(Mutation, 0, cfg, __traits(allMembers, Mutation));
 }
 
 // ============================================================================
@@ -993,20 +1004,21 @@ template getInputTypesFromMutation(Mutation) {
 // ============================================================================
 
 /// Helper to extract enum type from a type (unwraps Nullable, arrays)
-template extractEnumFromType(T) {
-    static if (is(T == E[], E)) {
-        alias extractEnumFromType = extractEnumFromType!E;
-    } else static if (is(T == Nullable!U, U)) {
-        alias extractEnumFromType = extractEnumFromType!U;
-    } else static if (isGraphQLEnum!T) {
-        alias extractEnumFromType = T;
+template extractEnumFromType(T, alias cfg = NoSchemaConfig) {
+    alias Resolved = ResolveType!(T, cfg);
+    static if (is(Resolved == E[], E)) {
+        alias extractEnumFromType = extractEnumFromType!(E, cfg);
+    } else static if (is(Resolved == Nullable!U, U)) {
+        alias extractEnumFromType = extractEnumFromType!(U, cfg);
+    } else static if (isGraphQLEnum!Resolved) {
+        alias extractEnumFromType = Resolved;
     } else {
         alias extractEnumFromType = void;
     }
 }
 
 /// Helper to collect enum types from entity members (iterative)
-template getEnumTypesFromEntityImpl(Entity, size_t idx, Members...) {
+template getEnumTypesFromEntityImpl(Entity, size_t idx, alias cfg = NoSchemaConfig, Members...) {
     import std.traits : ReturnType, Parameters;
     import dynamo.core.expr : ExprResultType;
 
@@ -1014,7 +1026,7 @@ template getEnumTypesFromEntityImpl(Entity, size_t idx, Members...) {
         alias getEnumTypesFromEntityImpl = AliasSeq!();
     } else {
         enum member = Members[idx];
-        alias Rest = getEnumTypesFromEntityImpl!(Entity, idx + 1, Members);
+        alias Rest = getEnumTypesFromEntityImpl!(Entity, idx + 1, cfg, Members);
 
         static if (isInternalMember!member) {
             alias getEnumTypesFromEntityImpl = Rest;
@@ -1025,11 +1037,11 @@ template getEnumTypesFromEntityImpl(Entity, size_t idx, Members...) {
                 alias ResultT = ExprResultType!RetType;
 
                 // Check return type for enum
-                alias EnumFromReturn = extractEnumFromType!ResultT;
+                alias EnumFromReturn = extractEnumFromType!(ResultT, cfg);
 
                 // Check argument types for enums
                 alias Params = Parameters!fn;
-                alias EnumFromArgs = getEnumTypesFromParamsImpl!(1, Params);
+                alias EnumFromArgs = getEnumTypesFromParamsImpl!(1, cfg, Params);
 
                 static if (!is(EnumFromReturn == void)) {
                     alias getEnumTypesFromEntityImpl = AliasSeq!(EnumFromReturn, EnumFromArgs, Rest);
@@ -1046,19 +1058,20 @@ template getEnumTypesFromEntityImpl(Entity, size_t idx, Members...) {
 }
 
 /// Helper to extract enum types from parameters (iterative)
-template getEnumTypesFromParamsImpl(size_t idx, Params...) {
+template getEnumTypesFromParamsImpl(size_t idx, alias cfg = NoSchemaConfig, Params...) {
     static if (idx >= Params.length) {
         alias getEnumTypesFromParamsImpl = AliasSeq!();
     } else {
         alias P = Params[idx];
-        alias Unwrapped = UnwrapNullable!P;
-        alias Rest = getEnumTypesFromParamsImpl!(idx + 1, Params);
+        alias Resolved = ResolveType!(P, cfg);
+        alias Unwrapped = UnwrapNullable!Resolved;
+        alias Rest = getEnumTypesFromParamsImpl!(idx + 1, cfg, Params);
 
         static if (isGraphQLEnum!Unwrapped) {
             alias getEnumTypesFromParamsImpl = AliasSeq!(Unwrapped, Rest);
         } else static if (isInputType!Unwrapped) {
             // Check inside input type for enum fields
-            alias EnumsFromInput = getEnumTypesFromInputType!Unwrapped;
+            alias EnumsFromInput = getEnumTypesFromInputType!(Unwrapped, cfg);
             alias getEnumTypesFromParamsImpl = AliasSeq!(EnumsFromInput, Rest);
         } else {
             alias getEnumTypesFromParamsImpl = Rest;
@@ -1067,12 +1080,12 @@ template getEnumTypesFromParamsImpl(size_t idx, Params...) {
 }
 
 /// Helper to collect enum types from input type fields
-template getEnumTypesFromInputTypeImpl(T, size_t idx, Members...) {
+template getEnumTypesFromInputTypeImpl(T, size_t idx, alias cfg = NoSchemaConfig, Members...) {
     static if (idx >= Members.length) {
         alias getEnumTypesFromInputTypeImpl = AliasSeq!();
     } else {
         enum member = Members[idx];
-        alias Rest = getEnumTypesFromInputTypeImpl!(T, idx + 1, Members);
+        alias Rest = getEnumTypesFromInputTypeImpl!(T, idx + 1, cfg, Members);
 
         static if (isInternalMember!member) {
             alias getEnumTypesFromInputTypeImpl = Rest;
@@ -1080,7 +1093,8 @@ template getEnumTypesFromInputTypeImpl(T, size_t idx, Members...) {
             alias MemberType = typeof(__traits(getMember, T, member));
 
             static if (!is(MemberType == function) && !is(MemberType == void)) {
-                alias Unwrapped = UnwrapNullable!MemberType;
+                alias Resolved = ResolveType!(MemberType, cfg);
+                alias Unwrapped = UnwrapNullable!Resolved;
 
                 static if (isGraphQLEnum!Unwrapped) {
                     alias getEnumTypesFromInputTypeImpl = AliasSeq!(Unwrapped, Rest);
@@ -1097,30 +1111,30 @@ template getEnumTypesFromInputTypeImpl(T, size_t idx, Members...) {
 }
 
 /// Collect enum types from an input type's fields
-template getEnumTypesFromInputType(T) if (isInputType!T) {
-    alias getEnumTypesFromInputType = getEnumTypesFromInputTypeImpl!(T, 0, __traits(allMembers, T));
+template getEnumTypesFromInputType(T, alias cfg = NoSchemaConfig) if (isInputType!T) {
+    alias getEnumTypesFromInputType = getEnumTypesFromInputTypeImpl!(T, 0, cfg, __traits(allMembers, T));
 }
 
 /// Collect all enum types from an entity's fields
-template getEnumTypesFromEntity(Entity) {
-    alias getEnumTypesFromEntity = getEnumTypesFromEntityImpl!(Entity, 0, __traits(allMembers, Entity));
+template getEnumTypesFromEntity(Entity, alias cfg = NoSchemaConfig) {
+    alias getEnumTypesFromEntity = getEnumTypesFromEntityImpl!(Entity, 0, cfg, __traits(allMembers, Entity));
 }
 
 /// Helper to collect enum types from multiple entities
-template getEnumTypesFromEntitiesImpl(Entities...) {
+template getEnumTypesFromEntitiesImpl(alias cfg = NoSchemaConfig, Entities...) {
     static if (Entities.length == 0) {
         alias getEnumTypesFromEntitiesImpl = AliasSeq!();
     } else {
-        alias First = getEnumTypesFromEntity!(Entities[0]);
-        alias Rest = getEnumTypesFromEntitiesImpl!(Entities[1..$]);
+        alias First = getEnumTypesFromEntity!(Entities[0], cfg);
+        alias Rest = getEnumTypesFromEntitiesImpl!(cfg, Entities[1..$]);
         alias getEnumTypesFromEntitiesImpl = AliasSeq!(First, Rest);
     }
 }
 
 /// Collect all enum types from all entities in the schema
-template getAllEnumTypes(Query) {
-    alias AllEntityTypes = getAllEntityTypes!Query;
-    alias AllEnumTypes = getEnumTypesFromEntitiesImpl!AllEntityTypes;
+template getAllEnumTypes(Query, alias cfg = NoSchemaConfig) {
+    alias _AllEntityTypes = getAllEntityTypes!(Query, cfg);
+    alias AllEnumTypes = getEnumTypesFromEntitiesImpl!(cfg, _AllEntityTypes);
     alias getAllEnumTypes = uniqueTypes!AllEnumTypes;
 }
 
@@ -1141,16 +1155,17 @@ template staticContains(T, Types...) {
 
 /// Extract object type from a result type (handles T, T[], Nullable!T).
 /// Returns void if no object type is found.
-template extractEntityFromType(T) {
-    static if (is(T == E[], E)) {
+template extractEntityFromType(T, alias cfg = NoSchemaConfig) {
+    alias Resolved = ResolveType!(T, cfg);
+    static if (is(Resolved == E[], E)) {
         // Array - check element type
-        alias extractEntityFromType = extractEntityFromType!E;
-    } else static if (is(T == Nullable!U, U)) {
+        alias extractEntityFromType = extractEntityFromType!(E, cfg);
+    } else static if (is(Resolved == Nullable!U, U)) {
         // Nullable - unwrap
-        alias extractEntityFromType = extractEntityFromType!U;
-    } else static if (isObjectType!T) {
+        alias extractEntityFromType = extractEntityFromType!(U, cfg);
+    } else static if (isObjectType!Resolved) {
         // Object type (struct with valid field methods)
-        alias extractEntityFromType = T;
+        alias extractEntityFromType = Resolved;
     } else {
         // Not an object type
         alias extractEntityFromType = void;
@@ -1160,7 +1175,7 @@ template extractEntityFromType(T) {
 /// Helper to get related types from a type by iterating over members.
 /// Scans for valid field methods, plain fields, and plain methods,
 /// and extracts object types from return types.
-template getRelatedTypesImpl(T, size_t idx, Members...) {
+template getRelatedTypesImpl(T, size_t idx, alias cfg = NoSchemaConfig, Members...) {
     import dynamo.core.expr : ExprResultType;
     import dynamo.core.types : isPlainField, isPlainMethod;
 
@@ -1168,7 +1183,7 @@ template getRelatedTypesImpl(T, size_t idx, Members...) {
         alias getRelatedTypesImpl = AliasSeq!();
     } else {
         enum member = Members[idx];
-        alias Rest = getRelatedTypesImpl!(T, idx + 1, Members);
+        alias Rest = getRelatedTypesImpl!(T, idx + 1, cfg, Members);
 
         static if (!isInternalMember!member) {
             // 1. Check computed fields (static methods returning Expr!T)
@@ -1180,7 +1195,7 @@ template getRelatedTypesImpl(T, size_t idx, Members...) {
                     alias ResultT = ExprResultType!RetType;
 
                     // Extract object type from return type
-                    alias EntityFromReturn = extractEntityFromType!ResultT;
+                    alias EntityFromReturn = extractEntityFromType!(ResultT, cfg);
 
                     static if (!is(EntityFromReturn == void)) {
                         alias getRelatedTypesImpl = AliasSeq!(EntityFromReturn, Rest);
@@ -1191,7 +1206,7 @@ template getRelatedTypesImpl(T, size_t idx, Members...) {
                 // 2. Check plain methods (instance methods returning non-Expr types)
                 else static if (isPlainMethod!(T, member)) {
                     alias RetType = ReturnType!fn;
-                    alias EntityFromReturn = extractEntityFromType!RetType;
+                    alias EntityFromReturn = extractEntityFromType!(RetType, cfg);
 
                     static if (!is(EntityFromReturn == void)) {
                         alias getRelatedTypesImpl = AliasSeq!(EntityFromReturn, Rest);
@@ -1205,7 +1220,7 @@ template getRelatedTypesImpl(T, size_t idx, Members...) {
             // 3. Check plain fields (struct instance fields)
             else static if (isPlainField!(T, member)) {
                 alias FieldType = typeof(__traits(getMember, T.init, member));
-                alias EntityFromField = extractEntityFromType!FieldType;
+                alias EntityFromField = extractEntityFromType!(FieldType, cfg);
 
                 static if (!is(EntityFromField == void)) {
                     alias getRelatedTypesImpl = AliasSeq!(EntityFromField, Rest);
@@ -1222,20 +1237,20 @@ template getRelatedTypesImpl(T, size_t idx, Members...) {
 }
 
 /// Get all object types directly referenced by a type (via field return types)
-template getRelatedTypes(T) {
-    alias getRelatedTypes = getRelatedTypesImpl!(T, 0, __traits(allMembers, T));
+template getRelatedTypes(T, alias cfg = NoSchemaConfig) {
+    alias getRelatedTypes = getRelatedTypesImpl!(T, 0, cfg, __traits(allMembers, T));
 }
 
 /// Helper to get root types from Query by iterating over members.
 /// Scans for valid field methods and extracts object types from return types.
-template getRootTypesImpl(Query, size_t idx, Members...) {
+template getRootTypesImpl(Query, size_t idx, alias cfg = NoSchemaConfig, Members...) {
     import dynamo.core.expr : ExprResultType;
 
     static if (idx >= Members.length) {
         alias getRootTypesImpl = AliasSeq!();
     } else {
         enum member = Members[idx];
-        alias Rest = getRootTypesImpl!(Query, idx + 1, Members);
+        alias Rest = getRootTypesImpl!(Query, idx + 1, cfg, Members);
 
         static if (!isInternalMember!member &&
                    is(typeof(__traits(getMember, Query, member)) == function)) {
@@ -1247,7 +1262,7 @@ template getRootTypesImpl(Query, size_t idx, Members...) {
                 alias ResultT = ExprResultType!RetType;
 
                 // Extract object type from return type
-                alias EntityFromReturn = extractEntityFromType!ResultT;
+                alias EntityFromReturn = extractEntityFromType!(ResultT, cfg);
 
                 static if (!is(EntityFromReturn == void)) {
                     alias getRootTypesImpl = AliasSeq!(EntityFromReturn, Rest);
@@ -1264,8 +1279,8 @@ template getRootTypesImpl(Query, size_t idx, Members...) {
 }
 
 /// Get root object types from Query
-template getRootTypes(Query) {
-    alias getRootTypes = getRootTypesImpl!(Query, 0, __traits(allMembers, Query));
+template getRootTypes(Query, alias cfg = NoSchemaConfig) {
+    alias getRootTypes = getRootTypesImpl!(Query, 0, cfg, __traits(allMembers, Query));
 }
 
 /// Remove duplicates from a type list
@@ -1280,27 +1295,27 @@ template uniqueTypes(Types...) {
 }
 
 /// Expand one level: get all related types from a set of types
-template expandOneLevel(Types...) {
+template expandOneLevel(alias cfg = NoSchemaConfig, Types...) {
     static if (Types.length == 0) {
         alias expandOneLevel = AliasSeq!();
     } else {
-        alias First = getRelatedTypes!(Types[0]);
-        alias Rest = expandOneLevel!(Types[1..$]);
+        alias First = getRelatedTypes!(Types[0], cfg);
+        alias Rest = expandOneLevel!(cfg, Types[1..$]);
         alias expandOneLevel = AliasSeq!(First, Rest);
     }
 }
 
 /// Fixed-depth type discovery (sufficient for most schemas)
 /// Expands relationships up to 4 levels deep
-template getAllEntityTypes(Query) {
+template getAllEntityTypes(Query, alias cfg = NoSchemaConfig) {
     // Start with root types
-    alias Level0 = getRootTypes!Query;
+    alias Level0 = getRootTypes!(Query, cfg);
 
     // Expand level by level, deduping at each step
-    alias Level1 = uniqueTypes!(Level0, expandOneLevel!Level0);
-    alias Level2 = uniqueTypes!(Level1, expandOneLevel!Level1);
-    alias Level3 = uniqueTypes!(Level2, expandOneLevel!Level2);
-    alias Level4 = uniqueTypes!(Level3, expandOneLevel!Level3);
+    alias Level1 = uniqueTypes!(Level0, expandOneLevel!(cfg, Level0));
+    alias Level2 = uniqueTypes!(Level1, expandOneLevel!(cfg, Level1));
+    alias Level3 = uniqueTypes!(Level2, expandOneLevel!(cfg, Level2));
+    alias Level4 = uniqueTypes!(Level3, expandOneLevel!(cfg, Level3));
 
     alias getAllEntityTypes = Level4;
 }
@@ -1311,8 +1326,8 @@ template getAllEntityTypes(Query) {
 
 /// Generate GraphQL SDL for an entity type
 /// Generate GraphQL SDL for any object type (entity, Query, or Mutation).
-string generateObjectTypeSDL(T)(string typeName) {
-    enum fields = getFields!T;
+string generateObjectTypeSDL(T, alias cfg = NoSchemaConfig)(string typeName) {
+    enum fields = getFields!(T, cfg);
 
     static if (fields.length == 0) {
         return "";  // No fields defined
@@ -1448,10 +1463,10 @@ template getRootFieldArguments(alias member) {
 }
 
 /// Generate GraphQL SDL for an input type
-string generateInputTypeSDL(T)() if (isInputType!T) {
+string generateInputTypeSDL(T, alias cfg = NoSchemaConfig)() if (isInputType!T) {
     string result = "input " ~ T.stringof ~ " {\n";
 
-    foreach (field; getInputTypeFields!T) {
+    foreach (field; getInputTypeFields!(T, cfg)) {
         result ~= "  " ~ field.name ~ ": " ~ field.graphqlType;
         if (field.hasDefault) {
             result ~= " = " ~ field.defaultValue;
@@ -1464,7 +1479,7 @@ string generateInputTypeSDL(T)() if (isInputType!T) {
 }
 
 /// Collect custom scalar names from any type's field return types.
-private template getCustomScalarNames(T) {
+private template getCustomScalarNames(T, alias cfg = NoSchemaConfig) {
     import dynamo.core.expr : ExprResultType;
 
     enum getCustomScalarNames = () {
@@ -1477,7 +1492,8 @@ private template getCustomScalarNames(T) {
                 static if (isValidFieldMethod!(T, fn)) {
                     alias RetType = ReturnType!fn;
                     alias ResultT = ExprResultType!RetType;
-                    alias Unwrapped = UnwrapNullable!ResultT;
+                    alias Resolved = ResolveType!(ResultT, cfg);
+                    alias Unwrapped = UnwrapNullable!Resolved;
 
                     // Check if the unwrapped type is a custom scalar
                     static if (isCustomScalar!Unwrapped) {
@@ -1514,11 +1530,11 @@ private template getCustomScalarNames(T) {
 }
 
 /// Collect all custom scalar names from multiple entities
-package template getAllCustomScalarNames(Entities...) {
+package template getAllCustomScalarNames(alias cfg = NoSchemaConfig, Entities...) {
     enum getAllCustomScalarNames = () {
         string[] allNames;
         static foreach (Entity; Entities) {
-            foreach (name; getCustomScalarNames!Entity) {
+            foreach (name; getCustomScalarNames!(Entity, cfg)) {
                 // Add if not already present
                 bool found = false;
                 foreach (n; allNames) {
@@ -1550,36 +1566,43 @@ template generateSchemaSDL(alias SchemaOrQuery) {
         struct MutationType {}
     }
 
+    // Extract config from Schema if available (bare Query types have no Config)
+    static if (isSchema!SchemaOrQuery) {
+        alias cfg = SchemaOrQuery.Config;
+    } else {
+        alias cfg = NoSchemaConfig;
+    }
+
     // Use Schema-provided AllEntityTypes if available (for plugins like PaginationPlugin),
     // otherwise discover entity types from Query
     static if (isSchema!SchemaOrQuery && __traits(hasMember, SchemaOrQuery, "AllEntityTypes")) {
         alias AllTypes = SchemaOrQuery.AllEntityTypes;
     } else {
-        alias AllTypes = getAllEntityTypes!QueryType;
+        alias AllTypes = getAllEntityTypes!(QueryType, cfg);
     }
 
     // Collect input types from entities AND mutations (if any)
     // Both are expanded to discover nested types (handles recursive types)
-    alias EntityInputTypes = getAllInputTypes!QueryType;
-    static if (getFields!MutationType.length > 0) {
-        alias MutationDirectTypes = getInputTypesFromMutation!MutationType;
-        alias MutationInputTypes = expandAllInputTypes!(uniqueTypesForExpand!MutationDirectTypes);
+    alias EntityInputTypes = getAllInputTypes!(QueryType, cfg);
+    static if (getFields!(MutationType, cfg).length > 0) {
+        alias MutationDirectTypes = getInputTypesFromMutation!(MutationType, cfg);
+        alias MutationInputTypes = expandAllInputTypes!(cfg, uniqueTypesForExpand!MutationDirectTypes);
         alias AllInputTypes = uniqueTypesForExpand!(AliasSeq!(EntityInputTypes, MutationInputTypes));
     } else {
         alias AllInputTypes = EntityInputTypes;
     }
 
     // Collect enum types from entities
-    alias AllEnumTypes = getAllEnumTypes!QueryType;
+    alias AllEnumTypes = getAllEnumTypes!(QueryType, cfg);
 
     enum generateSchemaSDL = () {
         string result;
 
         // Declare custom scalars
-        foreach (scalarName; getAllCustomScalarNames!AllTypes) {
+        foreach (scalarName; getAllCustomScalarNames!(cfg, AllTypes)) {
             result ~= "scalar " ~ scalarName ~ "\n";
         }
-        static if (getAllCustomScalarNames!AllTypes.length > 0) {
+        static if (getAllCustomScalarNames!(cfg, AllTypes).length > 0) {
             result ~= "\n";
         }
 
@@ -1590,11 +1613,11 @@ template generateSchemaSDL(alias SchemaOrQuery) {
         }
 
         // Generate Query type
-        result ~= generateObjectTypeSDL!QueryType("Query");
+        result ~= generateObjectTypeSDL!(QueryType, cfg)("Query");
         result ~= "\n";
 
         // Generate Mutation type if it has fields
-        enum mutationSdl = generateObjectTypeSDL!MutationType("Mutation");
+        enum mutationSdl = generateObjectTypeSDL!(MutationType, cfg)("Mutation");
         static if (mutationSdl.length > 0) {
             result ~= mutationSdl;
             result ~= "\n";
@@ -1602,13 +1625,13 @@ template generateSchemaSDL(alias SchemaOrQuery) {
 
         // Generate each discovered object type
         static foreach (Entity; AllTypes) {
-            result ~= generateObjectTypeSDL!Entity(getGraphQLTypeName!Entity);
+            result ~= generateObjectTypeSDL!(Entity, cfg)(getGraphQLTypeName!Entity);
             result ~= "\n";
         }
 
         // Generate input types (discovered from computed field arguments)
         static foreach (InputType; AllInputTypes) {
-            result ~= generateInputTypeSDL!InputType();
+            result ~= generateInputTypeSDL!(InputType, cfg)();
             result ~= "\n";
         }
 

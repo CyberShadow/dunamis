@@ -1143,6 +1143,8 @@ template FilterPlugin(alias S) if (isSchema!S) {
 
     alias Query = FilteredQuery;
     alias Mutation = S.Mutation;
+
+    alias Config = S.Config;
 }
 
 // ============================================================================

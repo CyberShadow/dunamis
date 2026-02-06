@@ -131,6 +131,8 @@ template PaginationPlugin(alias S) if (isSchema!S) {
 
     alias Query = PaginatedQuery;
     alias Mutation = S.Mutation;
+
+    alias Config = S.Config;
 }
 
 /// Mixin for paginated array field on an entity (adds first/offset arguments).

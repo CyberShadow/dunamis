@@ -8,7 +8,7 @@ import std.meta;
 import std.traits;
 import std.typecons : Nullable;
 
-import dynamo.core.types : isCustomScalar, isPlainField, isPlainMethod;
+import dynamo.core.types : isCustomScalar, isPlainField, isPlainMethod, NoSchemaConfig, ResolveType;
 import dynamo.core.expr : Expr, ExprResultType, isExpr;
 import dynamo.graphql.schema;
 
@@ -28,59 +28,61 @@ import dynamo.graphql.schema;
 ///   User (object)   → NON_NULL { OBJECT "User" }
 ///   Status (enum)   → NON_NULL { ENUM "Status" }
 ///   FormatOpts (in) → NON_NULL { INPUT_OBJECT "FormatOptions" }
-template typeRefJson(T) {
-    enum typeRefJson = buildTypeRefJson!T();
+template typeRefJson(T, alias cfg = NoSchemaConfig) {
+    enum typeRefJson = buildTypeRefJson!(T, cfg)();
 }
 
-private JSONValue buildTypeRefJson(T)() {
+private JSONValue buildTypeRefJson(T, alias cfg = NoSchemaConfig)() {
+    alias Resolved = ResolveType!(T, cfg);
     // Nullable → no NON_NULL wrapper
-    static if (is(T == Nullable!U, U)) {
-        return buildBaseTypeRefJson!U();
+    static if (is(Resolved == Nullable!U, U)) {
+        return buildBaseTypeRefJson!(U, cfg)();
     }
     // Pointer → nullable (no NON_NULL wrapper)
-    else static if (is(T == U*, U)) {
-        return buildBaseTypeRefJson!U();
+    else static if (is(Resolved == U*, U)) {
+        return buildBaseTypeRefJson!(U, cfg)();
     }
     // Everything else → wrapped in NON_NULL
     else {
-        return nonNullOf(buildBaseTypeRefJson!T());
+        return nonNullOf(buildBaseTypeRefJson!(Resolved, cfg)());
     }
 }
 
-private JSONValue buildBaseTypeRefJson(T)() {
+private JSONValue buildBaseTypeRefJson(T, alias cfg = NoSchemaConfig)() {
+    alias Resolved = ResolveType!(T, cfg);
     // Scalar types (check string BEFORE array since string is immutable(char)[])
-    static if (is(T == string)) {
+    static if (is(Resolved == string)) {
         return namedType("SCALAR", "String");
-    } else static if (is(T == bool)) {
+    } else static if (is(Resolved == bool)) {
         return namedType("SCALAR", "Boolean");
-    } else static if (is(T == int) || is(T == long)) {
+    } else static if (is(Resolved == int) || is(Resolved == long)) {
         return namedType("SCALAR", "Int");
-    } else static if (is(T == float) || is(T == double)) {
+    } else static if (is(Resolved == float) || is(Resolved == double)) {
         return namedType("SCALAR", "Float");
     }
     // JSONValue → JSON scalar
-    else static if (is(T == JSONValue)) {
+    else static if (is(Resolved == JSONValue)) {
         return namedType("SCALAR", "JSON");
     }
     // Custom scalar
-    else static if (isCustomScalar!T) {
-        return namedType("SCALAR", T.name);
+    else static if (isCustomScalar!Resolved) {
+        return namedType("SCALAR", Resolved.name);
     }
     // Array → LIST (after string check since string is immutable(char)[])
-    else static if (is(T == E[], E)) {
-        return listOf(buildTypeRefJson!E());
+    else static if (is(Resolved == E[], E)) {
+        return listOf(buildTypeRefJson!(E, cfg)());
     }
     // Enum
-    else static if (is(T == enum)) {
-        return namedType("ENUM", __traits(identifier, T));
+    else static if (is(Resolved == enum)) {
+        return namedType("ENUM", __traits(identifier, Resolved));
     }
     // Object type (entity or POD struct with fields)
-    else static if (isObjectType!T) {
-        return namedType("OBJECT", getGraphQLTypeName!T);
+    else static if (isObjectType!Resolved) {
+        return namedType("OBJECT", getGraphQLTypeName!Resolved);
     }
     // Input type
-    else static if (isInputType!T) {
-        return namedType("INPUT_OBJECT", T.stringof);
+    else static if (isInputType!Resolved) {
+        return namedType("INPUT_OBJECT", Resolved.stringof);
     }
     // Fallback
     else {
@@ -137,11 +139,11 @@ struct RuntimeFieldInfo {
 
 /// Extract runtime field information from any type.
 /// Mirrors the three-pass pattern from getFields!T but produces JSONValue type refs.
-template getRuntimeFields(T) {
-    enum getRuntimeFields = buildRuntimeFields!T();
+template getRuntimeFields(T, alias cfg = NoSchemaConfig) {
+    enum getRuntimeFields = buildRuntimeFields!(T, cfg)();
 }
 
-private RuntimeFieldInfo[] buildRuntimeFields(T)() {
+private RuntimeFieldInfo[] buildRuntimeFields(T, alias cfg = NoSchemaConfig)() {
     RuntimeFieldInfo[] fields;
 
     // First pass: computed fields (static methods taking Expr!T)
@@ -157,10 +159,10 @@ private RuntimeFieldInfo[] buildRuntimeFields(T)() {
 
                 static if (isValidFieldMethod!(T, fn)) {
                     // Compute return type JSON
-                    enum typeJson = computedFieldTypeRefJson!fn();
+                    enum typeJson = computedFieldTypeRefJson!(fn, cfg)();
 
                     // Compute argument info
-                    enum args = computedFieldRuntimeArgs!fn();
+                    enum args = computedFieldRuntimeArgs!(fn, cfg)();
 
                     fields ~= RuntimeFieldInfo(
                         gqlFieldName,
@@ -180,7 +182,7 @@ private RuntimeFieldInfo[] buildRuntimeFields(T)() {
         static if (!isInternalMember!member) {
             static if (isPlainField!(T, member)) {
                 alias FieldType = typeof(__traits(getMember, T.init, member));
-                enum typeJson = typeRefJson!FieldType;
+                enum typeJson = typeRefJson!(FieldType, cfg);
 
                 fields ~= RuntimeFieldInfo(
                     member,
@@ -206,7 +208,7 @@ private RuntimeFieldInfo[] buildRuntimeFields(T)() {
                 enum gqlFieldName = getGqlName!(methodSym, member);
                 enum description = getGqlDescription!methodSym;
                 enum deprecation = getGqlDeprecated!methodSym;
-                enum typeJson = typeRefJson!RetType;
+                enum typeJson = typeRefJson!(RetType, cfg);
 
                 fields ~= RuntimeFieldInfo(
                     gqlFieldName,
@@ -225,29 +227,30 @@ private RuntimeFieldInfo[] buildRuntimeFields(T)() {
 
 /// Get JSONValue type ref for a computed field's return type.
 /// Mirrors computedFieldReturnType but produces JSONValue instead of string.
-private JSONValue computedFieldTypeRefJson(alias member)() {
+private JSONValue computedFieldTypeRefJson(alias member, alias cfg = NoSchemaConfig)() {
     alias Return = ReturnType!(typeof(member));
-    alias ResultT = ExprResultType!Return;
+    alias RawResultT = ExprResultType!Return;
+    alias ResultT = ResolveType!(RawResultT, cfg);
 
     static if (is(ResultT == string)) {
-        return typeRefJson!string;
+        return typeRefJson!(string, cfg);
     }
     else static if (is(ResultT == E[], E)) {
         static if (is(E : Expr!Inner, Inner)) {
             // Array of expressions (e.g., from map) - extract inner type → [Inner!]!
-            return nonNullOf(listOf(typeRefJson!Inner));
+            return nonNullOf(listOf(typeRefJson!(Inner, cfg)));
         } else {
-            return nonNullOf(listOf(typeRefJson!E));
+            return nonNullOf(listOf(typeRefJson!(E, cfg)));
         }
     }
     else {
-        return typeRefJson!ResultT;
+        return typeRefJson!(ResultT, cfg);
     }
 }
 
 /// Extract runtime argument info from a computed field.
 /// Mirrors getComputedFieldArguments but produces JSONValue type refs.
-private RuntimeArgInfo[] computedFieldRuntimeArgs(alias member)() {
+private RuntimeArgInfo[] computedFieldRuntimeArgs(alias member, alias cfg = NoSchemaConfig)() {
     alias Params = Parameters!member;
     alias Defaults = ParameterDefaults!member;
     enum string[] paramNames = [ParameterIdentifierTuple!member];
@@ -256,13 +259,13 @@ private RuntimeArgInfo[] computedFieldRuntimeArgs(alias member)() {
 
     // Skip first parameter (Expr!Entity), process rest as arguments
     static foreach (i; 1 .. Params.length) {{
-        alias P = Params[i];
+        alias P = ResolveType!(Params[i], cfg);
 
         static if (is(Defaults[i] == void)) {
             // No default - required argument
             args ~= RuntimeArgInfo(
                 paramNames[i],
-                typeRefJson!P,
+                typeRefJson!(P, cfg),
                 false,
                 ""
             );
@@ -271,14 +274,14 @@ private RuntimeArgInfo[] computedFieldRuntimeArgs(alias member)() {
             static if (is(P == Nullable!U, U)) {
                 args ~= RuntimeArgInfo(
                     paramNames[i],
-                    buildBaseTypeRefJson!U(),  // nullable, no NON_NULL wrapper
+                    buildBaseTypeRefJson!(U, cfg)(),  // nullable, no NON_NULL wrapper
                     true,
                     "null"
                 );
             } else {
                 args ~= RuntimeArgInfo(
                     paramNames[i],
-                    buildBaseTypeRefJson!P(),  // nullable (has default), no NON_NULL wrapper
+                    buildBaseTypeRefJson!(P, cfg)(),  // nullable (has default), no NON_NULL wrapper
                     true,
                     defaultValueToString(Defaults[i])
                 );
@@ -299,32 +302,33 @@ struct RuntimeInputFieldInfo {
 }
 
 /// Extract runtime input field info from an input type struct.
-template getRuntimeInputFields(T) if (isInputType!T) {
-    enum getRuntimeInputFields = buildRuntimeInputFields!T();
+template getRuntimeInputFields(T, alias cfg = NoSchemaConfig) if (isInputType!T) {
+    enum getRuntimeInputFields = buildRuntimeInputFields!(T, cfg)();
 }
 
-private RuntimeInputFieldInfo[] buildRuntimeInputFields(T)() {
+private RuntimeInputFieldInfo[] buildRuntimeInputFields(T, alias cfg = NoSchemaConfig)() {
     RuntimeInputFieldInfo[] fields;
 
     static foreach (member; __traits(allMembers, T)) {{
         static if (!isInternalMember!member) {
-            alias MemberType = typeof(__traits(getMember, T, member));
+            alias RawMemberType = typeof(__traits(getMember, T, member));
+            alias MemberType = ResolveType!(RawMemberType, cfg);
 
             static if (!is(MemberType == function) && !is(MemberType == void)) {
                 static if (__traits(compiles, { auto v = __traits(getMember, T.init, member); })) {
                     // Determine type ref based on nullability
                     static if (is(MemberType == Nullable!(Nullable!U), U)) {
                         // Three-state: absent/null/value → nullable
-                        enum typeJson = buildBaseTypeRefJson!U();
+                        enum typeJson = buildBaseTypeRefJson!(U, cfg)();
                     } else static if (is(MemberType == Nullable!U, U)) {
                         // Two-state → nullable
-                        enum typeJson = buildBaseTypeRefJson!U();
+                        enum typeJson = buildBaseTypeRefJson!(U, cfg)();
                     } else static if (is(MemberType == U*, U)) {
                         // Pointer → nullable
-                        enum typeJson = buildBaseTypeRefJson!U();
+                        enum typeJson = buildBaseTypeRefJson!(U, cfg)();
                     } else {
                         // Required → NON_NULL
-                        enum typeJson = nonNullOf(buildBaseTypeRefJson!MemberType());
+                        enum typeJson = nonNullOf(buildBaseTypeRefJson!(MemberType, cfg)());
                     }
 
                     fields ~= RuntimeInputFieldInfo(member, typeJson, "");
@@ -356,23 +360,30 @@ JSONValue buildIntrospectionJson(alias SchemaOrQuery)() {
         struct MutationType {}
     }
 
+    // Extract config from Schema if available (bare Query types have no Config)
+    static if (isSchema!SchemaOrQuery) {
+        alias cfg = SchemaOrQuery.Config;
+    } else {
+        alias cfg = NoSchemaConfig;
+    }
+
     // Discover all types (same pattern as generateSchemaSDL)
     static if (isSchema!SchemaOrQuery && __traits(hasMember, SchemaOrQuery, "AllEntityTypes")) {
         alias AllEntityTypes = SchemaOrQuery.AllEntityTypes;
     } else {
-        alias AllEntityTypes = getAllEntityTypes!QueryType;
+        alias AllEntityTypes = getAllEntityTypes!(QueryType, cfg);
     }
 
-    alias AllInputTypes_ = getAllInputTypes!QueryType;
-    static if (getFields!MutationType.length > 0) {
-        alias MutationDirectTypes = getInputTypesFromMutation!MutationType;
-        alias MutationInputTypes = expandAllInputTypes!(uniqueTypesForExpand!MutationDirectTypes);
+    alias AllInputTypes_ = getAllInputTypes!(QueryType, cfg);
+    static if (getFields!(MutationType, cfg).length > 0) {
+        alias MutationDirectTypes = getInputTypesFromMutation!(MutationType, cfg);
+        alias MutationInputTypes = expandAllInputTypes!(cfg, uniqueTypesForExpand!MutationDirectTypes);
         alias AllInputTypes = uniqueTypesForExpand!(AliasSeq!(AllInputTypes_, MutationInputTypes));
     } else {
         alias AllInputTypes = AllInputTypes_;
     }
 
-    alias AllEnumTypes = getAllEnumTypes!QueryType;
+    alias AllEnumTypes = getAllEnumTypes!(QueryType, cfg);
 
     // Build types array
     JSONValue[] types;
@@ -384,7 +395,7 @@ JSONValue buildIntrospectionJson(alias SchemaOrQuery)() {
     types ~= scalarTypeJson("Boolean");
 
     // Custom scalars
-    static foreach (scalarName; getAllCustomScalarNames!AllEntityTypes) {
+    static foreach (scalarName; getAllCustomScalarNames!(cfg, AllEntityTypes)) {
         types ~= scalarTypeJson(scalarName);
     }
 
@@ -394,21 +405,21 @@ JSONValue buildIntrospectionJson(alias SchemaOrQuery)() {
     }
 
     // Query type
-    types ~= buildObjectTypeJsonFromFields!QueryType("Query");
+    types ~= buildObjectTypeJsonFromFields!(QueryType, cfg)("Query");
 
     // Mutation type (if it has fields)
-    static if (getFields!MutationType.length > 0) {
-        types ~= buildObjectTypeJsonFromFields!MutationType("Mutation");
+    static if (getFields!(MutationType, cfg).length > 0) {
+        types ~= buildObjectTypeJsonFromFields!(MutationType, cfg)("Mutation");
     }
 
     // Entity/object types
     static foreach (Entity; AllEntityTypes) {
-        types ~= buildObjectTypeJsonFromFields!Entity(getGraphQLTypeName!Entity);
+        types ~= buildObjectTypeJsonFromFields!(Entity, cfg)(getGraphQLTypeName!Entity);
     }
 
     // Input types
     static foreach (InputType; AllInputTypes) {
-        types ~= buildInputObjectTypeJson!(InputType)();
+        types ~= buildInputObjectTypeJson!(InputType, cfg)();
     }
 
     // Introspection meta-types
@@ -418,7 +429,7 @@ JSONValue buildIntrospectionJson(alias SchemaOrQuery)() {
     JSONValue queryTypeRef = JSONValue(["name": JSONValue("Query")]);
 
     JSONValue mutationTypeRef;
-    static if (getFields!MutationType.length > 0) {
+    static if (getFields!(MutationType, cfg).length > 0) {
         mutationTypeRef = JSONValue(["name": JSONValue("Mutation")]);
     } else {
         mutationTypeRef = JSONValue(null);
@@ -572,8 +583,8 @@ private JSONValue scalarTypeJson(string name) {
     ]);
 }
 
-private JSONValue buildObjectTypeJsonFromFields(T)(string typeName) {
-    enum rtFields = getRuntimeFields!T;
+private JSONValue buildObjectTypeJsonFromFields(T, alias cfg = NoSchemaConfig)(string typeName) {
+    enum rtFields = getRuntimeFields!(T, cfg);
     JSONValue[] fields;
     static foreach (f; rtFields) {{
         static if (!f.hidden) {
@@ -613,9 +624,9 @@ private JSONValue buildEnumTypeJson(E)() {
     ]);
 }
 
-private JSONValue buildInputObjectTypeJson(T)() {
+private JSONValue buildInputObjectTypeJson(T, alias cfg = NoSchemaConfig)() {
     JSONValue[] inputFields;
-    static foreach (f; getRuntimeInputFields!T) {
+    static foreach (f; getRuntimeInputFields!(T, cfg)) {
         inputFields ~= inputValueJson(f.name, "", f.typeJson, f.defaultValue);
     }
 

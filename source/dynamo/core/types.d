@@ -4,6 +4,7 @@ import std.algorithm;
 import std.array;
 import std.conv;
 import std.string : indexOf;
+import std.typecons : Nullable;
 
 // ============================================================================
 // Plain Field Support
@@ -430,6 +431,232 @@ unittest {
 
     auto parsed = TestScalar.fromJsonValue(JSONValue(123));
     assert(parsed.value == 123);
+}
+
+// ============================================================================
+// Schema Configuration & Type Mappings
+// ============================================================================
+
+/// A compile-time mapping from one D type to another for GraphQL representation.
+///
+/// Allows external types (that you can't modify) to be represented as
+/// GraphQL-compatible types. The framework resolves these mappings at every
+/// type unwrapping level (Nullable, arrays).
+///
+/// Params:
+///   _From = The D type to replace (e.g., Date)
+///   _To = The replacement type that GraphQL understands (e.g., string, CustomScalar, struct)
+///   _serialize = Function: From → To (for output/serialization)
+///   _deserialize = Function: To → From (for input/deserialization)
+///
+/// Example:
+/// ---
+/// alias DateMapping = TypeMapping!(Date, string,
+///     (Date d) => d.toISOExtString,
+///     (string s) => Date.fromISOExtString(s),
+/// );
+/// ---
+template TypeMapping(_From, _To, alias _serialize, alias _deserialize) {
+    alias SourceType = _From;
+    alias TargetType = _To;
+    alias toTarget = _serialize;
+    alias fromTarget = _deserialize;
+}
+
+/// Schema-level configuration, threaded through SDL generation, compilation,
+/// and introspection. Currently holds type mappings; can be extended with
+/// future configuration fields.
+///
+/// Example:
+/// ---
+/// alias cfg = SchemaConfig!(
+///     TypeMapping!(Date, string, dateToStr, strToDate),
+///     TypeMapping!(UUID, string, uuidToStr, strToUuid),
+/// );
+/// ---
+struct SchemaConfig(TypeMappings...) {
+    alias typeMappings = TypeMappings;
+}
+
+/// Default empty schema configuration.
+alias NoSchemaConfig = SchemaConfig!();
+
+/// Resolve a D type through the schema's type mappings.
+///
+/// Checks at every unwrapping level (Nullable, arrays, direct match),
+/// so `Nullable!Date` with a `Date → string` mapping becomes `Nullable!string`.
+///
+/// If no mapping matches, the type is returned unchanged (identity).
+template ResolveType(T, alias cfg) {
+    static if (findMapping!(T, cfg).found) {
+        alias ResolveType = findMapping!(T, cfg).TargetType;
+    } else static if (is(T == Nullable!U, U)) {
+        alias Inner = ResolveType!(U, cfg);
+        static if (is(Inner == U)) {
+            alias ResolveType = T; // No change
+        } else {
+            alias ResolveType = Nullable!Inner;
+        }
+    } else static if (!is(T == string) && is(T == E[], E)) {
+        alias Inner = ResolveType!(E, cfg);
+        static if (is(Inner == E)) {
+            alias ResolveType = T; // No change
+        } else {
+            alias ResolveType = Inner[];
+        }
+    } else {
+        alias ResolveType = T;
+    }
+}
+
+/// Search the schema config's type mappings for a mapping matching source type T.
+///
+/// Returns a template with:
+///   `.found` — bool, whether a mapping was found
+///   `.TargetType` — the target type (if found)
+///   `.toTarget` — serialize function alias (if found)
+///   `.fromTarget` — deserialize function alias (if found)
+template findMapping(T, alias cfg) {
+    alias findMapping = findMappingImpl!(T, cfg.typeMappings);
+}
+
+template findMappingImpl(T, Mappings...) {
+    static if (Mappings.length == 0) {
+        enum found = false;
+        alias TargetType = void;
+    } else static if (is(Mappings[0].SourceType == T)) {
+        enum found = true;
+        alias TargetType = Mappings[0].TargetType;
+        alias toTarget = Mappings[0].toTarget;
+        alias fromTarget = Mappings[0].fromTarget;
+    } else {
+        alias rest = findMappingImpl!(T, Mappings[1 .. $]);
+        enum found = rest.found;
+        alias TargetType = rest.TargetType;
+        static if (found) {
+            alias toTarget = rest.toTarget;
+            alias fromTarget = rest.fromTarget;
+        }
+    }
+}
+
+/// Check if a type has a mapping in the schema config.
+template hasMappingFor(T, alias cfg) {
+    enum hasMappingFor = findMapping!(T, cfg).found;
+}
+
+/// Apply a type mapping's serialize function, recursively handling
+/// Nullable and array wrappers. The conversion is applied at the leaf level.
+///
+/// This is a runtime function used by the compiler to insert conversion
+/// expressions via the `use()` combinator.
+auto applySerialize(From, To, alias serialize)(From value) {
+    static if (is(From == Nullable!U, U) && is(To == Nullable!V, V)) {
+        if (value.isNull) return Nullable!V.init;
+        return Nullable!V(applySerialize!(U, V, serialize)(value.get));
+    } else static if (!is(From == string) && is(From == E1[], E1)
+                    && !is(To == string) && is(To == E2[], E2)) {
+        E2[] result;
+        result.length = value.length;
+        foreach (i, ref e; value)
+            result[i] = applySerialize!(E1, E2, serialize)(e);
+        return result;
+    } else {
+        return serialize(value);
+    }
+}
+
+/// Apply a type mapping's deserialize function, recursively handling
+/// Nullable and array wrappers.
+auto applyDeserialize(To, From, alias deserialize)(To value) {
+    import std.typecons : Nullable;
+    static if (is(To == Nullable!U, U) && is(From == Nullable!V, V)) {
+        if (value.isNull) return Nullable!V.init;
+        return Nullable!V(applyDeserialize!(U, V, deserialize)(value.get));
+    } else static if (!is(To == string) && is(To == E1[], E1)
+                    && !is(From == string) && is(From == E2[], E2)) {
+        E2[] result;
+        result.length = value.length;
+        foreach (i, ref e; value)
+            result[i] = applyDeserialize!(E1, E2, deserialize)(e);
+        return result;
+    } else {
+        return deserialize(value);
+    }
+}
+
+// Type mapping unit tests — uses module-level type to avoid nested struct issues
+private struct _TestDate {
+    int year, month, day;
+}
+
+private string _testDateToString(_TestDate d) {
+    import std.conv : to;
+    return d.year.to!string ~ "-" ~ d.month.to!string ~ "-" ~ d.day.to!string;
+}
+
+private _TestDate _testDateFromString(string) {
+    return _TestDate(2024, 1, 15);
+}
+
+unittest {
+    alias DateMapping = TypeMapping!(_TestDate, string, _testDateToString, _testDateFromString);
+    alias cfg = SchemaConfig!(DateMapping);
+
+    // ResolveType: direct match
+    static assert(is(ResolveType!(_TestDate, cfg) == string));
+
+    // ResolveType: Nullable wrapping
+    static assert(is(ResolveType!(Nullable!_TestDate, cfg) == Nullable!string));
+
+    // ResolveType: array wrapping
+    static assert(is(ResolveType!(_TestDate[], cfg) == string[]));
+
+    // ResolveType: Nullable array
+    static assert(is(ResolveType!(Nullable!(_TestDate[]), cfg) == Nullable!(string[])));
+
+    // ResolveType: identity for unmatched types
+    static assert(is(ResolveType!(int, cfg) == int));
+    static assert(is(ResolveType!(string, cfg) == string));
+    static assert(is(ResolveType!(Nullable!int, cfg) == Nullable!int));
+
+    // ResolveType: empty config
+    static assert(is(ResolveType!(_TestDate, NoSchemaConfig) == _TestDate));
+
+    // findMapping
+    static assert(findMapping!(_TestDate, cfg).found);
+    static assert(is(findMapping!(_TestDate, cfg).TargetType == string));
+    static assert(!findMapping!(int, cfg).found);
+
+    // hasMappingFor
+    static assert(hasMappingFor!(_TestDate, cfg));
+    static assert(!hasMappingFor!(int, cfg));
+
+    // applySerialize: direct
+    auto d = _TestDate(2024, 1, 15);
+    auto s = applySerialize!(_TestDate, string, DateMapping.toTarget)(d);
+    assert(s == "2024-1-15");
+
+    // applySerialize: Nullable
+    auto nd = Nullable!_TestDate(d);
+    auto ns = applySerialize!(Nullable!_TestDate, Nullable!string, DateMapping.toTarget)(nd);
+    assert(!ns.isNull);
+    assert(ns.get == "2024-1-15");
+
+    // applySerialize: null Nullable
+    auto nullD = Nullable!_TestDate.init;
+    auto nullS = applySerialize!(Nullable!_TestDate, Nullable!string, DateMapping.toTarget)(nullD);
+    assert(nullS.isNull);
+
+    // applySerialize: array
+    auto arr = [_TestDate(2024, 1, 15), _TestDate(2024, 6, 30)];
+    auto arrS = applySerialize!(_TestDate[], string[], DateMapping.toTarget)(arr);
+    assert(arrS.length == 2);
+    assert(arrS[0] == "2024-1-15");
+
+    // applyDeserialize: direct
+    auto d2 = applyDeserialize!(string, _TestDate, DateMapping.fromTarget)("2024-1-15");
+    assert(d2.year == 2024);
 }
 
 // ============================================================================
