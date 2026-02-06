@@ -231,6 +231,55 @@ mixin template CopyFields(SourceType) {
     }
 }
 
+/// Mixin template to wrap all fields from SourceType with type substitution and
+/// plugin-specific array field handling.
+///
+/// This is the common skeleton for plugin entity/Query/Mutation wrapping:
+/// 1. Copy nodeId + constructor + toString (if present on SourceType)
+/// 2. Copy plain fields (struct instance fields)
+/// 3. Dispatch fields: arrays → ArrayFieldMixin, computed → ForwardFieldWithTypeMap,
+///    plain methods → ForwardPlainMethodWithTypeMap
+///
+/// Example:
+/// ---
+/// template SortedEntity(Entity) {
+///     @GqlName(getGraphQLTypeName!Entity)
+///     struct SortedEntity {
+///         mixin WrapFields!(Entity, EntityTypeMap, SortedArrayField);
+///     }
+/// }
+/// ---
+mixin template WrapFields(SourceType, alias TypeMap, alias ArrayFieldMixin) {
+    import dynamo.core.types : isPlainField;
+    import dynamo.graphql.plugin : getFieldMembers, isComputedField, isArrayReturningField;
+    import dynamo.graphql.transform : ForwardFieldWithTypeMap, ForwardPlainMethodWithTypeMap;
+
+    // 1. Copy entity infrastructure (nodeId)
+    static if (__traits(hasMember, SourceType, "nodeId")) {
+        typeof(SourceType.nodeId) nodeId;
+        this(string id) { nodeId = typeof(nodeId)(id); }
+        string toString() const { return nodeId.toString(); }
+    }
+
+    // 2. Copy plain fields (struct instance fields)
+    static foreach (member; __traits(allMembers, SourceType)) {
+        static if (isPlainField!(SourceType, member)) {
+            mixin("typeof(__traits(getMember, SourceType.init, \"" ~ member ~ "\")) " ~ member ~ ";");
+        }
+    }
+
+    // 3. Field iteration with dispatch
+    static foreach (member; getFieldMembers!SourceType) {
+        static if (isArrayReturningField!(__traits(getMember, SourceType, member))) {
+            mixin ArrayFieldMixin!(SourceType, member, TypeMap);
+        } else static if (isComputedField!(SourceType, member)) {
+            mixin ForwardFieldWithTypeMap!(SourceType, member, TypeMap);
+        } else {
+            mixin ForwardPlainMethodWithTypeMap!(SourceType, member, TypeMap);
+        }
+    }
+}
+
 // ============================================================================
 // Plugin Helpers
 // ============================================================================

@@ -58,60 +58,17 @@ import dynamo.graphql.schema : isSchema, GqlHidden;
 template SortingPlugin(alias S) if (isSchema!S) {
     import std.meta : AliasSeq, staticMap;
     import dynamo.graphql.schema : getAllEntityTypes, getGraphQLTypeName, GqlName;
-    import dynamo.graphql.transform : isTypeInList, ForwardFieldWithTypeMap, ForwardPlainMethodWithTypeMap;
+    import dynamo.graphql.transform : isTypeInList;
 
     // Get all entity types discovered from the schema
     alias _OriginalQuery = S.Query;
     alias _AllEntityTypes = getAllEntityTypes!_OriginalQuery;
 
-    // Generate SortedQuery struct with transformed fields
-    struct SortedQuery {
-        static foreach (member; getFieldMembers!(_OriginalQuery)) {
-            static if (isArrayReturningField!(__traits(getMember, _OriginalQuery, member))) {
-                // Array field: add sorting arguments and wrap return type
-                mixin SortedArrayField!(_OriginalQuery, member, EntityTypeMap);
-            } else {
-                // Non-array field: forward with type wrapping
-                mixin ForwardFieldWithTypeMap!(_OriginalQuery, member, EntityTypeMap);
-            }
-        }
-    }
-
     // Generate sorted versions of each entity type.
-    // Each sorted entity type:
-    // 1. Has @GqlName to preserve the original GraphQL type name
-    // 2. Has orderBy arguments on array-returning fields
-    // 3. Wraps the entity type discovered from the inner schema's Query
     template SortedEntity(Entity) {
-        import dynamo.core.types : isPlainField;
-
         @GqlName(getGraphQLTypeName!Entity)
         struct SortedEntity {
-            // Copy entity infrastructure
-            static if (__traits(hasMember, Entity, "nodeId")) {
-                typeof(Entity.nodeId) nodeId;
-                this(string id) { nodeId = typeof(nodeId)(id); }
-                string toString() const { return nodeId.toString(); }
-            }
-
-            // Copy plain fields (struct instance fields)
-            static foreach (member; __traits(allMembers, Entity)) {
-                static if (isPlainField!(Entity, member)) {
-                    mixin("typeof(__traits(getMember, Entity.init, \"" ~ member ~ "\")) " ~ member ~ ";");
-                }
-            }
-
-            // Copy all fields with sorting on array fields
-            static foreach (member; getFieldMembers!Entity) {
-                static if (isArrayReturningField!(__traits(getMember, Entity, member))) {
-                    mixin SortedEntityArrayField!(Entity, member, EntityTypeMap);
-                } else static if (isComputedField!(Entity, member)) {
-                    mixin ForwardFieldWithTypeMap!(Entity, member, EntityTypeMap);
-                } else {
-                    // Plain method (instance method with no Expr parameter)
-                    mixin ForwardPlainMethodWithTypeMap!(Entity, member, EntityTypeMap);
-                }
-            }
+            mixin WrapFields!(Entity, EntityTypeMap, SortedArrayField);
         }
     }
 
@@ -127,8 +84,16 @@ template SortingPlugin(alias S) if (isSchema!S) {
         }
     }
 
+    struct SortedQuery {
+        mixin WrapFields!(_OriginalQuery, EntityTypeMap, SortedArrayField);
+    }
+
+    struct SortedMutation {
+        mixin WrapFields!(S.Mutation, EntityTypeMap, SortedArrayField);
+    }
+
     alias Query = SortedQuery;
-    alias Mutation = S.Mutation;
+    alias Mutation = SortedMutation;
 
     alias Config = S.Config;
 }
@@ -236,85 +201,6 @@ mixin template GenerateOrderByTypes(Entity, string graphqlEnumName, string graph
 // ============================================================================
 // Mixin Template for Sorted Array Fields
 // ============================================================================
-
-/// Mixin for sorted array field on an entity (adds orderBy arguments).
-/// Similar to SortedArrayField but for entity types.
-/// Uses type aliases instead of stringof to preserve type scope across plugin composition.
-mixin template SortedEntityArrayField(Entity, string fieldName, alias TypeMap) {
-    import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
-    import std.meta : AliasSeq;
-    import std.conv : to;
-    import dynamo.core.expr : Expr, ExprResultType, entityCast;
-    import dynamo.core.sorting : orderBy, OrderBySpec, SortDirection;
-    import dynamo.relational.schema : getSqlColumn;
-    import dynamo.graphql.transform : wrapEntityResult;
-
-    alias _srcFn = __traits(getMember, Entity, fieldName);
-    alias _SrcParams = Parameters!_srcFn;
-    alias _SrcDefaults = ParameterDefaults!_srcFn;
-    enum string[] _srcParamNames = [ParameterIdentifierTuple!_srcFn];
-
-    alias _SrcFirstParam = _SrcParams[0];
-    alias _SrcEntity = ExprResultType!_SrcFirstParam;
-
-    // Extract element type from array expression
-    alias _ElementType = ArrayFieldElementType!_srcFn;
-
-    // Generate the OrderBy types for this entity's child (GraphQL names for SDL)
-    enum _orderByFieldEnumName = __traits(identifier, _ElementType) ~ "OrderByField";
-    enum _orderByStructName = __traits(identifier, _ElementType) ~ "OrderBy";
-
-    // Only generate if we have sortable fields
-    static if (getSortableFields!_ElementType.length > 0) {
-        // Generate both enum and struct with fixed internal names (avoids string-based lookup)
-        mixin GenerateOrderByTypes!(_ElementType, _orderByFieldEnumName, _orderByStructName);
-        // _OrderByFieldEnum and _OrderByStruct are now defined by the mixin
-    }
-
-    // Generate type aliases for each parameter to preserve type scope
-    static foreach (i; 1 .. _SrcParams.length) {
-        mixin("alias _ParamType" ~ i.to!string ~ " = _SrcParams[" ~ i.to!string ~ "];");
-    }
-
-    // Build parameter list using type aliases
-    enum string _paramListStr = () {
-        string result = "Expr!(typeof(this)) " ~ _srcParamNames[0];
-        static foreach (i; 1 .. _SrcParams.length) {{
-            result ~= ", ";
-            result ~= "_ParamType" ~ i.to!string ~ " " ~ _srcParamNames[i];
-            static if (!is(_SrcDefaults[i] == void)) {
-                result ~= " = _SrcDefaults[" ~ i.to!string ~ "]";
-            }
-        }}
-        // Add orderBy param using fixed internal type name
-        static if (getSortableFields!_ElementType.length > 0) {
-            result ~= ", _OrderByStruct[] orderBy = null";
-        }
-        return result;
-    }();
-
-    // Build argument list - cast wrapper entity back to original
-    enum string _argListStr = () {
-        string result = "entityCast!_SrcEntity(" ~ _srcParamNames[0] ~ ")";
-        static foreach (i; 1 .. _SrcParams.length) {
-            result ~= ", " ~ _srcParamNames[i];
-        }
-        return result;
-    }();
-
-    // Generate the sorted method
-    // Helper functions (_applySorting, _getColumnName) are generated by GenerateOrderByTypes
-    static if (getSortableFields!_ElementType.length > 0) {
-        @(__traits(getAttributes, _srcFn))
-        mixin("static auto " ~ fieldName ~ "(" ~ _paramListStr ~ ") { " ~
-              "return wrapEntityResult!(TypeMap)(_applySorting(_srcFn(" ~ _argListStr ~ "), orderBy)); }");
-    } else {
-        // No sortable fields - just forward the field without orderBy
-        @(__traits(getAttributes, _srcFn))
-        mixin("static auto " ~ fieldName ~ "(" ~ _paramListStr ~ ") { " ~
-              "return wrapEntityResult!(TypeMap)(_srcFn(" ~ _argListStr ~ ")); }");
-    }
-}
 
 /// Mixin template to create a sorted version of an array-returning field.
 /// Adds orderBy parameter and wraps the result with orderBy expressions.

@@ -1076,57 +1076,17 @@ T extractJsonValue(T)(JSONValue value) {
 template FilterPlugin(alias S) if (isSchema!S) {
     import std.meta : AliasSeq, staticMap;
     import dynamo.graphql.schema : getAllEntityTypes, getGraphQLTypeName, GqlName;
-    import dynamo.graphql.transform : isTypeInList, IdentityTypeMap, ForwardFieldWithTypeMap,
-        ForwardPlainMethodWithTypeMap;
+    import dynamo.graphql.transform : isTypeInList;
 
     // Get all entity types discovered from the schema
     alias _OriginalQuery = S.Query;
     alias _AllEntityTypes = getAllEntityTypes!_OriginalQuery;
 
-    // Generate FilteredQuery struct with transformed fields
-    struct FilteredQuery {
-        static foreach (member; getFieldMembers!(_OriginalQuery)) {
-            static if (isArrayReturningField!(__traits(getMember, _OriginalQuery, member))) {
-                // Array field: add filter argument and wrap return type
-                mixin FilteredArrayField!(_OriginalQuery, member, EntityTypeMap);
-            } else {
-                // Non-array field: forward with type wrapping
-                mixin ForwardFieldWithTypeMap!(_OriginalQuery, member, EntityTypeMap);
-            }
-        }
-    }
-
     // Generate filtered versions of each entity type
     template FilteredEntity(Entity) {
-        import dynamo.core.types : isPlainField;
-
         @GqlName(getGraphQLTypeName!Entity)
         struct FilteredEntity {
-            // Copy entity infrastructure
-            static if (__traits(hasMember, Entity, "nodeId")) {
-                typeof(Entity.nodeId) nodeId;
-                this(string id) { nodeId = typeof(nodeId)(id); }
-                string toString() const { return nodeId.toString(); }
-            }
-
-            // Copy plain fields (struct instance fields)
-            static foreach (member; __traits(allMembers, Entity)) {
-                static if (isPlainField!(Entity, member)) {
-                    mixin("typeof(__traits(getMember, Entity.init, \"" ~ member ~ "\")) " ~ member ~ ";");
-                }
-            }
-
-            // Copy all fields with filter on array fields
-            static foreach (member; getFieldMembers!Entity) {
-                static if (isArrayReturningField!(__traits(getMember, Entity, member))) {
-                    mixin FilteredEntityArrayField!(Entity, member, EntityTypeMap);
-                } else static if (isComputedField!(Entity, member)) {
-                    mixin ForwardFieldWithTypeMap!(Entity, member, EntityTypeMap);
-                } else {
-                    // Plain method (instance method with no Expr parameter)
-                    mixin ForwardPlainMethodWithTypeMap!(Entity, member, EntityTypeMap);
-                }
-            }
+            mixin WrapFields!(Entity, EntityTypeMap, FilteredArrayField);
         }
     }
 
@@ -1142,8 +1102,16 @@ template FilterPlugin(alias S) if (isSchema!S) {
         }
     }
 
+    struct FilteredQuery {
+        mixin WrapFields!(_OriginalQuery, EntityTypeMap, FilteredArrayField);
+    }
+
+    struct FilteredMutation {
+        mixin WrapFields!(S.Mutation, EntityTypeMap, FilteredArrayField);
+    }
+
     alias Query = FilteredQuery;
-    alias Mutation = S.Mutation;
+    alias Mutation = FilteredMutation;
 
     alias Config = S.Config;
 }
@@ -1213,77 +1181,6 @@ mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) 
         }
 
         // Build filter predicate from typed struct
-        auto item = new FilterItemExpr!_ElementType();
-        auto predicate = buildFilterPredicateFromStruct!_ElementType(item, filter.get);
-        auto filterExpr = new FilterByExpr!_ElementType(base, item, predicate);
-        item._parentFilter = filterExpr;
-        return filterExpr;
-    }
-
-    @(__traits(getAttributes, _srcFn))
-    mixin("static auto " ~ fieldName ~ "(" ~ _paramListStr ~ ") { " ~
-          "return wrapEntityResult!(TypeMap)(_applyFilter(_srcFn(" ~ _argListStr ~ "), filter)); }");
-}
-
-/// Mixin for filtered array field on an entity type.
-/// Uses type aliases instead of stringof to preserve type scope across plugin composition.
-mixin template FilteredEntityArrayField(Entity, string fieldName, alias TypeMap) {
-    import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
-    import std.meta : AliasSeq;
-    import std.conv : to;
-    import dynamo.core.expr : Expr, ExprResultType, entityCast;
-    import dynamo.core.filtering : FilterByExpr, FilterItemExpr;
-    import dynamo.graphql.transform : wrapEntityResult;
-    import std.typecons : Nullable;
-
-    alias _srcFn = __traits(getMember, Entity, fieldName);
-    alias _SrcParams = Parameters!_srcFn;
-    alias _SrcDefaults = ParameterDefaults!_srcFn;
-    enum string[] _srcParamNames = [ParameterIdentifierTuple!_srcFn];
-
-    alias _SrcFirstParam = _SrcParams[0];
-    alias _SrcEntity = ExprResultType!_SrcFirstParam;
-
-    alias _ElementType = ArrayFieldElementType!_srcFn;
-
-    // Generate the entity filter type for this element type
-    enum _filterTypeName = __traits(identifier, _ElementType) ~ "Filter";
-    mixin GenerateEntityFilterType!(_ElementType, _filterTypeName);
-
-    // Generate type aliases for each parameter to preserve type scope
-    static foreach (i; 1 .. _SrcParams.length) {
-        mixin("alias _ParamType" ~ i.to!string ~ " = _SrcParams[" ~ i.to!string ~ "];");
-    }
-
-    // Build parameter list using type aliases
-    enum string _paramListStr = () {
-        string result = "Expr!(typeof(this)) " ~ _srcParamNames[0];
-        static foreach (i; 1 .. _SrcParams.length) {{
-            result ~= ", ";
-            result ~= "_ParamType" ~ i.to!string ~ " " ~ _srcParamNames[i];
-            static if (!is(_SrcDefaults[i] == void)) {
-                result ~= " = _SrcDefaults[" ~ i.to!string ~ "]";
-            }
-        }}
-        // Add typed filter param
-        result ~= ", Nullable!_EntityFilter filter = Nullable!_EntityFilter.init";
-        return result;
-    }();
-
-    enum string _argListStr = () {
-        string result = "entityCast!_SrcEntity(" ~ _srcParamNames[0] ~ ")";
-        static foreach (i; 1 .. _SrcParams.length) {
-            result ~= ", " ~ _srcParamNames[i];
-        }
-        return result;
-    }();
-
-    // Apply filter using typed filter struct
-    private static Expr!(_ElementType[]) _applyFilter(T)(T base, Nullable!_EntityFilter filter) {
-        if (filter.isNull) {
-            return base;
-        }
-
         auto item = new FilterItemExpr!_ElementType();
         auto predicate = buildFilterPredicateFromStruct!_ElementType(item, filter.get);
         auto filterExpr = new FilterByExpr!_ElementType(base, item, predicate);
