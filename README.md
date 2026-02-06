@@ -685,6 +685,38 @@ users(filter: {posts: {every: {title: {contains: "Draft"}}}}) { ... }
 users(filter: {posts: {none: {title: {contains: "Spam"}}}}) { ... }
 ```
 
+### Introspection
+
+Runtime introspection is built in. The standard `__schema`, `__type`, and `__typename` meta-fields work out of the box:
+
+```graphql
+# Type name on any object
+{ users { __typename firstName } }
+# Returns: {"users": [{"__typename": "User", "firstName": "Alice"}, ...]}
+
+# Schema introspection
+{
+  __schema {
+    queryType { name }
+    types { name kind }
+  }
+}
+
+# Type lookup
+{
+  __type(name: "User") {
+    name
+    kind
+    fields {
+      name
+      type { name kind ofType { name } }
+    }
+  }
+}
+```
+
+Introspection respects `@GqlHidden` (hidden fields are excluded), `@GqlDeprecated` (fields include `isDeprecated` and `deprecationReason`), and the `includeDeprecated` argument on `fields` and `enumValues`.
+
 ## Current Status
 
 **Working:**
@@ -734,13 +766,13 @@ users(filter: {posts: {none: {title: {contains: "Spam"}}}}) { ... }
   - Nested sorting for HasMany relationships
 - Pagination with `PaginationPlugin`:
   - `first`/`after` cursor-based pagination
+- Runtime introspection (`__schema`, `__type`, `__typename`)
 
 ## Future Directions
 
 - **Polymorphism** - GraphQL union and interface types for heterogeneous collections
 - **Expression deduplication** - Grafast-style peer analysis
 - **Plan caching** - Reuse optimized plans for repeated queries
-- **Runtime introspection** - `__schema`, `__type`, `__typename` queries
 - **Error path tracking** - Track field paths through nested selections for precise error reporting (e.g., `["users", 0, "posts", 2, "title"]`)
 - **Field override plugin layer** - Runtime mechanism to intercept and override any field resolution, enabling feature flags, A/B testing, gradual rollouts, or per-deployment customization without recompilation
 

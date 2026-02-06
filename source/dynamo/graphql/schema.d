@@ -885,7 +885,7 @@ template expandInputOneLevel(Types...) {
 }
 
 /// Forward declaration helper for uniqueTypes (defined later)
-private template uniqueTypesForExpand(Types...) {
+package template uniqueTypesForExpand(Types...) {
     static if (Types.length == 0) {
         alias uniqueTypesForExpand = AliasSeq!();
     } else static if (staticContains!(Types[0], Types[1..$])) {
@@ -1514,7 +1514,7 @@ private template getCustomScalarNames(T) {
 }
 
 /// Collect all custom scalar names from multiple entities
-private template getAllCustomScalarNames(Entities...) {
+package template getAllCustomScalarNames(Entities...) {
     enum getAllCustomScalarNames = () {
         string[] allNames;
         static foreach (Entity; Entities) {

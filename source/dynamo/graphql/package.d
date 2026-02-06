@@ -2,6 +2,7 @@ module dynamo.graphql;
 
 public import dynamo.graphql.compiler;
 public import dynamo.graphql.filtering;
+public import dynamo.graphql.introspection;
 public import dynamo.graphql.pagination;
 public import dynamo.graphql.plugin;
 public import dynamo.graphql.schema;

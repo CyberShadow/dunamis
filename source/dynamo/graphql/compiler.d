@@ -17,6 +17,7 @@ import dynamo.core;
 import dynamo.core.expr : SequentialJsonObjectExpr, SingletonExpr, isExpr, ExprResultType, Expr, singleton, FieldAccessExpr, MethodCallExpr;
 import dynamo.core.optimize : OptimizeContext;
 import dynamo.core.types : isPlainField, isPlainMethod;
+import dynamo.graphql.introspection;
 import dynamo.graphql.schema;
 
 // ============================================================================
@@ -130,7 +131,7 @@ class CompilerException : Exception {
 // Internal: AST Navigation
 // ============================================================================
 
-private:
+package:
 
 /// Find the first operation in the document
 OperationDefinition findOperation(Document doc) @safe {
@@ -310,6 +311,21 @@ bool extractBool(Value val) {
 bool isNullValue(Value val) {
     import graphql.ast : ValueEnum;
     return val is null || val.ruleSelection == ValueEnum.N;
+}
+
+/// Extract the "name" argument for __type introspection query
+string extractTypeNameArg(Arguments args, JSONValue variables) {
+    auto lookup = findArgumentValue(args, "name");
+    if (lookup.isNull) {
+        throw new CompilerException("__type requires a 'name' argument");
+    }
+    if (lookup.isVariable) {
+        if (lookup.variableName in variables) {
+            return variables[lookup.variableName].str;
+        }
+        throw new CompilerException("Variable $" ~ lookup.variableName ~ " not found");
+    }
+    return extractString(lookup.value);
 }
 
 /// Convert a GraphQL AST Value to JSONValue
@@ -863,6 +879,24 @@ ExprBase compileRootField(Parent)(Field field, JSONValue variables) {
     auto fieldName = getFieldName(field);
     auto parentExpr = singleton(Parent.init);
 
+    // Introspection fields
+    if (fieldName == "__typename") {
+        return wrapAsJsonExpr(singleton(getGraphQLTypeName!Parent));
+    }
+    if (fieldName == "__schema") {
+        auto schemaJson = buildIntrospectionJson!Parent();
+        auto result = applySelectionSet(schemaJson, field.ss, variables);
+        return wrapAsJsonExpr(singleton(result));
+    }
+    if (fieldName == "__type") {
+        auto typeName = extractTypeNameArg(field.args, variables);
+        auto lookup = buildTypeLookup!Parent();
+        if (auto typeJson = typeName in lookup) {
+            return wrapAsJsonExpr(singleton(applySelectionSet(*typeJson, field.ss, variables)));
+        }
+        return wrapAsJsonExpr(singleton(JSONValue(null)));
+    }
+
     static foreach (member; __traits(allMembers, Parent)) {{
         static if (!isInternalMember!member) {
             alias memberSym = __traits(getMember, Parent, member);
@@ -1014,6 +1048,24 @@ DynamicJsonObjectExpr compileRootSelectionSetWithSchema(Query, alias Schema)(Sel
 ExprBase compileRootFieldWithSchema(Parent, alias Schema)(Field field, JSONValue variables) {
     auto fieldName = getFieldName(field);
     auto parentExpr = singleton(Parent.init);
+
+    // Introspection fields
+    if (fieldName == "__typename") {
+        return wrapAsJsonExpr(singleton(getGraphQLTypeName!Parent));
+    }
+    if (fieldName == "__schema") {
+        auto schemaJson = buildIntrospectionJson!Schema();
+        auto result = applySelectionSet(schemaJson, field.ss, variables);
+        return wrapAsJsonExpr(singleton(result));
+    }
+    if (fieldName == "__type") {
+        auto typeName = extractTypeNameArg(field.args, variables);
+        auto lookup = buildTypeLookup!Schema();
+        if (auto typeJson = typeName in lookup) {
+            return wrapAsJsonExpr(singleton(applySelectionSet(*typeJson, field.ss, variables)));
+        }
+        return wrapAsJsonExpr(singleton(JSONValue(null)));
+    }
 
     static foreach (member; __traits(allMembers, Parent)) {{
         static if (!isInternalMember!member) {
@@ -1243,6 +1295,11 @@ ExprBase compileFieldAccess(T)(Expr!T ref_, Field field, JSONValue variables) {
         }
     }}
 
+    // __typename: returns the GraphQL type name as a constant
+    if (fieldName == "__typename") {
+        return wrapAsJsonExpr(constant(getGraphQLTypeName!T, ref_));
+    }
+
     throw new CompilerException("Unknown field '" ~ fieldName ~ "' on type " ~ T.stringof);
 }
 
@@ -1404,6 +1461,11 @@ ExprBase compileFieldAccessWithSchema(T, alias Schema)(Expr!T ref_, Field field,
             }
         }
     }}
+
+    // __typename: returns the GraphQL type name as a constant
+    if (fieldName == "__typename") {
+        return wrapAsJsonExpr(constant(getGraphQLTypeName!T, ref_));
+    }
 
     throw new CompilerException("Unknown field '" ~ fieldName ~ "' on type " ~ T.stringof);
 }
@@ -2792,4 +2854,158 @@ unittest {
     auto users = result["users"].array;
     assert(users.length == 1);
     assert(users[0]["matchFilter"].str == "Alice");
+}
+
+// __typename introspection test
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dynamo.core;
+    import dynamo.relational.schema;
+    import dynamo.relational.demo;
+
+    static MockDB!() db;
+
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("firstName", string);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "first_name": "Alice"}
+    ]`);
+
+    auto executor = new Executor();
+
+    // __typename on root Query
+    {
+        auto query = compileQuery!Query(`{ __typename }`);
+        auto result = awaitSync(executor.execute(query));
+        assert(result["__typename"].str == "Query");
+    }
+
+    // __typename on entity
+    {
+        auto query = compileQuery!Query(`{ users { __typename firstName } }`);
+        auto result = awaitSync(executor.execute(query));
+        auto users = result["users"].array;
+        assert(users.length == 1);
+        assert(users[0]["__typename"].str == "User");
+        assert(users[0]["firstName"].str == "Alice");
+    }
+}
+
+// __schema introspection test
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dynamo.core;
+    import dynamo.relational.schema;
+    import dynamo.relational.demo;
+
+    static MockDB!() db;
+
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("firstName", string);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    db = new MockDB!();
+
+    auto executor = new Executor();
+
+    // Basic __schema query
+    {
+        auto query = compileQuery!Query(`{ __schema { queryType { name } } }`);
+        auto result = awaitSync(executor.execute(query));
+        assert(result["__schema"]["queryType"]["name"].str == "Query");
+    }
+
+    // __schema with types
+    {
+        auto query = compileQuery!Query(`{ __schema { types { name kind } } }`);
+        auto result = awaitSync(executor.execute(query));
+        auto types = result["__schema"]["types"].array;
+        bool foundUser = false;
+        bool foundQuery = false;
+        foreach (t; types) {
+            if (t["name"].str == "User") {
+                foundUser = true;
+                assert(t["kind"].str == "OBJECT");
+            }
+            if (t["name"].str == "Query") {
+                foundQuery = true;
+                assert(t["kind"].str == "OBJECT");
+            }
+        }
+        assert(foundUser, "Should find User type");
+        assert(foundQuery, "Should find Query type");
+    }
+}
+
+// __type introspection test
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dynamo.core;
+    import dynamo.relational.schema;
+    import dynamo.relational.demo;
+
+    static MockDB!() db;
+
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("firstName", string);
+        mixin Col!("lastName", string);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    db = new MockDB!();
+
+    auto executor = new Executor();
+
+    // __type lookup for existing type
+    {
+        auto query = compileQuery!Query(`{ __type(name: "User") { name kind } }`);
+        auto result = awaitSync(executor.execute(query));
+        assert(result["__type"]["name"].str == "User");
+        assert(result["__type"]["kind"].str == "OBJECT");
+    }
+
+    // __type lookup for non-existent type
+    {
+        auto query = compileQuery!Query(`{ __type(name: "NonExistent") { name } }`);
+        auto result = awaitSync(executor.execute(query));
+        assert(result["__type"].isNull);
+    }
+
+    // __type with fields
+    {
+        auto query = compileQuery!Query(`{ __type(name: "User") { name fields { name type { kind name } } } }`);
+        auto result = awaitSync(executor.execute(query));
+        assert(result["__type"]["name"].str == "User");
+        auto fields = result["__type"]["fields"].array;
+        bool foundFirstName = false;
+        foreach (f; fields) {
+            if (f["name"].str == "firstName") {
+                foundFirstName = true;
+                // String! → NON_NULL wrapping SCALAR String
+                assert(f["type"]["kind"].str == "NON_NULL");
+                assert(f["type"]["name"].isNull);
+            }
+        }
+        assert(foundFirstName, "Should find firstName field");
+    }
 }
