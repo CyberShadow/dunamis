@@ -434,14 +434,13 @@ unittest {
 }
 
 // ============================================================================
-// Schema Configuration & Type Mappings
+// Type Mappings
 // ============================================================================
 
 /// A compile-time mapping from one D type to another for GraphQL representation.
 ///
 /// Allows external types (that you can't modify) to be represented as
-/// GraphQL-compatible types. The framework resolves these mappings at every
-/// type unwrapping level (Nullable, arrays).
+/// GraphQL-compatible types.
 ///
 /// Params:
 ///   _From = The D type to replace (e.g., Date)
@@ -461,88 +460,6 @@ template TypeMapping(_From, _To, alias _serialize, alias _deserialize) {
     alias TargetType = _To;
     alias toTarget = _serialize;
     alias fromTarget = _deserialize;
-}
-
-/// Schema-level configuration, threaded through SDL generation, compilation,
-/// and introspection. Currently holds type mappings; can be extended with
-/// future configuration fields.
-///
-/// Example:
-/// ---
-/// alias cfg = SchemaConfig!(
-///     TypeMapping!(Date, string, dateToStr, strToDate),
-///     TypeMapping!(UUID, string, uuidToStr, strToUuid),
-/// );
-/// ---
-struct SchemaConfig(TypeMappings...) {
-    alias typeMappings = TypeMappings;
-}
-
-/// Default empty schema configuration.
-alias NoSchemaConfig = SchemaConfig!();
-
-/// Resolve a D type through the schema's type mappings.
-///
-/// Checks at every unwrapping level (Nullable, arrays, direct match),
-/// so `Nullable!Date` with a `Date → string` mapping becomes `Nullable!string`.
-///
-/// If no mapping matches, the type is returned unchanged (identity).
-template ResolveType(T, alias cfg) {
-    static if (findMapping!(T, cfg).found) {
-        alias ResolveType = findMapping!(T, cfg).TargetType;
-    } else static if (is(T == Nullable!U, U)) {
-        alias Inner = ResolveType!(U, cfg);
-        static if (is(Inner == U)) {
-            alias ResolveType = T; // No change
-        } else {
-            alias ResolveType = Nullable!Inner;
-        }
-    } else static if (!is(T == string) && is(T == E[], E)) {
-        alias Inner = ResolveType!(E, cfg);
-        static if (is(Inner == E)) {
-            alias ResolveType = T; // No change
-        } else {
-            alias ResolveType = Inner[];
-        }
-    } else {
-        alias ResolveType = T;
-    }
-}
-
-/// Search the schema config's type mappings for a mapping matching source type T.
-///
-/// Returns a template with:
-///   `.found` — bool, whether a mapping was found
-///   `.TargetType` — the target type (if found)
-///   `.toTarget` — serialize function alias (if found)
-///   `.fromTarget` — deserialize function alias (if found)
-template findMapping(T, alias cfg) {
-    alias findMapping = findMappingImpl!(T, cfg.typeMappings);
-}
-
-template findMappingImpl(T, Mappings...) {
-    static if (Mappings.length == 0) {
-        enum found = false;
-        alias TargetType = void;
-    } else static if (is(Mappings[0].SourceType == T)) {
-        enum found = true;
-        alias TargetType = Mappings[0].TargetType;
-        alias toTarget = Mappings[0].toTarget;
-        alias fromTarget = Mappings[0].fromTarget;
-    } else {
-        alias rest = findMappingImpl!(T, Mappings[1 .. $]);
-        enum found = rest.found;
-        alias TargetType = rest.TargetType;
-        static if (found) {
-            alias toTarget = rest.toTarget;
-            alias fromTarget = rest.fromTarget;
-        }
-    }
-}
-
-/// Check if a type has a mapping in the schema config.
-template hasMappingFor(T, alias cfg) {
-    enum hasMappingFor = findMapping!(T, cfg).found;
 }
 
 /// Apply a type mapping's serialize function, recursively handling
@@ -601,36 +518,9 @@ private _TestDate _testDateFromString(string) {
 
 unittest {
     alias DateMapping = TypeMapping!(_TestDate, string, _testDateToString, _testDateFromString);
-    alias cfg = SchemaConfig!(DateMapping);
 
-    // ResolveType: direct match
-    static assert(is(ResolveType!(_TestDate, cfg) == string));
-
-    // ResolveType: Nullable wrapping
-    static assert(is(ResolveType!(Nullable!_TestDate, cfg) == Nullable!string));
-
-    // ResolveType: array wrapping
-    static assert(is(ResolveType!(_TestDate[], cfg) == string[]));
-
-    // ResolveType: Nullable array
-    static assert(is(ResolveType!(Nullable!(_TestDate[]), cfg) == Nullable!(string[])));
-
-    // ResolveType: identity for unmatched types
-    static assert(is(ResolveType!(int, cfg) == int));
-    static assert(is(ResolveType!(string, cfg) == string));
-    static assert(is(ResolveType!(Nullable!int, cfg) == Nullable!int));
-
-    // ResolveType: empty config
-    static assert(is(ResolveType!(_TestDate, NoSchemaConfig) == _TestDate));
-
-    // findMapping
-    static assert(findMapping!(_TestDate, cfg).found);
-    static assert(is(findMapping!(_TestDate, cfg).TargetType == string));
-    static assert(!findMapping!(int, cfg).found);
-
-    // hasMappingFor
-    static assert(hasMappingFor!(_TestDate, cfg));
-    static assert(!hasMappingFor!(int, cfg));
+    static assert(is(DateMapping.SourceType == _TestDate));
+    static assert(is(DateMapping.TargetType == string));
 
     // applySerialize: direct
     auto d = _TestDate(2024, 1, 15);

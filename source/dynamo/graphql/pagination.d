@@ -90,8 +90,6 @@ template PaginationPlugin(alias S) if (isSchema!S) {
 
     alias Query = PaginatedQuery;
     alias Mutation = PaginatedMutation;
-
-    alias Config = S.Config;
 }
 
 /// Mixin template to create a paginated version of an array-returning field.

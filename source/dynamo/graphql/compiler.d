@@ -16,7 +16,7 @@ import ae.utils.promise : Promise;
 import dynamo.core;
 import dynamo.core.expr : SequentialJsonObjectExpr, SingletonExpr, isExpr, ExprResultType, Expr, singleton, FieldAccessExpr, MethodCallExpr;
 import dynamo.core.optimize : OptimizeContext;
-import dynamo.core.types : isPlainField, isPlainMethod, NoSchemaConfig, ResolveType, findMapping, hasMappingFor, applySerialize, applyDeserialize;
+import dynamo.core.types : isPlainField, isPlainMethod;
 import dynamo.graphql.introspection;
 import dynamo.graphql.schema;
 
@@ -103,24 +103,17 @@ GraphQLResult compileQuery(alias SchemaOrQuery)(string queryString, JSONValue va
         struct MutationType {}
     }
 
-    // Extract config from Schema if available (bare Query types have no Config)
-    static if (isSchema!SchemaOrQuery) {
-        alias cfg = SchemaOrQuery.Config;
-    } else {
-        alias cfg = NoSchemaConfig;
-    }
-
     // Compile based on operation type
     if (isMutation) {
-        static if (getFields!(MutationType, cfg).length > 0) {
-            return compileRootMutationSet!(MutationType, cfg)(op.ss, variables);
+        static if (getFields!MutationType.length > 0) {
+            return compileRootMutationSet!MutationType(op.ss, variables);
         } else {
             throw new CompilerException("Mutation operations require a Schema with Mutation type");
         }
     } else {
         // Query operation - compile using QueryType directly
         // Entity return types are already wrapped by ForwardFieldWithTypeMap
-        return compileRootSelectionSet!(QueryType, cfg, SchemaOrQuery)(op.ss, variables);
+        return compileRootSelectionSet!(QueryType, SchemaOrQuery)(op.ss, variables);
     }
 }
 
@@ -400,15 +393,8 @@ private template getMemberName(alias member) {
 // ============================================================================
 
 /// Extract a typed value from a JSONValue (used for variable resolution)
-T extractValueFromJson(T, alias cfg = NoSchemaConfig)(JSONValue json) {
+T extractValueFromJson(T)(JSONValue json) {
     import std.json : JSONType;
-
-    // Check for type mapping first
-    static if (hasMappingFor!(T, cfg)) {
-        alias mapping = findMapping!(T, cfg);
-        auto targetVal = extractValueFromJson!(mapping.TargetType, cfg)(json);
-        return mapping.fromTarget(targetVal);
-    } else {
 
     if (json.type == JSONType.null_) {
         static if (is(T == Nullable!U, U)) {
@@ -499,12 +485,10 @@ T extractValueFromJson(T, alias cfg = NoSchemaConfig)(JSONValue json) {
     } else {
         static assert(false, "Unsupported variable type: " ~ T.stringof);
     }
-
-    } // end static else (no mapping)
 }
 
 /// Extract an input object from a JSONValue
-T extractInputObjectFromJson(T, alias cfg = NoSchemaConfig)(JSONValue json) if (isInputType!T) {
+T extractInputObjectFromJson(T)(JSONValue json) if (isInputType!T) {
     import std.json : JSONType;
 
     if (json.type != JSONType.object) {
@@ -524,7 +508,7 @@ T extractInputObjectFromJson(T, alias cfg = NoSchemaConfig)(JSONValue json) if (
                 alias MemberType = typeof(__traits(getMember, T, member));
                 static if (!is(MemberType == function) && !is(MemberType == void)) {
                     if (member in json.object) {
-                        __traits(getMember, result, member) = extractValueFromJson!(MemberType, cfg)(json.object[member]);
+                        __traits(getMember, result, member) = extractValueFromJson!MemberType(json.object[member]);
                     }
                 }
             }
@@ -535,15 +519,8 @@ T extractInputObjectFromJson(T, alias cfg = NoSchemaConfig)(JSONValue json) if (
 }
 
 /// Extract a typed value from a GraphQL Value node
-T extractValue(T, alias cfg = NoSchemaConfig)(Value val) {
+T extractValue(T)(Value val) {
     import graphql.ast : ValueEnum;
-
-    // Check for type mapping first
-    static if (hasMappingFor!(T, cfg)) {
-        alias mapping = findMapping!(T, cfg);
-        auto targetVal = extractValue!(mapping.TargetType, cfg)(val);
-        return mapping.fromTarget(targetVal);
-    } else {
 
     if (val is null || val.ruleSelection == ValueEnum.N) {
         return T.init;
@@ -620,12 +597,10 @@ T extractValue(T, alias cfg = NoSchemaConfig)(Value val) {
     } else {
         static assert(false, "Unsupported argument type: " ~ T.stringof);
     }
-
-    } // end static else (no mapping)
 }
 
 /// Extract an input object from a GraphQL object Value node
-T extractInputObject(T, alias cfg = NoSchemaConfig)(Value val) if (isInputType!T) {
+T extractInputObject(T)(Value val) if (isInputType!T) {
     import graphql.ast : ValueEnum;
 
     if (val is null) {
@@ -650,7 +625,7 @@ T extractInputObject(T, alias cfg = NoSchemaConfig)(Value val) if (isInputType!T
             Value fieldVal = vals.val.val;
 
             // Set the corresponding struct field
-            setInputField!(T, cfg)(result, fieldName, fieldVal);
+            setInputField!T(result, fieldName, fieldVal);
         }
 
         // Process remaining fields (linked list)
@@ -667,7 +642,7 @@ T extractInputObject(T, alias cfg = NoSchemaConfig)(Value val) if (isInputType!T
 }
 
 /// Set a field in an input object struct from a GraphQL Value
-void setInputField(T, alias cfg = NoSchemaConfig)(ref T obj, string fieldName, Value val) if (isInputType!T) {
+void setInputField(T)(ref T obj, string fieldName, Value val) if (isInputType!T) {
     // Use compile-time introspection to find and set the matching field
     static foreach (member; __traits(allMembers, T)) {{
         static if (!isInternalMember!member) {
@@ -684,7 +659,7 @@ void setInputField(T, alias cfg = NoSchemaConfig)(ref T obj, string fieldName, V
                                 __traits(getMember, obj, member) = null;
                             } else {
                                 auto ptr = new T;
-                                *ptr = extractInputObject!(T, cfg)(val);
+                                *ptr = extractInputObject!T(val);
                                 __traits(getMember, obj, member) = ptr;
                             }
                         } else static if (is(MemberType == T[])) {
@@ -697,7 +672,7 @@ void setInputField(T, alias cfg = NoSchemaConfig)(ref T obj, string fieldName, V
                                 void processValues(Values v) {
                                     if (v is null) return;
                                     if (v.val !is null) {
-                                        result ~= extractInputObject!(T, cfg)(v.val);
+                                        result ~= extractInputObject!T(v.val);
                                     }
                                     if (v.follow !is null) {
                                         processValues(v.follow);
@@ -709,7 +684,7 @@ void setInputField(T, alias cfg = NoSchemaConfig)(ref T obj, string fieldName, V
                                 __traits(getMember, obj, member) = result;
                             }
                         } else {
-                            __traits(getMember, obj, member) = extractValue!(MemberType, cfg)(val);
+                            __traits(getMember, obj, member) = extractValue!MemberType(val);
                         }
                         return;
                     }
@@ -783,7 +758,7 @@ template allArgTypesSupported(alias fn) {
 /// Uses compile-time introspection to determine parameter types and names,
 /// then extracts values from the GraphQL Arguments at runtime.
 /// Variables are resolved from the provided JSONValue map.
-auto callComputedField(alias fn, Entity, alias cfg = NoSchemaConfig)(Expr!Entity entityRef, Arguments args, JSONValue variables) {
+auto callComputedField(alias fn, Entity)(Expr!Entity entityRef, Arguments args, JSONValue variables) {
     import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
     import std.typecons : tuple;
 
@@ -802,7 +777,7 @@ auto callComputedField(alias fn, Entity, alias cfg = NoSchemaConfig)(Expr!Entity
             string code = "tuple(";
             static foreach (i; 1 .. Params.length) {
                 code ~= (i > 1 ? ", " : "") ~
-                    "extractArg!(Params[" ~ i.stringof ~ "], Defaults[" ~ i.stringof ~ "], cfg)" ~
+                    "extractArg!(Params[" ~ i.stringof ~ "], Defaults[" ~ i.stringof ~ "])" ~
                     "(args, paramNames[" ~ i.stringof ~ "], variables)";
             }
             code ~= ")";
@@ -814,7 +789,7 @@ auto callComputedField(alias fn, Entity, alias cfg = NoSchemaConfig)(Expr!Entity
 
 /// Extract an argument value, using default if not provided.
 /// Handles both literal values and variable references.
-T extractArg(T, alias Default, alias cfg = NoSchemaConfig)(Arguments args, string name, JSONValue variables) {
+T extractArg(T, alias Default)(Arguments args, string name, JSONValue variables) {
     import std.json : JSONType;
     import std.typecons : Nullable;
 
@@ -850,7 +825,7 @@ T extractArg(T, alias Default, alias cfg = NoSchemaConfig)(Arguments args, strin
                 throw new CompilerException("Missing variable: $" ~ lookup.variableName);
             }
         }
-        return extractValueFromJson!(T, cfg)(variables.object[lookup.variableName]);
+        return extractValueFromJson!T(variables.object[lookup.variableName]);
     } else {
         // Literal value
         static if (hasExplicitDefault) {
@@ -862,7 +837,7 @@ T extractArg(T, alias Default, alias cfg = NoSchemaConfig)(Arguments args, strin
                 return T.init;
             }
         }
-        return extractValue!(T, cfg)(lookup.value);
+        return extractValue!T(lookup.value);
     }
 }
 
@@ -871,7 +846,7 @@ T extractArg(T, alias Default, alias cfg = NoSchemaConfig)(Arguments args, strin
 // ============================================================================
 
 /// Compile the root selection set for mutations (sequential execution)
-SequentialJsonObjectExpr compileRootMutationSet(Mutation, alias cfg = NoSchemaConfig)(SelectionSet ss, JSONValue variables) {
+SequentialJsonObjectExpr compileRootMutationSet(Mutation)(SelectionSet ss, JSONValue variables) {
     auto selections = iterateSelections(ss);
 
     if (selections.length == 0) {
@@ -885,7 +860,7 @@ SequentialJsonObjectExpr compileRootMutationSet(Mutation, alias cfg = NoSchemaCo
         if (sel.ruleSelection != SelectionEnum.Field) continue;
         auto field = sel.field;
         fieldNames ~= getOutputName(field);
-        fieldExprs ~= compileRootField!(Mutation, cfg)(field, variables);
+        fieldExprs ~= compileRootField!Mutation(field, variables);
     }
 
     if (fieldNames.length == 0) {
@@ -897,7 +872,7 @@ SequentialJsonObjectExpr compileRootMutationSet(Mutation, alias cfg = NoSchemaCo
 
 /// Compile a single root field (works for both Query and Mutation).
 /// Scans for function members with matching GraphQL name.
-ExprBase compileRootField(Parent, alias cfg = NoSchemaConfig, alias IntrospectionSource = Parent)(Field field, JSONValue variables) {
+ExprBase compileRootField(Parent, alias IntrospectionSource = Parent)(Field field, JSONValue variables) {
     auto fieldName = getFieldName(field);
     auto parentExpr = singleton(Parent.init);
 
@@ -925,7 +900,7 @@ ExprBase compileRootField(Parent, alias cfg = NoSchemaConfig, alias Introspectio
             static if (is(typeof(memberSym) == function)) {
                 enum gqlName = getGqlName!(memberSym, member);
                 if (fieldName == gqlName) {
-                    return callRootField!(memberSym, Parent, cfg)(parentExpr, field.args, field.ss, variables);
+                    return callRootField!(memberSym, Parent)(parentExpr, field.args, field.ss, variables);
                 }
             }
         }
@@ -937,7 +912,7 @@ ExprBase compileRootField(Parent, alias cfg = NoSchemaConfig, alias Introspectio
 /// Call a root field function and handle the return type.
 /// Root fields return Expr!T which we may need to descend into with a selection set.
 /// Works for both Query and Mutation fields.
-ExprBase callRootField(alias fn, Parent, alias cfg = NoSchemaConfig)(Expr!Parent parent, Arguments args, SelectionSet ss, JSONValue variables) {
+ExprBase callRootField(alias fn, Parent)(Expr!Parent parent, Arguments args, SelectionSet ss, JSONValue variables) {
     import std.traits : Parameters, ReturnType, ParameterDefaults, ParameterIdentifierTuple;
     import std.typecons : tuple;
     import dynamo.core.expr : toJsonValue, Expr, ExprResultType, isExpr;
@@ -958,7 +933,7 @@ ExprBase callRootField(alias fn, Parent, alias cfg = NoSchemaConfig)(Expr!Parent
             string code = "tuple(";
             static foreach (i; 1 .. Params.length) {
                 code ~= (i > 1 ? ", " : "") ~
-                    "extractArg!(Params[" ~ i.stringof ~ "], ParameterDefaults!fn[" ~ i.stringof ~ "], cfg)" ~
+                    "extractArg!(Params[" ~ i.stringof ~ "], ParameterDefaults!fn[" ~ i.stringof ~ "])" ~
                     "(args, [ParameterIdentifierTuple!fn][" ~ i.stringof ~ "], variables)";
             }
             code ~= ")";
@@ -968,7 +943,7 @@ ExprBase callRootField(alias fn, Parent, alias cfg = NoSchemaConfig)(Expr!Parent
     }
 
     // Handle return type generically
-    return compileFieldResult!(typeof(resultExpr), cfg)(resultExpr, ss, variables);
+    return compileFieldResult!(typeof(resultExpr))(resultExpr, ss, variables);
 }
 
 /// Wrap an expression to convert its result to JSONValue
@@ -1016,7 +991,7 @@ auto extractAllArgs(alias fn)(Arguments args, JSONValue variables) {
 // ============================================================================
 
 /// Compile the root selection set (fields from Query type)
-DynamicJsonObjectExpr compileRootSelectionSet(Query, alias cfg = NoSchemaConfig, alias IntrospectionSource = Query)(SelectionSet ss, JSONValue variables) {
+DynamicJsonObjectExpr compileRootSelectionSet(Query, alias IntrospectionSource = Query)(SelectionSet ss, JSONValue variables) {
     auto selections = iterateSelections(ss);
 
     if (selections.length == 0) {
@@ -1030,7 +1005,7 @@ DynamicJsonObjectExpr compileRootSelectionSet(Query, alias cfg = NoSchemaConfig,
         if (sel.ruleSelection != SelectionEnum.Field) continue;
         auto field = sel.field;
         fieldNames ~= getOutputName(field);
-        fieldExprs ~= compileRootField!(Query, cfg, IntrospectionSource)(field, variables);
+        fieldExprs ~= compileRootField!(Query, IntrospectionSource)(field, variables);
     }
 
     if (fieldNames.length == 0) {
@@ -1047,29 +1022,29 @@ DynamicJsonObjectExpr compileRootSelectionSet(Query, alias cfg = NoSchemaConfig,
 /// Compile a selection set into a MapExpr with DynamicJsonObjectExpr body.
 /// Returns Expr!(JSONValue[]) which is the result of mapping over the collection.
 /// Note: Explicit return type breaks circular template instantiation.
-MapExpr!(Entity, DynamicJsonObjectExpr) compileMapExpr(Entity, alias cfg = NoSchemaConfig, Coll)(Coll collection, SelectionSet ss, JSONValue variables) {
+MapExpr!(Entity, DynamicJsonObjectExpr) compileMapExpr(Entity, Coll)(Coll collection, SelectionSet ss, JSONValue variables) {
     import dynamo.core.expr : Expr, map;
 
     return map!(
-        (Expr!Entity entity) => compileSelectionSetBody!(Entity, cfg)(entity, ss, variables)
+        (Expr!Entity entity) => compileSelectionSetBody!Entity(entity, ss, variables)
     )(collection);
 }
 
 /// Compile the body of a selection set (the fields to extract).
 /// Works with any struct type that has field methods.
-DynamicJsonObjectExpr compileSelectionSetBody(T, alias cfg = NoSchemaConfig)(Expr!T ref_, SelectionSet ss, JSONValue variables) {
+DynamicJsonObjectExpr compileSelectionSetBody(T)(Expr!T ref_, SelectionSet ss, JSONValue variables) {
     auto selections = iterateSelections(ss);
     if (selections.length == 0) {
         throw new CompilerException("Empty selection set for " ~ T.stringof);
     }
 
     // Build field name/value pairs for jsonObject
-    return compileFieldsToJsonObject!(T, cfg)(ref_, selections, variables);
+    return compileFieldsToJsonObject!T(ref_, selections, variables);
 }
 
 /// Compile selected fields into a jsonObject call.
 /// Works with any struct type that has field methods.
-DynamicJsonObjectExpr compileFieldsToJsonObject(T, alias cfg = NoSchemaConfig)(Expr!T ref_, Selection[] selections, JSONValue variables) {
+DynamicJsonObjectExpr compileFieldsToJsonObject(T)(Expr!T ref_, Selection[] selections, JSONValue variables) {
     // Collect field expressions
     ExprBase[] fieldExprs;
     string[] fieldNames;
@@ -1081,7 +1056,7 @@ DynamicJsonObjectExpr compileFieldsToJsonObject(T, alias cfg = NoSchemaConfig)(E
         auto outputName = getOutputName(field);
 
         fieldNames ~= outputName;
-        fieldExprs ~= compileFieldAccess!(T, cfg)(ref_, field, variables);
+        fieldExprs ~= compileFieldAccess!T(ref_, field, variables);
     }
 
     // Build a dynamic JSON object using runtime construction
@@ -1115,7 +1090,7 @@ template isFieldMethod(T, alias member) {
 /// Handles scalars, structs (with selection sets), and arrays.
 /// Scalars are wrapped to convert to JSONValue.
 /// Structs/arrays of structs compile selection sets.
-ExprBase compileFieldResult(ResultExpr, alias cfg = NoSchemaConfig)(ResultExpr resultExpr, SelectionSet ss, JSONValue variables) {
+ExprBase compileFieldResult(ResultExpr)(ResultExpr resultExpr, SelectionSet ss, JSONValue variables) {
     import dynamo.core.expr : ExprResultType, UnwrapNullableExpr, finalizeNullableObjectExpr;
 
     alias ResultType = ExprResultType!ResultExpr;
@@ -1131,7 +1106,7 @@ ExprBase compileFieldResult(ResultExpr, alias cfg = NoSchemaConfig)(ResultExpr r
                 throw new CompilerException(
                     "Field returning [" ~ E.stringof ~ "] requires a selection set");
             }
-            return compileMapExpr!(E, cfg)(resultExpr, ss, variables);
+            return compileMapExpr!E(resultExpr, ss, variables);
         }
     }
     // Nullable structs (entities) - handle null case specially
@@ -1144,7 +1119,7 @@ ExprBase compileFieldResult(ResultExpr, alias cfg = NoSchemaConfig)(ResultExpr r
         // This preserves the chain for optimization (findMapExprFromChain)
         auto unwrapper = new UnwrapNullableExpr!T(resultExpr);
         // Compile selection set using the unwrapper as input
-        auto innerExpr = compileSelectionSetBody!(T, cfg)(unwrapper, ss, variables);
+        auto innerExpr = compileSelectionSetBody!T(unwrapper, ss, variables);
         // Wrap in nullable handler
         return finalizeNullableObjectExpr!T(resultExpr, unwrapper, innerExpr);
     }
@@ -1158,7 +1133,7 @@ ExprBase compileFieldResult(ResultExpr, alias cfg = NoSchemaConfig)(ResultExpr r
             throw new CompilerException(
                 "Field returning " ~ ResultType.stringof ~ " requires a selection set");
         }
-        return compileSelectionSetBody!(ResultType, cfg)(resultExpr, ss, variables);
+        return compileSelectionSetBody!ResultType(resultExpr, ss, variables);
     }
     // Scalars (primitives and CustomScalar) - wrap to JSON
     else {
@@ -1166,53 +1141,10 @@ ExprBase compileFieldResult(ResultExpr, alias cfg = NoSchemaConfig)(ResultExpr r
     }
 }
 
-/// Expression that calls an instance method and applies a type mapping serialization.
-/// Combines MethodCallExpr + serialization in one eval step to avoid nested UseExpr
-/// chains that can trigger LDC optimizer issues.
-private class MappedMethodCallExpr(Entity, string methodName, alias serialize, TargetType) : Expr!TargetType {
-    import dynamo.core.expr : Expr, ExprBase, evalAs;
-    import dynamo.core.optimize : OptimizeContext;
-    import dynamo.core.eval : EvalContext;
-    import ae.utils.promise : Promise;
-
-    alias RawType = ReturnType!(__traits(getMember, Entity, methodName));
-    private ExprBase _input;
-
-    this(Expr!Entity input) {
-        _input = input;
-    }
-
-    override ExprBase[] dependencies() {
-        return [_input];
-    }
-
-    override void replaceDependency(size_t index, ExprBase newDep) {
-        if (index == 0)
-            _input = newDep;
-    }
-
-    override Expr!TargetType optimize(OptimizeContext ctx) {
-        _input = (cast(Expr!Entity) _input).optimize(ctx);
-        return this;
-    }
-
-    override Promise!(TargetType[]) eval(EvalContext ctx) {
-        return evalAs!Entity(_input, ctx).then((Entity[] entities) {
-            TargetType[] result = new TargetType[entities.length];
-            foreach (i, ref e; entities) {
-                result[i] = serialize(__traits(getMember, e, methodName)());
-            }
-            return result;
-        });
-    }
-}
-
 /// Compile access to a single field.
 /// Finds a method with signature (Expr!T, args...) -> Expr!U and calls it.
 /// Also handles plain fields (struct instance fields marked with plain fields).
-ExprBase compileFieldAccess(T, alias cfg = NoSchemaConfig)(Expr!T ref_, Field field, JSONValue variables) {
-    import dynamo.core.expr : use;
-
+ExprBase compileFieldAccess(T)(Expr!T ref_, Field field, JSONValue variables) {
     auto fieldName = getFieldName(field);
 
     // First, find a field method matching the GraphQL field name
@@ -1225,17 +1157,8 @@ ExprBase compileFieldAccess(T, alias cfg = NoSchemaConfig)(Expr!T ref_, Field fi
                     enum gqlName = getGqlName!(memberSym, member);
 
                     if (fieldName == gqlName) {
-                        // Call the field method with arguments
-                        auto resultExpr = callComputedField!(memberSym, T, cfg)(ref_, field.args, variables);
-                        // Apply type mapping if needed
-                        alias RawType = ExprResultType!(typeof(resultExpr));
-                        alias Resolved = ResolveType!(RawType, cfg);
-                        static if (!is(Resolved == RawType)) {
-                            auto converted = use(&applySerialize!(RawType, Resolved, findMapping!(RawType, cfg).toTarget), resultExpr);
-                            return compileFieldResult!(typeof(converted), cfg)(converted, field.ss, variables);
-                        } else {
-                            return compileFieldResult!(typeof(resultExpr), cfg)(resultExpr, field.ss, variables);
-                        }
+                        auto resultExpr = callComputedField!(memberSym, T)(ref_, field.args, variables);
+                        return compileFieldResult!(typeof(resultExpr))(resultExpr, field.ss, variables);
                     }
                 }
             }
@@ -1248,17 +1171,8 @@ ExprBase compileFieldAccess(T, alias cfg = NoSchemaConfig)(Expr!T ref_, Field fi
             static if (isPlainField!(T, member)) {
                 // Eager field - use D field name directly (GraphQL uses camelCase like D)
                 if (fieldName == member) {
-                    // Create FieldAccessExpr to read the struct field
                     auto resultExpr = new FieldAccessExpr!(T, member)(ref_);
-                    // Apply type mapping if needed
-                    alias RawType = ExprResultType!(typeof(resultExpr));
-                    alias Resolved = ResolveType!(RawType, cfg);
-                    static if (!is(Resolved == RawType)) {
-                        auto converted = use(&applySerialize!(RawType, Resolved, findMapping!(RawType, cfg).toTarget), resultExpr);
-                        return compileFieldResult!(typeof(converted), cfg)(converted, field.ss, variables);
-                    } else {
-                        return compileFieldResult!(typeof(resultExpr), cfg)(resultExpr, field.ss, variables);
-                    }
+                    return compileFieldResult!(typeof(resultExpr))(resultExpr, field.ss, variables);
                 }
             }
         }
@@ -1272,17 +1186,8 @@ ExprBase compileFieldAccess(T, alias cfg = NoSchemaConfig)(Expr!T ref_, Field fi
                 static if (!hasGqlHidden!methodSym) {
                     enum gqlName = getGqlName!(methodSym, member);
                     if (fieldName == gqlName) {
-                        // Apply type mapping if needed
-                        alias MethodRetType = ReturnType!(__traits(getMember, T, member));
-                        alias Resolved = ResolveType!(MethodRetType, cfg);
-                        static if (!is(Resolved == MethodRetType)) {
-                            alias mapping = findMapping!(MethodRetType, cfg);
-                            auto resultExpr = new MappedMethodCallExpr!(T, member, applySerialize!(MethodRetType, Resolved, mapping.toTarget), Resolved)(ref_);
-                            return compileFieldResult!(typeof(resultExpr), cfg)(resultExpr, field.ss, variables);
-                        } else {
-                            auto resultExpr = new MethodCallExpr!(T, member)(ref_);
-                            return compileFieldResult!(typeof(resultExpr), cfg)(resultExpr, field.ss, variables);
-                        }
+                        auto resultExpr = new MethodCallExpr!(T, member)(ref_);
+                        return compileFieldResult!(typeof(resultExpr))(resultExpr, field.ss, variables);
                     }
                 }
             }

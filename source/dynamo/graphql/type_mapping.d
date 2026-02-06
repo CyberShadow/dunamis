@@ -195,7 +195,7 @@ mixin template ForwardFieldWithMappings(SourceType, string fieldName, alias Type
 /// ---
 template ExternalTypesPlugin(alias S, NewMappings...) if (isSchema!S) {
     import dynamo.core.expr : Expr, use;
-    import dynamo.core.types : isPlainField, isPlainMethod, NoSchemaConfig;
+    import dynamo.core.types : isPlainField, isPlainMethod;
     import dynamo.graphql.schema : getAllEntityTypes, getGraphQLTypeName, GqlName, isInternalMember;
     import dynamo.graphql.transform : isTypeInList;
     import dynamo.graphql.plugin : getFieldMembers, isComputedField;
@@ -295,7 +295,6 @@ template ExternalTypesPlugin(alias S, NewMappings...) if (isSchema!S) {
         }
     }
 
-    alias Config = NoSchemaConfig;
 }
 
 // ============================================================================

@@ -573,7 +573,6 @@ unittest {
 // Test AddPaginationArgs
 unittest {
     import dynamo.graphql.schema : Schema, generateSchemaSDL;
-    import dynamo.core.types : NoSchemaConfig;
     import dynamo.core.expr : constant;
     import std.algorithm : canFind;
 
@@ -599,7 +598,6 @@ unittest {
             }
         }
         struct Mutation {}
-        alias Config = NoSchemaConfig;
     }
 
     static assert(isSchema!PaginatedSchema);
