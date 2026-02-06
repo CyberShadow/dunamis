@@ -139,7 +139,7 @@ Only the final string results are materialized. The "User objects" exist purely 
 
 ### 2. Fields as Static Expr Methods
 
-All field access—columns, relationships, and computed fields—is expressed through static methods that take `Expr!Entity` and return `Expr!T`:
+The canonical representation of all fields is a static method that takes `Expr!Entity` and returns `Expr!T`:
 
 ```d
 struct User {
@@ -154,9 +154,11 @@ struct User {
 }
 ```
 
+Users can also define plain fields and plain methods as a convenience for data that doesn't need SQL optimization (see [Plain Fields](#plain-fields-vs-col-mixins) and [Plain Methods](#plain-methods)). These are normalized into the canonical static Expr method form before plugin processing, so the plugin system only ever sees one kind of field.
+
 **Why this design?**
 
-1. **Uniform representation** - The optimizer can analyze and transform field access patterns regardless of whether the data comes from a database column, a JOIN, or in-memory computation. All fields look the same to the expression tree.
+1. **Uniform representation** - The optimizer and plugins can analyze and transform field access patterns regardless of whether the data comes from a database column, a JOIN, or in-memory computation. All fields look the same to the expression tree, and plugins only need to handle one field kind.
 
 2. **SQL pushdown** - Because fields return expressions (not values), the optimizer can compose them into SQL. `u.firstName ~ " " ~ u.lastName` isn't computed in D—it becomes `first_name || ' ' || last_name` in the SQL query itself.
 
@@ -200,6 +202,26 @@ The optimizer uses interface-based pattern matching to recognize and transform e
 - `BinaryOpInfo` - Operations that can be pushed down to SQL
 
 Different data sources register their own optimizers. The relational package contributes `RelationalOptimizer` and `SqlOptimizer`; future packages (e.g., REST APIs, in-memory stores) can add their own without modifying core.
+
+### 5. Plugins as Composable Type Transformers
+
+A plugin is a compile-time function from Schema to Schema. Each plugin takes the output of the previous one, transforms its types, and produces a new schema. Plugins compose by chaining:
+
+```d
+alias MySchema = PaginationPlugin!(SortingPlugin!(FilterPlugin!(Schema!(Query, Mutation))));
+```
+
+**Key invariant: each plugin only sees the output of the previous plugin.** SortingPlugin never sees `User` — it sees `FilteredUser`. There is no mechanism to "look back" at original types. Entity types are discovered from the Query's field return types, and each plugin wraps the types it finds.
+
+All types are treated uniformly — Query, Mutation, User, Post are all types with fields. The only distinction for Query/Mutation is that they are singletons (one instance per request), and this difference is encapsulated at the boundary rather than threaded through the plugin system.
+
+**Why this design?**
+
+1. **Composability** - Plugins are independent. Adding or removing a plugin doesn't require changes to other plugins. The order of composition determines the order of transformation.
+
+2. **Simplicity** - Each plugin only needs to understand one input (the previous schema's output) and produce one output (the transformed schema). No coordination between plugins.
+
+3. **Extensibility** - New plugins can add arbitrary capabilities (filtering, sorting, pagination, normalization, access control) without modifying existing code. The plugin interface is just: expose `Query`, `Mutation`, and `Config`.
 
 ## Example
 
