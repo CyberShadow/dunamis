@@ -475,7 +475,7 @@ auto singleton(T)(T value) {
 /// For non-entity types (Query, Mutation): uses default-initialized value.
 ///
 /// Implements AnyRefEvaluable when To is an entity type (has nodeId).
-class EntityCastExpr(To, From) : Expr!To, AnyRefEvaluable {
+class EntityCastExpr(To, From) : Expr!To, AnyRefEvaluable, EntityCastInfo {
     private Expr!From _source;
 
     this(Expr!From source) {
@@ -558,6 +558,9 @@ class EntityCastExpr(To, From) : Expr!To, AnyRefEvaluable {
 
     /// Access the source expression
     @property Expr!From source() { return _source; }
+
+    /// EntityCastInfo implementation - allows chain traversal through casts
+    @property ExprBase inputExpr() { return _source; }
 
     /// AnyRefEvaluable implementation - converts To entities to AnyRef
     Promise!(AnyRef[]) evalAsAnyRef(EvalContext ctx) {
@@ -2527,6 +2530,12 @@ class UnwrapNullableExpr(T) : Expr!T, UnwrapNullableInfo, AnyRefEvaluable {
             assert(false, "UnwrapNullableExpr.evalAsAnyRef called for non-entity type " ~ T.stringof);
         }
     }
+}
+
+/// Interface for EntityCastExpr to allow chain traversal during optimization.
+/// This lets findMapExprFromChain continue through entity cast wrappers.
+interface EntityCastInfo {
+    @property ExprBase inputExpr();
 }
 
 /// Interface for UnwrapNullableExpr to allow chain traversal during optimization.

@@ -54,7 +54,8 @@ import dynamo.graphql.schema : isSchema;
 template PaginationPlugin(alias S) if (isSchema!S) {
     import std.meta : AliasSeq, staticMap;
     import dynamo.graphql.schema : getAllEntityTypes, getGraphQLTypeName, GqlName;
-    import dynamo.graphql.transform : isTypeInList, IdentityTypeMap;
+    import dynamo.graphql.transform : isTypeInList, IdentityTypeMap, ForwardFieldWithTypeMap,
+        ForwardPlainMethodWithTypeMap;
 
     // Get all entity types discovered from the schema
     alias _OriginalQuery = S.Query;
@@ -65,12 +66,33 @@ template PaginationPlugin(alias S) if (isSchema!S) {
     struct PaginatedQuery {
         static foreach (member; getFieldMembers!(_OriginalQuery)) {
             static if (isArrayReturningField!(__traits(getMember, _OriginalQuery, member))) {
-                // Array field: add pagination arguments
-                mixin PaginatedArrayField!(_OriginalQuery, member);
+                // Array field: add pagination arguments and wrap return type
+                mixin PaginatedArrayField!(_OriginalQuery, member, EntityTypeMap);
             } else {
-                // Non-array field: forward unchanged
-                mixin ForwardField!(_OriginalQuery, member);
+                // Non-array field: forward with type wrapping
+                mixin ForwardFieldWithTypeMap!(_OriginalQuery, member, EntityTypeMap);
             }
+        }
+    }
+
+    // Compute inner entity types for TypeMap mapping.
+    template _GetInnerEntity(T) {
+        static if (__traits(hasMember, S, "EntityTypeMap")) {
+            alias _GetInnerEntity = S.EntityTypeMap!T;
+        } else {
+            alias _GetInnerEntity = T;
+        }
+    }
+    alias _AllInnerEntityTypes = staticMap!(_GetInnerEntity, _AllEntityTypes);
+
+    /// TypeMap for entity return type wrapping: inner entity → paginated entity.
+    template _EntityWrapMap(T) {
+        import std.meta : staticIndexOf;
+        enum _idx = staticIndexOf!(T, _AllInnerEntityTypes);
+        static if (_idx >= 0) {
+            alias _EntityWrapMap = PaginatedEntity!(_AllEntityTypes[_idx]);
+        } else {
+            alias _EntityWrapMap = T;
         }
     }
 
@@ -102,12 +124,12 @@ template PaginationPlugin(alias S) if (isSchema!S) {
             // This ensures pagination is layered on top of filtering, etc.
             static foreach (member; getFieldMembers!Entity) {
                 static if (isArrayReturningField!(__traits(getMember, Entity, member))) {
-                    mixin PaginatedEntityArrayField!(Entity, member);
+                    mixin PaginatedEntityArrayField!(Entity, member, _EntityWrapMap);
                 } else static if (isComputedField!(Entity, member)) {
-                    mixin ForwardField!(Entity, member);
+                    mixin ForwardFieldWithTypeMap!(Entity, member, _EntityWrapMap);
                 } else {
                     // Plain method (instance method with no Expr parameter)
-                    mixin ForwardPlainMethod!(Entity, member);
+                    mixin ForwardPlainMethodWithTypeMap!(Entity, member, _EntityWrapMap);
                 }
             }
         }
@@ -138,12 +160,13 @@ template PaginationPlugin(alias S) if (isSchema!S) {
 /// Mixin for paginated array field on an entity (adds first/offset arguments).
 /// Similar to PaginatedArrayField but for entity types.
 /// Uses type aliases instead of stringof to preserve type scope across plugin composition.
-mixin template PaginatedEntityArrayField(Entity, string fieldName) {
+mixin template PaginatedEntityArrayField(Entity, string fieldName, alias TypeMap) {
     import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
     import std.meta : AliasSeq;
     import std.conv : to;
     import dynamo.core.expr : Expr, ExprResultType, entityCast;
     import dynamo.core.pagination : limit, offset;
+    import dynamo.graphql.transform : wrapEntityResult;
     import std.typecons : Nullable;
 
     alias _srcFn = __traits(getMember, Entity, fieldName);
@@ -200,7 +223,7 @@ mixin template PaginatedEntityArrayField(Entity, string fieldName) {
 
     @(__traits(getAttributes, _srcFn))
     mixin("static auto " ~ fieldName ~ "(" ~ _paramListStr ~ ") { " ~
-          "return _applyPagination(_srcFn(" ~ _argListStr ~ "), first, offset); }");
+          "return wrapEntityResult!(TypeMap)(_applyPagination(_srcFn(" ~ _argListStr ~ "), first, offset)); }");
 }
 
 // ============================================================================
@@ -210,12 +233,13 @@ mixin template PaginatedEntityArrayField(Entity, string fieldName) {
 /// Mixin template to create a paginated version of an array-returning field.
 /// Adds first/offset parameters and wraps the result with limit/offset expressions.
 /// Uses type aliases instead of stringof to preserve type scope across plugin composition.
-mixin template PaginatedArrayField(SourceQuery, string fieldName) {
+mixin template PaginatedArrayField(SourceQuery, string fieldName, alias TypeMap) {
     import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
     import std.meta : AliasSeq;
     import std.conv : to;
     import dynamo.core.expr : Expr, ExprResultType, entityCast;
     import dynamo.core.pagination : limit, offset;
+    import dynamo.graphql.transform : wrapEntityResult;
 
     // Get the source function and its metadata
     alias _srcFn = __traits(getMember, SourceQuery, fieldName);
@@ -276,7 +300,7 @@ mixin template PaginatedArrayField(SourceQuery, string fieldName) {
     // Generate the paginated method with UDAs preserved
     @(__traits(getAttributes, _srcFn))
     mixin("static auto " ~ fieldName ~ "(" ~ _paramListStr ~ ") { " ~
-          "return _applyPagination(_srcFn(" ~ _argListStr ~ "), first, offset); }");
+          "return wrapEntityResult!(TypeMap)(_applyPagination(_srcFn(" ~ _argListStr ~ "), first, offset)); }");
 }
 
 // ============================================================================

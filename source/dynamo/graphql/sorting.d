@@ -58,7 +58,7 @@ import dynamo.graphql.schema : isSchema, GqlHidden;
 template SortingPlugin(alias S) if (isSchema!S) {
     import std.meta : AliasSeq, staticMap;
     import dynamo.graphql.schema : getAllEntityTypes, getGraphQLTypeName, GqlName;
-    import dynamo.graphql.transform : isTypeInList;
+    import dynamo.graphql.transform : isTypeInList, ForwardFieldWithTypeMap, ForwardPlainMethodWithTypeMap;
 
     // Get all entity types discovered from the schema
     alias _OriginalQuery = S.Query;
@@ -68,12 +68,34 @@ template SortingPlugin(alias S) if (isSchema!S) {
     struct SortedQuery {
         static foreach (member; getFieldMembers!(_OriginalQuery)) {
             static if (isArrayReturningField!(__traits(getMember, _OriginalQuery, member))) {
-                // Array field: add sorting arguments
-                mixin SortedArrayField!(_OriginalQuery, member);
+                // Array field: add sorting arguments and wrap return type
+                mixin SortedArrayField!(_OriginalQuery, member, EntityTypeMap);
             } else {
-                // Non-array field: forward unchanged
-                mixin ForwardField!(_OriginalQuery, member);
+                // Non-array field: forward with type wrapping
+                mixin ForwardFieldWithTypeMap!(_OriginalQuery, member, EntityTypeMap);
             }
+        }
+    }
+
+    // Compute inner entity types for TypeMap mapping.
+    // Maps inner schema's wrapped entity types to this plugin's sorted entity types.
+    template _GetInnerEntity(T) {
+        static if (__traits(hasMember, S, "EntityTypeMap")) {
+            alias _GetInnerEntity = S.EntityTypeMap!T;
+        } else {
+            alias _GetInnerEntity = T;
+        }
+    }
+    alias _AllInnerEntityTypes = staticMap!(_GetInnerEntity, _AllEntityTypes);
+
+    /// TypeMap for entity return type wrapping: inner entity → sorted entity.
+    template _EntityWrapMap(T) {
+        import std.meta : staticIndexOf;
+        enum _idx = staticIndexOf!(T, _AllInnerEntityTypes);
+        static if (_idx >= 0) {
+            alias _EntityWrapMap = SortedEntity!(_AllEntityTypes[_idx]);
+        } else {
+            alias _EntityWrapMap = T;
         }
     }
 
@@ -114,12 +136,12 @@ template SortingPlugin(alias S) if (isSchema!S) {
             // This ensures sorting is layered on top of filtering, etc.
             static foreach (member; getFieldMembers!Entity) {
                 static if (isArrayReturningField!(__traits(getMember, Entity, member))) {
-                    mixin SortedEntityArrayField!(Entity, member);
+                    mixin SortedEntityArrayField!(Entity, member, _EntityWrapMap);
                 } else static if (isComputedField!(Entity, member)) {
-                    mixin ForwardField!(Entity, member);
+                    mixin ForwardFieldWithTypeMap!(Entity, member, _EntityWrapMap);
                 } else {
                     // Plain method (instance method with no Expr parameter)
-                    mixin ForwardPlainMethod!(Entity, member);
+                    mixin ForwardPlainMethodWithTypeMap!(Entity, member, _EntityWrapMap);
                 }
             }
         }
@@ -254,13 +276,14 @@ mixin template GenerateOrderByTypes(Entity, string graphqlEnumName, string graph
 /// Mixin for sorted array field on an entity (adds orderBy arguments).
 /// Similar to SortedArrayField but for entity types.
 /// Uses type aliases instead of stringof to preserve type scope across plugin composition.
-mixin template SortedEntityArrayField(Entity, string fieldName) {
+mixin template SortedEntityArrayField(Entity, string fieldName, alias TypeMap) {
     import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
     import std.meta : AliasSeq;
     import std.conv : to;
     import dynamo.core.expr : Expr, ExprResultType, entityCast;
     import dynamo.core.sorting : orderBy, OrderBySpec, SortDirection;
     import dynamo.relational.schema : getSqlColumn;
+    import dynamo.graphql.transform : wrapEntityResult;
 
     alias _srcFn = __traits(getMember, Entity, fieldName);
     alias _SrcParams = Parameters!_srcFn;
@@ -320,24 +343,25 @@ mixin template SortedEntityArrayField(Entity, string fieldName) {
     static if (getSortableFields!_ElementType.length > 0) {
         @(__traits(getAttributes, _srcFn))
         mixin("static auto " ~ fieldName ~ "(" ~ _paramListStr ~ ") { " ~
-              "return _applySorting(_srcFn(" ~ _argListStr ~ "), orderBy); }");
+              "return wrapEntityResult!(TypeMap)(_applySorting(_srcFn(" ~ _argListStr ~ "), orderBy)); }");
     } else {
         // No sortable fields - just forward the field without orderBy
         @(__traits(getAttributes, _srcFn))
         mixin("static auto " ~ fieldName ~ "(" ~ _paramListStr ~ ") { " ~
-              "return _srcFn(" ~ _argListStr ~ "); }");
+              "return wrapEntityResult!(TypeMap)(_srcFn(" ~ _argListStr ~ ")); }");
     }
 }
 
 /// Mixin template to create a sorted version of an array-returning field.
 /// Adds orderBy parameter and wraps the result with orderBy expressions.
-mixin template SortedArrayField(SourceQuery, string fieldName) {
+mixin template SortedArrayField(SourceQuery, string fieldName, alias TypeMap) {
     import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
     import std.meta : AliasSeq;
     import std.conv : to;
     import dynamo.core.expr : Expr, ExprResultType, entityCast;
     import dynamo.core.sorting : orderBy, OrderBySpec, SortDirection;
     import dynamo.relational.schema : getSqlColumn;
+    import dynamo.graphql.transform : wrapEntityResult;
 
     // Get the source function and its metadata
     alias _srcFn = __traits(getMember, SourceQuery, fieldName);
@@ -407,12 +431,12 @@ mixin template SortedArrayField(SourceQuery, string fieldName) {
     static if (getSortableFields!_ElementType.length > 0) {
         @(__traits(getAttributes, _srcFn))
         mixin("static auto " ~ fieldName ~ "(" ~ _paramListStr ~ ") { " ~
-              "return _applySorting(_srcFn(" ~ _argListStr ~ "), orderBy); }");
+              "return wrapEntityResult!(TypeMap)(_applySorting(_srcFn(" ~ _argListStr ~ "), orderBy)); }");
     } else {
         // No sortable fields - just forward the method unchanged
         @(__traits(getAttributes, _srcFn))
         mixin("static auto " ~ fieldName ~ "(" ~ _paramListStr ~ ") { " ~
-              "return _srcFn(" ~ _argListStr ~ "); }");
+              "return wrapEntityResult!(TypeMap)(_srcFn(" ~ _argListStr ~ ")); }");
     }
 }
 

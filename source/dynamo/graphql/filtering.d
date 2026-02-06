@@ -1076,7 +1076,8 @@ T extractJsonValue(T)(JSONValue value) {
 template FilterPlugin(alias S) if (isSchema!S) {
     import std.meta : AliasSeq, staticMap;
     import dynamo.graphql.schema : getAllEntityTypes, getGraphQLTypeName, GqlName;
-    import dynamo.graphql.transform : isTypeInList, IdentityTypeMap;
+    import dynamo.graphql.transform : isTypeInList, IdentityTypeMap, ForwardFieldWithTypeMap,
+        ForwardPlainMethodWithTypeMap;
 
     // Get all entity types discovered from the schema
     alias _OriginalQuery = S.Query;
@@ -1086,11 +1087,11 @@ template FilterPlugin(alias S) if (isSchema!S) {
     struct FilteredQuery {
         static foreach (member; getFieldMembers!(_OriginalQuery)) {
             static if (isArrayReturningField!(__traits(getMember, _OriginalQuery, member))) {
-                // Array field: add filter argument
-                mixin FilteredArrayField!(_OriginalQuery, member);
+                // Array field: add filter argument and wrap return type
+                mixin FilteredArrayField!(_OriginalQuery, member, EntityTypeMap);
             } else {
-                // Non-array field: forward unchanged
-                mixin ForwardField!(_OriginalQuery, member);
+                // Non-array field: forward with type wrapping
+                mixin ForwardFieldWithTypeMap!(_OriginalQuery, member, EntityTypeMap);
             }
         }
     }
@@ -1118,12 +1119,12 @@ template FilterPlugin(alias S) if (isSchema!S) {
             // Copy all fields with filter on array fields
             static foreach (member; getFieldMembers!Entity) {
                 static if (isArrayReturningField!(__traits(getMember, Entity, member))) {
-                    mixin FilteredEntityArrayField!(Entity, member);
+                    mixin FilteredEntityArrayField!(Entity, member, EntityTypeMap);
                 } else static if (isComputedField!(Entity, member)) {
-                    mixin ForwardField!(Entity, member);
+                    mixin ForwardFieldWithTypeMap!(Entity, member, EntityTypeMap);
                 } else {
                     // Plain method (instance method with no Expr parameter)
-                    mixin ForwardPlainMethod!(Entity, member);
+                    mixin ForwardPlainMethodWithTypeMap!(Entity, member, EntityTypeMap);
                 }
             }
         }
@@ -1153,12 +1154,13 @@ template FilterPlugin(alias S) if (isSchema!S) {
 
 /// Mixin template to create a filtered version of an array-returning field.
 /// Uses type aliases instead of stringof to preserve type scope across plugin composition.
-mixin template FilteredArrayField(SourceQuery, string fieldName) {
+mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) {
     import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
     import std.meta : AliasSeq;
     import std.conv : to;
     import dynamo.core.expr : Expr, ExprResultType, entityCast;
     import dynamo.core.filtering : FilterByExpr, FilterItemExpr;
+    import dynamo.graphql.transform : wrapEntityResult;
     import std.typecons : Nullable;
 
     alias _srcFn = __traits(getMember, SourceQuery, fieldName);
@@ -1220,17 +1222,18 @@ mixin template FilteredArrayField(SourceQuery, string fieldName) {
 
     @(__traits(getAttributes, _srcFn))
     mixin("static auto " ~ fieldName ~ "(" ~ _paramListStr ~ ") { " ~
-          "return _applyFilter(_srcFn(" ~ _argListStr ~ "), filter); }");
+          "return wrapEntityResult!(TypeMap)(_applyFilter(_srcFn(" ~ _argListStr ~ "), filter)); }");
 }
 
 /// Mixin for filtered array field on an entity type.
 /// Uses type aliases instead of stringof to preserve type scope across plugin composition.
-mixin template FilteredEntityArrayField(Entity, string fieldName) {
+mixin template FilteredEntityArrayField(Entity, string fieldName, alias TypeMap) {
     import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
     import std.meta : AliasSeq;
     import std.conv : to;
     import dynamo.core.expr : Expr, ExprResultType, entityCast;
     import dynamo.core.filtering : FilterByExpr, FilterItemExpr;
+    import dynamo.graphql.transform : wrapEntityResult;
     import std.typecons : Nullable;
 
     alias _srcFn = __traits(getMember, Entity, fieldName);
@@ -1290,7 +1293,7 @@ mixin template FilteredEntityArrayField(Entity, string fieldName) {
 
     @(__traits(getAttributes, _srcFn))
     mixin("static auto " ~ fieldName ~ "(" ~ _paramListStr ~ ") { " ~
-          "return _applyFilter(_srcFn(" ~ _argListStr ~ "), filter); }");
+          "return wrapEntityResult!(TypeMap)(_applyFilter(_srcFn(" ~ _argListStr ~ "), filter)); }");
 }
 
 // ============================================================================

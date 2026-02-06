@@ -139,15 +139,108 @@ template IdentityTypeMap(T) {
 }
 
 // ============================================================================
+// Entity Result Wrapping
+// ============================================================================
+
+/// Wrap an expression result to map entity types through TypeMap via entityCast.
+/// Handles arrays of entities, single entities, nullable entities, and scalars.
+///
+/// - Expr!(Entity[]) → map each element via entityCast → Expr!(MappedEntity[])
+/// - Expr!Entity → entityCast → Expr!MappedEntity
+/// - Expr!(Nullable!Entity) → use with value-level cast → Expr!(Nullable!MappedEntity)
+/// - Expr!scalar → pass through unchanged
+auto wrapEntityResult(alias TypeMap, R)(R result)
+    if (isExpr!R)
+{
+    import dynamo.core.expr : ExprResultType, entityCast, map, use, Expr;
+
+    alias ResultT = ExprResultType!R;
+
+    static if (is(ResultT == E[], E) && !isSomeString!ResultT) {
+        static if (isObjectType!E) {
+            alias MappedE = TypeMap!E;
+            static if (is(MappedE == E)) {
+                return result;
+            } else {
+                return map!((Expr!E e) => entityCast!MappedE(e))(result);
+            }
+        } else {
+            return result;
+        }
+    } else static if (is(ResultT == Nullable!U, U) && isObjectType!U) {
+        alias MappedU = TypeMap!U;
+        static if (is(MappedU == U)) {
+            return result;
+        } else {
+            return use(&nullableEntityCastValue!(MappedU, U), result);
+        }
+    } else static if (isObjectType!ResultT) {
+        alias MappedT = TypeMap!ResultT;
+        static if (is(MappedT == ResultT)) {
+            return result;
+        } else {
+            return entityCast!MappedT(result);
+        }
+    } else {
+        return result;
+    }
+}
+
+/// Value-level entity cast for Nullable wrapping in wrapEntityResult.
+/// Converts Nullable!From to Nullable!To by copying nodeId and matching fields.
+Nullable!To nullableEntityCastValue(To, From)(Nullable!From val) {
+    if (val.isNull) return Nullable!To.init;
+    return Nullable!To(entityCastValue!(To, From)(val.get));
+}
+
+/// Value-level entity cast. Copies nodeId and matching instance fields from From to To.
+To entityCastValue(To, From)(From from) {
+    To to;
+    static if (__traits(hasMember, From, "nodeId") && __traits(hasMember, To, "nodeId")) {
+        to = To(from.nodeId.id);
+        static foreach (member; __traits(allMembers, From)) {{
+            static if (member.length > 0 && member[0] != '_' &&
+                       member != "nodeId" &&
+                       member != "toString" && member != "toHash" &&
+                       member != "opEquals" && member != "opCmp" &&
+                       member != "opAssign" && member != "factory" &&
+                       member != "Monitor" &&
+                       __traits(hasMember, To, member)) {
+                static if (__traits(compiles, __traits(getMember, from, member)) &&
+                           __traits(compiles, __traits(getMember, to, member) = __traits(getMember, from, member))) {
+                    __traits(getMember, to, member) = __traits(getMember, from, member);
+                }
+            }
+        }}
+    } else static if (is(From == struct) && is(To == struct)) {
+        static foreach (member; __traits(allMembers, From)) {{
+            static if (member.length > 0 && member[0] != '_' &&
+                       member != "toString" && member != "toHash" &&
+                       member != "opEquals" && member != "opCmp" &&
+                       member != "opAssign" && member != "factory" &&
+                       member != "Monitor" &&
+                       __traits(hasMember, To, member)) {
+                static if (__traits(compiles, __traits(getMember, from, member)) &&
+                           __traits(compiles, __traits(getMember, to, member) = __traits(getMember, from, member))) {
+                    __traits(getMember, to, member) = __traits(getMember, from, member);
+                }
+            }
+        }}
+    }
+    return to;
+}
+
+// ============================================================================
 // Field Forwarding with Type Substitution
 // ============================================================================
 
 /// Mixin template to forward a field from SourceType with type substitution.
-/// The return type has entity references replaced via TypeMap.
+/// The return type has entity references replaced via TypeMap using wrapEntityResult.
 mixin template ForwardFieldWithTypeMap(SourceType, string fieldName, alias TypeMap) {
     import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple, ReturnType;
+    import std.conv : to;
     import dynamo.core.expr : Expr, ExprResultType, entityCast;
-    import dynamo.graphql.transform : ReplaceTypeRefs;
+    import dynamo.graphql.transform : ReplaceTypeRefs, wrapEntityResult;
 
     alias _srcFn = __traits(getMember, SourceType, fieldName);
     alias _SrcParams = Parameters!_srcFn;
@@ -157,15 +250,22 @@ mixin template ForwardFieldWithTypeMap(SourceType, string fieldName, alias TypeM
     alias _SrcFirstParam = _SrcParams[0];
     alias _SrcEntity = ExprResultType!_SrcFirstParam;
 
-    // Build parameter list string
+    // Create type aliases for each parameter to avoid stringof scope issues.
+    // This ensures types like NodeInput* are properly referenced.
+    static foreach (i; 1 .. _SrcParams.length) {
+        mixin("alias _ParamType" ~ i.to!string ~ " = _SrcParams[" ~ i.to!string ~ "];");
+    }
+
+    // Build parameter list string using type aliases
     enum string _paramListStr = () {
         string result = "Expr!(typeof(this)) " ~ _srcParamNames[0];
-        static foreach (i; 1 .. _SrcParams.length) {
-            result ~= ", " ~ _SrcParams[i].stringof ~ " " ~ _srcParamNames[i];
+        static foreach (i; 1 .. _SrcParams.length) {{
+            result ~= ", ";
+            result ~= "_ParamType" ~ i.to!string ~ " " ~ _srcParamNames[i];
             static if (!is(_SrcDefaults[i] == void)) {
-                result ~= " = " ~ _SrcDefaults[i].stringof;
+                result ~= " = _SrcDefaults[" ~ i.to!string ~ "]";
             }
-        }
+        }}
         return result;
     }();
 
@@ -180,7 +280,7 @@ mixin template ForwardFieldWithTypeMap(SourceType, string fieldName, alias TypeM
 
     @(__traits(getAttributes, _srcFn))
     mixin("static auto " ~ fieldName ~ "(" ~ _paramListStr ~ ") { " ~
-          "return _srcFn(" ~ _argListStr ~ "); }");
+          "return wrapEntityResult!(TypeMap)(_srcFn(" ~ _argListStr ~ ")); }");
 }
 
 /// Mixin template to forward a plain method from SourceType (instance method with no Expr parameter).
@@ -269,7 +369,7 @@ mixin template AddPaginationArgsWithTypeMap(SourceType, string fieldName, alias 
     import dynamo.core.expr : Expr, ExprResultType, entityCast;
     import dynamo.core.pagination : limit, offset;
     import dynamo.graphql.plugin : getFieldMembers, isArrayReturningField, ForwardField, ArrayFieldElementType, isComputedField;
-    import dynamo.graphql.transform : ForwardFieldWithTypeMap, ForwardPlainMethodWithTypeMap;
+    import dynamo.graphql.transform : ForwardFieldWithTypeMap, ForwardPlainMethodWithTypeMap, wrapEntityResult;
     import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple, ReturnType;
     import std.typecons : Nullable;
 
@@ -322,7 +422,7 @@ mixin template AddPaginationArgsWithTypeMap(SourceType, string fieldName, alias 
 
         @(__traits(getAttributes, _srcFn))
         mixin("static auto " ~ fieldName ~ "(" ~ _paramStr ~ ") { " ~
-              "return _applyPagination(_srcFn(" ~ _argStr ~ "), first, offset); }");
+              "return wrapEntityResult!(TypeMap)(_applyPagination(_srcFn(" ~ _argStr ~ "), first, offset)); }");
     } else static if (isComputedField!(SourceType, fieldName)) {
         mixin ForwardFieldWithTypeMap!(SourceType, fieldName, TypeMap);
     } else {
