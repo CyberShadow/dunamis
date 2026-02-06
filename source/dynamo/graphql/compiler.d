@@ -3009,3 +3009,40 @@ unittest {
         assert(foundFirstName, "Should find firstName field");
     }
 }
+
+// Col field + plain method in the same selection set
+// Regression test: evalAs cache stored Promise!(AnyRef[]) from column access,
+// then MethodCallExpr tried to retrieve as Promise!(Entity[]) — cast returned
+// null → SIGSEGV on .then(). Fixed by runtime type-checking the cache.
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dynamo.core;
+    import dynamo.relational.schema;
+    import dynamo.relational.demo;
+
+    static MockDB!() db;
+
+    static struct Item {
+        mixin DemoEntity!(db, "items");
+        mixin Col!("title", string);
+
+        string label() => "item-label";
+    }
+
+    static struct Query {
+        mixin Table!(Item, "items");
+    }
+
+    db = new MockDB!();
+    db.setTableData("items", `[{"id": 1, "title": "Thing"}]`);
+
+    auto query = compileQuery!(Schema!(Query))(`{ items { title label } }`);
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query));
+
+    auto items = result["items"].array;
+    assert(items.length == 1);
+    assert(items[0]["title"].str == "Thing");
+    assert(items[0]["label"].str == "item-label");
+}

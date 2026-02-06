@@ -66,7 +66,8 @@ class EvalContext {
     /// Used by evalAs() to automatically memoize expression evaluation.
     /// When the same expression is evaluated multiple times (e.g., via
     /// parallel dependencies), the same Promise is returned.
-    private Object[void*] _exprCache;
+    /// Uses SealedArray for runtime type checking (stores promise as 1-element array).
+    private SealedArray[void*] _exprCache;
 
     /// Set values for an expression (generic storage for any T[]).
     void setValues(T)(Object key, T[] vals) {
@@ -84,19 +85,25 @@ class EvalContext {
         return [];
     }
 
-    /// Get cached Promise for an expression, or null if not cached.
-    /// Used internally by evalAs() for automatic memoization.
-    Object getCachedEval(Object expr) {
+    /// Get cached Promise for an expression, or null if types don't match.
+    /// Uses runtime type checking via SealedArray — asserts on type mismatch
+    /// rather than silently returning null.
+    import ae.utils.promise : Promise;
+    Promise!(T[]) getCachedEval(T)(Object expr) {
         if (auto p = cast(void*) expr in _exprCache) {
-            return *p;
+            if (p.hasType!(Promise!(T[])))
+                return p.get!(Promise!(T[]))()[0];
         }
         return null;
     }
 
     /// Cache a Promise for an expression.
-    /// Used internally by evalAs() for automatic memoization.
-    void setCachedEval(Object expr, Object promise) {
-        _exprCache[cast(void*) expr] = promise;
+    /// Only caches if no entry exists yet — avoids overwriting a differently-typed
+    /// cached promise (the same expression may be evaluated as different types).
+    void setCachedEval(T)(Object expr, Promise!(T[]) promise) {
+        auto key = cast(void*) expr;
+        if (key !in _exprCache)
+            _exprCache[key] = SealedArray([promise]);
     }
 
     /// Clear the cached eval for a specific expression.

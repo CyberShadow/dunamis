@@ -55,18 +55,14 @@ abstract class ExprBase {
 /// (e.g., via parallel dependencies), returns the cached Promise instead of
 /// re-evaluating. This is safe because expressions are pure/deterministic.
 Promise!(T[]) evalAs(T)(ExprBase expr, EvalContext ctx) {
-    // Check memoization cache first
-    if (auto cached = ctx.getCachedEval(expr)) {
-        return cast(Promise!(T[])) cached;
-    }
+    if (auto cached = ctx.getCachedEval!T(expr))
+        return cached;
 
     auto typed = cast(Expr!T) expr;
     assert(typed !is null, "Type mismatch in evalAs: expected " ~ T.stringof);
 
     auto promise = typed.eval(ctx);
-
-    // Cache for future calls
-    ctx.setCachedEval(expr, promise);
+    ctx.setCachedEval!T(expr, promise);
     return promise;
 }
 
@@ -83,15 +79,13 @@ interface AnyRefEvaluable {
 /// Used by projection expressions that need to evaluate input refs without
 /// knowing the specific entity type at compile time.
 Promise!(AnyRef[]) evalRefAsAnyRef(ExprBase expr, EvalContext ctx) {
-    // Check memoization cache first
-    if (auto cached = ctx.getCachedEval(expr)) {
-        return cast(Promise!(AnyRef[])) cached;
-    }
+    if (auto cached = ctx.getCachedEval!AnyRef(expr))
+        return cached;
 
     // Check if it implements AnyRefEvaluable interface
     if (auto evaluable = cast(AnyRefEvaluable) expr) {
         auto promise = evaluable.evalAsAnyRef(ctx);
-        ctx.setCachedEval(expr, promise);
+        ctx.setCachedEval!AnyRef(expr, promise);
         return promise;
     }
 
@@ -99,7 +93,7 @@ Promise!(AnyRef[]) evalRefAsAnyRef(ExprBase expr, EvalContext ctx) {
     auto typed = cast(Expr!AnyRef) expr;
     if (typed !is null) {
         auto promise = typed.eval(ctx);
-        ctx.setCachedEval(expr, promise);
+        ctx.setCachedEval!AnyRef(expr, promise);
         return promise;
     }
 

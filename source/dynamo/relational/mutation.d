@@ -95,9 +95,8 @@ class InsertExpr(Entity) : Expr!Entity, AnyRefEvaluable {
     override Promise!(Entity[]) eval(EvalContext ctx) {
         // Memoization: mutations should only execute once even when eval() is called
         // multiple times (e.g., when multiple ColumnAccessExpr share the same InsertExpr)
-        if (auto cached = ctx.getCachedEval(this)) {
-            return cast(Promise!(Entity[])) cached;
-        }
+        if (auto cached = ctx.getCachedEval!Entity(this))
+            return cached;
 
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
 
@@ -123,7 +122,7 @@ class InsertExpr(Entity) : Expr!Entity, AnyRefEvaluable {
             });
 
         // Cache for future calls
-        ctx.setCachedEval(this, promise);
+        ctx.setCachedEval!Entity(this, promise);
         return promise;
     }
 
