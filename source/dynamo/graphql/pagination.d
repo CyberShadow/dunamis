@@ -75,61 +75,30 @@ template PaginationPlugin(alias S) if (isSchema!S) {
         }
     }
 
-    // Compute inner entity types for TypeMap mapping.
-    template _GetInnerEntity(T) {
-        static if (__traits(hasMember, S, "EntityTypeMap")) {
-            alias _GetInnerEntity = S.EntityTypeMap!T;
-        } else {
-            alias _GetInnerEntity = T;
-        }
-    }
-    alias _AllInnerEntityTypes = staticMap!(_GetInnerEntity, _AllEntityTypes);
-
-    /// TypeMap for entity return type wrapping: inner entity → paginated entity.
-    template _EntityWrapMap(T) {
-        import std.meta : staticIndexOf;
-        enum _idx = staticIndexOf!(T, _AllInnerEntityTypes);
-        static if (_idx >= 0) {
-            alias _EntityWrapMap = PaginatedEntity!(_AllEntityTypes[_idx]);
-        } else {
-            alias _EntityWrapMap = T;
-        }
-    }
-
     // Generate paginated versions of each entity type.
     // Each paginated entity type:
     // 1. Has @GqlName to preserve the original GraphQL type name
     // 2. Has pagination arguments on array-returning fields
-    // 3. Uses the inner schema's transformed type (for plugin composition)
-    template PaginatedEntity(OriginalEntity) {
-        // Get the inner schema's transformed type (e.g., FilteredEntity!User)
-        // If the inner schema has EntityTypeMap, use it; otherwise use identity
-        static if (__traits(hasMember, S, "EntityTypeMap")) {
-            alias Entity = S.EntityTypeMap!OriginalEntity;
-        } else {
-            alias Entity = OriginalEntity;
-        }
-
-        // Use @GqlName to ensure the paginated type has the same GraphQL name as the original
-        @GqlName(getGraphQLTypeName!OriginalEntity)
+    // 3. Wraps the entity type discovered from the inner schema's Query
+    template PaginatedEntity(Entity) {
+        @GqlName(getGraphQLTypeName!Entity)
         struct PaginatedEntity {
-            // Copy entity infrastructure from ORIGINAL entity (for nodeId type consistency)
-            static if (__traits(hasMember, OriginalEntity, "nodeId")) {
-                typeof(OriginalEntity.nodeId) nodeId;
+            // Copy entity infrastructure
+            static if (__traits(hasMember, Entity, "nodeId")) {
+                typeof(Entity.nodeId) nodeId;
                 this(string id) { nodeId = typeof(nodeId)(id); }
                 string toString() const { return nodeId.toString(); }
             }
 
-            // Copy all fields from the TRANSFORMED entity (with inner schema's modifications)
-            // This ensures pagination is layered on top of filtering, etc.
+            // Copy all fields with pagination on array fields
             static foreach (member; getFieldMembers!Entity) {
                 static if (isArrayReturningField!(__traits(getMember, Entity, member))) {
-                    mixin PaginatedEntityArrayField!(Entity, member, _EntityWrapMap);
+                    mixin PaginatedEntityArrayField!(Entity, member, EntityTypeMap);
                 } else static if (isComputedField!(Entity, member)) {
-                    mixin ForwardFieldWithTypeMap!(Entity, member, _EntityWrapMap);
+                    mixin ForwardFieldWithTypeMap!(Entity, member, EntityTypeMap);
                 } else {
                     // Plain method (instance method with no Expr parameter)
-                    mixin ForwardPlainMethodWithTypeMap!(Entity, member, _EntityWrapMap);
+                    mixin ForwardPlainMethodWithTypeMap!(Entity, member, EntityTypeMap);
                 }
             }
         }
@@ -138,16 +107,12 @@ template PaginationPlugin(alias S) if (isSchema!S) {
     // Map all entity types to their paginated versions
     alias AllEntityTypes = staticMap!(PaginatedEntity, _AllEntityTypes);
 
-    /// Entity type map: maps original entity types to their paginated versions.
-    /// Used by the compiler to resolve fields on transformed types.
+    /// Entity type map: maps discovered entity types to their paginated versions.
     template EntityTypeMap(T) {
         static if (isTypeInList!(T, _AllEntityTypes)) {
             alias EntityTypeMap = PaginatedEntity!T;
-        } else static if (__traits(hasMember, S, "EntityTypeMap")) {
-            // Delegate to inner schema for non-entity types
-            alias EntityTypeMap = S.EntityTypeMap!T;
         } else {
-            alias EntityTypeMap = T;  // Identity for non-entity types
+            alias EntityTypeMap = T;
         }
     }
 
