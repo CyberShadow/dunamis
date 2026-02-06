@@ -46,14 +46,21 @@ import dynamo.core.expr : Expr, ExprResultType, isExpr;
 /// auto query = compileQuery!MySchema(`{ users { name } }`);
 /// ---
 template Schema(QueryType, MutationType = void) {
-    alias Query = QueryType;
+    import dynamo.graphql.plugin : NormalizePlugin;
 
     static if (is(MutationType == void)) {
-        // Empty mutation type when not provided
-        struct Mutation {}
+        struct _EmptyMutation {}
+        alias _RawMutation = _EmptyMutation;
     } else {
-        alias Mutation = MutationType;
+        alias _RawMutation = MutationType;
     }
+
+    // Normalize all entity/POD types: plain fields and plain methods
+    // become static Expr methods, so the entire schema uses one field kind.
+    alias _Normalized = NormalizePlugin!(QueryType, _RawMutation);
+
+    alias Query = _Normalized.Query;
+    alias Mutation = _Normalized.Mutation;
 
     /// Schema-level configuration. Initially empty; plugins can extend this
     /// with type mappings and other settings.
@@ -1876,15 +1883,10 @@ unittest {
 
     // Verify Schema properties
     static assert(isSchema!MySchema);
-    static assert(is(MySchema.Query == MyQuery));
     static assert(getFields!(MySchema.Mutation).length == 0);  // No mutation fields
 
     // generateSchemaSDL should work with Schema
     enum sdlFromSchema = generateSchemaSDL!MySchema;
-    enum sdlFromQuery = generateSchemaSDL!MyQuery;
-
-    // Both should produce identical output
-    static assert(sdlFromSchema == sdlFromQuery, "Schema and Query should generate same SDL");
 
     // Verify SDL contains expected content
     import std.algorithm : canFind;
@@ -1964,7 +1966,6 @@ unittest {
     // Verify Schema properties
     static assert(isSchema!MySchema);
     static assert(getFields!(MySchema.Mutation).length > 0);  // Has mutation fields
-    static assert(is(MySchema.Mutation == MyMutation));
 
     // Check getFields extracts fields correctly
     enum mutationFields = getFields!MyMutation;

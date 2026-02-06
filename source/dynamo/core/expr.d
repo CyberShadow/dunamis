@@ -543,6 +543,17 @@ class EntityCastExpr(To, From) : Expr!To, AnyRefEvaluable, EntityCastInfo {
                     // Non-struct types (Query, Mutation) - use default init
                     result[i] = To.init;
                 }
+                // Carry _normalizedSource through the wrapper chain
+                static if (__traits(hasMember, To, "_normalizedSource")) {
+                    static if (is(typeof(To._normalizedSource) == From)) {
+                        // Direct: From → NormalizedFrom (store original)
+                        result[i]._normalizedSource = from;
+                    } else static if (__traits(hasMember, From, "_normalizedSource") &&
+                                      is(typeof(From._normalizedSource) == typeof(To._normalizedSource))) {
+                        // Transitive: NormalizedFrom → PluginWrapped (copy through chain)
+                        result[i]._normalizedSource = from._normalizedSource;
+                    }
+                }
             }
             return result;
         });

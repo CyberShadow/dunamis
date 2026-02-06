@@ -194,6 +194,11 @@ Nullable!To nullableEntityCastValue(To, From)(Nullable!From val) {
 }
 
 /// Value-level entity cast. Copies nodeId and matching instance fields from From to To.
+///
+/// Special handling for `_normalizedSource`: if To has a `_normalizedSource` field,
+/// it is populated to carry original entity data through the plugin wrapper chain.
+/// - If `_normalizedSource` type matches From: store From directly (normalization cast)
+/// - If both From and To have `_normalizedSource` of the same type: copy transitively (plugin chain)
 To entityCastValue(To, From)(From from) {
     To to;
     static if (__traits(hasMember, From, "nodeId") && __traits(hasMember, To, "nodeId")) {
@@ -226,6 +231,17 @@ To entityCastValue(To, From)(From from) {
                 }
             }
         }}
+    }
+    // Carry _normalizedSource through the wrapper chain
+    static if (__traits(hasMember, To, "_normalizedSource")) {
+        static if (is(typeof(To._normalizedSource) == From)) {
+            // Direct: From → NormalizedFrom (store original)
+            to._normalizedSource = from;
+        } else static if (__traits(hasMember, From, "_normalizedSource") &&
+                          is(typeof(From._normalizedSource) == typeof(To._normalizedSource))) {
+            // Transitive: NormalizedFrom → PluginWrapped (copy through chain)
+            to._normalizedSource = from._normalizedSource;
+        }
     }
     return to;
 }
@@ -605,4 +621,59 @@ unittest {
     static assert(AllTypes.length == 2);
     static assert(isTypeInList!(TestAuthor, AllTypes));
     static assert(isTypeInList!(TestPost, AllTypes));
+}
+
+// Test _normalizedSource in entityCastValue with entities
+unittest {
+    import dynamo.relational.demo : DemoEntity, MockDB;
+
+    static MockDB!() db;
+
+    static struct Original {
+        mixin DemoEntity!(db, "originals");
+        string name;
+        int age;
+    }
+
+    // Normalized wrapper with _normalizedSource
+    static struct Normalized {
+        mixin DemoEntity!(db, "originals");
+        Original _normalizedSource;
+    }
+
+    // Plugin wrapper that carries _normalizedSource through chain
+    static struct PluginWrapped {
+        mixin DemoEntity!(db, "originals");
+        Original _normalizedSource;
+    }
+
+    // Direct: Original → Normalized (stores original in _normalizedSource)
+    auto orig = Original("1");
+    orig.name = "Alice";
+    orig.age = 30;
+    auto norm = entityCastValue!(Normalized, Original)(orig);
+    assert(norm._normalizedSource.name == "Alice");
+    assert(norm._normalizedSource.age == 30);
+
+    // Transitive: Normalized → PluginWrapped (copies _normalizedSource)
+    auto wrapped = entityCastValue!(PluginWrapped, Normalized)(norm);
+    assert(wrapped._normalizedSource.name == "Alice");
+    assert(wrapped._normalizedSource.age == 30);
+}
+
+// Test _normalizedSource with POD types (no nodeId)
+unittest {
+    static struct POD {
+        int x;
+        string y;
+    }
+
+    static struct NormalizedPOD {
+        POD _normalizedSource;
+    }
+
+    auto pod = POD(42, "hello");
+    auto norm = entityCastValue!(NormalizedPOD, POD)(pod);
+    assert(norm._normalizedSource.x == 42);
+    assert(norm._normalizedSource.y == "hello");
 }

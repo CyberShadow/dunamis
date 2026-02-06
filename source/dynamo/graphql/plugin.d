@@ -261,14 +261,19 @@ mixin template WrapFields(SourceType, alias TypeMap, alias ArrayFieldMixin) {
         string toString() const { return nodeId.toString(); }
     }
 
-    // 2. Copy plain fields (struct instance fields)
+    // 2. Copy _normalizedSource (carries original entity data through plugin chain)
+    static if (__traits(hasMember, SourceType, "_normalizedSource")) {
+        typeof(SourceType._normalizedSource) _normalizedSource;
+    }
+
+    // 3. Copy plain fields (struct instance fields)
     static foreach (member; __traits(allMembers, SourceType)) {
         static if (isPlainField!(SourceType, member)) {
             mixin("typeof(__traits(getMember, SourceType.init, \"" ~ member ~ "\")) " ~ member ~ ";");
         }
     }
 
-    // 3. Field iteration with dispatch
+    // 4. Field iteration with dispatch
     static foreach (member; getFieldMembers!SourceType) {
         static if (isArrayReturningField!(__traits(getMember, SourceType, member))) {
             mixin ArrayFieldMixin!(SourceType, member, TypeMap);
@@ -277,6 +282,180 @@ mixin template WrapFields(SourceType, alias TypeMap, alias ArrayFieldMixin) {
         } else {
             mixin ForwardPlainMethodWithTypeMap!(SourceType, member, TypeMap);
         }
+    }
+}
+
+// ============================================================================
+// Field Normalization
+// ============================================================================
+
+/// Mixin template that normalizes ALL fields of SourceType to static Expr methods.
+///
+/// Computed fields (static methods taking Expr!SourceType) are forwarded as-is.
+/// Plain fields and plain methods are wrapped via `use()` to read from
+/// `_normalizedSource`, which carries the original entity data.
+///
+/// After normalization, every field is a static method `(Expr!Self) -> Expr!T`,
+/// so downstream consumers (schema generator, compiler, plugins) only need
+/// one code path.
+///
+/// Example:
+/// ---
+/// struct NormalizedUser {
+///     mixin NormalizeFields!User;
+///     // Now has:
+///     //   _normalizedSource: User
+///     //   static auto firstName(Expr!NormalizedUser) -> Expr!string  (forwarded)
+///     //   static auto nickname(Expr!NormalizedUser) -> Expr!(Nullable!string)  (from plain field)
+///     //   static auto displayName(Expr!NormalizedUser) -> Expr!string  (from plain method)
+/// }
+/// ---
+mixin template NormalizeFields(SourceType) {
+    import dynamo.core.expr : Expr, use;
+    import dynamo.core.types : isPlainField, isPlainMethod;
+    import dynamo.graphql.plugin : getFieldMembers, isComputedField, ForwardField;
+
+    // Store original struct for data access by normalized methods
+    SourceType _normalizedSource;
+
+    // Copy nodeId infrastructure
+    static if (__traits(hasMember, SourceType, "nodeId")) {
+        typeof(SourceType.nodeId) nodeId;
+        this(string id) { nodeId = typeof(nodeId)(id); }
+        string toString() const { return nodeId.toString(); }
+    }
+
+    // Forward computed fields (already static Expr methods)
+    static foreach (_nf_member; getFieldMembers!SourceType) {
+        static if (isComputedField!(SourceType, _nf_member)) {
+            mixin ForwardField!(SourceType, _nf_member);
+        }
+    }
+
+    // Normalize plain fields → static Expr methods
+    static foreach (_nf_member; __traits(allMembers, SourceType)) {
+        static if (isPlainField!(SourceType, _nf_member)) {
+            // Helper: reads field from _normalizedSource
+            mixin("private static auto _nf_read_" ~ _nf_member ~
+                  "(typeof(this) _n) { return _n._normalizedSource." ~ _nf_member ~ "; }");
+            // Public method with UDAs preserved from source field
+            @(__traits(getAttributes, __traits(getMember, SourceType, _nf_member)))
+            mixin("static auto " ~ _nf_member ~
+                  "(Expr!(typeof(this)) _self) { return use(&_nf_read_" ~ _nf_member ~ ", _self); }");
+        }
+    }
+
+    // Normalize plain methods → static Expr methods
+    static foreach (_nf_member; getFieldMembers!SourceType) {
+        static if (!isComputedField!(SourceType, _nf_member)) {
+            // Helper: calls method on _normalizedSource
+            mixin("private static auto _nf_call_" ~ _nf_member ~
+                  "(typeof(this) _n) { return _n._normalizedSource." ~ _nf_member ~ "(); }");
+            // Public method with UDAs preserved from source method
+            @(__traits(getAttributes, __traits(getMember, SourceType, _nf_member)))
+            mixin("static auto " ~ _nf_member ~
+                  "(Expr!(typeof(this)) _self) { return use(&_nf_call_" ~ _nf_member ~ ", _self); }");
+        }
+    }
+}
+
+/// Like NormalizeFields but applies TypeMap to remap entity/object types in
+/// return values. Used by NormalizePlugin to ensure normalized methods return
+/// references to other normalized types (e.g., stats() → Expr!NormalizedUserStats).
+mixin template NormalizeFieldsWithTypeMap(SourceType, alias TypeMap) {
+    import dynamo.core.expr : Expr, use;
+    import dynamo.core.types : isPlainField, isPlainMethod;
+    import dynamo.graphql.plugin : getFieldMembers, isComputedField;
+    import dynamo.graphql.transform : ForwardFieldWithTypeMap, wrapEntityResult;
+
+    // Store original struct for data access by normalized methods
+    SourceType _normalizedSource;
+
+    // Copy nodeId infrastructure
+    static if (__traits(hasMember, SourceType, "nodeId")) {
+        typeof(SourceType.nodeId) nodeId;
+        this(string id) { nodeId = typeof(nodeId)(id); }
+        string toString() const { return nodeId.toString(); }
+    }
+
+    // Forward computed fields with type remapping
+    static foreach (_nf_member; getFieldMembers!SourceType) {
+        static if (isComputedField!(SourceType, _nf_member)) {
+            mixin ForwardFieldWithTypeMap!(SourceType, _nf_member, TypeMap);
+        }
+    }
+
+    // Normalize plain fields → static Expr methods with type remapping
+    static foreach (_nf_member; __traits(allMembers, SourceType)) {
+        static if (isPlainField!(SourceType, _nf_member)) {
+            mixin("private static auto _nf_read_" ~ _nf_member ~
+                  "(typeof(this) _n) { return _n._normalizedSource." ~ _nf_member ~ "; }");
+            @(__traits(getAttributes, __traits(getMember, SourceType, _nf_member)))
+            mixin("static auto " ~ _nf_member ~
+                  "(Expr!(typeof(this)) _self) { return wrapEntityResult!(TypeMap)(use(&_nf_read_" ~ _nf_member ~ ", _self)); }");
+        }
+    }
+
+    // Normalize plain methods → static Expr methods with type remapping
+    static foreach (_nf_member; getFieldMembers!SourceType) {
+        static if (!isComputedField!(SourceType, _nf_member)) {
+            mixin("private static auto _nf_call_" ~ _nf_member ~
+                  "(typeof(this) _n) { return _n._normalizedSource." ~ _nf_member ~ "(); }");
+            @(__traits(getAttributes, __traits(getMember, SourceType, _nf_member)))
+            mixin("static auto " ~ _nf_member ~
+                  "(Expr!(typeof(this)) _self) { return wrapEntityResult!(TypeMap)(use(&_nf_call_" ~ _nf_member ~ ", _self)); }");
+        }
+    }
+}
+
+// ============================================================================
+// Normalize Plugin
+// ============================================================================
+
+/// Internal plugin that normalizes entity types (those with nodeId) to use
+/// only static Expr methods. Plain fields and plain methods are converted to
+/// computed fields via `use()`, making all field access uniform for entities.
+///
+/// POD types (structs without nodeId) are left unchanged — they keep their
+/// plain fields/methods and remain compatible with ExternalTypesPlugin.
+///
+/// Used internally by Schema to normalize types before external plugins
+/// are applied.
+template NormalizePlugin(RawQuery, RawMutation) {
+    import std.meta : staticMap;
+    import dynamo.graphql.schema : getAllEntityTypes, getGraphQLTypeName, GqlName;
+    import dynamo.graphql.transform : isTypeInList, ForwardFieldWithTypeMap;
+
+    // Discover all entity and POD types reachable from the Query root
+    alias _AllTypes = getAllEntityTypes!RawQuery;
+
+    // Create normalized version of each discovered type
+    template _NormalizedType(T) {
+        @GqlName(getGraphQLTypeName!T)
+        struct _NormalizedType {
+            mixin NormalizeFieldsWithTypeMap!(T, _TypeMap);
+        }
+    }
+
+    // Map entity types (with nodeId) to normalized versions.
+    // POD types pass through unchanged — they keep plain fields/methods
+    // and remain compatible with ExternalTypesPlugin type mappings.
+    template _TypeMap(T) {
+        static if (isTypeInList!(T, _AllTypes) && __traits(hasMember, T, "nodeId")) {
+            alias _TypeMap = _NormalizedType!T;
+        } else {
+            alias _TypeMap = T;
+        }
+    }
+
+    // Wrap Query: forward all fields with type remapping
+    struct Query {
+        mixin WrapFields!(RawQuery, _TypeMap, ForwardFieldWithTypeMap);
+    }
+
+    // Wrap Mutation: forward all fields with type remapping
+    struct Mutation {
+        mixin WrapFields!(RawMutation, _TypeMap, ForwardFieldWithTypeMap);
     }
 }
 
@@ -907,3 +1086,64 @@ unittest {
     assert(result["users"][1]["greeting"].str == "Hello, Bob");
     assert(result["users"][1]["politeGreeting"].str == "Dear Bob, welcome!");
 }
+
+// Test NormalizeFields mixin - schema generation
+unittest {
+    import dynamo.relational.schema;
+    import dynamo.relational.demo;
+    import dynamo.graphql.schema : Schema, generateSchemaSDL, GqlName, GqlDescription, GqlHidden;
+    import std.algorithm : canFind;
+    import std.typecons : Nullable;
+
+    static MockDB!() db;
+
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("firstName", string);
+
+        // Plain field
+        Nullable!string nickname;
+
+        // Plain field with UDA
+        @GqlDescription("User's age")
+        int age;
+
+        // Plain method
+        string displayName() => "display";
+
+        // Plain method with UDA
+        @GqlDescription("Is the user active?")
+        bool isActive() => true;
+
+        // Computed field
+        static auto fullName(Expr!User u) {
+            import dynamo.core.expr : constant;
+            return constant("full", u);
+        }
+    }
+
+    // Normalized wrapper
+    static struct NormalizedUser {
+        mixin NormalizeFields!User;
+    }
+
+    static struct Query {
+        mixin Table!(NormalizedUser, "users");
+    }
+
+    alias MySchema = Schema!Query;
+    enum sdl = generateSchemaSDL!MySchema;
+
+    // All fields should appear in schema
+    static assert(sdl.canFind("firstName:"), "Forwarded computed field");
+    static assert(sdl.canFind("nickname:"), "Normalized plain field");
+    static assert(sdl.canFind("age:"), "Normalized plain field with UDA");
+    static assert(sdl.canFind("displayName:"), "Normalized plain method");
+    static assert(sdl.canFind("isActive:"), "Normalized plain method with UDA");
+    static assert(sdl.canFind("fullName:"), "Forwarded computed field");
+
+    // UDA descriptions should be preserved
+    static assert(sdl.canFind(`"User's age"`), "Description preserved on plain field");
+    static assert(sdl.canFind(`"Is the user active?"`), "Description preserved on plain method");
+}
+

@@ -141,7 +141,7 @@ template getFilterableColumns(Entity) {
     enum string[] getFilterableColumns = () {
         string[] columns;
         static foreach (member; __traits(allMembers, Entity)) {{
-            static if (isEntityColumnMethod!(Entity, member)) {
+            static if (!isInternalMember!member && isEntityColumnMethod!(Entity, member)) {
                 columns ~= member;
             }
         }}
@@ -217,7 +217,7 @@ template getArrayFields(Entity) {
     enum string[] getArrayFields = () {
         string[] fields;
         static foreach (member; __traits(allMembers, Entity)) {{
-            static if (isArrayReturningMethod!(Entity, member)) {
+            static if (!isInternalMember!member && isArrayReturningMethod!(Entity, member)) {
                 fields ~= member;
             }
         }}
@@ -230,7 +230,7 @@ template getEntityArrayFields(Entity) {
     enum string[] getEntityArrayFields = () {
         string[] fields;
         static foreach (member; __traits(allMembers, Entity)) {{
-            static if (isEntityArrayField!(Entity, member)) {
+            static if (!isInternalMember!member && isEntityArrayField!(Entity, member)) {
                 fields ~= member;
             }
         }}
@@ -243,7 +243,7 @@ template getScalarArrayFields(Entity) {
     enum string[] getScalarArrayFields = () {
         string[] fields;
         static foreach (member; __traits(allMembers, Entity)) {{
-            static if (isScalarArrayField!(Entity, member)) {
+            static if (!isInternalMember!member && isScalarArrayField!(Entity, member)) {
                 fields ~= member;
             }
         }}
@@ -908,7 +908,7 @@ private Expr!bool buildComparisonFromJson(Entity)(FilterItemExpr!Entity item, st
     // Create expressions using string interpolation that reference Entity columns
 
     static foreach (member; __traits(allMembers, Entity)) {{
-        static if (isEntityColumnMethod!(Entity, member)) {
+        static if (!isInternalMember!member && isEntityColumnMethod!(Entity, member)) {
             if (member == columnName) {
                 // Found the column - build the condition
                 alias colMethod = __traits(getMember, Entity, member);
