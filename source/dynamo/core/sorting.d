@@ -306,9 +306,9 @@ class OrderByExpr(T) : Expr!(T[]), OrderByInfo {
             foreach (ref group; groups) {
                 if (group.length <= 1 || specs.length == 0) continue;
 
-                // Get table name from first entity's typeName
-                static if (__traits(hasMember, T, "nodeId")) {
-                    string tableName = getTableFromTypeName(group[0].nodeId.typeName);
+                static if (__traits(hasMember, T, "nodeId") &&
+                           __traits(hasMember, typeof(T.init.nodeId), "table")) {
+                    enum tableName = typeof(T.init.nodeId).table;
                     AnyRef[] refs = group.map!(e => AnyRef(e.nodeId.id)).array;
 
                     // Sort using fetched column values via the sorting helper
@@ -320,23 +320,7 @@ class OrderByExpr(T) : Expr!(T[]), OrderByInfo {
         });
     }
 
-    /// Get table name from type name (snake_case pluralization)
-    private static string getTableFromTypeName(string typeName) {
-        // Simple conversion: "User" -> "users"
-        import std.uni : toLower;
 
-        if (typeName.length == 0) return "";
-
-        // Convert camelCase to snake_case and pluralize
-        string result;
-        foreach (i, c; typeName) {
-            if (i > 0 && c >= 'A' && c <= 'Z') {
-                result ~= '_';
-            }
-            result ~= toLower(c);
-        }
-        return result ~ "s";
-    }
 }
 
 // ============================================================================
