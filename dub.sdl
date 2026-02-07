@@ -1,4 +1,4 @@
-name "dynamo"
+name "dunamis"
 description "GraphQL server for D that eliminates N+1 queries through expression-based query optimization"
 authors "Vladimir"
 license "MIT"
@@ -11,8 +11,8 @@ dependency "graphqld:parser" repository="git+https://github.com/vpanteleev-sym/g
 dependency "ae" repository="git+https://github.com/CyberShadow/ae.git" version="85f44a586afccdaf652a60489dc3604b23dba893"
 
 # Exclude sqlite and mysql modules from main package (available via subpackages)
-excludedSourceFiles "source/dynamo/sqlite/*"
-excludedSourceFiles "source/dynamo/mysql/*"
+excludedSourceFiles "source/dunamis/sqlite/*"
+excludedSourceFiles "source/dunamis/mysql/*"
 
 # Exclude integration tests from library build
 excludedSourceFiles "source/integration/*"
@@ -33,7 +33,7 @@ configuration "sqlite-integration" {
     mainSourceFile "source/integration/sqlite_test.d"
     sourceFiles "source/integration/test_framework.d" "source/integration/tests.d" "source/integration/schema.d" "source/integration/test_runner.d"
     # Include sqlite sources directly for integration test
-    sourceFiles "source/dynamo/sqlite/ddl.d" "source/dynamo/sqlite/dialect.d" "source/dynamo/sqlite/fetcher.d" "source/dynamo/sqlite/sql.d" "source/dynamo/sqlite/package.d"
+    sourceFiles "source/dunamis/sqlite/ddl.d" "source/dunamis/sqlite/dialect.d" "source/dunamis/sqlite/fetcher.d" "source/dunamis/sqlite/sql.d" "source/dunamis/sqlite/package.d"
     dependency "ae:sqlite" repository="git+https://github.com/CyberShadow/ae.git" version="85f44a586afccdaf652a60489dc3604b23dba893"
     debugVersions "ASOCKETS_DEBUG_IDLE"
 }
@@ -43,7 +43,7 @@ configuration "mysql-integration" {
     mainSourceFile "source/integration/mysql_test.d"
     sourceFiles "source/integration/test_framework.d" "source/integration/tests.d" "source/integration/schema.d" "source/integration/test_runner.d"
     # Include mysql sources directly for integration test
-    sourceFiles "source/dynamo/mysql/ddl.d" "source/dynamo/mysql/dialect.d" "source/dynamo/mysql/fetcher.d" "source/dynamo/mysql/sql.d" "source/dynamo/mysql/connection.d" "source/dynamo/mysql/package.d"
+    sourceFiles "source/dunamis/mysql/ddl.d" "source/dunamis/mysql/dialect.d" "source/dunamis/mysql/fetcher.d" "source/dunamis/mysql/sql.d" "source/dunamis/mysql/connection.d" "source/dunamis/mysql/package.d"
     debugVersions "ASOCKETS_DEBUG_IDLE"
 }
 
@@ -57,7 +57,7 @@ subPackage {
 
     # Exclude other database backends and integration tests
     excludedSourceFiles "source/integration/*"
-    excludedSourceFiles "source/dynamo/mysql/*"
+    excludedSourceFiles "source/dunamis/mysql/*"
 
     dependency "graphqld:parser" repository="git+https://github.com/vpanteleev-sym/graphqld.git" version="542374109b26018c9542631c90d1ba2acef32a8b"
     dependency "ae:sqlite" repository="git+https://github.com/CyberShadow/ae.git" version="85f44a586afccdaf652a60489dc3604b23dba893"
@@ -73,7 +73,7 @@ subPackage {
 
     # Exclude other database backends and integration tests
     excludedSourceFiles "source/integration/*"
-    excludedSourceFiles "source/dynamo/sqlite/*"
+    excludedSourceFiles "source/dunamis/sqlite/*"
 
     dependency "graphqld:parser" repository="git+https://github.com/vpanteleev-sym/graphqld.git" version="542374109b26018c9542631c90d1ba2acef32a8b"
     dependency "ae" repository="git+https://github.com/CyberShadow/ae.git" version="85f44a586afccdaf652a60489dc3604b23dba893"

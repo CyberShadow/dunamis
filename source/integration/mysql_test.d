@@ -16,7 +16,7 @@ import ae.net.sync : ThreadAnchor;
 import ae.net.db.mysql : MySqlConnection;
 import ae.utils.promise.await : async, await;
 
-import dynamo.mysql;
+import dunamis.mysql;
 
 import integration.schema;
 import integration.test_runner;

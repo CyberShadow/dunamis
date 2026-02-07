@@ -16,7 +16,7 @@ import ae.net.sync : ThreadAnchor;
 import ae.net.db.psql : PgSqlConnection;
 import ae.utils.promise.await : async, await;
 
-import dynamo.postgres;
+import dunamis.postgres;
 
 import integration.schema;
 import integration.test_runner;

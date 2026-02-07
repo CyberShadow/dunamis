@@ -13,7 +13,7 @@ import std.string : strip;
 import ae.net.sync : ThreadAnchor;
 import ae.sys.sqlite3 : SQLite;
 
-import dynamo.sqlite;
+import dunamis.sqlite;
 
 import integration.schema;
 import integration.test_runner;

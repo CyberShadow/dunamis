@@ -1,4 +1,4 @@
-# Dynamo
+# Dunamis
 
 A GraphQL server for D that eliminates N+1 queries through expression-based query optimization.
 
@@ -226,9 +226,9 @@ All types are treated uniformly â€” Query, Mutation, User, Post are all types wi
 ## Example
 
 ```d
-import dynamo.core;
-import dynamo.relational;
-import dynamo.graphql;
+import dunamis.core;
+import dunamis.relational;
+import dunamis.graphql;
 
 // Data source - static variable bound to entities via DemoEntity mixin
 // Options: MockDB (testing), PostgresDB, SQLiteDB, MySQLDB
@@ -394,7 +394,7 @@ SELECT * FROM layer1;
 
 ### Plain Fields vs Col Mixins
 
-Dynamo offers two ways to define fields on entities:
+Dunamis offers two ways to define fields on entities:
 
 **Col mixins** (lazy, SQL-optimized):
 ```d
@@ -578,7 +578,7 @@ This distinction is semantic (handled in your resolver logic), not schema-levelâ
 Use `compileQuery` to compile GraphQL query strings at runtime:
 
 ```d
-import dynamo.graphql : compileQuery;
+import dunamis.graphql : compileQuery;
 
 db = new MockDB!();  // Initialize the static db
 auto executor = new Executor();
@@ -636,7 +636,7 @@ auto result = executor.execute(query);
 Use the `FilterPlugin` to add filtering support to your schema. Filter types are auto-generated for each entity:
 
 ```d
-import dynamo.graphql.filtering : FilterPlugin;
+import dunamis.graphql.filtering : FilterPlugin;
 
 // Wrap your schema with FilterPlugin to add filter arguments
 alias MySchema = FilterPlugin!(Schema!(Query, Mutation));

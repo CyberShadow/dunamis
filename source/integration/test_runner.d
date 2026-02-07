@@ -25,8 +25,8 @@ import ae.net.http.responseex : HttpResponseEx;
 import ae.sys.data : Data;
 import ae.sys.dataset : DataVec, joinToGC;
 
-import dynamo.core : Executor;
-import dynamo.graphql : compileQuery;
+import dunamis.core : Executor;
+import dunamis.graphql : compileQuery;
 
 import integration.test_framework : runAllTests;
 import integration.schema : seedDatabase;

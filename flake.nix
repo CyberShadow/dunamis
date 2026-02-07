@@ -1,5 +1,5 @@
 {
-  description = "Dynamo - GraphQL server for D that eliminates N+1 queries through expression-based query optimization";
+  description = "Dunamis - GraphQL server for D that eliminates N+1 queries through expression-based query optimization";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -13,7 +13,7 @@
 
         # Build the postgres integration test executable
         postgresTestBin = pkgs.buildDubPackage {
-          pname = "dynamo-postgres-test";
+          pname = "dunamis-postgres-test";
           version = "0.0.1";
           src = self;
           dubLock = ./dub-lock.json;
@@ -23,14 +23,14 @@
           installPhase = ''
             runHook preInstall
             mkdir -p $out/bin
-            cp build/dynamo $out/bin/postgres_test
+            cp build/dunamis $out/bin/postgres_test
             runHook postInstall
           '';
         };
 
         # Build the sqlite integration test executable
         sqliteTestBin = pkgs.buildDubPackage {
-          pname = "dynamo-sqlite-test";
+          pname = "dunamis-sqlite-test";
           version = "0.0.1";
           src = self;
           dubLock = ./dub-lock.json;
@@ -41,14 +41,14 @@
           installPhase = ''
             runHook preInstall
             mkdir -p $out/bin
-            cp build/dynamo $out/bin/sqlite_test
+            cp build/dunamis $out/bin/sqlite_test
             runHook postInstall
           '';
         };
 
         # Build the mysql integration test executable
         mysqlTestBin = pkgs.buildDubPackage {
-          pname = "dynamo-mysql-test";
+          pname = "dunamis-mysql-test";
           version = "0.0.1";
           src = self;
           dubLock = ./dub-lock.json;
@@ -58,7 +58,7 @@
           installPhase = ''
             runHook preInstall
             mkdir -p $out/bin
-            cp build/dynamo $out/bin/mysql_test
+            cp build/dunamis $out/bin/mysql_test
             runHook postInstall
           '';
         };
@@ -66,7 +66,7 @@
         checks = {
           # D unit tests via dub
           unit-tests = pkgs.buildDubPackage {
-            pname = "dynamo-unit-tests";
+            pname = "dunamis-unit-tests";
             version = "0.0.1";
             src = self;
 
@@ -87,7 +87,7 @@
 
           # PostgreSQL integration tests
           postgres-integration = pkgs.stdenv.mkDerivation {
-            name = "dynamo-postgres-integration";
+            name = "dunamis-postgres-integration";
             dontUnpack = true;
             nativeBuildInputs = [ pkgs.postgresql ];
 
@@ -123,7 +123,7 @@
 
           # SQLite integration tests
           sqlite-integration = pkgs.stdenv.mkDerivation {
-            name = "dynamo-sqlite-integration";
+            name = "dunamis-sqlite-integration";
             dontUnpack = true;
 
             buildPhase = ''
@@ -138,7 +138,7 @@
 
           # MySQL integration tests
           mysql-integration = pkgs.stdenv.mkDerivation {
-            name = "dynamo-mysql-integration";
+            name = "dunamis-mysql-integration";
             dontUnpack = true;
             nativeBuildInputs = [ pkgs.mariadb ];
 
@@ -201,7 +201,7 @@
           ];
 
           shellHook = ''
-            echo "Dynamo development shell"
+            echo "Dunamis development shell"
             echo "Run 'dub test' for unit tests"
             echo "Run 'nix flake check' for all tests (unit + integration)"
           '';
