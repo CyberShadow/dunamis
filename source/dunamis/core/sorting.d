@@ -1,18 +1,11 @@
 /// Sorting expression nodes for ORDER BY support.
 ///
-/// Provides predicate-based sorting that can be optimized to SQL ORDER BY:
-/// - SortByExpr: sorts using a comparison predicate (a, b) => bool
-/// - OrderByExpr: column-based sorting (SQL-friendly, used after optimization)
+/// Provides predicate-based sorting that can be optimized to SQL ORDER BY.
+/// SortByExpr sorts using a comparison predicate (a, b) => bool.
 ///
 /// The optimizer pattern-matches predicates like `(a, b) => a.column < b.column`
-/// and converts them to column-based OrderBy for SQL push-down.
+/// and converts them to SQL ORDER BY clauses.
 module dunamis.core.sorting;
-
-import std.algorithm : sort, map;
-import std.array : array;
-import std.conv : to;
-import std.json : JSONValue, JSONType;
-import std.range : iota;
 
 import ae.utils.promise;
 import ae.utils.promise.await : async;
@@ -20,7 +13,6 @@ import ae.utils.promise.await : async;
 import dunamis.core.expr;
 import dunamis.core.eval;
 import dunamis.core.optimize;
-import dunamis.core.types : AnyRef;
 
 // ============================================================================
 // Types
@@ -68,16 +60,6 @@ interface SortByInfo {
 
     /// Get the right item placeholder (b)
     Object sortRightItem();
-}
-
-/// Interface for expressions that apply column-based ORDER BY.
-/// This is the SQL-friendly form produced after optimization.
-interface OrderByInfo {
-    /// Get the ordering specifications (column + direction)
-    const(OrderBySpec)[] orderBySpecs();
-
-    /// Get the source expression (without the orderBy wrapper)
-    ExprBase orderBySource();
 }
 
 // ============================================================================
@@ -208,6 +190,8 @@ class SortByExpr(Entity, Pred) : Expr!(Entity[]), SortByInfo
                     size_t pos = 0;
                     while (pos < sorted.length) {
                         // Compare: is item < sorted[pos]?
+                        // Clear expression cache since context values changed
+                        ctx.clearAllCachedEvals();
                         ctx.setValues!Entity(self, [item, sorted[pos]]);
 
                         bool itemIsLess;
@@ -238,170 +222,6 @@ class SortByExpr(Entity, Pred) : Expr!(Entity[]), SortByInfo
             return groups;
         });
     }
-}
-
-// ============================================================================
-// OrderByExpr - Column-based sorting (SQL-friendly)
-// ============================================================================
-
-/// Column-based sorting expression, optimized for SQL push-down.
-///
-/// This is the SQL-friendly form that stores column names and directions.
-/// Created directly or by optimizing SortByExpr predicates.
-///
-/// Example:
-/// ---
-/// auto sorted = orderBy(users(), [OrderBySpec("lastName", SortDirection.ASC)]);
-/// ---
-class OrderByExpr(T) : Expr!(T[]), OrderByInfo {
-    private ExprBase _source;
-    private OrderBySpec[] _specs;
-
-    this(Expr!(T[]) source, OrderBySpec[] specs) {
-        _source = source;
-        _specs = specs;
-    }
-
-    override ExprBase[] dependencies() {
-        return [_source];
-    }
-
-    override void replaceDependency(size_t index, ExprBase newDep) {
-        if (index == 0) _source = newDep;
-    }
-
-    /// Get the ordering specifications (OrderByInfo interface)
-    const(OrderBySpec)[] orderBySpecs() {
-        return _specs;
-    }
-
-    /// Get the source expression (OrderByInfo interface)
-    ExprBase orderBySource() {
-        return _source;
-    }
-
-    /// Get the source expression (typed)
-    @property Expr!(T[]) source() {
-        return cast(Expr!(T[])) _source;
-    }
-
-    override Expr!(T[]) optimize(OptimizeContext ctx) {
-        // Optimize source, keep wrapper (in-memory fallback works)
-        // Push-down to SQL happens via the relational optimizer
-        _source = source.optimize(ctx);
-        return this;
-    }
-
-    override Promise!(T[][]) eval(EvalContext ctx) {
-        import ae.utils.promise.await : async, await;
-
-        auto src = source;
-        auto specs = _specs;
-
-        return async({
-            // Evaluate source to get entity groups
-            T[][] groups = evalAs!(T[])(src, ctx).await;
-
-            // Sort each group using naive path sorting if available
-            foreach (ref group; groups) {
-                if (group.length <= 1 || specs.length == 0) continue;
-
-                static if (__traits(hasMember, T, "nodeId") &&
-                           __traits(hasMember, typeof(T.init.nodeId), "table")) {
-                    enum tableName = typeof(T.init.nodeId).table;
-                    AnyRef[] refs = group.map!(e => AnyRef(e.nodeId.id)).array;
-
-                    // Sort using fetched column values via the sorting helper
-                    group = sortByColumnsNaive!T(group, refs, specs, tableName, ctx);
-                }
-            }
-
-            return groups;
-        });
-    }
-
-
-}
-
-// ============================================================================
-// Naive Path Sorting Helper
-// ============================================================================
-
-/// Sort entities by column values for naive evaluation path.
-/// Fetches column values via RelationalEvalContext if available.
-/// Must be called from within a fiber context (e.g., inside an async block).
-@async private T[] sortByColumnsNaive(T)(T[] items, AnyRef[] refs, const(OrderBySpec)[] specs,
-                                         string tableName, EvalContext ctx) {
-    import ae.utils.promise.await : await;
-
-    // Try to get relational context for DataFetcher access
-    try {
-        import dunamis.relational.eval_context : RelationalEvalContext;
-
-        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-        if (relCtx is null || relCtx.fetcher is null) {
-            return items;  // No fetcher available - return unsorted
-        }
-
-        // Fetch all sort column values (using await since we're in a fiber)
-        JSONValue[][] sortValues;
-        foreach (spec; specs) {
-            auto values = relCtx.fetcher.fetchColumnJson(tableName, spec.column, refs).await;
-            sortValues ~= values;
-        }
-
-        // Build index array and sort
-        size_t[] indices = iota(items.length).array;
-
-        indices.sort!((a, b) {
-            foreach (i, spec; specs) {
-                auto valA = sortValues[i][a];
-                auto valB = sortValues[i][b];
-                int cmp = compareJsonValues(valA, valB);
-                if (cmp != 0) {
-                    return spec.descending ? (cmp > 0) : (cmp < 0);
-                }
-            }
-            return false;  // Equal
-        });
-
-        // Reorder items according to sorted indices
-        T[] result;
-        result.reserve(items.length);
-        foreach (idx; indices) {
-            result ~= items[idx];
-        }
-        return result;
-    } catch (Exception e) {
-        // RelationalEvalContext not available - return unsorted
-        return items;
-    }
-}
-
-/// Compare two JSON values for sorting
-private int compareJsonValues(JSONValue a, JSONValue b) {
-    // Handle nulls
-    if (a.type == JSONType.null_ && b.type == JSONType.null_) return 0;
-    if (a.type == JSONType.null_) return -1;
-    if (b.type == JSONType.null_) return 1;
-
-    // Compare based on type
-    if (a.type == JSONType.integer && b.type == JSONType.integer) {
-        auto diff = a.integer - b.integer;
-        return diff < 0 ? -1 : (diff > 0 ? 1 : 0);
-    }
-    if (a.type == JSONType.string && b.type == JSONType.string) {
-        if (a.str < b.str) return -1;
-        if (a.str > b.str) return 1;
-        return 0;
-    }
-    if (a.type == JSONType.float_ && b.type == JSONType.float_) {
-        auto diff = a.floating - b.floating;
-        return diff < 0 ? -1 : (diff > 0 ? 1 : 0);
-    }
-
-    // Mixed types: convert to string
-    return 0;
 }
 
 // ============================================================================
@@ -455,24 +275,6 @@ private template CollectionEntityType(Coll) {
     }
 }
 
-/// Wrap expression with column-based ORDER BY (SQL-friendly).
-///
-/// This is a lower-level API that directly specifies columns.
-/// Prefer sortBy with predicates for flexibility.
-///
-/// Example:
-/// ---
-/// auto query = orderBy(users(), [OrderBySpec("lastName", SortDirection.DESC)]);
-/// ---
-auto orderBy(T)(Expr!(T[]) source, OrderBySpec[] specs) {
-    return new OrderByExpr!T(source, specs);
-}
-
-/// Convenience overload for single column sorting.
-auto orderBy(T)(Expr!(T[]) source, string column, SortDirection direction = SortDirection.ASC) {
-    return new OrderByExpr!T(source, [OrderBySpec(column, direction)]);
-}
-
 // ============================================================================
 // Unit Tests
 // ============================================================================
@@ -488,63 +290,6 @@ unittest {
     assert(spec2.column == "age");
     assert(spec2.direction == SortDirection.DESC);
     assert(spec2.descending);
-}
-
-unittest {
-    // Test OrderByExpr creation and interface
-    static struct Item {
-        int value;
-    }
-
-    auto source = new class Expr!(Item[]) {
-        override ExprBase[] dependencies() { return []; }
-        override void replaceDependency(size_t, ExprBase) {}
-
-        override Promise!(Item[][]) eval(EvalContext ctx) {
-            return resolve([
-                [Item(3), Item(1), Item(2)]
-            ]);
-        }
-    };
-
-    auto sorted = orderBy(source, [
-        OrderBySpec("value", SortDirection.DESC),
-        OrderBySpec("name", SortDirection.ASC)
-    ]);
-
-    // Verify it implements OrderByInfo
-    auto info = cast(OrderByInfo) sorted;
-    assert(info !is null);
-    assert(info.orderBySpecs.length == 2);
-    assert(info.orderBySpecs[0].column == "value");
-    assert(info.orderBySpecs[0].descending);
-    assert(info.orderBySpecs[1].column == "name");
-    assert(!info.orderBySpecs[1].descending);
-    assert(info.orderBySource is source);
-}
-
-unittest {
-    // Test single column convenience overload
-    static struct Item {
-        int value;
-    }
-
-    auto source = new class Expr!(Item[]) {
-        override ExprBase[] dependencies() { return []; }
-        override void replaceDependency(size_t, ExprBase) {}
-
-        override Promise!(Item[][]) eval(EvalContext ctx) {
-            return resolve([[Item(1)]]);
-        }
-    };
-
-    auto sorted = orderBy(source, "name", SortDirection.DESC);
-
-    auto info = cast(OrderByInfo) sorted;
-    assert(info !is null);
-    assert(info.orderBySpecs.length == 1);
-    assert(info.orderBySpecs[0].column == "name");
-    assert(info.orderBySpecs[0].descending);
 }
 
 unittest {

@@ -16,8 +16,7 @@ import std.traits : ReturnType, Parameters, ParameterDefaults, ParameterIdentifi
 import std.typecons : Nullable;
 
 import dunamis.core.expr : Expr, ExprResultType;
-import dunamis.core.sorting : orderBy, OrderByInfo, SortDirection;
-import dunamis.core.sorting : OrderBySpec = OrderBySpec;
+import dunamis.core.sorting : SortDirection;
 import dunamis.graphql.plugin;
 import dunamis.graphql.schema : isSchema, GqlHidden;
 
@@ -103,7 +102,7 @@ template SortingPlugin(alias S) if (isSchema!S) {
 /// Get sortable field names from an entity type (fields with @SqlColumn UDA).
 /// Returns an array of field names that can be used in ORDER BY.
 template getSortableFields(Entity) {
-    import dunamis.relational.schema : hasSqlColumn;
+    import dunamis.relational.schema : hasSqlColumn, hasForeignKeyRef;
     import dunamis.graphql.schema : hasGqlHidden;
 
     enum getSortableFields = () {
@@ -113,8 +112,14 @@ template getSortableFields(Entity) {
                 static if (__traits(compiles, __traits(getMember, Entity, member)) &&
                            is(typeof(__traits(getMember, Entity, member)) == function)) {
                     alias method = __traits(getMember, Entity, member);
-                    // Include if it's a column and not hidden
-                    static if (hasSqlColumn!method && !hasGqlHidden!method) {
+                    // Include if it's a sortable column:
+                    // - has @SqlColumn UDA
+                    // - not @GqlHidden
+                    // - not a FK reference (ForeignKey types don't support < comparison)
+                    // - not an enum type (enum sort order is database-dependent:
+                    //   string enums sort alphabetically, native enums sort by definition order)
+                    static if (hasSqlColumn!method && !hasGqlHidden!method
+                            && !hasForeignKeyRef!method && !hasEnumReturn!method) {
                         fields ~= member;
                     }
                 }
@@ -124,13 +129,25 @@ template getSortableFields(Entity) {
     }();
 }
 
+/// Check if a method returns an enum type (Expr!SomeEnum or Expr!(Nullable!SomeEnum))
+private template hasEnumReturn(alias method) {
+    import std.traits : ReturnType;
+    import std.typecons : Nullable;
+    import dunamis.core.expr : ExprResultType;
+    alias ResultT = ExprResultType!(ReturnType!method);
+    static if (is(ResultT == Nullable!U, U)) {
+        enum hasEnumReturn = is(U == enum);
+    } else {
+        enum hasEnumReturn = is(ResultT == enum);
+    }
+}
+
 /// Generate OrderBy enum, struct, and helper functions at compile time.
 /// All types and functions that reference the enum/struct are generated together
 /// in a single string mixin to ensure proper symbol visibility in nested mixin contexts.
 mixin template GenerateOrderByTypes(Entity, string graphqlEnumName, string graphqlStructName) {
     import std.meta : AliasSeq;
-    import dunamis.relational.schema : getSqlColumn;
-    import dunamis.core.sorting : orderBy, OrderBySpec;
+    import dunamis.core.sorting : sortBy;
     import dunamis.core.expr : Expr;
 
     // Alias for the entity type (accessible in generated code)
@@ -153,36 +170,40 @@ mixin template GenerateOrderByTypes(Entity, string graphqlEnumName, string graph
         result ~= "    SortDirection direction = SortDirection.ASC;\n";
         result ~= "}\n\n";
 
-        // Generate _getColumnName function
-        result ~= "private static string _getColumnName(_OrderByFieldEnum field) {\n";
-        result ~= "    final switch (field) {\n";
-        static foreach (member; getSortableFields!Entity) {{
-            static if (__traits(compiles, __traits(getMember, Entity, member)) &&
-                       is(typeof(__traits(getMember, Entity, member)) == function)) {
-                alias method = __traits(getMember, Entity, member);
-                enum sqlCol = getSqlColumn!method;
-                static if (sqlCol.length > 0) {
-                    result ~= "        case _OrderByFieldEnum." ~ member ~ ": return \"" ~ sqlCol ~ "\";\n";
-                } else {
-                    result ~= "        case _OrderByFieldEnum." ~ member ~ ": return \"" ~ member ~ "\";\n";
-                }
-            }
-        }}
+        // Generate _applySingleSort: wraps source with a single-column SortByExpr.
+        // Templated on source type so it works with both the original and plugin-wrapped entity types.
+        result ~= "private static auto _applySingleSort(S)(S source, _OrderByFieldEnum field, SortDirection dir) {\n";
+        result ~= "    static assert(is(S : Expr!(E[]), E), \"Expected Expr!(E[])\");\n";
+        result ~= "    static if (is(S : Expr!(E[]), E)) {\n";
+        result ~= "        Expr!(E[]) _result;\n";
+        result ~= "        final switch (field) {\n";
+        static foreach (member; getSortableFields!Entity) {
+            result ~= "            case _OrderByFieldEnum." ~ member ~ ":\n";
+            result ~= "                if (dir == SortDirection.ASC)\n";
+            result ~= "                    _result = sortBy!((a, b) => a." ~ member ~ ".lt(b." ~ member ~ "))(source);\n";
+            result ~= "                else\n";
+            result ~= "                    _result = sortBy!((a, b) => a." ~ member ~ ".gt(b." ~ member ~ "))(source);\n";
+            result ~= "                break;\n";
+        }
+        result ~= "        }\n";
+        result ~= "        return _result;\n";
         result ~= "    }\n";
         result ~= "}\n\n";
 
-        // Generate _applySorting function
-        result ~= "private static Expr!(_SortEntity[]) _applySorting(T)(T base, _OrderByStruct[] orderBySpecs) {\n";
-        result ~= "    if (orderBySpecs is null || orderBySpecs.length == 0) {\n";
-        result ~= "        return base;\n";
+        // Generate _applySorting: nests SortByExpr wrappers for multi-column sorting.
+        // Applied in reverse so the first spec (highest priority) is the outermost wrapper.
+        result ~= "private static auto _applySorting(S)(S base, _OrderByStruct[] orderBySpecs) {\n";
+        result ~= "    static assert(is(S : Expr!(E[]), E), \"Expected Expr!(E[])\");\n";
+        result ~= "    static if (is(S : Expr!(E[]), E)) {\n";
+        result ~= "        Expr!(E[]) result = base;\n";
+        result ~= "        if (orderBySpecs is null || orderBySpecs.length == 0) {\n";
+        result ~= "            return result;\n";
+        result ~= "        }\n";
+        result ~= "        foreach_reverse (ob; orderBySpecs) {\n";
+        result ~= "            result = _applySingleSort(result, ob.field, ob.direction);\n";
+        result ~= "        }\n";
+        result ~= "        return result;\n";
         result ~= "    }\n";
-        result ~= "    OrderBySpec[] specs;\n";
-        result ~= "    foreach (ob; orderBySpecs) {\n";
-        result ~= "        string columnName = _getColumnName(ob.field);\n";
-        result ~= "        bool isDescending = (ob.direction == SortDirection.DESC);\n";
-        result ~= "        specs ~= OrderBySpec(columnName, isDescending ? SortDirection.DESC : SortDirection.ASC);\n";
-        result ~= "    }\n";
-        result ~= "    return base.orderBy(specs);\n";
         result ~= "}\n";
 
         return result;
@@ -207,7 +228,7 @@ mixin template SortedArrayField(SourceQuery, string fieldName, alias TypeMap) {
     import std.meta : AliasSeq;
     import std.conv : to;
     import dunamis.core.expr : Expr, ExprResultType, entityCast;
-    import dunamis.core.sorting : orderBy, OrderBySpec, SortDirection;
+    import dunamis.core.sorting : sortBy, SortDirection;
     import dunamis.relational.schema : getSqlColumn;
     import dunamis.graphql.transform : wrapEntityResult;
 
@@ -274,12 +295,14 @@ mixin template SortedArrayField(SourceQuery, string fieldName, alias TypeMap) {
         return result;
     }();
 
-    // Generate the sorted method
-    // Helper functions (_applySorting, _getColumnName) are generated by GenerateOrderByTypes
+    // Generate the sorted method.
+    // Sorting is applied AFTER wrapEntityResult so that the SortByExpr wraps the
+    // entity-cast MapExpr, not the other way around. This ensures the unwrapping loop
+    // in ColumnAccessExpr.optimize() can see the SortByExpr in the collection chain.
     static if (getSortableFields!_ElementType.length > 0) {
         @(__traits(getAttributes, _srcFn))
         mixin("static auto " ~ fieldName ~ "(" ~ _paramListStr ~ ") { " ~
-              "return wrapEntityResult!(TypeMap)(_applySorting(_srcFn(" ~ _argListStr ~ "), orderBy)); }");
+              "return _applySorting(wrapEntityResult!(TypeMap)(_srcFn(" ~ _argListStr ~ ")), orderBy); }");
     } else {
         // No sortable fields - just forward the method unchanged
         @(__traits(getAttributes, _srcFn))

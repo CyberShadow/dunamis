@@ -20,7 +20,7 @@ import dunamis.relational.schema.interfaces;
 ///
 /// Accepts ExprBase to work with any Expr!Entity type.
 Object findMapExprFromChain(ExprBase expr, ref JoinHop[] joinPath, out ExprBase baseInput, out ExprBase baseInputAsAnyRef) {
-    import dunamis.core.expr : EveryItemOfExprInfo, UnwrapNullableInfo;
+    import dunamis.core.expr : EveryItemOfExprInfo, UnwrapNullableInfo, EntityCastInfo;
 
     // Track the first expression before any belongsTo chain starts
     // This produces refs for the query node's base table
@@ -136,19 +136,27 @@ private struct SortColumnInfo {
 /// Try to extract column info from a sort predicate operand.
 private SortColumnInfo extractSortColumnInfo(Object expr, Object leftItem, Object rightItem) {
     import dunamis.core.sorting : SortItemInfo;
+    import dunamis.core.expr : EntityCastInfo;
 
     // Check if this is a column access expression
     auto colAccess = cast(ColumnAccessInfo) expr;
     if (colAccess is null) return SortColumnInfo.init;
 
-    // Get the input expression
-    auto inputExpr = colAccess.inputExpr();
-
-    // Check if input is one of the sort item placeholders
-    if (inputExpr is leftItem) {
-        return SortColumnInfo(colAccess.sqlColumn, true);
-    } else if (inputExpr is rightItem) {
-        return SortColumnInfo(colAccess.sqlColumn, false);
+    // Get the input expression, walking through EntityCast wrappers
+    // (plugin forwarded fields insert EntityCast between the sort item and column access)
+    Object inputExpr = colAccess.inputExpr();
+    while (inputExpr !is null) {
+        if (inputExpr is leftItem) {
+            return SortColumnInfo(colAccess.sqlColumn, true);
+        } else if (inputExpr is rightItem) {
+            return SortColumnInfo(colAccess.sqlColumn, false);
+        }
+        // Walk through EntityCast
+        if (auto castInfo = cast(EntityCastInfo) inputExpr) {
+            inputExpr = castInfo.inputExpr();
+        } else {
+            break;
+        }
     }
 
     return SortColumnInfo.init;

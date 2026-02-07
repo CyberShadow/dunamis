@@ -333,11 +333,10 @@ void testSortPostsByTitle() {
     }
 }
 
-void testSortTasksByStatus() {
+void testSortTasksByTitle() {
     auto response = graphql(`{
-        tasks(orderBy: [{field: status, direction: ASC}]) {
+        tasks(orderBy: [{field: title, direction: ASC}]) {
             title
-            status
         }
     }`);
 
@@ -345,11 +344,11 @@ void testSortTasksByStatus() {
     auto tasks = response["data"]["tasks"].array;
     assertTrue(tasks.length >= 2, "Expected at least 2 tasks");
 
-    // Verify ascending order by status (enum values)
+    // Verify ascending order by title
     for (size_t i = 1; i < tasks.length; i++) {
-        auto prev = tasks[i - 1]["status"].str;
-        auto curr = tasks[i]["status"].str;
-        assertTrue(prev <= curr, "Tasks should be sorted by status ascending");
+        auto prev = tasks[i - 1]["title"].str;
+        auto curr = tasks[i]["title"].str;
+        assertTrue(prev <= curr, "Tasks should be sorted by title ascending");
     }
 }
 
@@ -1557,7 +1556,7 @@ static this() {
     registerTest("Sort users ascending", "tests", &testSortUsersAscending);
     registerTest("Sort users descending", "tests", &testSortUsersDescending);
     registerTest("Sort posts by title", "tests", &testSortPostsByTitle);
-    registerTest("Sort tasks by status", "tests", &testSortTasksByStatus);
+    registerTest("Sort tasks by title", "tests", &testSortTasksByTitle);
     registerTest("Sort without orderBy", "tests", &testSortWithoutOrderBy);
 
     // Nested sorting tests (HasMany relationships)

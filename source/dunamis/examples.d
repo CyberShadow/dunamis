@@ -1068,9 +1068,9 @@ unittest {
 // Sorting Tests
 // ============================================================================
 
-// Test column-based sorting with orderBy
+// Test predicate-based sorting with sortBy (ASC, using getAll)
 unittest {
-    import dunamis.core.sorting : orderBy, OrderBySpec, SortDirection;
+    import dunamis.core.sorting : sortBy;
 
     auto mock = new MockDB!()();
     mock.setTableData("users", `[
@@ -1082,10 +1082,10 @@ unittest {
     db = new DebugSqlDB!()(mock, testDialect());
     auto executor = new Executor();
 
-    // Sort by first_name ASC using getAll
+    // Sort by firstName ASC using getAll
     auto query = map!(
         (Expr!User u) => u.firstName
-    )(orderBy(getAll!User(), "first_name", SortDirection.ASC));
+    )(sortBy!((a, b) => a.firstName.lt(b.firstName))(getAll!User()));
 
     auto names = awaitSync(executor.execute(query));
 
@@ -1119,7 +1119,7 @@ EOF";
 
 // Test descending sort
 unittest {
-    import dunamis.core.sorting : orderBy, SortDirection;
+    import dunamis.core.sorting : sortBy;
 
     auto mock = new MockDB!()();
     mock.setTableData("users", `[
@@ -1131,10 +1131,10 @@ unittest {
     db = new DebugSqlDB!()(mock, testDialect());
     auto executor = new Executor();
 
-    // Sort by first_name DESC
+    // Sort by firstName DESC
     auto query = map!(
         (Expr!User u) => u.firstName
-    )(orderBy(getAll!User(), "first_name", SortDirection.DESC));
+    )(sortBy!((a, b) => a.firstName.gt(b.firstName))(getAll!User()));
 
     auto names = awaitSync(executor.execute(query));
 
@@ -1225,7 +1225,7 @@ unittest {
 
 // Test sorting combined with pagination (limit/offset)
 unittest {
-    import dunamis.core.sorting : orderBy, SortDirection;
+    import dunamis.core.sorting : sortBy;
     import dunamis.core.pagination : limit, offset;
 
     auto mock = new MockDB!()();
@@ -1240,10 +1240,10 @@ unittest {
     db = new DebugSqlDB!()(mock, testDialect());
     auto executor = new Executor();
 
-    // Sort by first_name ASC, then skip 1 and take 2
+    // Sort by firstName ASC, then skip 1 and take 2
     auto query = map!(
         (Expr!User u) => u.firstName
-    )(limit(offset(orderBy(getAll!User(), "first_name", SortDirection.ASC), 1), 2));
+    )(limit(offset(sortBy!((a, b) => a.firstName.lt(b.firstName))(getAll!User()), 1), 2));
 
     auto names = awaitSync(executor.execute(query));
 

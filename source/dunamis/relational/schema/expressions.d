@@ -208,8 +208,9 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
 
                 // Unwrap pagination and sorting expressions.
                 import dunamis.core.pagination : LimitInfo, OffsetInfo;
-                import dunamis.core.sorting : SortByInfo, OrderByInfo;
+                import dunamis.core.sorting : SortByInfo;
                 import dunamis.core.filtering : FilterByInfo;
+
                 bool seenSort = false;  // Track if we've seen ORDER BY (outside-in)
                 while (true) {
                     if (auto limitInfo = cast(LimitInfo) coll) {
@@ -224,13 +225,6 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
                         }
                         node.setOffset(offsetInfo.offsetValue);
                         coll = offsetInfo.offsetSource;
-                    } else if (auto orderByInfo = cast(OrderByInfo) coll) {
-                        // Column-based OrderBy (already pattern-matched or directly created)
-                        foreach (spec; orderByInfo.orderBySpecs) {
-                            node.addOrderBy(spec);
-                        }
-                        coll = orderByInfo.orderBySource;
-                        seenSort = true;
                     } else if (auto sortByInfo = cast(SortByInfo) coll) {
                         // Predicate-based SortBy - try to pattern-match for SQL push-down
                         auto specs = extractSortBySpecs(sortByInfo);
