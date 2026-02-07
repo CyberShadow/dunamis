@@ -1,0 +1,1126 @@
+module dunamis.relational.schema.expressions;
+
+import std.algorithm;
+import std.array;
+import std.conv;
+import std.typecons : Nullable;
+
+import ae.utils.promise;
+
+import dunamis.core;
+import dunamis.relational.eval_context;
+import dunamis.relational.optimize_context;
+import dunamis.relational.project;
+import dunamis.relational.query_node;
+import dunamis.relational.schema.attrs;
+import dunamis.relational.schema.types;
+import dunamis.relational.schema.mixins;
+import dunamis.relational.schema.interfaces;
+import dunamis.relational.schema.patterns;
+
+// ============================================================================
+// UFCS Access Functions
+// ============================================================================
+
+/// Column access - reads a column value for each entity ref.
+/// Takes typed Expr!Entity for compile-time type safety.
+auto column(T, Entity)(Expr!Entity input, string name) {
+    return new ColumnAccessExpr!(T, Entity)(input, name);
+}
+
+/// HasMany relationship - returns collection of child entities for each parent.
+/// Takes typed Expr!Parent and returns Expr!(Child[]).
+auto hasMany(Child, string fk, Parent)(Expr!Parent input) {
+    return new HasManyAccessExpr!(Parent, Child, fk)(input);
+}
+
+/// BelongsTo relationship - returns parent entity for each child.
+/// Takes typed Expr!Child and returns Expr!Parent or Expr!(Nullable!Parent).
+/// ResultType should be Parent (required FK) or Nullable!Parent (optional FK).
+auto belongsTo(Parent, ResultType = Parent, string fk, Child)(Expr!Child input) {
+    return new BelongsToAccessExpr!(Child, Parent, ResultType, fk)(input);
+}
+
+// ============================================================================
+// Entity Population Utilities
+// ============================================================================
+
+/// Populate plain field values into entities by fetching from database.
+/// Used by GetByIdsExpr and GetAllExpr in naive mode to pre-populate fields.
+private Promise!(Entity[]) populatePlainFields(Entity)(DataFetcher fetcher, Entity[] entities) {
+    import ae.utils.promise : all;
+    import dunamis.core.types : AnyRef;
+
+    if (entities.length == 0) {
+        return resolve(entities);
+    }
+
+    auto refs = entities.map!(e => AnyRef(e.nodeId.id)).array;
+    enum table = EntityID!Entity.table;
+    enum plainFields = getPlainFieldNames!Entity;
+
+    static if (plainFields.length == 0) {
+        // No plain fields to populate
+        return resolve(entities);
+    } else {
+        // Fetch all plain fields in parallel
+        Promise!void[] fetches;
+        static foreach (fieldName; plainFields) {{
+            enum columnName = getPlainFieldColumnName!(Entity, fieldName);
+            alias FieldType = typeof(__traits(getMember, Entity.init, fieldName));
+
+            fetches ~= fetcher.fetchColumn!FieldType(table, columnName, refs)
+                .then((FieldType[] values) {
+                    foreach (i, ref e; entities) {
+                        __traits(getMember, e, fieldName) = values[i];
+                    }
+                });
+        }}
+
+        // all(Promise!void[]) returns Promise!void, then we return entities
+        return all(fetches).then(() => entities);
+    }
+}
+
+// ============================================================================
+// Entity Creation and Decoding Utilities
+// ============================================================================
+
+/// Create an Entity with its nodeId set from a long ID
+Entity makeEntity(Entity)(long id) {
+    return Entity(EntityID!Entity.typeName ~ ":" ~ id.to!string);
+}
+
+/// Create an Entity with its nodeId set from a string ID
+Entity makeEntity(Entity)(string id) {
+    return Entity(EntityID!Entity.typeName ~ ":" ~ id);
+}
+
+/// Create an Entity with its nodeId set from multiple key values (composite key)
+Entity makeCompositeEntity(Entity)(string[] keyValues) {
+    import dunamis.core.types : encodeCompositeKey;
+    return Entity(EntityID!Entity.typeName ~ ":" ~ encodeCompositeKey(keyValues));
+}
+
+/// Convenience overload for two-part composite keys
+Entity makeCompositeEntity(Entity, T1, T2)(T1 val1, T2 val2) {
+    return makeCompositeEntity!Entity([val1.to!string, val2.to!string]);
+}
+
+/// Convenience overload for three-part composite keys
+Entity makeCompositeEntity(Entity, T1, T2, T3)(T1 val1, T2 val2, T3 val3) {
+    return makeCompositeEntity!Entity([val1.to!string, val2.to!string, val3.to!string]);
+}
+
+/// Decode an entity's nodeId to a long (assumes ID portion is numeric)
+/// Works with AnyRef (has localId method) and entities (have nodeId.localId)
+long decodeAsLong(T)(T entity) {
+    static if (__traits(hasMember, T, "localId")) {
+        // AnyRef or similar with direct localId method
+        return entity.localId.to!long;
+    } else static if (__traits(hasMember, T, "nodeId") && __traits(hasMember, typeof(T.init.nodeId), "localId")) {
+        // Entity with nodeId struct that has localId
+        return entity.nodeId.localId.to!long;
+    } else {
+        static assert(false, "Type " ~ T.stringof ~ " has no localId accessor");
+    }
+}
+
+/// Decode multiple entities to long IDs
+long[] decodeAsLongs(T)(T[] entities) {
+    return entities.map!(e => decodeAsLong(e)).array;
+}
+
+/// Decode an entity's localId as composite key parts
+/// Works with AnyRef (has localId method) and entities (have nodeId.localId)
+string[] decodeEntityCompositeKey(T)(T entity) {
+    import dunamis.core.types : decodeCompositeKey;
+    static if (__traits(hasMember, T, "localId")) {
+        // AnyRef or similar with direct localId method
+        return decodeCompositeKey(entity.localId);
+    } else static if (__traits(hasMember, T, "nodeId") && __traits(hasMember, typeof(T.init.nodeId), "localId")) {
+        // Entity with nodeId struct that has localId
+        return decodeCompositeKey(entity.nodeId.localId);
+    } else {
+        static assert(false, "Type " ~ T.stringof ~ " has no localId accessor");
+    }
+}
+
+// ============================================================================
+// Column Access Expression
+// ============================================================================
+
+/// Expression that reads a column from entities.
+/// Takes typed Expr!Entity for type safety.
+class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
+    private ExprBase _input;  // the entity we're reading from (type-erased for storage)
+    string _column;
+
+    this(Expr!Entity input, string column) {
+        _input = input;
+        _column = column;
+    }
+
+    // ColumnAccessInfo implementation
+    @property ExprBase inputExpr() { return _input; }
+    @property string sqlColumn() { return _column; }
+
+    override ExprBase[] dependencies() {
+        return [_input];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0)
+            _input = newDep;
+    }
+
+    override Expr!T optimize(OptimizeContext ctx) {
+        // First optimize input
+        _input = (cast(Expr!Entity) _input).optimize(ctx);
+
+        // Find the MapExpr this column belongs to
+        JoinHop[] joinPath;
+        ExprBase baseInput;
+        ExprBase baseInputAsAnyRef;
+        auto mapExpr = findMapExprFromChain(_input, joinPath, baseInput, baseInputAsAnyRef);
+
+        if (mapExpr is null) {
+            // Can't optimize, use naive path
+            return this;
+        }
+
+        // Get the relational optimization context for this data source
+        auto relCtx = ctx.getSourceContext!RelationalOptimizeContext();
+
+        // Get or create QueryNode for this MapExpr
+        auto node = relCtx.getOrCreateNode(mapExpr, EntityID!Entity.typeName, EntityID!Entity.table);
+
+        // Set the data fetcher on the node (for mutation-returned entities that bypass GetByIdsExpr)
+        if (node.dataFetcher is null && EntityID!Entity.db !is null) {
+            node.dataFetcher = EntityID!Entity.db;
+        }
+
+        // Configure the node based on collection type (if not already configured)
+        if (node.rootFilter == FilterType.none && node.parent is null) {
+            if (auto mapInfo = cast(MapExprInfo) mapExpr) {
+                Object coll = mapInfo.collection;
+                Object originalColl = coll;
+
+                // Unwrap pagination and sorting expressions.
+                import dunamis.core.pagination : LimitInfo, OffsetInfo;
+                import dunamis.core.sorting : SortByInfo, OrderByInfo;
+                import dunamis.core.filtering : FilterByInfo;
+                bool seenSort = false;  // Track if we've seen ORDER BY (outside-in)
+                while (true) {
+                    if (auto limitInfo = cast(LimitInfo) coll) {
+                        if (seenSort) {
+                            break;
+                        }
+                        node.setLimit(limitInfo.limitValue);
+                        coll = limitInfo.limitSource;
+                    } else if (auto offsetInfo = cast(OffsetInfo) coll) {
+                        if (seenSort) {
+                            break;
+                        }
+                        node.setOffset(offsetInfo.offsetValue);
+                        coll = offsetInfo.offsetSource;
+                    } else if (auto orderByInfo = cast(OrderByInfo) coll) {
+                        // Column-based OrderBy (already pattern-matched or directly created)
+                        foreach (spec; orderByInfo.orderBySpecs) {
+                            node.addOrderBy(spec);
+                        }
+                        coll = orderByInfo.orderBySource;
+                        seenSort = true;
+                    } else if (auto sortByInfo = cast(SortByInfo) coll) {
+                        // Predicate-based SortBy - try to pattern-match for SQL push-down
+                        auto specs = extractSortBySpecs(sortByInfo);
+                        if (specs.length > 0) {
+                            foreach (spec; specs) {
+                                node.addOrderBy(spec);
+                            }
+                            coll = sortByInfo.sortSource;
+                            seenSort = true;
+                        } else {
+                            // Pattern matching failed - can't push down to SQL
+                            break;
+                        }
+                    } else if (auto filterByInfo = cast(FilterByInfo) coll) {
+                        // Predicate-based FilterBy - try to pattern-match for SQL push-down
+                        auto whereSql = extractFilterWhereClause(filterByInfo);
+                        if (!whereSql.isNull) {
+                            node.addWhereClause(whereSql.get);
+                            coll = filterByInfo.filterSource;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+
+                // If pagination was unwrapped, replace the MapExpr's collection
+                if (coll !is originalColl) {
+                    if (auto mapExprBase = cast(ExprBase) mapExpr) {
+                        if (auto collExpr = cast(ExprBase) coll) {
+                            mapExprBase.replaceDependency(0, collExpr);
+                        }
+                    }
+                }
+
+                // Check if collection is a root expression
+                if (auto rootExpr = cast(RootExprInfo) coll) {
+                    if (rootExpr.filterType == FilterType.byIds) {
+                        node.setRootFilter(FilterType.byIds, rootExpr.filterRefs);
+                    } else if (rootExpr.filterType == FilterType.all) {
+                        node.setRootFilter(FilterType.all);
+                    }
+                }
+                // Check if collection is a hasMany relationship
+                else if (auto hasManyExpr = cast(HasManyInfo) coll) {
+                    // Child of a hasMany relationship
+                    JoinHop[] parentJoinPath;
+                    ExprBase parentBaseInput;
+                    ExprBase parentBaseInputAsAnyRef;
+                    auto parentMapExpr = findMapExprFromChain(hasManyExpr.inputExpr, parentJoinPath, parentBaseInput, parentBaseInputAsAnyRef);
+                    if (parentMapExpr !is null) {
+                        auto parentNode = relCtx.getNode(parentMapExpr);
+                        if (parentNode !is null) {
+                            node.setParent(parentNode, hasManyExpr.fkColumn, hasManyExpr.parentTypeName);
+
+                            // For HasMany with pagination, use per-parent pagination (window functions)
+                            if (!node.limit_.isNull || !node.offset_.isNull) {
+                                if (!node.limit_.isNull) {
+                                    node.perParentLimit_ = node.limit_;
+                                    node.limit_.nullify();
+                                }
+                                if (!node.offset_.isNull) {
+                                    node.perParentOffset_ = node.offset_;
+                                    node.offset_.nullify();
+                                }
+                                node.useWindowFunction = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // If the node wasn't configured with a valid root filter and has no parent,
+        // fall back to naive path
+        if (node.rootFilter == FilterType.none && node.parent is null) {
+            return this;
+        }
+
+        // Get the PrefetchExpr for this node
+        auto prefetch = relCtx.getPrefetchExpr(node);
+
+        import dunamis.relational.project : EntityToAnyRefExpr;
+
+        if (joinPath.length == 0) {
+            // Direct column access - return projection expression
+            node.addColumn(_column);
+            auto refInput = new EntityToAnyRefExpr!Entity(_input);
+            return new ProjectColumnExpr!T(node.id, _column, refInput, prefetch);
+        }
+
+        // Access through belongsTo chain - add JOINs
+        Nullable!JoinAlias lastAlias;
+        foreach (hop; joinPath) {
+            if (lastAlias.isNull) {
+                // First hop: FK is on the root table
+                node.addColumn(hop.fk);
+            } else {
+                // Subsequent hops: FK is on the previously joined table
+                node.addJoinedColumn(lastAlias.get, hop.fk);
+            }
+            // Add JOIN and get alias, tracking source for multi-hop
+            lastAlias = node.addJoin(hop.targetTable, hop.targetType, hop.fk, lastAlias);
+        }
+
+        // Track the column needed from the final joined table
+        node.addJoinedColumn(lastAlias.get, _column);
+
+        // Return projection that reads from the final joined table
+        return new ProjectJoinedColumnExpr!T(node.id, lastAlias.get, _column, baseInputAsAnyRef, prefetch);
+    }
+
+    override Promise!(T[]) eval(EvalContext ctx) {
+        auto column = _column;
+        auto input = _input;
+
+        // Ensure fetcher is set up from Entity's data source
+        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+        if (relCtx.fetcher is null && EntityID!Entity.db !is null) {
+            relCtx.fetcher = EntityID!Entity.db;
+        }
+
+        // Get the entity refs from the input chain, then fetch column
+        return evalAs!Entity(input, ctx).then((Entity[] entities) {
+            AnyRef[] entityRefs = entities.map!(e => AnyRef(e.nodeId.id)).array;
+
+            debug(filter) {
+                import std.stdio : writefln;
+                writefln("    ColumnAccessExpr.eval: table=%s, column=%s, refs=%s",
+                    EntityID!Entity.table, column, entityRefs.map!(r => r.nodeId).array);
+            }
+
+            // First, check for mutation results (mutations store their results here)
+            if (relCtx.hasMutationResult(EntityID!Entity.typeName)) {
+                return resolve(relCtx.getMutationColumnValues!T(EntityID!Entity.typeName, column, entityRefs));
+            }
+
+            // Otherwise, fetch from database (async)
+            if (relCtx.fetcher !is null) {
+                return relCtx.fetcher.fetchColumn!T(EntityID!Entity.table, column, entityRefs);
+            }
+
+            // Fallback to empty results
+            return resolve(entityRefs.map!(_ => T.init).array);
+        });
+    }
+
+    @property string column() { return _column; }
+    @property ExprBase input() { return _input; }
+}
+
+// ============================================================================
+// Root Expressions
+// ============================================================================
+
+/// Root expression that returns specific entities by their IDs.
+class GetByIdsExpr(Entity) : Expr!(Entity[]), RootExprInfo {
+    import dunamis.core.optimize : ExprOptimizer;
+
+    private Entity[] _entities;
+
+    /// Construct from array of IDs (any type convertible to string)
+    this(IdType)(IdType[] ids) {
+        _entities = ids.map!(id => Entity(EntityID!Entity.typeName ~ ":" ~ id.to!string)).array;
+    }
+
+    this(Entity[] entities) {
+        _entities = entities;
+    }
+
+    override ExprBase[] dependencies() {
+        return [];  // Root node
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        // No dependencies to replace
+    }
+
+    override ExprOptimizer[] requestedOptimizers() {
+        auto fetcher = EntityID!Entity.db;
+        if (fetcher !is null) {
+            return fetcher.requestedOptimizers();
+        }
+        return [];
+    }
+
+    override Promise!(Entity[][]) eval(EvalContext ctx) {
+        auto fetcher = EntityID!Entity.db;
+        if (fetcher !is null) {
+            auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+            if (relCtx.fetcher is null) {
+                relCtx.fetcher = fetcher;
+            }
+        }
+
+        // Populate eager fields if any exist
+        enum plainFields = getPlainFieldNames!Entity;
+        static if (plainFields.length > 0) {
+            if (fetcher !is null && _entities.length > 0) {
+                return populatePlainFields!Entity(fetcher, _entities)
+                    .then((Entity[] populated) => [populated]);
+            }
+        }
+
+        return resolve([_entities]);
+    }
+
+    @property Entity[] entities() { return _entities; }
+
+    // RootExprInfo implementation
+    FilterType filterType() { return FilterType.byIds; }
+    AnyRef[] filterRefs() { return _entities.map!(e => AnyRef(e.nodeId.id)).array; }
+    string entityTypeName() { return EntityID!Entity.typeName; }
+    string entityTable() { return EntityID!Entity.table; }
+    DataFetcher dataFetcher() { return EntityID!Entity.db; }
+}
+
+/// Factory function to create GetByIdsExpr (works with any ID type)
+auto getByIds(Entity, IdType)(IdType[] ids) {
+    return new GetByIdsExpr!Entity(ids);
+}
+
+/// Factory function to create GetByIdsExpr for composite keys.
+auto getByCompositeIds(Entity, IdType)(IdType[][] keyParts) {
+    import dunamis.core.types : encodeCompositeKey;
+
+    Entity[] entities;
+    foreach (parts; keyParts) {
+        string[] strParts;
+        foreach (p; parts) {
+            strParts ~= p.to!string;
+        }
+        entities ~= Entity(EntityID!Entity.typeName ~ ":" ~ encodeCompositeKey(strParts));
+    }
+    return new GetByIdsExpr!Entity(entities);
+}
+
+/// Root expression that fetches all entities of a type.
+class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
+    import dunamis.core.optimize : ExprOptimizer, OptimizeContext;
+
+    private {
+        PrefetchExpr _prefetch;  // Set during optimization
+        QueryNodeId _queryNodeId = noQueryNodeId;   // QueryNode ID for optimized path
+    }
+
+    this() {}
+
+    override ExprBase[] dependencies() {
+        return _prefetch !is null ? [_prefetch] : [];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0 && _prefetch !is null) {
+            _prefetch = cast(PrefetchExpr) newDep;
+        }
+    }
+
+    override ExprOptimizer[] requestedOptimizers() {
+        auto fetcher = EntityID!Entity.db;
+        if (fetcher !is null) {
+            return fetcher.requestedOptimizers();
+        }
+        return [];
+    }
+
+    override Expr!(Entity[]) optimize(OptimizeContext ctx) {
+        auto fetcher = EntityID!Entity.db;
+        if (fetcher is null) return this;
+
+        auto relCtx = ctx.getSourceContext!RelationalOptimizeContext();
+
+        auto node = relCtx.findRootNode(EntityID!Entity.typeName, EntityID!Entity.table);
+
+        if (node is null) {
+            return this;
+        }
+
+        _prefetch = relCtx.getPrefetchExpr(node);
+        _queryNodeId = node.id;
+
+        return this;
+    }
+
+    override Promise!(Entity[][]) eval(EvalContext ctx) {
+        auto fetcher = EntityID!Entity.db;
+
+        if (fetcher !is null) {
+            auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+            if (relCtx.fetcher is null) {
+                relCtx.fetcher = fetcher;
+            }
+        }
+
+        // Optimized path: use PrefetchExpr to fetch data, then read refs
+        if (_prefetch !is null) {
+            return evalAs!(AnyRef[])(_prefetch, ctx).then((AnyRef[][] prefetchResults) {
+                auto refs = prefetchResults.length > 0 ? prefetchResults[0] : [];
+                auto entities = refs.map!(r => Entity(r.nodeId)).array;
+                return [entities];
+            });
+        }
+
+        // Fallback: naive path using fetchAllIds
+        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+        return relCtx.fetchAllIds(EntityID!Entity.table).then((long[] ids) {
+            auto entities = ids.map!(id => Entity(EntityID!Entity.typeName ~ ":" ~ id.to!string)).array;
+
+            enum plainFields = getPlainFieldNames!Entity;
+            static if (plainFields.length > 0) {
+                if (fetcher !is null && entities.length > 0) {
+                    return populatePlainFields!Entity(fetcher, entities)
+                        .then((Entity[] populated) => [populated]);
+                }
+            }
+
+            return resolve([entities]);
+        });
+    }
+
+    // RootExprInfo implementation
+    FilterType filterType() { return FilterType.all; }
+    AnyRef[] filterRefs() { return []; }
+    string entityTypeName() { return EntityID!Entity.typeName; }
+    string entityTable() { return EntityID!Entity.table; }
+    DataFetcher dataFetcher() { return EntityID!Entity.db; }
+
+    // MapExprInfo implementation (for QueryNode creation)
+    Object collection() { return this; }
+}
+
+/// Factory function to create GetAllExpr
+auto getAll(Entity)() {
+    return new GetAllExpr!Entity();
+}
+
+// ============================================================================
+// HasMany Access Expression
+// ============================================================================
+
+/// Expression representing a one-to-many relationship.
+class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Child[]), HasManyInfo {
+    private ExprBase _input;
+
+    static if (!is(Parent == void)) {
+        this(Expr!Parent input) {
+            _input = input;
+        }
+    } else {
+        this(ExprBase input) {
+            _input = input;
+        }
+    }
+
+    override ExprBase[] dependencies() {
+        return [_input];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0)
+            _input = newDep;
+    }
+
+    static if (!is(Parent == void)) {
+        override Expr!(Child[]) optimize(OptimizeContext ctx) {
+            _input = (cast(Expr!Parent) _input).optimize(ctx);
+            return this;
+        }
+    } else {
+        override Expr!(Child[]) optimize(OptimizeContext ctx) {
+            return this;
+        }
+    }
+
+    override Promise!(Child[][]) eval(EvalContext ctx) {
+        auto input = _input;
+
+        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+        if (relCtx.fetcher is null && EntityID!Child.db !is null) {
+            relCtx.fetcher = EntityID!Child.db;
+        }
+
+        static if (!is(Parent == void)) {
+            auto refsPromise = evalAs!Parent(input, ctx).then((Parent[] parents) {
+                return parents.map!(e => AnyRef(e.nodeId.id)).array;
+            });
+        } else {
+            auto refsPromise = evalAs!AnyRef(input, ctx);
+        }
+        return refsPromise.then((AnyRef[] parentRefs) {
+            debug(filter) {
+                import std.stdio : writefln, stdout;
+                writefln("    HasManyAccessExpr.eval: parentRefs=%s, fk=%s, childTable=%s",
+                    parentRefs.map!(r => r.nodeId).array, fk, EntityID!Child.table);
+                stdout.flush();
+            }
+            if (relCtx.fetcher !is null) {
+                return relCtx.fetcher.fetchChildren(EntityID!Child.table, EntityID!Child.typeName, fk, parentRefs)
+                    .then((AnyRef[][] children) {
+                        debug(filter) {
+                            import std.stdio : writefln, stdout;
+                            writefln("    HasManyAccessExpr.eval: fetched children=%s",
+                                children.map!(g => g.map!(r => r.nodeId).array).array);
+                            stdout.flush();
+                        }
+                        return children.map!(group => group.map!(r => Child(r.nodeId)).array).array;
+                    });
+            }
+
+            return resolve(parentRefs.map!(_ => cast(Child[])[]).array);
+        });
+    }
+
+    @property ExprBase input() { return _input; }
+
+    // HasManyInfo implementation
+    @property ExprBase inputExpr() { return _input; }
+    static if (!is(Parent == void)) {
+        @property ExprBase inputAsAnyRefExpr() {
+            import dunamis.relational.project : EntityToAnyRefExpr;
+            return new EntityToAnyRefExpr!Parent(_input);
+        }
+    } else {
+        @property ExprBase inputAsAnyRefExpr() { return null; }
+    }
+    @property string childTable() { return EntityID!Child.table; }
+    @property string childTypeName() { return EntityID!Child.typeName; }
+    @property string fkColumn() { return fk; }
+    static if (!is(Parent == void)) {
+        @property string parentTypeName() { return EntityID!Parent.typeName; }
+    } else {
+        @property string parentTypeName() { return ""; }
+    }
+}
+
+// ============================================================================
+// BelongsTo Access Expression
+// ============================================================================
+
+/// Expression representing a many-to-one relationship.
+class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultType, BelongsToInfo {
+    private ExprBase _input;
+
+    static if (!is(Child == void)) {
+        this(Expr!Child input) {
+            _input = input;
+        }
+    } else {
+        this(ExprBase input) {
+            _input = input;
+        }
+    }
+
+    override ExprBase[] dependencies() {
+        return [_input];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0)
+            _input = newDep;
+    }
+
+    static if (!is(Child == void)) {
+        override Expr!ResultType optimize(OptimizeContext ctx) {
+            import std.typecons : Nullable;
+
+            _input = (cast(Expr!Child) _input).optimize(ctx);
+
+            static if (!is(ResultType == Nullable!Parent)) {
+                return this;
+            } else {
+                JoinHop[] joinPath;
+                ExprBase baseInput;
+                ExprBase baseInputAsAnyRef;
+                auto mapExpr = findMapExprFromChain(_input, joinPath, baseInput, baseInputAsAnyRef);
+
+                if (mapExpr is null) {
+                    return this;
+                }
+
+                auto relCtx = ctx.getSourceContext!RelationalOptimizeContext();
+                if (relCtx is null) {
+                    return this;
+                }
+
+                auto node = relCtx.getNode(mapExpr);
+                if (node is null) {
+                    return this;
+                }
+
+                node.addColumn(fk);
+
+                auto prefetch = relCtx.getPrefetchExpr(node);
+
+                import dunamis.relational.project : ProjectBelongsToExpr, ProjectTypedBelongsToExpr, EntityToAnyRefExpr;
+                auto refBaseInput = baseInputAsAnyRef !is null
+                    ? baseInputAsAnyRef
+                    : cast(ExprBase) new EntityToAnyRefExpr!Child(baseInput);
+                auto innerProj = new ProjectBelongsToExpr(node.id, fk, EntityID!Parent.typeName, refBaseInput, prefetch);
+                return new ProjectTypedBelongsToExpr!(Child, Parent, ResultType, fk)(innerProj, refBaseInput);
+            }
+        }
+    } else {
+        override Expr!ResultType optimize(OptimizeContext ctx) {
+            return this;
+        }
+    }
+
+    override Promise!(ResultType[]) eval(EvalContext ctx) {
+        auto input = _input;
+
+        static if (!is(Child == void)) {
+            auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+            if (relCtx.fetcher is null && EntityID!Child.db !is null) {
+                relCtx.fetcher = EntityID!Child.db;
+            }
+        }
+
+        static if (!is(Child == void)) {
+            auto refsPromise = evalAs!Child(input, ctx).then((Child[] children) {
+                return children.map!(e => AnyRef(e.nodeId.id)).array;
+            });
+        } else {
+            auto refsPromise = evalAs!AnyRef(input, ctx);
+        }
+        return refsPromise.then((AnyRef[] childRefs) {
+            static if (is(Child == void)) {
+                return resolve(childRefs.map!(_ => ResultType.init).array);
+            } else {
+                auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+                if (relCtx.fetcher !is null) {
+                    return relCtx.fetcher.fetchBelongsTo(EntityID!Child.table, fk, EntityID!Parent.typeName, childRefs)
+                        .then((AnyRef[] parentRefs) {
+                            static if (is(ResultType == Parent)) {
+                                return parentRefs.map!(r => Parent(r.nodeId)).array;
+                            } else static if (is(ResultType == Nullable!Parent)) {
+                                return parentRefs.map!(r => r.isValid ? Nullable!Parent(Parent(r.nodeId)) : Nullable!Parent.init).array;
+                            } else {
+                                static assert(false, "ResultType must be Parent or Nullable!Parent");
+                            }
+                        });
+                }
+
+                return resolve(childRefs.map!(_ => ResultType.init).array);
+            }
+        });
+    }
+
+    @property ExprBase input() { return _input; }
+
+    // BelongsToInfo implementation
+    @property ExprBase inputExpr() { return _input; }
+    static if (!is(Child == void)) {
+        @property ExprBase inputAsAnyRefExpr() {
+            import dunamis.relational.project : EntityToAnyRefExpr;
+            return new EntityToAnyRefExpr!Child(_input);
+        }
+        @property string childTable() { return EntityID!Child.table; }
+    } else {
+        @property ExprBase inputAsAnyRefExpr() { return null; }
+        @property string childTable() { return ""; }
+    }
+    @property string parentTable() { return EntityID!Parent.table; }
+    @property string parentTypeName() { return EntityID!Parent.typeName; }
+    @property string fkColumn() { return fk; }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+// Test isPlainField detection
+unittest {
+    import dunamis.relational.demo : MockDB;
+
+    static MockDB!() db;
+
+    static struct TestEntity {
+        mixin Entity!(db, "test_entities");
+        string nickname;       // Plain field - auto-detected
+        string displayName;    // Plain field - auto-detected
+    }
+
+    static assert(isPlainField!(TestEntity, "nickname"), "nickname should be a plain field");
+    static assert(isPlainField!(TestEntity, "displayName"), "displayName should be a plain field");
+    static assert(!isPlainField!(TestEntity, "nodeId"), "nodeId should NOT be a plain field");
+
+    alias plainFields = getPlainFieldNames!TestEntity;
+    static assert(plainFields.length == 2, "Should have 2 plain fields");
+
+    static assert(getPlainFieldColumnName!(TestEntity, "nickname") == "nickname",
+        "nickname column name should be 'nickname'");
+    static assert(getPlainFieldColumnName!(TestEntity, "displayName") == "display_name",
+        "displayName column name should be 'display_name' (snake_case)");
+}
+
+unittest {
+    import std.traits : hasUDA, getUDAs;
+    import dunamis.relational.demo : MockDB;
+
+    static MockDB!() db;
+
+    static struct User {
+        mixin Entity!(db, "users");
+        @PrimaryKeyAttr mixin Col!("id", long);
+    }
+    static assert(EntityID!User.table == "users");
+    static assert(EntityID!User.typeName == "User");
+    static assert(hasUDA!(User.id, SqlColumn));
+    static assert(hasUDA!(User.id, PrimaryKeyAttr));
+    static assert(getUDAs!(User.id, SqlColumn)[0].name == "id");
+
+    static struct Post {
+        mixin Entity!(db, "posts", "BlogPost");
+        @PrimaryKeyAttr mixin Col!("id", long);
+    }
+    static assert(EntityID!Post.table == "posts");
+    static assert(EntityID!Post.typeName == "BlogPost");
+    static assert(hasUDA!(Post.id, SqlColumn));
+    static assert(hasUDA!(Post.id, PrimaryKeyAttr));
+}
+
+unittest {
+    import std.traits : hasUDA, getUDAs;
+    import dunamis.relational.demo : DemoEntity, Int64, MockDB;
+
+    static MockDB!() db;
+
+    static struct Comment {
+        mixin DemoEntity!(db, "comments");
+    }
+    static assert(EntityID!Comment.table == "comments");
+    static assert(hasUDA!(Comment.id, SqlColumn));
+    static assert(hasUDA!(Comment.id, PrimaryKeyAttr));
+
+    static struct UuidEntity {
+        mixin DemoEntity!(db, "items", string);
+    }
+    static assert(hasUDA!(UuidEntity.id, SqlColumn));
+}
+
+// Test optimization creates QueryNode
+unittest {
+    import std.json : parseJSON;
+    import dunamis.relational.demo : DemoEntity, MockDB;
+
+    static MockDB!() db;
+
+    static struct User {
+        mixin DemoEntity!(db, "users");
+        mixin Col!("firstName", string);
+        mixin Col!("lastName", string);
+    }
+
+    db = new MockDB!();
+
+    auto userRefs = getByIds!User([1, 2]);
+    auto query = map!(
+        (Expr!User user) => use(
+            (string first, string last) => first ~ " " ~ last,
+            user.firstName,
+            user.lastName
+        )
+    )(userRefs);
+
+    auto optCtx = new OptimizeContext();
+    auto optimized = query.optimize(optCtx);
+
+    auto relCtx = optCtx.getSourceContext!RelationalOptimizeContext();
+    auto nodes = relCtx.allNodes();
+    assert(nodes.length == 1);
+    assert(nodes[0].typeName == "User");
+    assert(nodes[0].table == "users");
+    assert(nodes[0].columns.canFind("first_name"));
+    assert(nodes[0].columns.canFind("last_name"));
+}
+
+// Test end-to-end with string (UUID) primary keys
+unittest {
+    import std.json : parseJSON;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.relational.demo : DemoEntity, MockDB;
+
+    static MockDB!() db;
+
+    static struct Item {
+        mixin DemoEntity!(db, "items", string);
+        mixin Col!("name", string);
+    }
+
+    db = new MockDB!();
+    db.setTableData("items", `[
+        {"id": "uuid-abc", "name": "First Item"},
+        {"id": "uuid-def", "name": "Second Item"}
+    ]`);
+
+    auto query = map!(
+        (Expr!Item item) => item.name
+    )(getByIds!Item(["uuid-abc", "uuid-def"]));
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query, true));
+
+    assert(result.length == 2);
+    assert(result[0] == "First Item");
+    assert(result[1] == "Second Item");
+}
+
+// Test belongsTo with string FKs
+unittest {
+    import std.json : parseJSON;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.relational.demo : DemoEntity, MockDB;
+
+    static MockDB!() db;
+
+    static struct Category {
+        mixin DemoEntity!(db, "categories", string);
+        mixin Col!("name", string);
+    }
+
+    static struct Product {
+        mixin DemoEntity!(db, "products", string);
+        mixin Col!("name", string);
+        mixin Col!("categoryId", ForeignKey!Category);
+        mixin BelongsTo!("category", "categoryId");
+    }
+
+    db = new MockDB!();
+    db.setTableData("categories", `[
+        {"id": "cat-1", "name": "Electronics"},
+        {"id": "cat-2", "name": "Books"}
+    ]`);
+    db.setTableData("products", `[
+        {"id": "prod-a", "category_id": "cat-1", "name": "Phone"},
+        {"id": "prod-b", "category_id": "cat-2", "name": "Novel"}
+    ]`);
+
+    auto query = map!(
+        (Expr!Product prod) => jsonObject(
+            "name", prod.name,
+            "categoryName", prod.category.name
+        )
+    )(getByIds!Product(["prod-a", "prod-b"]));
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query, true));
+
+    assert(result.length == 2);
+    assert(result[0]["name"].str == "Phone");
+    assert(result[0]["categoryName"].str == "Electronics");
+    assert(result[1]["name"].str == "Novel");
+    assert(result[1]["categoryName"].str == "Books");
+}
+
+// Test composite primary keys end-to-end
+unittest {
+    import std.json : parseJSON;
+    import std.traits : hasUDA;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core.types : encodeCompositeKey;
+    import dunamis.relational.demo : MockDB;
+
+    static MockDB!() db;
+
+    static struct OrderItem {
+        mixin Entity!(db, "order_items");
+        @PrimaryKeyAttr mixin Col!("orderId", long);
+        @PrimaryKeyAttr mixin Col!("productId", long);
+        mixin Col!("quantity", long);
+        mixin Col!("price", string);
+    }
+
+    static assert(hasUDA!(OrderItem.orderId, PrimaryKeyAttr));
+    static assert(hasUDA!(OrderItem.productId, PrimaryKeyAttr));
+    static assert(EntityID!OrderItem.table == "order_items");
+    static assert(EntityID!OrderItem.typeName == "OrderItem");
+
+    db = new MockDB!();
+    db.setPrimaryKey("order_items", "order_id", "product_id");
+    db.setTableData("order_items", `[
+        {"order_id": 1, "product_id": 100, "quantity": 2, "price": "10.00"},
+        {"order_id": 1, "product_id": 101, "quantity": 1, "price": "25.00"},
+        {"order_id": 2, "product_id": 100, "quantity": 3, "price": "10.00"}
+    ]`);
+
+    auto refs = [
+        OrderItem("OrderItem:1,100"),
+        OrderItem("OrderItem:1,101")
+    ];
+
+    auto query = map!(
+        (Expr!OrderItem item) => jsonObject(
+            "quantity", item.quantity,
+            "price", item.price
+        )
+    )(new GetByIdsExpr!OrderItem(refs));
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query, true));
+
+    assert(result.length == 2);
+    assert(result[0]["quantity"].integer == 2);
+    assert(result[0]["price"].str == "10.00");
+    assert(result[1]["quantity"].integer == 1);
+    assert(result[1]["price"].str == "25.00");
+}
+
+// Test getByCompositeIds helper function
+unittest {
+    import std.json : parseJSON;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.relational.demo : MockDB;
+
+    static MockDB!() db;
+
+    static struct OrderItem {
+        mixin Entity!(db, "order_items");
+        @PrimaryKeyAttr mixin Col!("orderId", long);
+        @PrimaryKeyAttr mixin Col!("productId", long);
+        mixin Col!("quantity", long);
+    }
+
+    db = new MockDB!();
+    db.setPrimaryKey("order_items", "order_id", "product_id");
+    db.setTableData("order_items", `[
+        {"order_id": 1, "product_id": 100, "quantity": 2},
+        {"order_id": 1, "product_id": 101, "quantity": 1},
+        {"order_id": 2, "product_id": 100, "quantity": 3}
+    ]`);
+
+    auto query = map!(
+        (Expr!OrderItem item) => item.quantity
+    )(getByCompositeIds!OrderItem([[1, 100], [2, 100]]));
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query, true));
+
+    assert(result.length == 2);
+    assert(result[0] == 2);
+    assert(result[1] == 3);
+}
+
+// Test makeEntity and decodeAsLong
+unittest {
+    import dunamis.core.types : AnyRef;
+    import dunamis.relational.demo : DemoEntity, MockDB;
+
+    static MockDB!() db;
+
+    static struct User {
+        mixin DemoEntity!(db, "users");
+    }
+
+    auto user1 = makeEntity!User(42);
+    assert(user1.nodeId.id == "User:42");
+    static assert(is(typeof(user1) == User));
+
+    auto user2 = makeEntity!User("abc-123");
+    assert(user2.nodeId.id == "User:abc-123");
+
+    assert(decodeAsLong(user1) == 42);
+    assert(decodeAsLong(AnyRef("User:123")) == 123);
+
+    auto users = [makeEntity!User(1), makeEntity!User(2), makeEntity!User(3)];
+    assert(decodeAsLongs(users) == [1, 2, 3]);
+}
+
+// Test makeCompositeEntity and decodeEntityCompositeKey
+unittest {
+    import dunamis.core.types : AnyRef;
+    import dunamis.relational.demo : MockDB;
+
+    static MockDB!() db;
+
+    static struct OrderItem {
+        mixin Entity!(db, "order_items");
+        @PrimaryKeyAttr mixin Col!("orderId", long);
+        @PrimaryKeyAttr mixin Col!("productId", long);
+    }
+
+    auto item1 = makeCompositeEntity!(OrderItem, int, int)(100, 200);
+    assert(item1.nodeId.id == "OrderItem:100,200");
+    assert(item1.nodeId.localId == "100,200");
+    static assert(is(typeof(item1) == OrderItem));
+
+    auto item2 = makeCompositeEntity!OrderItem(["order-1", "prod-2"]);
+    assert(item2.nodeId.id == "OrderItem:order-1,prod-2");
+
+    assert(decodeEntityCompositeKey(item1) == ["100", "200"]);
+    assert(decodeEntityCompositeKey(AnyRef("OrderItem:100,200")) == ["100", "200"]);
+}
