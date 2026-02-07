@@ -99,11 +99,31 @@ template SortingPlugin(alias S) if (isSchema!S) {
 // Helper Templates for OrderBy Type Generation
 // ============================================================================
 
-/// Get sortable field names from an entity type (fields with @SqlColumn UDA).
-/// Returns an array of field names that can be used in ORDER BY.
+/// Get sortable field names from an entity type.
+/// A field is sortable if its D result type supports the `<` operator
+/// and it takes no required arguments beyond the entity expression.
+/// Enum fields are temporarily excluded pending native DB enum type support.
 template getSortableFields(Entity) {
-    import dunamis.relational.schema : hasSqlColumn, hasForeignKeyRef;
     import dunamis.graphql.schema : hasGqlHidden;
+    import std.traits : Parameters;
+
+    /// Check if a method can be called with just Expr!Entity (no extra required args).
+    private template isZeroArgField(alias method) {
+        alias Params = Parameters!method;
+        static if (Params.length <= 1) {
+            enum isZeroArgField = true;
+        } else {
+            // Check that all params beyond the first have defaults
+            alias Defaults = ParameterDefaults!method;
+            enum isZeroArgField = () {
+                static foreach (i; 1 .. Params.length) {
+                    static if (is(Defaults[i] == void))
+                        return false;
+                }
+                return true;
+            }();
+        }
+    }
 
     enum getSortableFields = () {
         string[] fields;
@@ -112,14 +132,15 @@ template getSortableFields(Entity) {
                 static if (__traits(compiles, __traits(getMember, Entity, member)) &&
                            is(typeof(__traits(getMember, Entity, member)) == function)) {
                     alias method = __traits(getMember, Entity, member);
-                    // Include if it's a sortable column:
-                    // - has @SqlColumn UDA
+                    alias ResultT = ExprResultType!(ReturnType!method);
+                    // Include if:
+                    // - callable with just Expr!Entity (no required extra args)
                     // - not @GqlHidden
-                    // - not a FK reference (ForeignKey types don't support < comparison)
-                    // - not an enum type (enum sort order is database-dependent:
-                    //   string enums sort alphabetically, native enums sort by definition order)
-                    static if (hasSqlColumn!method && !hasGqlHidden!method
-                            && !hasForeignKeyRef!method && !hasEnumReturn!method) {
+                    // - not an enum (temporarily excluded: DB sort order may differ from D)
+                    // - result type supports `<` (excludes ForeignKey, Nullable, entities, arrays)
+                    static if (isZeroArgField!method && !hasGqlHidden!method
+                            && !hasEnumReturn!method
+                            && is(typeof(ResultT.init < ResultT.init))) {
                         fields ~= member;
                     }
                 }
@@ -229,7 +250,6 @@ mixin template SortedArrayField(SourceQuery, string fieldName, alias TypeMap) {
     import std.conv : to;
     import dunamis.core.expr : Expr, ExprResultType, entityCast;
     import dunamis.core.sorting : sortBy, SortDirection;
-    import dunamis.relational.schema : getSqlColumn;
     import dunamis.graphql.transform : wrapEntityResult;
 
     // Get the source function and its metadata
