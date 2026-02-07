@@ -309,6 +309,21 @@ unittest {
     assert(summaries[1].canFind("D Programming"));
     assert(summaries[1].canFind("Bob Jones"));
 
+    // Verify generated SQL
+    enum expectedSQL = q"EOF
+WITH
+  layer0 AS (
+    SELECT posts.id, posts.title, posts.body, posts.author_id, j0.id AS j0__id, j0.first_name AS j0__first_name, j0.last_name AS j0__last_name, ((j0.first_name || ' ') || j0.last_name) AS computed_0
+    FROM posts
+    LEFT JOIN users j0 ON posts.author_id = j0.id
+    WHERE posts.id = ANY($1)
+  )
+SELECT json_build_object(
+  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer0 t)
+)
+EOF";
+    assert(db.getSQL() == expectedSQL, db.getSQL());
+
     debug(sql) {
         writeln("\n=== Test: Computed field with belongsTo (Post.summary) ===");
         db.printSQL();
@@ -333,6 +348,28 @@ unittest {
     assert(htmls[0].canFind("Alice Smith"));
     assert(htmls[0].canFind("Great post!"));
     assert(htmls[0].canFind("Bob Jones"));
+
+    // Verify generated SQL - 2-layer CTE: posts with author JOIN, comments with author JOIN
+    enum expectedSQL = q"EOF
+WITH
+  layer0 AS (
+    SELECT posts.id, posts.title, posts.body, posts.author_id, j0.id AS j0__id, j0.first_name AS j0__first_name, j0.last_name AS j0__last_name, ((j0.first_name || ' ') || j0.last_name) AS computed_0
+    FROM posts
+    LEFT JOIN users j0 ON posts.author_id = j0.id
+    WHERE posts.id = ANY($1)
+  ),
+  layer1 AS (
+    SELECT comments.id, comments.post_id, comments.body, comments.author_id, j0.id AS j0__id, j0.first_name AS j0__first_name, j0.last_name AS j0__last_name, ((j0.first_name || ' ') || j0.last_name) AS computed_1
+    FROM comments
+    LEFT JOIN users j0 ON comments.author_id = j0.id
+    WHERE comments.post_id IN (SELECT id FROM layer0)
+  )
+SELECT json_build_object(
+  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer0 t),
+  'layer1', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer1 t)
+)
+EOF";
+    assert(db.getSQL() == expectedSQL, db.getSQL());
 
     debug(sql) {
         writeln("\n=== Test: Full 4-layer query (Post.html with comments) ===");
@@ -370,6 +407,26 @@ unittest {
     // Bob has 1 post
     assert(result[1]["firstName"].str == "Bob");
     assert(result[1]["posts"].array.length == 1);
+
+    // Verify generated SQL
+    enum expectedSQL = q"EOF
+WITH
+  layer0 AS (
+    SELECT users.id, users.first_name
+    FROM users
+    WHERE users.id = ANY($1)
+  ),
+  layer1 AS (
+    SELECT posts.id, posts.author_id, posts.title
+    FROM posts
+    WHERE posts.author_id IN (SELECT id FROM layer0)
+  )
+SELECT json_build_object(
+  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer0 t),
+  'layer1', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer1 t)
+)
+EOF";
+    assert(db.getSQL() == expectedSQL, db.getSQL());
 
     debug(sql) {
         writeln("\n=== Test: Nested hasMany (users -> posts) ===");
@@ -415,6 +472,32 @@ unittest {
     assert(result[1]["posts"].array.length == 1);
     assert(result[1]["comments"].array.length == 1);
 
+    // Verify generated SQL
+    enum expectedSQL = q"EOF
+WITH
+  layer0 AS (
+    SELECT users.id, users.first_name
+    FROM users
+    WHERE users.id = ANY($1)
+  ),
+  layer1 AS (
+    SELECT posts.id, posts.author_id, posts.title
+    FROM posts
+    WHERE posts.author_id IN (SELECT id FROM layer0)
+  ),
+  layer2 AS (
+    SELECT comments.id, comments.author_id, comments.body
+    FROM comments
+    WHERE comments.author_id IN (SELECT id FROM layer0)
+  )
+SELECT json_build_object(
+  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer0 t),
+  'layer1', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer1 t),
+  'layer2', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer2 t)
+)
+EOF";
+    assert(db.getSQL() == expectedSQL, db.getSQL());
+
     debug(sql) {
         writeln("\n=== Test: Forking hasMany (users -> posts, users -> comments) ===");
         db.printSQL();
@@ -453,6 +536,20 @@ unittest {
     assert(users[1]["firstName"].str == "Bob");
     assert(users[2]["firstName"].str == "Carol");
 
+    // Verify generated SQL
+    enum expectedSQL = q"EOF
+WITH
+  layer0 AS (
+    SELECT users.id, users.first_name, users.last_name, users.email
+    FROM users
+    WHERE 1=1
+  )
+SELECT json_build_object(
+  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer0 t)
+)
+EOF";
+    assert(db.getSQL() == expectedSQL, db.getSQL());
+
     debug(sql) {
         writeln("\n=== Test: Basic query with scalar fields ===");
         db.printSQL();
@@ -486,6 +583,26 @@ unittest {
     assert(users[1]["posts"].array.length == 1);  // Bob has post 2
     assert(users[2]["fullName"].str == "Carol White");
     assert(users[2]["posts"].array.length == 0);  // Carol has no posts
+
+    // Verify generated SQL
+    enum expectedSQL = q"EOF
+WITH
+  layer0 AS (
+    SELECT users.id, users.first_name, users.last_name, ((first_name || ' ') || last_name) AS computed_0
+    FROM users
+    WHERE 1=1
+  ),
+  layer1 AS (
+    SELECT posts.id, posts.author_id, posts.title
+    FROM posts
+    WHERE posts.author_id IN (SELECT id FROM layer0)
+  )
+SELECT json_build_object(
+  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer0 t),
+  'layer1', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer1 t)
+)
+EOF";
+    assert(db.getSQL() == expectedSQL, db.getSQL());
 
     debug(sql) {
         writeln("\n=== Test: Query with computed field ===");
@@ -527,6 +644,32 @@ unittest {
     assert(aliceFirstPost["title"].str == "Hello World");
     assert(aliceFirstPost["comments"].array.length == 2);
 
+    // Verify generated SQL
+    enum expectedSQL = q"EOF
+WITH
+  layer0 AS (
+    SELECT users.id, users.first_name, users.last_name, ((first_name || ' ') || last_name) AS computed_0
+    FROM users
+    WHERE 1=1
+  ),
+  layer1 AS (
+    SELECT posts.id, posts.author_id, posts.title
+    FROM posts
+    WHERE posts.author_id IN (SELECT id FROM layer0)
+  ),
+  layer2 AS (
+    SELECT comments.id, comments.post_id, comments.body
+    FROM comments
+    WHERE comments.post_id IN (SELECT id FROM layer1)
+  )
+SELECT json_build_object(
+  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer0 t),
+  'layer1', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer1 t),
+  'layer2', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer2 t)
+)
+EOF";
+    assert(db.getSQL() == expectedSQL, db.getSQL());
+
     debug(sql) {
         writeln("\n=== Test: 3-level nesting (users -> posts -> comments) ===");
         db.printSQL();
@@ -557,6 +700,20 @@ unittest {
     assert(users[0]["greeting"].str == "Hello Alice!");
     assert(users[1]["greeting"].str == "Hello Bob!");
     assert(users[2]["greeting"].str == "Hello Carol!");
+
+    // Verify generated SQL - arguments become SQL string literals
+    enum expectedSQL = q"EOF
+WITH
+  layer0 AS (
+    SELECT users.id, users.first_name, (('Hello ' || first_name) || '!') AS computed_0
+    FROM users
+    WHERE 1=1
+  )
+SELECT json_build_object(
+  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer0 t)
+)
+EOF";
+    assert(db.getSQL() == expectedSQL, db.getSQL());
 
     debug(sql) {
         writeln("\n=== Test: Computed field with arguments ===");
@@ -661,6 +818,20 @@ unittest {
     assert(result.length == 2);
     assert(result[0] == "Hello Alice!");
     assert(result[1] == "Hello Bob!");
+
+    // Verify generated SQL - same structure as compileQuery version but with getByIds
+    enum expectedSQL = q"EOF
+WITH
+  layer0 AS (
+    SELECT users.id, users.first_name, (('Hello ' || first_name) || '!') AS computed_0
+    FROM users
+    WHERE users.id = ANY($1)
+  )
+SELECT json_build_object(
+  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer0 t)
+)
+EOF";
+    assert(db.getSQL() == expectedSQL, db.getSQL());
 
     debug(sql) {
         writeln("\n=== Test: Computed field with arguments (greeting) ===");
@@ -912,6 +1083,21 @@ unittest {
     assert(names[1] == "Bob", "Second should be Bob, got: " ~ names[1]);
     assert(names[2] == "Charlie", "Third should be Charlie, got: " ~ names[2]);
 
+    // Verify generated SQL
+    enum expectedSQL = q"EOF
+WITH
+  layer0 AS (
+    SELECT users.id, users.first_name
+    FROM users
+    WHERE 1=1
+    ORDER BY users.first_name
+  )
+SELECT json_build_object(
+  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (SELECT * FROM layer0 ORDER BY first_name) t)
+)
+EOF";
+    assert(db.getSQL() == expectedSQL, db.getSQL());
+
     debug(sql) {
         import std.stdio : writeln;
         writeln("\n=== Test: Column-based sorting (first_name ASC) ===");
@@ -945,6 +1131,21 @@ unittest {
     assert(names[0] == "Charlie", "First should be Charlie, got: " ~ names[0]);
     assert(names[1] == "Bob", "Second should be Bob, got: " ~ names[1]);
     assert(names[2] == "Alice", "Third should be Alice, got: " ~ names[2]);
+
+    // Verify generated SQL
+    enum expectedSQL = q"EOF
+WITH
+  layer0 AS (
+    SELECT users.id, users.first_name
+    FROM users
+    WHERE 1=1
+    ORDER BY users.first_name DESC
+  )
+SELECT json_build_object(
+  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (SELECT * FROM layer0 ORDER BY first_name DESC) t)
+)
+EOF";
+    assert(db.getSQL() == expectedSQL, db.getSQL());
 }
 
 // Test predicate-based sorting with sortBy
@@ -1039,6 +1240,23 @@ unittest {
     assert(names[0] == "Bob", "First should be Bob, got: " ~ names[0]);
     assert(names[1] == "Charlie", "Second should be Charlie, got: " ~ names[1]);
 
+    // Verify generated SQL
+    enum expectedSQL = q"EOF
+WITH
+  layer0 AS (
+    SELECT users.id, users.first_name
+    FROM users
+    WHERE 1=1
+    ORDER BY users.first_name
+    LIMIT 2
+    OFFSET 1
+  )
+SELECT json_build_object(
+  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (SELECT * FROM layer0 ORDER BY first_name) t)
+)
+EOF";
+    assert(db.getSQL() == expectedSQL, db.getSQL());
+
     debug(sql) {
         import std.stdio : writeln;
         writeln("\n=== Test: Sorting + pagination ===");
@@ -1083,6 +1301,20 @@ unittest {
     // Bob has only posts with empty titles → false
     assert(result[1]["name"].str == "Bob");
     assert(result[1]["hasTitledPost"].boolean == false, "Bob should not have any posts with title");
+
+    // Verify generated SQL - some() becomes EXISTS subquery
+    enum expectedSQL = q"EOF
+WITH
+  layer0 AS (
+    SELECT users.id, users.first_name, EXISTS (SELECT 1 FROM posts WHERE posts.author_id = users.id AND (posts.title <> '')) AS computed_0
+    FROM users
+    WHERE users.id = ANY($1)
+  )
+SELECT json_build_object(
+  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer0 t)
+)
+EOF";
+    assert(db.getSQL() == expectedSQL, db.getSQL());
 
     debug(sql) {
         import std.stdio : writeln;
@@ -1130,6 +1362,20 @@ unittest {
     // Charlie: no posts (vacuous truth) → true
     assert(result[2]["name"].str == "Charlie");
     assert(result[2]["allPostsTitled"].boolean == true, "Charlie with no posts should satisfy every()");
+
+    // Verify generated SQL - every() becomes EXISTS with NOT predicate
+    enum expectedSQL = q"EOF
+WITH
+  layer0 AS (
+    SELECT users.id, users.first_name, EXISTS (SELECT 1 FROM posts WHERE posts.author_id = users.id AND (NOT (posts.title <> ''))) AS computed_0
+    FROM users
+    WHERE users.id = ANY($1)
+  )
+SELECT json_build_object(
+  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer0 t)
+)
+EOF";
+    assert(db.getSQL() == expectedSQL, db.getSQL());
 
     debug(sql) {
         import std.stdio : writeln;
@@ -1180,5 +1426,145 @@ unittest {
 
     assert(result.length == 1);
     assert(result[0] == true, "every() on empty collection should be true (vacuous truth)");
+}
+
+// ============================================================================
+// SQL Snapshot Tests - Optimization Pattern Coverage
+// ============================================================================
+//
+// These tests verify that specific query patterns produce the expected SQL,
+// making optimization decisions (JOINs, CTEs, pushdown) explicit and testable.
+
+// Test belongsTo JOIN - single hop (post with author.firstName via JOIN)
+unittest {
+    auto db = createMockDB();
+    auto executor = new Executor();
+
+    // Accessing a belongsTo relationship field should produce a JOIN, not a separate CTE
+    auto query = map!(
+        (Expr!Post p) => jsonObject(
+            "title", p.title,
+            "authorName", p.author.firstName
+        )
+    )(getByIds!Post([1, 2]));
+
+    auto result = awaitSync(executor.execute(query));
+    assert(result.length == 2);
+    assert(result[0]["title"].str == "Hello World");
+    assert(result[0]["authorName"].str == "Alice");
+    assert(result[1]["title"].str == "D Programming");
+    assert(result[1]["authorName"].str == "Bob");
+
+    // Verify generated SQL - belongsTo produces LEFT JOIN, not a separate CTE
+    enum expectedSQL = q"EOF
+WITH
+  layer0 AS (
+    SELECT posts.id, posts.title, posts.author_id, j0.id AS j0__id, j0.first_name AS j0__first_name
+    FROM posts
+    LEFT JOIN users j0 ON posts.author_id = j0.id
+    WHERE posts.id = ANY($1)
+  )
+SELECT json_build_object(
+  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer0 t)
+)
+EOF";
+    assert(db.getSQL() == expectedSQL, db.getSQL());
+}
+
+// Test belongsTo JOIN from Comment - single hop (comment.author.firstName)
+unittest {
+    auto db = createMockDB();
+    auto executor = new Executor();
+
+    // Comment -> author via belongsTo JOIN
+    auto query = map!(
+        (Expr!Comment c) => jsonObject(
+            "body", c.body_,
+            "authorName", c.author.firstName
+        )
+    )(getByIds!Comment([101, 102]));
+
+    auto result = awaitSync(executor.execute(query));
+    assert(result.length == 2);
+    assert(result[0]["body"].str == "Great post!");
+    assert(result[0]["authorName"].str == "Bob");
+    assert(result[1]["body"].str == "Thanks for sharing!");
+    assert(result[1]["authorName"].str == "Carol");
+
+    // Verify generated SQL - single-hop belongsTo JOIN from comments to users
+    enum expectedSQL = q"EOF
+WITH
+  layer0 AS (
+    SELECT comments.id, comments.body, comments.author_id, j0.id AS j0__id, j0.first_name AS j0__first_name
+    FROM comments
+    LEFT JOIN users j0 ON comments.author_id = j0.id
+    WHERE comments.id = ANY($1)
+  )
+SELECT json_build_object(
+  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer0 t)
+)
+EOF";
+    assert(db.getSQL() == expectedSQL, db.getSQL());
+}
+
+// NOTE: Multi-hop belongsTo chains (e.g. comment.post.author.firstName)
+// currently generate incorrect JOINs - the second hop uses the wrong
+// source table FK. This is a known limitation to be fixed separately.
+
+// Test getAll root expression (no ID filtering)
+unittest {
+    auto db = createMockDB();
+    auto executor = new Executor();
+
+    auto query = map!(
+        (Expr!User u) => u.firstName
+    )(getAll!User());
+
+    auto result = awaitSync(executor.execute(query));
+    assert(result.length == 3);
+
+    // Verify generated SQL - getAll produces WHERE 1=1 (no ID filtering)
+    enum expectedSQL = q"EOF
+WITH
+  layer0 AS (
+    SELECT users.id, users.first_name
+    FROM users
+    WHERE 1=1
+  )
+SELECT json_build_object(
+  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer0 t)
+)
+EOF";
+    assert(db.getSQL() == expectedSQL, db.getSQL());
+}
+
+// Test computed field with arguments - SQL push-down verification
+unittest {
+    auto db = createMockDB();
+    auto executor = new Executor();
+
+    // greeting("Hello") should push constant string args into SQL as literals
+    auto query = map!(
+        (Expr!User u) => u.greeting("Hello")
+    )(getByIds!User([1, 2]));
+
+    auto result = awaitSync(executor.execute(query));
+    assert(result.length == 2);
+    assert(result[0] == "Hello Alice!");
+    assert(result[1] == "Hello Bob!");
+
+    // Verify generated SQL - constant args become SQL string literals in computed column
+    enum expectedSQL = q"EOF
+WITH
+  layer0 AS (
+    SELECT users.id, users.first_name, (('Hello ' || first_name) || '!') AS computed_0
+    FROM users
+    WHERE users.id = ANY($1)
+  )
+SELECT json_build_object(
+  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer0 t)
+)
+EOF";
+    assert(db.getSQL() == expectedSQL, db.getSQL());
 }
 
