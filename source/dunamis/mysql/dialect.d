@@ -1,5 +1,12 @@
 module dunamis.mysql.dialect;
 
+import std.algorithm : map;
+import std.array : array, join;
+import std.conv : to;
+import std.format : format;
+import std.json : JSONValue, JSONType;
+import std.string : replace;
+
 import dunamis.relational.sql_dialect;
 
 /// MySQL dialect - uses CONCAT() for string concatenation
@@ -44,6 +51,57 @@ class MySQLDialect : SqlDialect {
     }
 
     override string name() { return "MySQL"; }
+
+    // =========================================================================
+    // Query SQL generation vocabulary
+    // =========================================================================
+
+    override string escapeSqlString(string s) {
+        return "'" ~ s.replace("\\", "\\\\").replace("'", "''") ~ "'";
+    }
+
+    override string jsonToSqlLiteral(JSONValue val) {
+        final switch (val.type) {
+            case JSONType.string:
+                return escapeSqlString(val.str);
+            case JSONType.integer:
+                return val.integer.to!string;
+            case JSONType.uinteger:
+                return val.uinteger.to!string;
+            case JSONType.float_:
+                return val.floating.to!string;
+            case JSONType.true_:
+                return "TRUE";
+            case JSONType.false_:
+                return "FALSE";
+            case JSONType.null_:
+                return "NULL";
+            case JSONType.array:
+                auto elements = val.array.map!(v => jsonToSqlLiteral(v)).array;
+                return "JSON_ARRAY(" ~ elements.join(",") ~ ")";
+            case JSONType.object:
+                return escapeSqlString(val.toString());
+        }
+    }
+
+    override string rootIdFilter(string table) {
+        return format("%s.id IN ({{IDS}})", table);
+    }
+
+    override string jsonObjectFunc() { return "JSON_OBJECT"; }
+
+    override string rowJsonFunc() { return "JSON_OBJECT"; }
+
+    override string emptyJsonArray() { return "JSON_ARRAY()"; }
+
+    override string aggregateLayerJson(int layerId, string orderByClause) {
+        if (orderByClause.length > 0) {
+            return format("COALESCE((SELECT JSON_ARRAYAGG(row_json ORDER BY %s) FROM layer%d), %s)",
+                orderByClause, layerId, emptyJsonArray());
+        }
+        return format("COALESCE((SELECT JSON_ARRAYAGG(row_json) FROM layer%d), %s)",
+            layerId, emptyJsonArray());
+    }
 
     private static string toSqlOp(string op) {
         switch (op) {

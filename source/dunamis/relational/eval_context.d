@@ -1226,14 +1226,11 @@ class DebugSqlDB(DBConfig config = defaultDBConfig) : DataFetcher {
     private string _cachedSQL;  // Cached to avoid duplicate debug output
     private CapturingSqlOptimizer _sqlOptimizer;
     private SqlDialect _dialect;
-    private string function(QueryNode[], SqlOptimizer) _toSQLFn;
 
-    this(DataFetcher delegate_, SqlDialect dialect,
-         string function(QueryNode[], SqlOptimizer) toSQLFn = null) {
+    this(DataFetcher delegate_, SqlDialect dialect) {
         _delegate = delegate_;
         _dialect = dialect;
         _sqlOptimizer = new CapturingSqlOptimizer(dialect);
-        _toSQLFn = toSQLFn;
     }
 
     /// Return the CapturingSqlOptimizer to enable SQL push-down
@@ -1261,8 +1258,9 @@ class DebugSqlDB(DBConfig config = defaultDBConfig) : DataFetcher {
     /// Includes computed columns from SQL push-down optimization.
     /// Requires a toSQL function to be provided at construction time.
     string getSQL() {
-        if (_toSQLFn !is null && _cachedSQL.length == 0 && _executedNodes.length > 0) {
-            _cachedSQL = _toSQLFn(_executedNodes, _sqlOptimizer);
+        if (_cachedSQL.length == 0 && _executedNodes.length > 0) {
+            import dunamis.relational.sql : toSQL;
+            _cachedSQL = toSQL(_executedNodes, _dialect, _sqlOptimizer);
         }
         return _cachedSQL;
     }

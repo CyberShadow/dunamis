@@ -10,7 +10,6 @@ import ae.utils.promise.await : awaitSync;
 import dunamis.core;
 import dunamis.relational;
 import dunamis.relational.sql_dialect : SqlDialect;
-import dunamis.postgres.sql : toSQL;
 
 // ============================================================================
 // Data Source Configuration
@@ -53,6 +52,42 @@ private class TestDialect : SqlDialect {
         return "(" ~ operandSql ~ " LIKE '" ~ pattern ~ `' ESCAPE '\')`;
     }
     override string name() { return "Test"; }
+
+    // Query SQL generation vocabulary (PostgreSQL-compatible for tests)
+    override string escapeSqlString(string s) {
+        import std.string : replace;
+        return "'" ~ s.replace("'", "''") ~ "'";
+    }
+    override string jsonToSqlLiteral(JSONValue val) {
+        final switch (val.type) {
+            case JSONType.string: return escapeSqlString(val.str);
+            case JSONType.integer: return val.integer.to!string;
+            case JSONType.uinteger: return val.uinteger.to!string;
+            case JSONType.float_: return val.floating.to!string;
+            case JSONType.true_: return "TRUE";
+            case JSONType.false_: return "FALSE";
+            case JSONType.null_: return "NULL";
+            case JSONType.array:
+                auto elements = val.array.map!(v => jsonToSqlLiteral(v)).array;
+                return "ARRAY[" ~ elements.join(",") ~ "]";
+            case JSONType.object: return escapeSqlString(val.toString());
+        }
+    }
+    override string rootIdFilter(string table) {
+        return table ~ ".id = ANY($1)";
+    }
+    override string jsonObjectFunc() { return "json_build_object"; }
+    override string rowJsonFunc() { return ""; }
+    override string emptyJsonArray() { return "'[]'::json"; }
+    override string aggregateLayerJson(int layerId, string orderByClause) {
+        auto layerStr = layerId.to!string;
+        if (orderByClause.length > 0) {
+            return "(SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (SELECT * FROM layer"
+                ~ layerStr ~ " ORDER BY " ~ orderByClause ~ ") t)";
+        }
+        return "(SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer"
+            ~ layerStr ~ " t)";
+    }
 }
 
 /// Singleton test dialect instance
@@ -262,7 +297,7 @@ private DebugSqlDB!() createMockDB() {
     ]`);
 
     // Set the module-level static for Query to use
-    db = new DebugSqlDB!()(mock, testDialect(), &toSQL);
+    db = new DebugSqlDB!()(mock, testDialect());
     return db;
 }
 
@@ -742,37 +777,7 @@ unittest {
     auto optimized = query.optimize(optCtx);
 
     // Phase 2: SQL push-down (replaces BinaryOpExprs with ProjectComputedExprs)
-    // Use a simple test dialect for unit tests
-    static class TestDialect : SqlDialect {
-        override string binaryOp(string op, string leftSql, string rightSql) {
-            if (op == "~") return "(" ~ leftSql ~ " || " ~ rightSql ~ ")";
-            return "(" ~ leftSql ~ " " ~ op ~ " " ~ rightSql ~ ")";
-        }
-        override string unaryOp(string op, string operandSql) {
-            if (op == "!") return "(NOT " ~ operandSql ~ ")";
-            return "(" ~ op ~ operandSql ~ ")";
-        }
-        override string caseWhen(string conditionSql, string trueSql, string falseSql) {
-            return "(CASE WHEN " ~ conditionSql ~ " THEN " ~ trueSql ~ " ELSE " ~ falseSql ~ " END)";
-        }
-        override string isNullOp(string operandSql) {
-            return "(" ~ operandSql ~ " IS NULL)";
-        }
-        override string existsSubquery(string subquery) {
-            return "EXISTS (" ~ subquery ~ ")";
-        }
-        override string notExistsSubquery(string subquery) {
-            return "NOT EXISTS (" ~ subquery ~ ")";
-        }
-        override string likeOp(string operandSql, string pattern, bool caseInsensitive) {
-            if (caseInsensitive) {
-                return "(LOWER(" ~ operandSql ~ ") LIKE LOWER('" ~ pattern ~ `') ESCAPE '\')`;
-            }
-            return "(" ~ operandSql ~ " LIKE '" ~ pattern ~ `' ESCAPE '\')`;
-        }
-        override string name() { return "Test"; }
-    }
-    auto sqlOpt = new SqlOptimizer(new TestDialect());
+    auto sqlOpt = new SqlOptimizer(testDialect());
     sqlOpt.optimize(optimized, optCtx);
 
     // Get the relational optimization context
@@ -786,7 +791,7 @@ unittest {
     assert(computed.length >= 1, "Should have at least 1 computed column for fullName");
 
     // Verify the full SQL output
-    auto sql = toSQL(relCtx.nodesInOrder(), sqlOpt);
+    auto sql = toSQL(relCtx.nodesInOrder(), testDialect(), sqlOpt);
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
@@ -1074,7 +1079,7 @@ unittest {
         {"id": 3, "first_name": "Bob", "last_name": "Xavier"}
     ]`);
 
-    db = new DebugSqlDB!()(mock, testDialect(), &toSQL);
+    db = new DebugSqlDB!()(mock, testDialect());
     auto executor = new Executor();
 
     // Sort by first_name ASC using getAll
@@ -1123,7 +1128,7 @@ unittest {
         {"id": 3, "first_name": "Bob"}
     ]`);
 
-    db = new DebugSqlDB!()(mock, testDialect(), &toSQL);
+    db = new DebugSqlDB!()(mock, testDialect());
     auto executor = new Executor();
 
     // Sort by first_name DESC
@@ -1166,7 +1171,7 @@ unittest {
         {"id": 3, "first_name": "Bob"}
     ]`);
 
-    db = new DebugSqlDB!()(mock, testDialect(), &toSQL);
+    db = new DebugSqlDB!()(mock, testDialect());
     auto executor = new Executor();
 
     // Sort by firstName using predicate (a.lt(b) for ASC)
@@ -1201,7 +1206,7 @@ unittest {
         {"id": 3, "first_name": "Bob"}
     ]`);
 
-    db = new DebugSqlDB!()(mock, testDialect(), &toSQL);
+    db = new DebugSqlDB!()(mock, testDialect());
     auto executor = new Executor();
 
     // Sort by firstName using predicate (a.gt(b) for DESC)
@@ -1232,7 +1237,7 @@ unittest {
         {"id": 5, "first_name": "Eve"}
     ]`);
 
-    db = new DebugSqlDB!()(mock, testDialect(), &toSQL);
+    db = new DebugSqlDB!()(mock, testDialect());
     auto executor = new Executor();
 
     // Sort by first_name ASC, then skip 1 and take 2
@@ -1288,7 +1293,7 @@ unittest {
         {"id": 3, "author_id": 2, "title": "", "body": "Bob's post"}
     ]`);
 
-    db = new DebugSqlDB!()(mock, testDialect(), &toSQL);
+    db = new DebugSqlDB!()(mock, testDialect());
     auto executor = new Executor();
 
     // Test: which users have at least one post with non-empty title
@@ -1346,7 +1351,7 @@ unittest {
     ]`);
     // Charlie has no posts
 
-    db = new DebugSqlDB!()(mock, testDialect(), &toSQL);
+    db = new DebugSqlDB!()(mock, testDialect());
     auto executor = new Executor();
 
     // Test: which users have ALL posts with non-empty title
@@ -1399,7 +1404,7 @@ unittest {
     ]`);
     mock.setTableData("posts", `[]`);  // No posts at all
 
-    db = new DebugSqlDB!()(mock, testDialect(), &toSQL);
+    db = new DebugSqlDB!()(mock, testDialect());
     auto executor = new Executor();
 
     // Test: some() on empty collection should return false
@@ -1421,7 +1426,7 @@ unittest {
     ]`);
     mock.setTableData("posts", `[]`);  // No posts at all
 
-    db = new DebugSqlDB!()(mock, testDialect(), &toSQL);
+    db = new DebugSqlDB!()(mock, testDialect());
     auto executor = new Executor();
 
     // Test: every() on empty collection should return true (vacuous truth)

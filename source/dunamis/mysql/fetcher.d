@@ -16,6 +16,7 @@ import dunamis.relational.eval_context;
 import dunamis.relational.query_node;
 import dunamis.relational.sql_optimizer;
 import dunamis.mysql.dialect : mysqlDialect;
+import dunamis.relational.sql : toSQL;
 import dunamis.mysql.sql;
 
 /// MySQL data fetcher using ae.net.db.mysql.
@@ -77,7 +78,7 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
         _executedNodes = allNodes;
 
         // Generate the full CTE query for entire node tree
-        auto sql = dunamis.mysql.sql.toSQL(allNodes, _sqlOptimizer);
+        auto sql = toSQL(allNodes, mysqlDialect(), _sqlOptimizer);
 
         // Substitute IDs if needed
         if (node.rootFilter == FilterType.byId || node.rootFilter == FilterType.byIds) {

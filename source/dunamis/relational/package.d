@@ -8,5 +8,6 @@ public {
     import dunamis.relational.project;
     import dunamis.relational.query_node;
     import dunamis.relational.schema;
+    import dunamis.relational.sql;
     import dunamis.relational.sql_optimizer;
 }

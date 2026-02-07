@@ -17,6 +17,7 @@ import std.format : format;
 import dunamis.relational.query_node;
 import dunamis.relational.sql_optimizer;
 import dunamis.sqlite.dialect : sqliteDialect;
+import dunamis.relational.sql : toSQL;
 import dunamis.sqlite.sql;
 
 /// SQLite data fetcher using ae.sys.sqlite3.
@@ -84,7 +85,7 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
         _executedNodes = allNodes;
 
         // Generate the full CTE query
-        auto sql = dunamis.sqlite.sql.toSQL(allNodes, _sqlOptimizer);
+        auto sql = toSQL(allNodes, sqliteDialect(), _sqlOptimizer);
 
         // Substitute IDs if needed
         if (node.rootFilter == FilterType.byId || node.rootFilter == FilterType.byIds) {

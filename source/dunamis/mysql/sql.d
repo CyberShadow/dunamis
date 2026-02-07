@@ -7,228 +7,21 @@ import std.format;
 import std.json;
 
 import dunamis.relational.mutation : InsertInput, UpdateInput;
-import dunamis.relational.query_node : QueryNode, FilterType;
-import dunamis.relational.sql_optimizer : SqlOptimizer;
-
-// ============================================================================
-// MySQL SQL Escaping
-// ============================================================================
-
-/// Escape a string for use in MySQL SQL.
-/// Uses single-quote doubling and backslash escaping for safety.
-string escapeSqlString(string s) {
-    import std.string : replace;
-    // MySQL escaping: double single quotes and escape backslashes
-    return "'" ~ s.replace("\\", "\\\\").replace("'", "''") ~ "'";
-}
-
-/// Convert JSONValue to a properly quoted MySQL SQL literal.
-string jsonToSqlLiteral(JSONValue val) {
-    final switch (val.type) {
-        case JSONType.string:
-            return escapeSqlString(val.str);
-        case JSONType.integer:
-            return val.integer.to!string;
-        case JSONType.uinteger:
-            return val.uinteger.to!string;
-        case JSONType.float_:
-            return val.floating.to!string;
-        case JSONType.true_:
-            return "TRUE";
-        case JSONType.false_:
-            return "FALSE";
-        case JSONType.null_:
-            return "NULL";
-        case JSONType.array:
-            // MySQL JSON array format: JSON_ARRAY(val1, val2, ...)
-            auto elements = val.array.map!(v => jsonToSqlLiteral(v)).array;
-            return "JSON_ARRAY(" ~ elements.join(",") ~ ")";
-        case JSONType.object:
-            // JSON object - serialize as JSON string
-            return escapeSqlString(val.toString());
-    }
-}
-
-// ============================================================================
-// Query SQL Generation (CTE-based)
-// ============================================================================
-
-/// Generate a complete CTE-based SQL query for MySQL.
-string toSQL(QueryNode[] nodes) {
-    return toSQL(nodes, null);
-}
-
-/// Generate a complete CTE-based SQL query with computed columns for MySQL.
-/// Note: MySQL 8.0+ supports CTEs with recursive capability.
-string toSQL(QueryNode[] nodes, SqlOptimizer sqlOpt) {
-    if (nodes.length == 0)
-        return "";
-
-    auto sql = appender!string;
-
-    // Build CTEs for each layer
-    sql ~= "WITH\n";
-
-    string[] ctes;
-    foreach (node; nodes) {
-        ctes ~= toCTE(node, sqlOpt);
-    }
-    sql ~= ctes.join(",\n");
-
-    // Final SELECT: aggregate all layers into JSON using MySQL's JSON_OBJECT
-    // MySQL 8.0+: Use ORDER BY inside JSON_ARRAYAGG to preserve sorting
-    sql ~= "\nSELECT JSON_OBJECT(\n";
-    string[] jsonParts;
-    foreach (node; nodes) {
-        // MySQL: COALESCE with JSON_ARRAYAGG, or empty JSON array if no rows
-        // Note: JSON_ARRAYAGG returns NULL if no rows, so we wrap with COALESCE
-        if (node.orderBy_.length > 0) {
-            string[] orderParts;
-            foreach (spec; node.orderBy_) {
-                orderParts ~= format("%s%s", spec.column, spec.descending ? " DESC" : "");
-            }
-            string orderByClause = orderParts.join(", ");
-            // MySQL aggregate ORDER BY syntax: JSON_ARRAYAGG(expr ORDER BY col)
-            jsonParts ~= format("  'layer%d', COALESCE((SELECT JSON_ARRAYAGG(row_json ORDER BY %s) FROM layer%d), JSON_ARRAY())",
-                node.id.value, orderByClause, node.id.value);
-        } else {
-            jsonParts ~= format("  'layer%d', COALESCE((SELECT JSON_ARRAYAGG(row_json) FROM layer%d), JSON_ARRAY())",
-                node.id.value, node.id.value);
-        }
-    }
-    sql ~= jsonParts.join(",\n");
-    sql ~= "\n) AS result\n";
-
-    return sql.data;
-}
-
-/// Generate CTE for a single QueryNode (MySQL version)
-private string toCTE(QueryNode node, SqlOptimizer sqlOpt) {
-    auto sql = appender!string;
-
-    sql ~= format("  layer%d AS (\n", node.id.value);
-    sql ~= "    SELECT ";
-    sql ~= toSelect(node, sqlOpt);
-
-    // MySQL: wrap each row as JSON using JSON_OBJECT
-    sql ~= format(",\n           JSON_OBJECT(%s) AS row_json",
-        buildJsonObjectArgs(node, sqlOpt));
-
-    sql ~= format("\n    FROM %s", node.table);
-
-    // Add JOINs for belongsTo relationships
-    foreach (joinInfo; node.joins) {
-        auto sourceRef = !joinInfo.sourceAlias.isNull ? joinInfo.sourceAlias.get.value : node.table;
-        sql ~= format("\n    LEFT JOIN %s %s ON %s.%s = %s.id",
-            joinInfo.targetTable, joinInfo.alias_.value,
-            sourceRef, joinInfo.fk, joinInfo.alias_.value);
-    }
-
-    // WHERE clause
-    sql ~= "\n    WHERE ";
-    if (node.isRoot) {
-        final switch (node.rootFilter) {
-            case FilterType.none:
-            case FilterType.all:
-                sql ~= "1=1";
-                break;
-            case FilterType.byId:
-            case FilterType.byIds:
-                // MySQL: use IN clause with placeholder for IDs
-                // The actual IDs will be substituted by the fetcher
-                sql ~= format("%s.id IN ({{IDS}})", node.table);
-                break;
-        }
-    } else {
-        sql ~= format("%s.%s IN (SELECT id FROM layer%d)",
-            node.table, node.parentFk, node.parent.id.value);
-    }
-
-    // ORDER BY clause (sorting)
-    if (node.orderBy_.length > 0) {
-        string[] orderParts;
-        foreach (spec; node.orderBy_) {
-            orderParts ~= format("%s.%s%s", node.table, spec.column,
-                spec.descending ? " DESC" : "");
-        }
-        sql ~= format("\n    ORDER BY %s", orderParts.join(", "));
-    }
-
-    // LIMIT clause (pagination)
-    if (!node.limit_.isNull) {
-        sql ~= format("\n    LIMIT %d", node.limit_.get);
-    }
-
-    // OFFSET clause (pagination)
-    if (!node.offset_.isNull) {
-        sql ~= format("\n    OFFSET %d", node.offset_.get);
-    }
-
-    sql ~= "\n  )";
-    return sql.data;
-}
-
-/// Generate SQL SELECT clause including computed columns
-private string toSelect(QueryNode node, SqlOptimizer sqlOpt) {
-    string[] selectParts;
-
-    // Regular columns from main table
-    foreach (col; node.columns) {
-        selectParts ~= format("%s.%s", node.table, col);
-    }
-
-    // Columns from JOINed tables
-    foreach (joinInfo; node.joins) {
-        if (auto cols = joinInfo.alias_ in node.joinedColumns) {
-            foreach (col; *cols) {
-                selectParts ~= format("%s.%s AS %s__%s",
-                    joinInfo.alias_.value, col, joinInfo.alias_.value, col);
-            }
-        }
-    }
-
-    // Computed columns (if SqlOptimizer is provided)
-    if (sqlOpt !is null) {
-        foreach (computed; sqlOpt.getComputedColumns(node.id)) {
-            selectParts ~= format("%s AS %s", computed.sqlExpr, computed.alias_);
-        }
-    }
-
-    return selectParts.join(", ");
-}
-
-/// Build JSON_OBJECT arguments for all columns in a row
-private string buildJsonObjectArgs(QueryNode node, SqlOptimizer sqlOpt) {
-    string[] args;
-
-    // Regular columns from main table
-    foreach (col; node.columns) {
-        args ~= format("'%s', %s.%s", col, node.table, col);
-    }
-
-    // Columns from JOINed tables
-    foreach (joinInfo; node.joins) {
-        if (auto cols = joinInfo.alias_ in node.joinedColumns) {
-            foreach (col; *cols) {
-                args ~= format("'%s__%s', %s.%s",
-                    joinInfo.alias_.value, col, joinInfo.alias_.value, col);
-            }
-        }
-    }
-
-    // Computed columns
-    if (sqlOpt !is null) {
-        foreach (computed; sqlOpt.getComputedColumns(node.id)) {
-            args ~= format("'%s', %s", computed.alias_, computed.sqlExpr);
-        }
-    }
-
-    return args.join(", ");
-}
+import dunamis.mysql.dialect : mysqlDialect;
 
 // ============================================================================
 // Mutation SQL Generation
 // ============================================================================
+
+/// Escape a string for use in MySQL SQL.
+private string escapeSqlString(string s) {
+    return mysqlDialect().escapeSqlString(s);
+}
+
+/// Convert JSONValue to a properly quoted MySQL SQL literal.
+private string jsonToSqlLiteral(JSONValue val) {
+    return mysqlDialect().jsonToSqlLiteral(val);
+}
 
 /// Generate INSERT SQL for MySQL.
 /// MySQL doesn't have a RETURNING clause, so we need to use LAST_INSERT_ID().
@@ -331,19 +124,21 @@ string generateDeleteSQL(string table, long[] ids) {
 
 unittest {
     // Test SQL escaping
-    assert(escapeSqlString("hello") == "'hello'");
-    assert(escapeSqlString("it's") == "'it''s'");
-    assert(escapeSqlString("O'Brien") == "'O''Brien'");
-    assert(escapeSqlString("back\\slash") == "'back\\\\slash'");
+    auto dialect = mysqlDialect();
+    assert(dialect.escapeSqlString("hello") == "'hello'");
+    assert(dialect.escapeSqlString("it's") == "'it''s'");
+    assert(dialect.escapeSqlString("O'Brien") == "'O''Brien'");
+    assert(dialect.escapeSqlString("back\\slash") == "'back\\\\slash'");
 }
 
 unittest {
     // Test jsonToSqlLiteral
-    assert(jsonToSqlLiteral(JSONValue("hello")) == "'hello'");
-    assert(jsonToSqlLiteral(JSONValue(42)) == "42");
-    assert(jsonToSqlLiteral(JSONValue(true)) == "TRUE");
-    assert(jsonToSqlLiteral(JSONValue(false)) == "FALSE");
-    assert(jsonToSqlLiteral(JSONValue(null)) == "NULL");
+    auto dialect = mysqlDialect();
+    assert(dialect.jsonToSqlLiteral(JSONValue("hello")) == "'hello'");
+    assert(dialect.jsonToSqlLiteral(JSONValue(42)) == "42");
+    assert(dialect.jsonToSqlLiteral(JSONValue(true)) == "TRUE");
+    assert(dialect.jsonToSqlLiteral(JSONValue(false)) == "FALSE");
+    assert(dialect.jsonToSqlLiteral(JSONValue(null)) == "NULL");
 }
 
 unittest {

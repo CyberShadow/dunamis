@@ -3,6 +3,7 @@ module dunamis.relational.sql_optimizer;
 import std.algorithm;
 import std.array;
 import std.conv;
+import std.json : JSONValue;
 import std.traits;
 import std.typecons : Nullable;
 
@@ -945,6 +946,13 @@ unittest {
             return "(" ~ operandSql ~ " LIKE '" ~ pattern ~ `' ESCAPE '\')`;
         }
         override string name() { return "Test"; }
+        override string escapeSqlString(string s) { return "'" ~ s ~ "'"; }
+        override string jsonToSqlLiteral(JSONValue) { return "NULL"; }
+        override string rootIdFilter(string table) { return table ~ ".id = ANY($1)"; }
+        override string jsonObjectFunc() { return "json_build_object"; }
+        override string rowJsonFunc() { return ""; }
+        override string emptyJsonArray() { return "'[]'::json"; }
+        override string aggregateLayerJson(int, string) { return ""; }
     }
     auto optimizer = new SqlOptimizer(new TestDialect());
     assert(optimizer !is null);
@@ -1007,6 +1015,13 @@ unittest {
             return "(" ~ operandSql ~ " LIKE '" ~ pattern ~ `' ESCAPE '\')`;
         }
         override string name() { return "Test"; }
+        override string escapeSqlString(string s) { return "'" ~ s ~ "'"; }
+        override string jsonToSqlLiteral(JSONValue) { return "NULL"; }
+        override string rootIdFilter(string table) { return table ~ ".id = ANY($1)"; }
+        override string jsonObjectFunc() { return "json_build_object"; }
+        override string rowJsonFunc() { return ""; }
+        override string emptyJsonArray() { return "'[]'::json"; }
+        override string aggregateLayerJson(int, string) { return ""; }
     }
     auto ctx = new OptimizeContext();
     auto sqlOpt = new SqlOptimizer(new TestDialect());

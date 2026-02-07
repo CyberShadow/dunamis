@@ -1,5 +1,12 @@
 module dunamis.sqlite.dialect;
 
+import std.algorithm : map;
+import std.array : array, join;
+import std.conv : to;
+import std.format : format;
+import std.json : JSONValue, JSONType;
+import std.string : replace;
+
 import dunamis.relational.sql_dialect;
 
 /// SQLite dialect - uses || for string concatenation (same as PostgreSQL)
@@ -39,6 +46,57 @@ class SQLiteDialect : SqlDialect {
     }
 
     override string name() { return "SQLite"; }
+
+    // =========================================================================
+    // Query SQL generation vocabulary
+    // =========================================================================
+
+    override string escapeSqlString(string s) {
+        return "'" ~ s.replace("'", "''") ~ "'";
+    }
+
+    override string jsonToSqlLiteral(JSONValue val) {
+        final switch (val.type) {
+            case JSONType.string:
+                return escapeSqlString(val.str);
+            case JSONType.integer:
+                return val.integer.to!string;
+            case JSONType.uinteger:
+                return val.uinteger.to!string;
+            case JSONType.float_:
+                return val.floating.to!string;
+            case JSONType.true_:
+                return "1";
+            case JSONType.false_:
+                return "0";
+            case JSONType.null_:
+                return "NULL";
+            case JSONType.array:
+                auto elements = val.array.map!(v => jsonToSqlLiteral(v)).array;
+                return "json_array(" ~ elements.join(",") ~ ")";
+            case JSONType.object:
+                return escapeSqlString(val.toString());
+        }
+    }
+
+    override string rootIdFilter(string table) {
+        return format("%s.id IN ({{IDS}})", table);
+    }
+
+    override string jsonObjectFunc() { return "json_object"; }
+
+    override string rowJsonFunc() { return "json_object"; }
+
+    override string emptyJsonArray() { return "json('[]')"; }
+
+    override string aggregateLayerJson(int layerId, string orderByClause) {
+        if (orderByClause.length > 0) {
+            return format("COALESCE((SELECT json_group_array(json(row_json)) FROM (SELECT * FROM layer%d ORDER BY %s)), %s)",
+                layerId, orderByClause, emptyJsonArray());
+        }
+        return format("COALESCE((SELECT json_group_array(json(row_json)) FROM layer%d), %s)",
+            layerId, emptyJsonArray());
+    }
 
     private static string toSqlOp(string op) {
         switch (op) {

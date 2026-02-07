@@ -18,7 +18,7 @@ import dunamis.relational.eval_context;
 import dunamis.relational.query_node;
 import dunamis.relational.sql_optimizer;
 import dunamis.postgres.dialect : postgresDialect;
-import dunamis.postgres.sql : toSQL;
+import dunamis.relational.sql : toSQL;
 
 /// PostgreSQL data fetcher using ae.net.db.psql.
 /// Executes SQL generated from QueryNodes against a PostgreSQL database.
@@ -79,7 +79,7 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
         _executedNodes = allNodes;
 
         // Generate the full CTE query for entire node tree
-        auto sql = toSQL(allNodes, _sqlOptimizer);
+        auto sql = toSQL(allNodes, postgresDialect(), _sqlOptimizer);
         _cachedSQL = sql;
 
         debug(sql) {
