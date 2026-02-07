@@ -112,14 +112,14 @@ class PrefetchExpr : Expr!(AnyRef[]) {
 
 /// Interface for ProjectColumnExpr pattern matching by external optimizers
 interface ProjectColumnInfo {
-    @property int queryNodeId();
+    @property QueryNodeId queryNodeId();
     @property string column();
 }
 
 /// Interface for ProjectJoinedColumnExpr pattern matching by external optimizers
 interface ProjectJoinedColumnInfo {
-    @property int queryNodeId();
-    @property string joinAlias();
+    @property QueryNodeId queryNodeId();
+    @property JoinAlias joinAlias();
     @property string column();
 }
 
@@ -166,14 +166,14 @@ class EntityToAnyRefExpr(Entity) : Expr!AnyRef {
 /// Created by optimizer when transforming ColumnAccessExpr.
 class ProjectColumnExpr(T) : Expr!T, ProjectColumnInfo {
     private {
-        int _queryNodeId;
+        QueryNodeId _queryNodeId;
         string _column;
         ExprBase _input;     // The input chain (for deriving refs) - Expr!AnyRef via EntityToAnyRefExpr
         ExprBase _prefetch;  // PrefetchExpr - ensures data is loaded
     }
 
     /// Accepts ExprBase to work with both typed Expr!Entity and untyped Expr!AnyRef
-    this(int queryNodeId, string column, ExprBase input, PrefetchExpr prefetch) {
+    this(QueryNodeId queryNodeId, string column, ExprBase input, PrefetchExpr prefetch) {
         assert(column.length > 0, "ProjectColumnExpr column must not be empty");
         assert(input !is null, "ProjectColumnExpr input must not be null");
         assert(prefetch !is null, "ProjectColumnExpr prefetch must not be null");
@@ -208,7 +208,7 @@ class ProjectColumnExpr(T) : Expr!T, ProjectColumnInfo {
         });
     }
 
-    @property int queryNodeId() { return _queryNodeId; }
+    @property QueryNodeId queryNodeId() { return _queryNodeId; }
     @property string column() { return _column; }
 }
 
@@ -216,16 +216,16 @@ class ProjectColumnExpr(T) : Expr!T, ProjectColumnInfo {
 /// Created by optimizer for belongsTo chain access.
 class ProjectJoinedColumnExpr(T) : Expr!T, ProjectJoinedColumnInfo {
     private {
-        int _queryNodeId;
-        string _joinAlias;
+        QueryNodeId _queryNodeId;
+        JoinAlias _joinAlias;
         string _column;
         ExprBase _input;     // The input chain (for deriving refs)
         ExprBase _prefetch;  // PrefetchExpr - ensures data is loaded
     }
 
     /// Accepts ExprBase to work with both typed Expr!Entity and untyped Expr!AnyRef
-    this(int queryNodeId, string joinAlias, string column, ExprBase input, PrefetchExpr prefetch) {
-        assert(joinAlias.length > 0, "ProjectJoinedColumnExpr joinAlias must not be empty");
+    this(QueryNodeId queryNodeId, JoinAlias joinAlias, string column, ExprBase input, PrefetchExpr prefetch) {
+        assert(joinAlias.value.length > 0, "ProjectJoinedColumnExpr joinAlias must not be empty");
         assert(column.length > 0, "ProjectJoinedColumnExpr column must not be empty");
         assert(input !is null, "ProjectJoinedColumnExpr input must not be null");
         assert(prefetch !is null, "ProjectJoinedColumnExpr prefetch must not be null");
@@ -262,8 +262,8 @@ class ProjectJoinedColumnExpr(T) : Expr!T, ProjectJoinedColumnInfo {
         });
     }
 
-    @property int queryNodeId() { return _queryNodeId; }
-    @property string joinAlias() { return _joinAlias; }
+    @property QueryNodeId queryNodeId() { return _queryNodeId; }
+    @property JoinAlias joinAlias() { return _joinAlias; }
     @property string column() { return _column; }
 }
 
@@ -272,11 +272,11 @@ class ProjectJoinedColumnExpr(T) : Expr!T, ProjectJoinedColumnInfo {
 /// At the root level, there's always exactly 1 parent (queryRoot).
 class ProjectRefsExpr : Expr!(AnyRef[]) {
     private {
-        int _queryNodeId;
+        QueryNodeId _queryNodeId;
         ExprBase _prefetch;  // PrefetchExpr - ensures data is loaded
     }
 
-    this(int queryNodeId, PrefetchExpr prefetch) {
+    this(QueryNodeId queryNodeId, PrefetchExpr prefetch) {
         _queryNodeId = queryNodeId;
         _prefetch = prefetch;
     }
@@ -306,20 +306,20 @@ class ProjectRefsExpr : Expr!(AnyRef[]) {
         });
     }
 
-    @property int queryNodeId() { return _queryNodeId; }
+    @property QueryNodeId queryNodeId() { return _queryNodeId; }
 }
 
 /// Projects child refs grouped by parent from a QueryResult.
 /// Used for hasMany relationships in optimized path.
 class ProjectChildRefsExpr : Expr!(AnyRef[]) {
     private {
-        int _queryNodeId;
+        QueryNodeId _queryNodeId;
         ExprBase _parentInput;  // Expression that yields parent refs
         ExprBase _prefetch;     // PrefetchExpr - ensures data is loaded
     }
 
     /// Accepts ExprBase to work with both typed Expr!Entity and untyped Expr!AnyRef
-    this(int queryNodeId, ExprBase parentInput, PrefetchExpr prefetch) {
+    this(QueryNodeId queryNodeId, ExprBase parentInput, PrefetchExpr prefetch) {
         _queryNodeId = queryNodeId;
         _parentInput = parentInput;
         _prefetch = prefetch;
@@ -353,14 +353,14 @@ class ProjectChildRefsExpr : Expr!(AnyRef[]) {
         });
     }
 
-    @property int queryNodeId() { return _queryNodeId; }
+    @property QueryNodeId queryNodeId() { return _queryNodeId; }
 }
 
 /// Projects parent ref for each child (belongsTo).
 /// Reads FK from the child's query result and encodes as parent ref.
 class ProjectBelongsToExpr : Expr!AnyRef {
     private {
-        int _queryNodeId;
+        QueryNodeId _queryNodeId;
         string _fkColumn;
         string _parentTypeName;
         ExprBase _input;     // The input chain (for deriving refs)
@@ -368,7 +368,7 @@ class ProjectBelongsToExpr : Expr!AnyRef {
     }
 
     /// Accepts ExprBase to work with both typed Expr!Entity and untyped Expr!AnyRef
-    this(int queryNodeId, string fkColumn, string parentTypeName, ExprBase input, PrefetchExpr prefetch) {
+    this(QueryNodeId queryNodeId, string fkColumn, string parentTypeName, ExprBase input, PrefetchExpr prefetch) {
         assert(fkColumn.length > 0, "ProjectBelongsToExpr fkColumn must not be empty");
         assert(parentTypeName.length > 0, "ProjectBelongsToExpr parentTypeName must not be empty");
         assert(input !is null, "ProjectBelongsToExpr input must not be null");
@@ -408,7 +408,7 @@ class ProjectBelongsToExpr : Expr!AnyRef {
         });
     }
 
-    @property int queryNodeId() { return _queryNodeId; }
+    @property QueryNodeId queryNodeId() { return _queryNodeId; }
     @property string fkColumn() { return _fkColumn; }
     @property string parentTypeName() { return _parentTypeName; }
 }
@@ -462,7 +462,7 @@ class ProjectTypedBelongsToExpr(Child, Parent, ResultType, string fk) : Expr!Res
     @property string parentTypeName() { return EntityID!Parent.typeName; }
     @property string fkColumn() { return fk; }
 
-    @property int queryNodeId() { return _inner.queryNodeId; }
+    @property QueryNodeId queryNodeId() { return _inner.queryNodeId; }
 }
 
 // ============================================================================
@@ -489,10 +489,10 @@ unittest {
         parseJSON(`{"id": 2, "first_name": "Bob"}`)
     ];
     result.loadFromRows(rows, "User");
-    relCtx.storeQueryResult(0, result);
+    relCtx.storeQueryResult(QueryNodeId(0), result);
 
     // Create mock QueryNode and PrefetchExpr
-    auto node = new QueryNode(0, "User", "users");
+    auto node = new QueryNode(QueryNodeId(0), "User", "users");
     auto prefetch = new PrefetchExpr(node);
 
     // Create a mock input that returns the refs via EntityToAnyRefExpr
@@ -501,7 +501,7 @@ unittest {
     auto refInput = new EntityToAnyRefExpr!TestUser(item);
 
     // Create projection with input and prefetch
-    auto proj = new ProjectColumnExpr!string(0, "first_name", refInput, prefetch);
+    auto proj = new ProjectColumnExpr!string(QueryNodeId(0), "first_name", refInput, prefetch);
 
     // Evaluate
     auto names = awaitSync(proj.eval(ctx));
@@ -522,13 +522,13 @@ unittest {
         parseJSON(`{"id": 3}`)
     ];
     result.loadFromRows(rows, "User");
-    relCtx.storeQueryResult(0, result);
+    relCtx.storeQueryResult(QueryNodeId(0), result);
 
     // Create mock QueryNode and PrefetchExpr
-    auto node = new QueryNode(0, "User", "users");
+    auto node = new QueryNode(QueryNodeId(0), "User", "users");
     auto prefetch = new PrefetchExpr(node);
 
-    auto proj = new ProjectRefsExpr(0, prefetch);
+    auto proj = new ProjectRefsExpr(QueryNodeId(0), prefetch);
     ctx.setValues!AnyRef(null, [queryRoot]);
     auto refArrays = awaitSync(proj.eval(ctx));
 
@@ -556,10 +556,10 @@ unittest {
         parseJSON(`{"id": 2, "author_id": 20}`)
     ];
     result.loadFromRows(rows, "Post");
-    relCtx.storeQueryResult(0, result);
+    relCtx.storeQueryResult(QueryNodeId(0), result);
 
     // Create mock QueryNode and PrefetchExpr
-    auto node = new QueryNode(0, "Post", "posts");
+    auto node = new QueryNode(QueryNodeId(0), "Post", "posts");
     auto prefetch = new PrefetchExpr(node);
 
     // Create a mock input that returns the refs via EntityToAnyRefExpr
@@ -567,7 +567,7 @@ unittest {
     ctx.setValues!TestPost(null, [TestPost("Post:1"), TestPost("Post:2")]);
     auto refInput = new EntityToAnyRefExpr!TestPost(item);
 
-    auto proj = new ProjectBelongsToExpr(0, "author_id", "User", refInput, prefetch);
+    auto proj = new ProjectBelongsToExpr(QueryNodeId(0), "author_id", "User", refInput, prefetch);
     auto parentRefs = awaitSync(proj.eval(ctx));
 
     assert(parentRefs == [AnyRef("User:10"), AnyRef("User:20")]);

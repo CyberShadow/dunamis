@@ -1239,7 +1239,7 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
 
     private {
         PrefetchExpr _prefetch;  // Set during optimization
-        int _queryNodeId = -1;   // QueryNode ID for optimized path
+        QueryNodeId _queryNodeId = noQueryNodeId;   // QueryNode ID for optimized path
     }
 
     this() {}
@@ -1603,26 +1603,26 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
 
         // Access through belongsTo chain - add JOINs
         // Each hop: source table -> target table via FK
-        string lastAlias;
+        Nullable!JoinAlias lastAlias;
         foreach (hop; joinPath) {
-            if (lastAlias is null) {
+            if (lastAlias.isNull) {
                 // First hop: FK is on the root table
                 node.addColumn(hop.fk);
             } else {
                 // Subsequent hops: FK is on the previously joined table
-                node.addJoinedColumn(lastAlias, hop.fk);
+                node.addJoinedColumn(lastAlias.get, hop.fk);
             }
             // Add JOIN and get alias, tracking source for multi-hop
             lastAlias = node.addJoin(hop.targetTable, hop.targetType, hop.fk, lastAlias);
         }
 
         // Track the column needed from the final joined table
-        node.addJoinedColumn(lastAlias, _column);
+        node.addJoinedColumn(lastAlias.get, _column);
 
         // Return projection that reads from the final joined table
         // Use baseInputAsAnyRef (pre-wrapped by BelongsToInfo with the correct base entity type)
         // not _input (which may be a belongsTo that produces refs for a different table)
-        return new ProjectJoinedColumnExpr!T(node.id, lastAlias, _column, baseInputAsAnyRef, prefetch);
+        return new ProjectJoinedColumnExpr!T(node.id, lastAlias.get, _column, baseInputAsAnyRef, prefetch);
     }
 
     override Promise!(T[]) eval(EvalContext ctx) {

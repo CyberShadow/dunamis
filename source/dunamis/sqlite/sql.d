@@ -87,10 +87,10 @@ string toSQL(QueryNode[] nodes, SqlOptimizer sqlOpt) {
             }
             auto orderByClause = orderParts.join(", ");
             jsonParts ~= format("  'layer%d', COALESCE((SELECT json_group_array(json(row_json)) FROM (SELECT * FROM layer%d ORDER BY %s)), json('[]'))",
-                node.id, node.id, orderByClause);
+                node.id.value, node.id.value, orderByClause);
         } else {
             jsonParts ~= format("  'layer%d', COALESCE((SELECT json_group_array(json(row_json)) FROM layer%d), json('[]'))",
-                node.id, node.id);
+                node.id.value, node.id.value);
         }
     }
     sql ~= jsonParts.join(",\n");
@@ -103,7 +103,7 @@ string toSQL(QueryNode[] nodes, SqlOptimizer sqlOpt) {
 private string toCTE(QueryNode node, SqlOptimizer sqlOpt) {
     auto sql = appender!string;
 
-    sql ~= format("  layer%d AS (\n", node.id);
+    sql ~= format("  layer%d AS (\n", node.id.value);
     sql ~= "    SELECT ";
     sql ~= toSelect(node, sqlOpt);
 
@@ -115,10 +115,10 @@ private string toCTE(QueryNode node, SqlOptimizer sqlOpt) {
 
     // Add JOINs for belongsTo relationships
     foreach (joinInfo; node.joins) {
-        auto sourceRef = joinInfo.sourceAlias !is null ? joinInfo.sourceAlias : node.table;
+        auto sourceRef = !joinInfo.sourceAlias.isNull ? joinInfo.sourceAlias.get.value : node.table;
         sql ~= format("\n    LEFT JOIN %s %s ON %s.%s = %s.id",
-            joinInfo.targetTable, joinInfo.alias_,
-            sourceRef, joinInfo.fk, joinInfo.alias_);
+            joinInfo.targetTable, joinInfo.alias_.value,
+            sourceRef, joinInfo.fk, joinInfo.alias_.value);
     }
 
     // WHERE clause
@@ -138,7 +138,7 @@ private string toCTE(QueryNode node, SqlOptimizer sqlOpt) {
         }
     } else {
         sql ~= format("%s.%s IN (SELECT id FROM layer%d)",
-            node.table, node.parentFk, node.parent.id);
+            node.table, node.parentFk, node.parent.id.value);
     }
 
     // ORDER BY clause (sorting)
@@ -179,7 +179,7 @@ private string toSelect(QueryNode node, SqlOptimizer sqlOpt) {
         if (auto cols = joinInfo.alias_ in node.joinedColumns) {
             foreach (col; *cols) {
                 selectParts ~= format("%s.%s AS %s__%s",
-                    joinInfo.alias_, col, joinInfo.alias_, col);
+                    joinInfo.alias_.value, col, joinInfo.alias_.value, col);
             }
         }
     }
@@ -208,7 +208,7 @@ private string buildJsonObjectArgs(QueryNode node, SqlOptimizer sqlOpt) {
         if (auto cols = joinInfo.alias_ in node.joinedColumns) {
             foreach (col; *cols) {
                 args ~= format("'%s__%s', %s.%s",
-                    joinInfo.alias_, col, joinInfo.alias_, col);
+                    joinInfo.alias_.value, col, joinInfo.alias_.value, col);
             }
         }
     }

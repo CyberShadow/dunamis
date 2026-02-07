@@ -420,8 +420,8 @@ class QueryResult {
     }
 
     /// Get column from JOINed data (aliased columns like "j0__first_name")
-    T[] getJoinedColumn(T)(string joinAlias, string column, AnyRef[] refs) {
-        auto fullColumn = joinAlias ~ "__" ~ column;
+    T[] getJoinedColumn(T)(JoinAlias joinAlias, string column, AnyRef[] refs) {
+        auto fullColumn = joinAlias.value ~ "__" ~ column;
         return getColumn!T(fullColumn, refs);
     }
 
@@ -571,37 +571,37 @@ class RelationalEvalContext {
 
     /// Pre-fetched query results, keyed by QueryNode ID.
     /// Stored by PrefetchExpr after query execution, read by ProjectColumnExpr.
-    private QueryResult[int] _queryResults;
+    private QueryResult[QueryNodeId] _queryResults;
 
     /// Mutation results, keyed by entity type name.
     /// Stored by InsertExpr/UpdateExpr, read by ColumnAccessExpr.
     private QueryResult[string] _mutationResults;
 
     /// Store results from a QueryNode execution
-    void storeQueryResult(int queryNodeId, QueryResult result) {
+    void storeQueryResult(QueryNodeId queryNodeId, QueryResult result) {
         assert(result !is null, "Cannot store null QueryResult");
         _queryResults[queryNodeId] = result;
     }
 
     /// Check if we have results for a query node
-    bool hasQueryResult(int queryNodeId) {
+    bool hasQueryResult(QueryNodeId queryNodeId) {
         return (queryNodeId in _queryResults) !is null;
     }
 
     /// Get query result by node ID
-    QueryResult getQueryResult(int queryNodeId) {
+    QueryResult getQueryResult(QueryNodeId queryNodeId) {
         return _queryResults.get(queryNodeId, null);
     }
 
     /// Get column values from pre-fetched results
-    T[] getColumnValues(T)(int queryNodeId, string column, AnyRef[] refs) {
+    T[] getColumnValues(T)(QueryNodeId queryNodeId, string column, AnyRef[] refs) {
         auto result = _queryResults.get(queryNodeId, null);
         if (result is null) return refs.map!(_ => T.init).array;
         return result.getColumn!T(column, refs);
     }
 
     /// Get column values from a JOINed table
-    T[] getJoinedColumnValues(T)(int queryNodeId, string joinAlias, string column, AnyRef[] refs) {
+    T[] getJoinedColumnValues(T)(QueryNodeId queryNodeId, JoinAlias joinAlias, string column, AnyRef[] refs) {
         auto result = _queryResults.get(queryNodeId, null);
         if (result is null) return refs.map!(_ => T.init).array;
         return result.getJoinedColumn!T(joinAlias, column, refs);
@@ -753,9 +753,9 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
             // Get FK values to determine joined refs
             JSONValue[] fkValues;
-            if (joinInfo.sourceAlias !is null) {
+            if (!joinInfo.sourceAlias.isNull) {
                 // Multi-hop: FK is on a previously joined table, read from result
-                auto fkKey = joinInfo.sourceAlias ~ "__" ~ joinInfo.fk;
+                auto fkKey = joinInfo.sourceAlias.get.value ~ "__" ~ joinInfo.fk;
                 auto colData = result._columns.get(fkKey, null);
                 foreach (r; refs) {
                     if (colData !is null) {
@@ -784,7 +784,7 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
             // Load each joined column
             foreach (column; joinedCols) {
                 auto values = fetchColumnJsonSync(joinInfo.targetTable, column, joinedRefs);
-                result.loadColumn(joinAlias ~ "__" ~ column, refs, values);
+                result.loadColumn(joinAlias.value ~ "__" ~ column, refs, values);
             }
         }
 
@@ -1414,11 +1414,11 @@ unittest {
 
     auto result = new QueryResult();
     result.initialize("User", [AnyRef("User:1"), AnyRef("User:2")]);
-    ctx.storeQueryResult(0, result);
+    ctx.storeQueryResult(QueryNodeId(0), result);
 
-    assert(ctx.hasQueryResult(0));
-    assert(!ctx.hasQueryResult(1));
-    assert(ctx.getQueryResult(0) is result);
+    assert(ctx.hasQueryResult(QueryNodeId(0)));
+    assert(!ctx.hasQueryResult(QueryNodeId(1)));
+    assert(ctx.getQueryResult(QueryNodeId(0)) is result);
 }
 
 unittest {

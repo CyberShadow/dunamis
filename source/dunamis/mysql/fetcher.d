@@ -30,7 +30,7 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
     private SqlOptimizer _sqlOptimizer;
     private QueryNode[] _executedNodes;
     private string _cachedSQL;
-    private QueryResult[int] _cachedResults;  // Store child results from CTE query (by node ID)
+    private QueryResult[QueryNodeId] _cachedResults;  // Store child results from CTE query (by node ID)
     private QueryResult[string] _cachedResultsByType;  // Also index by type name for fetchChildren
 
     this(MySqlConnection conn) {
@@ -124,7 +124,7 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
         // Parse each layer and cache results
         QueryResult rootResult;
         foreach (node; nodes) {
-            auto layerKey = "layer" ~ node.id.to!string;
+            auto layerKey = "layer" ~ node.id.value.to!string;
             if (layerKey in jsonData) {
                 auto layerRows = jsonData[layerKey].array;
                 auto result = new QueryResult();

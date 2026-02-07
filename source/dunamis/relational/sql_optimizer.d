@@ -91,7 +91,7 @@ struct ComputedColumn {
 /// of this class from their requestedOptimizers() method.
 class SqlOptimizer : ExprOptimizer {
     /// Track computed columns per QueryNode ID
-    private ComputedColumn[][int] _computedColumns;
+    private ComputedColumn[][QueryNodeId] _computedColumns;
 
     /// Next computed column alias counter
     private int _nextComputedAlias = 0;
@@ -218,11 +218,11 @@ class SqlOptimizer : ExprOptimizer {
     /// Try to push down a binary operation to SQL
     protected ExprBase tryPushDownBinaryOp(ExprBase expr, BinaryOpInfo binOp, OptimizeContext ctx) {
         // Check if both operands can be translated to SQL
-        int queryNodeId = -1;
+        QueryNodeId queryNodeId = noQueryNodeId;
         auto leftSql = tryGetSqlExpr(binOp.left, queryNodeId);
         auto rightSql = tryGetSqlExpr(binOp.right, queryNodeId);
 
-        if (leftSql.isNull || rightSql.isNull || queryNodeId < 0) {
+        if (leftSql.isNull || rightSql.isNull || queryNodeId == noQueryNodeId) {
             // Can't push down - operands aren't SQL-translatable or from different nodes
             return null;
         }
@@ -265,10 +265,10 @@ class SqlOptimizer : ExprOptimizer {
     /// Try to push down a unary operation to SQL
     protected ExprBase tryPushDownUnaryOp(ExprBase expr, UnaryOpInfo unaryOp, OptimizeContext ctx) {
         // Check if operand can be translated to SQL
-        int queryNodeId = -1;
+        QueryNodeId queryNodeId = noQueryNodeId;
         auto operandSql = tryGetSqlExpr(unaryOp.operand, queryNodeId);
 
-        if (operandSql.isNull || queryNodeId < 0) {
+        if (operandSql.isNull || queryNodeId == noQueryNodeId) {
             return null;
         }
 
@@ -302,12 +302,12 @@ class SqlOptimizer : ExprOptimizer {
     /// Try to push down a ternary operation to SQL
     protected ExprBase tryPushDownTernaryOp(ExprBase expr, TernaryInfo ternaryOp, OptimizeContext ctx) {
         // Check if all operands can be translated to SQL and come from the same QueryNode
-        int queryNodeId = -1;
+        QueryNodeId queryNodeId = noQueryNodeId;
         auto condSql = tryGetSqlExpr(ternaryOp.condition, queryNodeId);
         auto trueSql = tryGetSqlExpr(ternaryOp.trueExpr, queryNodeId);
         auto falseSql = tryGetSqlExpr(ternaryOp.falseExpr, queryNodeId);
 
-        if (condSql.isNull || trueSql.isNull || falseSql.isNull || queryNodeId < 0) {
+        if (condSql.isNull || trueSql.isNull || falseSql.isNull || queryNodeId == noQueryNodeId) {
             return null;
         }
 
@@ -353,10 +353,10 @@ class SqlOptimizer : ExprOptimizer {
     /// Try to push down an isNull check to SQL
     protected ExprBase tryPushDownIsNull(ExprBase expr, IsNullInfo isNullOp, OptimizeContext ctx) {
         // Check if operand can be translated to SQL
-        int queryNodeId = -1;
+        QueryNodeId queryNodeId = noQueryNodeId;
         auto operandSql = tryGetSqlExpr(isNullOp.operand, queryNodeId);
 
-        if (operandSql.isNull || queryNodeId < 0) {
+        if (operandSql.isNull || queryNodeId == noQueryNodeId) {
             return null;
         }
 
@@ -657,10 +657,10 @@ class SqlOptimizer : ExprOptimizer {
 
     /// Try to get SQL expression for an operand.
     /// Also tracks the queryNodeId to ensure all parts come from the same node.
-    private Nullable!string tryGetSqlExpr(ExprBase expr, ref int queryNodeId) {
+    private Nullable!string tryGetSqlExpr(ExprBase expr, ref QueryNodeId queryNodeId) {
         // Check if it's a column projection
         if (auto projCol = cast(ProjectColumnInfo) expr) {
-            if (queryNodeId < 0) {
+            if (queryNodeId == noQueryNodeId) {
                 queryNodeId = projCol.queryNodeId;
             } else if (queryNodeId != projCol.queryNodeId) {
                 // Different query nodes - can't combine
@@ -673,17 +673,17 @@ class SqlOptimizer : ExprOptimizer {
 
         // Check if it's a joined column projection
         if (auto projJoin = cast(ProjectJoinedColumnInfo) expr) {
-            if (queryNodeId < 0) {
+            if (queryNodeId == noQueryNodeId) {
                 queryNodeId = projJoin.queryNodeId;
             } else if (queryNodeId != projJoin.queryNodeId) {
                 return Nullable!string.init;
             }
-            return Nullable!string(projJoin.joinAlias ~ "." ~ projJoin.column);
+            return Nullable!string(projJoin.joinAlias.value ~ "." ~ projJoin.column);
         }
 
         // Check if it's a computed column projection (e.g., EXISTS subquery)
         if (auto projComputed = cast(ProjectComputedInfo) expr) {
-            if (queryNodeId < 0) {
+            if (queryNodeId == noQueryNodeId) {
                 queryNodeId = projComputed.queryNodeId;
             } else if (queryNodeId != projComputed.queryNodeId) {
                 return Nullable!string.init;
@@ -737,7 +737,7 @@ class SqlOptimizer : ExprOptimizer {
     /// Create a ProjectComputedExpr for the given result type.
     /// Since we need to create a typed expression but only have TypeInfo at runtime,
     /// we use a factory approach with common types.
-    private ExprBase createProjectComputedExpr(int queryNodeId, string alias_, TypeInfo type, ExprBase input, PrefetchExpr prefetch) {
+    private ExprBase createProjectComputedExpr(QueryNodeId queryNodeId, string alias_, TypeInfo type, ExprBase input, PrefetchExpr prefetch) {
         // Handle common types
         if (type == typeid(string)) {
             return new ProjectComputedExpr!string(queryNodeId, alias_, input, prefetch);
@@ -763,17 +763,17 @@ class SqlOptimizer : ExprOptimizer {
     }
 
     /// Get computed columns for a QueryNode (for SQL generation)
-    ComputedColumn[] getComputedColumns(int queryNodeId) {
+    ComputedColumn[] getComputedColumns(QueryNodeId queryNodeId) {
         return _computedColumns.get(queryNodeId, []);
     }
 
     /// Check if a QueryNode has any computed columns
-    bool hasComputedColumns(int queryNodeId) {
+    bool hasComputedColumns(QueryNodeId queryNodeId) {
         return queryNodeId in _computedColumns && _computedColumns[queryNodeId].length > 0;
     }
 
     /// Get all computed columns keyed by QueryNode ID
-    const(ComputedColumn[][int]) allComputedColumns() {
+    const(ComputedColumn[][QueryNodeId]) allComputedColumns() {
         return _computedColumns;
     }
 }
@@ -837,20 +837,20 @@ class CapturingSqlOptimizer : SqlOptimizer {
 
 /// Interface for ProjectComputedExpr pattern matching by external optimizers
 interface ProjectComputedInfo {
-    @property int queryNodeId();
+    @property QueryNodeId queryNodeId();
     @property string columnAlias();
 }
 
 /// Projection expression that reads a computed column from QueryResult.
 /// Created by SqlOptimizer when pushing down expressions to SQL.
 class ProjectComputedExpr(T) : Expr!T, ProjectComputedInfo {
-    private int _queryNodeId;
+    private QueryNodeId _queryNodeId;
     private string _alias;
     private ExprBase _input;     // The input chain (for deriving refs)
     private ExprBase _prefetch;  // PrefetchExpr - ensures data is loaded
 
     /// Accepts ExprBase to work with both typed Expr!Entity and untyped Expr!AnyRef
-    this(int queryNodeId, string alias_, ExprBase input, PrefetchExpr prefetch) {
+    this(QueryNodeId queryNodeId, string alias_, ExprBase input, PrefetchExpr prefetch) {
         _queryNodeId = queryNodeId;
         _alias = alias_;
         _input = input;
@@ -896,7 +896,7 @@ class ProjectComputedExpr(T) : Expr!T, ProjectComputedInfo {
         });
     }
 
-    @property int queryNodeId() { return _queryNodeId; }
+    @property QueryNodeId queryNodeId() { return _queryNodeId; }
     @property string columnAlias() { return _alias; }
 }
 
@@ -940,10 +940,10 @@ string toSQL(QueryNode[] nodes, SqlOptimizer sqlOpt) {
             }
             auto orderByClause = orderParts.join(", ");
             jsonParts ~= format("  'layer%d', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (SELECT * FROM layer%d ORDER BY %s) t)",
-                node.id, node.id, orderByClause);
+                node.id.value, node.id.value, orderByClause);
         } else {
             jsonParts ~= format("  'layer%d', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer%d t)",
-                node.id, node.id);
+                node.id.value, node.id.value);
         }
     }
     sql ~= jsonParts.join(",\n");
@@ -971,17 +971,17 @@ private string toCTEWithComputed(QueryNode node, SqlOptimizer sqlOpt) {
 
     auto sql = appender!string;
 
-    sql ~= format("  layer%d AS (\n", node.id);
+    sql ~= format("  layer%d AS (\n", node.id.value);
     sql ~= "    SELECT ";
     sql ~= toSelectWithComputed(node, sqlOpt);
     sql ~= format("\n    FROM %s", node.table);
 
     // Add JOINs for belongsTo relationships
     foreach (joinInfo; node.joins) {
-        auto sourceRef = joinInfo.sourceAlias !is null ? joinInfo.sourceAlias : node.table;
+        auto sourceRef = !joinInfo.sourceAlias.isNull ? joinInfo.sourceAlias.get.value : node.table;
         sql ~= format("\n    LEFT JOIN %s %s ON %s.%s = %s.id",
-            joinInfo.targetTable, joinInfo.alias_,
-            sourceRef, joinInfo.fk, joinInfo.alias_);
+            joinInfo.targetTable, joinInfo.alias_.value,
+            sourceRef, joinInfo.fk, joinInfo.alias_.value);
     }
 
     // WHERE clause
@@ -999,7 +999,7 @@ private string toCTEWithComputed(QueryNode node, SqlOptimizer sqlOpt) {
         }
     } else {
         sql ~= format("%s.%s IN (SELECT id FROM layer%d)",
-            node.table, node.parentFk, node.parent.id);
+            node.table, node.parentFk, node.parent.id.value);
     }
 
     // Add custom WHERE clause from filter predicates
@@ -1061,7 +1061,7 @@ private string toCTEWithWindowFunction(QueryNode node, SqlOptimizer sqlOpt) {
         windowOrderBy = "id";
     }
 
-    sql ~= format("  layer%d AS (\n", node.id);
+    sql ~= format("  layer%d AS (\n", node.id.value);
 
     // Outer SELECT: project needed columns from the windowed subquery
     sql ~= "    SELECT ";
@@ -1075,15 +1075,15 @@ private string toCTEWithWindowFunction(QueryNode node, SqlOptimizer sqlOpt) {
 
     // Add JOINs for belongsTo relationships in the inner query
     foreach (joinInfo; node.joins) {
-        auto sourceRef = joinInfo.sourceAlias !is null ? joinInfo.sourceAlias : node.table;
+        auto sourceRef = !joinInfo.sourceAlias.isNull ? joinInfo.sourceAlias.get.value : node.table;
         sql ~= format("      LEFT JOIN %s %s ON %s.%s = %s.id\n",
-            joinInfo.targetTable, joinInfo.alias_,
-            sourceRef, joinInfo.fk, joinInfo.alias_);
+            joinInfo.targetTable, joinInfo.alias_.value,
+            sourceRef, joinInfo.fk, joinInfo.alias_.value);
     }
 
     // WHERE clause for inner query
     sql ~= format("      WHERE %s.%s IN (SELECT id FROM layer%d)",
-        node.table, node.parentFk, node.parent.id);
+        node.table, node.parentFk, node.parent.id.value);
 
     // Add custom WHERE clause from filter predicates
     if (node.whereClause_.length > 0) {
@@ -1139,10 +1139,10 @@ string toSelectWithComputed(QueryNode node, SqlOptimizer sqlOpt, string tableAli
                 if (tableAlias !is null) {
                     // From window subquery: columns are already aliased
                     selectParts ~= format("%s.%s__%s AS %s__%s",
-                        tableName, joinInfo.alias_, col, joinInfo.alias_, col);
+                        tableName, joinInfo.alias_.value, col, joinInfo.alias_.value, col);
                 } else {
                     selectParts ~= format("%s.%s AS %s__%s",
-                        joinInfo.alias_, col, joinInfo.alias_, col);
+                        joinInfo.alias_.value, col, joinInfo.alias_.value, col);
                 }
             }
         }
@@ -1206,7 +1206,7 @@ unittest {
     }
     auto optimizer = new SqlOptimizer(new TestDialect());
     assert(optimizer !is null);
-    assert(!optimizer.hasComputedColumns(0));
+    assert(!optimizer.hasComputedColumns(QueryNodeId(0)));
 }
 
 unittest {
@@ -1219,15 +1219,15 @@ unittest {
     }
 
     // Create mock QueryNode and PrefetchExpr
-    auto node = new QueryNode(0, "User", "users");
+    auto node = new QueryNode(QueryNodeId(0), "User", "users");
     auto prefetch = new PrefetchExpr(node);
 
     // Create a mock input
     auto item = new EveryItemOfExpr!TestUser();
 
     // First, set up mock projections with input and prefetch
-    auto proj1 = new ProjectColumnExpr!string(0, "first_name", item, prefetch);
-    auto proj2 = new ProjectColumnExpr!string(0, "last_name", item, prefetch);
+    auto proj1 = new ProjectColumnExpr!string(QueryNodeId(0), "first_name", item, prefetch);
+    auto proj2 = new ProjectColumnExpr!string(QueryNodeId(0), "last_name", item, prefetch);
 
     // Create binary op: proj1 ~ " " ~ proj2
     auto space = constant(" ", proj1);  // Derive length from proj1
@@ -1271,8 +1271,8 @@ unittest {
     sqlOpt.optimize(wrapper, ctx);
 
     // Check that computed columns were created
-    assert(sqlOpt.hasComputedColumns(0));
-    auto computed = sqlOpt.getComputedColumns(0);
+    assert(sqlOpt.hasComputedColumns(QueryNodeId(0)));
+    auto computed = sqlOpt.getComputedColumns(QueryNodeId(0));
     assert(computed.length >= 1);
 }
 
@@ -1282,11 +1282,11 @@ unittest {
         string nodeId;
     }
 
-    auto node = new QueryNode(0, "User", "users");
+    auto node = new QueryNode(QueryNodeId(0), "User", "users");
     auto prefetch = new PrefetchExpr(node);
     auto item = new EveryItemOfExpr!TestUser();
-    auto proj = new ProjectComputedExpr!string(0, "computed_0", item, prefetch);
-    assert(proj.queryNodeId == 0);
+    auto proj = new ProjectComputedExpr!string(QueryNodeId(0), "computed_0", item, prefetch);
+    assert(proj.queryNodeId == QueryNodeId(0));
     assert(proj.columnAlias == "computed_0");
     assert(proj.dependencies().length == 2);  // input and prefetch
 }
@@ -1296,7 +1296,7 @@ unittest {
     import std.algorithm : canFind;
     import std.typecons : Nullable;
 
-    auto node = new QueryNode(0, "User", "users");
+    auto node = new QueryNode(QueryNodeId(0), "User", "users");
     node.addColumn("first_name");
     node.setRootFilter(FilterType.all);
     node.setLimit(10);
@@ -1314,7 +1314,7 @@ unittest {
     // Test SQL generation with LIMIT only (no offset)
     import std.algorithm : canFind;
 
-    auto node = new QueryNode(0, "Post", "posts");
+    auto node = new QueryNode(QueryNodeId(0), "Post", "posts");
     node.addColumn("title");
     node.setRootFilter(FilterType.all);
     node.setLimit(5);
@@ -1330,7 +1330,7 @@ unittest {
     // Test SQL generation with OFFSET only (no limit)
     import std.algorithm : canFind;
 
-    auto node = new QueryNode(0, "Comment", "comments");
+    auto node = new QueryNode(QueryNodeId(0), "Comment", "comments");
     node.addColumn("body");
     node.setRootFilter(FilterType.all);
     node.setOffset(15);

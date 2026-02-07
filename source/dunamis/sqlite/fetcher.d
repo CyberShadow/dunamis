@@ -33,7 +33,7 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
     private SqlOptimizer _sqlOptimizer;
     private QueryNode[] _executedNodes;
     private string _cachedSQL;
-    private QueryResult[int] _cachedResults;
+    private QueryResult[QueryNodeId] _cachedResults;
     private QueryResult[string] _cachedResultsByType;
 
     this(SQLite db) {
@@ -131,7 +131,7 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
         // Parse each layer and cache results
         QueryResult rootResult;
         foreach (node; nodes) {
-            auto layerKey = "layer" ~ node.id.to!string;
+            auto layerKey = "layer" ~ node.id.value.to!string;
             if (layerKey in jsonData) {
                 auto layerRows = jsonData[layerKey].array;
                 auto result = new QueryResult();

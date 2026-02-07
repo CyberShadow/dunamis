@@ -18,7 +18,7 @@ class RelationalOptimizeContext {
         QueryNode[void*] _queryNodes;
 
         /// PrefetchExpr for each QueryNode (keyed by node ID)
-        PrefetchExpr[int] _prefetchExprs;
+        PrefetchExpr[QueryNodeId] _prefetchExprs;
 
         /// Next query node ID
         int _nextNodeId = 0;
@@ -33,7 +33,7 @@ class RelationalOptimizeContext {
             return _queryNodes[key];
         }
 
-        auto node = new QueryNode(_nextNodeId++, typeName, table);
+        auto node = new QueryNode(QueryNodeId(_nextNodeId++), typeName, table);
         node.mapExpr = mapExpr;  // Store for looking up currentRefs at eval time
         _queryNodes[key] = node;
         return node;
@@ -85,7 +85,7 @@ class RelationalOptimizeContext {
 
         // Topological sort: roots first, then children
         QueryNode[] result;
-        bool[int] added;
+        bool[QueryNodeId] added;
 
         void addWithDeps(QueryNode node) {
             if (node.id in added) return;
@@ -165,8 +165,8 @@ unittest {
     auto node2 = ctx.getOrCreateNode(map2, "Post", "posts");
     auto node1again = ctx.getOrCreateNode(map1, "User", "users");
 
-    assert(node1.id == 0);
-    assert(node2.id == 1);
+    assert(node1.id == QueryNodeId(0));
+    assert(node2.id == QueryNodeId(1));
     assert(node1again is node1);  // Same node returned
 
     assert(ctx.allNodes().length == 2);

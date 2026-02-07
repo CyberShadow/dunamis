@@ -10,6 +10,24 @@ import dunamis.core.sorting : OrderBySpec, SortDirection;
 import dunamis.relational.eval_context : DataFetcher;
 
 // ============================================================================
+// Typed Identifiers
+// ============================================================================
+
+/// Typed wrapper for QueryNode IDs. Prevents confusion with other ints.
+struct QueryNodeId {
+    int value;
+}
+
+/// Sentinel for "no QueryNode assigned yet" (replaces -1 convention).
+enum QueryNodeId noQueryNodeId = QueryNodeId(-1);
+
+/// Typed wrapper for SQL join aliases (e.g., "j0", "j1").
+/// Prevents confusion with column name strings.
+struct JoinAlias {
+    string value;
+}
+
+// ============================================================================
 // Filter Types (for root queries)
 // ============================================================================
 
@@ -37,7 +55,7 @@ enum FilterType {
 /// avoiding separate queries for 1:1 traversals.
 class QueryNode {
     /// Unique ID for this query node
-    int id;
+    QueryNodeId id;
 
     /// Entity type name (e.g., "User")
     string typeName;
@@ -77,7 +95,7 @@ class QueryNode {
     JoinInfo[] joins;
 
     /// Columns needed from each joined table (alias -> columns)
-    string[][string] joinedColumns;
+    string[][JoinAlias] joinedColumns;
 
     /// Pagination: limit number of results (global, for root queries)
     Nullable!size_t limit_;
@@ -105,7 +123,7 @@ class QueryNode {
     /// Next join alias counter
     private int _nextJoinAlias = 0;
 
-    this(int id, string typeName, string table) {
+    this(QueryNodeId id, string typeName, string table) {
         assert(typeName.length > 0, "QueryNode typeName must not be empty");
         assert(table.length > 0, "QueryNode table must not be empty");
         this.id = id;
@@ -144,7 +162,7 @@ class QueryNode {
     /// Add a JOIN for belongsTo chain access.
     /// sourceAlias: for multi-hop chains, the alias of the previous join (null = root table).
     /// Returns the join alias to use for column access.
-    string addJoin(string targetTable, string targetType, string fk, string sourceAlias = null) {
+    JoinAlias addJoin(string targetTable, string targetType, string fk, Nullable!JoinAlias sourceAlias = Nullable!JoinAlias.init) {
         // Check if we already have this join
         foreach (j; joins) {
             if (j.targetTable == targetTable && j.fk == fk && j.sourceAlias == sourceAlias) {
@@ -153,14 +171,14 @@ class QueryNode {
         }
 
         // Create new join
-        auto alias_ = "j" ~ (_nextJoinAlias++).to!string;
-        assert(!joins.map!(j => j.alias_).canFind(alias_), "Generated join alias collision: " ~ alias_);
+        auto alias_ = JoinAlias("j" ~ (_nextJoinAlias++).to!string);
+        assert(!joins.map!(j => j.alias_).canFind(alias_), "Generated join alias collision: " ~ alias_.value);
         joins ~= JoinInfo(targetTable, targetType, fk, alias_, sourceAlias);
         return alias_;
     }
 
     /// Add a column to fetch from a joined table.
-    void addJoinedColumn(string joinAlias, string column) {
+    void addJoinedColumn(JoinAlias joinAlias, string column) {
         if (joinAlias !in joinedColumns) {
             joinedColumns[joinAlias] = ["id"];  // Always need id
         }
@@ -226,11 +244,11 @@ class QueryNode {
 
 /// Information about a JOIN for belongsTo access
 struct JoinInfo {
-    string targetTable;   // Table to join to
-    string targetType;    // Entity type name
-    string fk;            // Foreign key column in source table
-    string alias_;        // SQL alias (e.g., "j0")
-    string sourceAlias;   // Source alias for multi-hop chains (null = root table)
+    string targetTable;           // Table to join to
+    string targetType;            // Entity type name
+    string fk;                    // Foreign key column in source table
+    JoinAlias alias_;             // SQL alias (e.g., "j0")
+    Nullable!JoinAlias sourceAlias;  // Source alias for multi-hop chains (null = root table)
 }
 
 // ============================================================================
@@ -239,8 +257,8 @@ struct JoinInfo {
 
 unittest {
     // Test QueryNode basics
-    auto node = new QueryNode(0, "User", "users");
-    assert(node.id == 0);
+    auto node = new QueryNode(QueryNodeId(0), "User", "users");
+    assert(node.id == QueryNodeId(0));
     assert(node.typeName == "User");
     assert(node.table == "users");
     assert(node.columns == ["id"]);
@@ -254,8 +272,8 @@ unittest {
 
 unittest {
     // Test QueryNode parent-child relationship
-    auto parent = new QueryNode(0, "User", "users");
-    auto child = new QueryNode(1, "Post", "posts");
+    auto parent = new QueryNode(QueryNodeId(0), "User", "users");
+    auto child = new QueryNode(QueryNodeId(1), "Post", "posts");
     child.setParent(parent, "author_id", "User");
 
     assert(parent.isRoot);
@@ -267,20 +285,20 @@ unittest {
 
 unittest {
     // Test QueryNode JOINs
-    auto node = new QueryNode(0, "Post", "posts");
+    auto node = new QueryNode(QueryNodeId(0), "Post", "posts");
     auto alias1 = node.addJoin("users", "User", "author_id");
     auto alias2 = node.addJoin("categories", "Category", "category_id");
     auto alias3 = node.addJoin("users", "User", "author_id");  // Duplicate
 
-    assert(alias1 == "j0");
-    assert(alias2 == "j1");
-    assert(alias3 == "j0");  // Returns existing alias
+    assert(alias1 == JoinAlias("j0"));
+    assert(alias2 == JoinAlias("j1"));
+    assert(alias3 == JoinAlias("j0"));  // Returns existing alias
     assert(node.joins.length == 2);
 }
 
 unittest {
     // Test QueryNode ORDER BY
-    auto node = new QueryNode(0, "User", "users");
+    auto node = new QueryNode(QueryNodeId(0), "User", "users");
     assert(node.orderBy_.length == 0);
 
     node.addOrderBy("last_name", SortDirection.ASC);
