@@ -720,20 +720,24 @@ auto belongsTo(Parent, ResultType = Parent, string fk, Child)(Expr!Child input) 
 /// Returns the MapExpr (as Object) or null if not found.
 /// Also returns the base input expression (the one that produces refs for the
 /// query node's base table) via the baseInput out parameter.
+/// When a belongsTo chain is found, baseInputAsAnyRef provides a pre-wrapped
+/// Expr!AnyRef that converts the base entity to AnyRef with the correct type.
 ///
 /// Accepts ExprBase to work with any Expr!Entity type.
-Object findMapExprFromChain(ExprBase expr, ref JoinHop[] joinPath, out ExprBase baseInput) {
+Object findMapExprFromChain(ExprBase expr, ref JoinHop[] joinPath, out ExprBase baseInput, out ExprBase baseInputAsAnyRef) {
     import dynamo.core.expr : EveryItemOfExprInfo, UnwrapNullableInfo;
 
     // Track the first expression before any belongsTo chain starts
     // This produces refs for the query node's base table
     ExprBase lastBeforeBelongsTo = expr;
+    ExprBase lastBeforeBelongsToAsAnyRef = null;
     bool inBelongsToChain = false;
 
     while (expr !is null) {
         // Check if we've reached EveryItemOfExpr (any instantiation)
         if (auto every = cast(EveryItemOfExprInfo) expr) {
             baseInput = inBelongsToChain ? lastBeforeBelongsTo : expr;
+            baseInputAsAnyRef = inBelongsToChain ? lastBeforeBelongsToAsAnyRef : null;
             return every.parentMap;
         }
 
@@ -744,8 +748,10 @@ Object findMapExprFromChain(ExprBase expr, ref JoinHop[] joinPath, out ExprBase 
         }
         if (auto belongs = cast(BelongsToInfo) expr) {
             // When entering a belongsTo chain, save the input that produces base entity refs
+            // and its pre-wrapped AnyRef adapter (BelongsToInfo knows the Child type)
             if (!inBelongsToChain) {
                 lastBeforeBelongsTo = belongs.inputExpr;
+                lastBeforeBelongsToAsAnyRef = belongs.inputAsAnyRefExpr;
                 inBelongsToChain = true;
             }
             // Collect join info for belongsTo hops
@@ -771,6 +777,7 @@ Object findMapExprFromChain(ExprBase expr, ref JoinHop[] joinPath, out ExprBase 
         break;
     }
     baseInput = null;
+    baseInputAsAnyRef = null;
     return null;
 }
 
@@ -1036,6 +1043,9 @@ interface ColumnAccessInfo {
 /// Interface for belongsTo expressions (for chain walking)
 interface BelongsToInfo {
     @property ExprBase inputExpr();
+    /// Returns an Expr!AnyRef that converts the input (Child entities) to AnyRef.
+    /// Created by the concrete class which knows the Child type at compile time.
+    @property ExprBase inputAsAnyRefExpr();
     @property string childTable();
     @property string parentTable();
     @property string parentTypeName();
@@ -1046,6 +1056,10 @@ interface BelongsToInfo {
 interface HasManyInfo {
     /// The input expression (points to parent entity)
     @property ExprBase inputExpr();
+
+    /// Returns an Expr!AnyRef that converts the input (Parent entities) to AnyRef.
+    /// Created by the concrete class which knows the Parent type at compile time.
+    @property ExprBase inputAsAnyRefExpr();
 
     /// Foreign key column in child table
     @property string fkColumn();
@@ -1429,7 +1443,8 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
         // Find the MapExpr this column belongs to
         JoinHop[] joinPath;
         ExprBase baseInput;
-        auto mapExpr = findMapExprFromChain(_input, joinPath, baseInput);
+        ExprBase baseInputAsAnyRef;
+        auto mapExpr = findMapExprFromChain(_input, joinPath, baseInput, baseInputAsAnyRef);
 
         if (mapExpr is null) {
             // Can't optimize, use naive path
@@ -1541,7 +1556,8 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
                     // Find the parent MapExpr by following parentInput
                     JoinHop[] parentJoinPath;
                     ExprBase parentBaseInput;
-                    auto parentMapExpr = findMapExprFromChain(hasManyExpr.inputExpr, parentJoinPath, parentBaseInput);
+                    ExprBase parentBaseInputAsAnyRef;
+                    auto parentMapExpr = findMapExprFromChain(hasManyExpr.inputExpr, parentJoinPath, parentBaseInput, parentBaseInputAsAnyRef);
                     if (parentMapExpr !is null) {
                         auto parentNode = relCtx.getNode(parentMapExpr);
                         if (parentNode !is null) {
@@ -1576,10 +1592,13 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
         // Get the PrefetchExpr for this node
         auto prefetch = relCtx.getPrefetchExpr(node);
 
+        import dynamo.relational.project : EntityToAnyRefExpr;
+
         if (joinPath.length == 0) {
             // Direct column access - return projection expression
             node.addColumn(_column);
-            return new ProjectColumnExpr!T(node.id, _column, _input, prefetch);
+            auto refInput = new EntityToAnyRefExpr!Entity(_input);
+            return new ProjectColumnExpr!T(node.id, _column, refInput, prefetch);
         }
 
         // Access through belongsTo chain - add JOINs
@@ -1596,9 +1615,9 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
         node.addJoinedColumn(lastAlias, _column);
 
         // Return projection that reads from the final joined table
-        // Use baseInput (the expression that produces refs for the base table)
+        // Use baseInputAsAnyRef (pre-wrapped by BelongsToInfo with the correct base entity type)
         // not _input (which may be a belongsTo that produces refs for a different table)
-        return new ProjectJoinedColumnExpr!T(node.id, lastAlias, _column, baseInput, prefetch);
+        return new ProjectJoinedColumnExpr!T(node.id, lastAlias, _column, baseInputAsAnyRef, prefetch);
     }
 
     override Promise!(T[]) eval(EvalContext ctx) {
@@ -1612,11 +1631,11 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
         }
 
         // Get the entity refs from the input chain, then fetch column
-        return evalRefAsAnyRef(input, ctx).then((AnyRef[] entityRefs) {
+        return evalAs!Entity(input, ctx).then((Entity[] entities) {
+            AnyRef[] entityRefs = entities.map!(e => AnyRef(e.nodeId.id)).array;
+
             debug(filter) {
                 import std.stdio : writefln;
-                import std.algorithm : map;
-                import std.array : array;
                 writefln("    ColumnAccessExpr.eval: table=%s, column=%s, refs=%s",
                     EntityID!Entity.table, column, entityRefs.map!(r => r.nodeId).array);
             }
@@ -1692,11 +1711,16 @@ class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Child[]), HasManyInfo 
         }
 
         // Get the parent refs from the input chain, then fetch children
-        return evalRefAsAnyRef(input, ctx).then((AnyRef[] parentRefs) {
+        static if (!is(Parent == void)) {
+            auto refsPromise = evalAs!Parent(input, ctx).then((Parent[] parents) {
+                return parents.map!(e => AnyRef(e.nodeId.id)).array;
+            });
+        } else {
+            auto refsPromise = evalAs!AnyRef(input, ctx);
+        }
+        return refsPromise.then((AnyRef[] parentRefs) {
             debug(filter) {
                 import std.stdio : writefln, stdout;
-                import std.algorithm : map;
-                import std.array : array;
                 writefln("    HasManyAccessExpr.eval: parentRefs=%s, fk=%s, childTable=%s",
                     parentRefs.map!(r => r.nodeId).array, fk, EntityID!Child.table);
                 stdout.flush();
@@ -1707,8 +1731,6 @@ class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Child[]), HasManyInfo 
                     .then((AnyRef[][] children) {
                         debug(filter) {
                             import std.stdio : writefln, stdout;
-                            import std.algorithm : map;
-                            import std.array : array;
                             writefln("    HasManyAccessExpr.eval: fetched children=%s",
                                 children.map!(g => g.map!(r => r.nodeId).array).array);
                             stdout.flush();
@@ -1727,6 +1749,14 @@ class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Child[]), HasManyInfo 
 
     // HasManyInfo implementation
     @property ExprBase inputExpr() { return _input; }
+    static if (!is(Parent == void)) {
+        @property ExprBase inputAsAnyRefExpr() {
+            import dynamo.relational.project : EntityToAnyRefExpr;
+            return new EntityToAnyRefExpr!Parent(_input);
+        }
+    } else {
+        @property ExprBase inputAsAnyRefExpr() { return null; }
+    }
     @property string childTable() { return EntityID!Child.table; }
     @property string childTypeName() { return EntityID!Child.typeName; }
     @property string fkColumn() { return fk; }
@@ -1744,8 +1774,7 @@ class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Child[]), HasManyInfo 
 /// Expression representing a many-to-one relationship.
 /// Takes typed Child input, returns typed Parent for each child.
 /// ResultType is either Parent (required FK) or Nullable!Parent (optional FK).
-/// Implements AnyRefEvaluable for type-agnostic evaluation by downstream expressions.
-class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultType, BelongsToInfo, AnyRefEvaluable {
+class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultType, BelongsToInfo {
     private ExprBase _input;
 
     static if (!is(Child == void)) {
@@ -1783,7 +1812,8 @@ class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultTyp
                 // Find the MapExpr this belongsTo belongs to
                 JoinHop[] joinPath;
                 ExprBase baseInput;
-                auto mapExpr = findMapExprFromChain(_input, joinPath, baseInput);
+                ExprBase baseInputAsAnyRef;
+                auto mapExpr = findMapExprFromChain(_input, joinPath, baseInput, baseInputAsAnyRef);
 
                 if (mapExpr is null) {
                     // Can't optimize, use naive path (fetchBelongsTo)
@@ -1810,31 +1840,20 @@ class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultTyp
                 auto prefetch = relCtx.getPrefetchExpr(node);
 
                 // Create projection that reads FK from query results
-                import dynamo.relational.project : ProjectBelongsToExpr, ProjectTypedBelongsToExpr;
-                auto innerProj = new ProjectBelongsToExpr(node.id, fk, EntityID!Parent.typeName, baseInput, prefetch);
-                return new ProjectTypedBelongsToExpr!(Child, Parent, ResultType, fk)(innerProj, baseInput);
+                import dynamo.relational.project : ProjectBelongsToExpr, ProjectTypedBelongsToExpr, EntityToAnyRefExpr;
+                // Use pre-wrapped AnyRef from chain walk if available (multi-hop BelongsTo),
+                // otherwise wrap with Child type (single-hop, baseInput is EveryItemOfExpr!Child)
+                auto refBaseInput = baseInputAsAnyRef !is null
+                    ? baseInputAsAnyRef
+                    : cast(ExprBase) new EntityToAnyRefExpr!Child(baseInput);
+                auto innerProj = new ProjectBelongsToExpr(node.id, fk, EntityID!Parent.typeName, refBaseInput, prefetch);
+                return new ProjectTypedBelongsToExpr!(Child, Parent, ResultType, fk)(innerProj, refBaseInput);
             }
         }
     } else {
         override Expr!ResultType optimize(OptimizeContext ctx) {
             return this;
         }
-    }
-
-    /// Evaluate and return as AnyRef[] (for type-agnostic internal use).
-    /// Converts typed Parent to AnyRef, handling Nullable properly.
-    Promise!(AnyRef[]) evalAsAnyRef(EvalContext ctx) {
-        return this.eval(ctx).then((ResultType[] results) {
-            static if (is(ResultType == Parent)) {
-                // Direct conversion from entity to AnyRef via nodeId
-                return results.map!(r => AnyRef(r.nodeId.id)).array;
-            } else static if (is(ResultType == Nullable!Parent)) {
-                // Handle nullable - convert valid refs, use AnyRef.init for null
-                return results.map!(r => r.isNull ? AnyRef.init : AnyRef(r.get.nodeId.id)).array;
-            } else {
-                static assert(false, "Unexpected ResultType in BelongsToAccessExpr");
-            }
-        });
     }
 
     override Promise!(ResultType[]) eval(EvalContext ctx) {
@@ -1849,7 +1868,14 @@ class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultTyp
         }
 
         // Get the child refs from the input chain, then fetch parent
-        return evalRefAsAnyRef(input, ctx).then((AnyRef[] childRefs) {
+        static if (!is(Child == void)) {
+            auto refsPromise = evalAs!Child(input, ctx).then((Child[] children) {
+                return children.map!(e => AnyRef(e.nodeId.id)).array;
+            });
+        } else {
+            auto refsPromise = evalAs!AnyRef(input, ctx);
+        }
+        return refsPromise.then((AnyRef[] childRefs) {
             static if (is(Child == void)) {
                 // Can't fetch without knowing child entity type
                 return resolve(childRefs.map!(_ => ResultType.init).array);
@@ -1881,8 +1907,13 @@ class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultTyp
     // For base class interface (runtime type checking)
     @property ExprBase inputExpr() { return _input; }
     static if (!is(Child == void)) {
+        @property ExprBase inputAsAnyRefExpr() {
+            import dynamo.relational.project : EntityToAnyRefExpr;
+            return new EntityToAnyRefExpr!Child(_input);
+        }
         @property string childTable() { return EntityID!Child.table; }
     } else {
+        @property ExprBase inputAsAnyRefExpr() { return null; }
         @property string childTable() { return ""; }
     }
     @property string parentTable() { return EntityID!Parent.table; }

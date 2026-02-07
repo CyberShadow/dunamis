@@ -421,7 +421,8 @@ class SqlOptimizer : ExprOptimizer {
         // Get the parent table name - walk up to find the MapExpr's QueryNode
         JoinHop[] joinPath;
         ExprBase baseInput;
-        auto parentMapExpr = findMapExprFromChain(hasManyInfo.inputExpr, joinPath, baseInput);
+        ExprBase baseInputAsAnyRef;
+        auto parentMapExpr = findMapExprFromChain(hasManyInfo.inputExpr, joinPath, baseInput, baseInputAsAnyRef);
         if (parentMapExpr is null) {
             return null;
         }
@@ -457,8 +458,12 @@ class SqlOptimizer : ExprOptimizer {
         }
         _computedColumns[parentNode.id] ~= ComputedColumn(alias_, sqlExpr, typeid(bool));
 
-        // Find the input expression that provides parent entity refs
-        auto input = extractInputFromChain(hasManyInfo.inputExpr);
+        // Get the input expression that provides parent entity refs as AnyRef
+        // HasManyInfo knows the Parent type at compile time and creates the wrapper
+        auto input = hasManyInfo.inputAsAnyRefExpr;
+        if (input is null) {
+            return null;
+        }
 
         // Create and return projection for computed column
         return createProjectComputedExpr(parentNode.id, alias_, typeid(bool), input, prefetch);
@@ -868,9 +873,9 @@ class ProjectComputedExpr(T) : Expr!T, ProjectComputedInfo {
         auto alias_ = _alias;
         auto input = _input;
 
-        // Ensure data is prefetched, then evaluate input, then read
+        // Ensure data is prefetched, then evaluate input refs, then read
         return evalAs!(AnyRef[])(_prefetch, ctx).then((_) {
-            return evalRefAsAnyRef(input, ctx);
+            return evalAs!AnyRef(input, ctx);
         }).then((AnyRef[] refs) {
             auto relCtx = ctx.getSourceContext!RelationalEvalContext();
             auto queryResult = relCtx.getQueryResult(queryNodeId);

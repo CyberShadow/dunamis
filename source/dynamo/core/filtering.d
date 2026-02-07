@@ -14,7 +14,7 @@ import std.array : array;
 import ae.utils.promise;
 import ae.utils.promise.await : async;
 
-import dynamo.core.expr : Expr, ExprBase, evalAs, AnyRefEvaluable;
+import dynamo.core.expr : Expr, ExprBase, evalAs;
 import dynamo.core.eval;
 import dynamo.core.optimize;
 import dynamo.core.types : AnyRef;
@@ -24,8 +24,7 @@ import dynamo.core.types : AnyRef;
 // ============================================================================
 
 /// Interface for filter placeholder items (for detecting item in predicate).
-/// Extends AnyRefEvaluable to support column access during predicate evaluation.
-interface FilterItemInfo : AnyRefEvaluable {
+interface FilterItemInfo {
     /// Get parent FilterByExpr
     @property Object parentFilter();
 }
@@ -77,23 +76,6 @@ class FilterItemExpr(Entity) : Expr!Entity, FilterItemInfo {
             "ensure FilterByExpr.eval() sets up filter item before predicate evaluation");
     }
 
-    /// AnyRefEvaluable implementation - derives refs from values on demand.
-    /// Required for column access expressions to work during predicate evaluation.
-    Promise!(AnyRef[]) evalAsAnyRef(EvalContext ctx) {
-        static if (__traits(hasMember, Entity, "nodeId")) {
-            auto vals = ctx.getValues!Entity(_parentFilter);
-            if (vals.length > 0) {
-                // Handle both nodeId types: string or struct with .id
-                alias NodeIdType = typeof(Entity.init.nodeId);
-                static if (is(NodeIdType == string)) {
-                    return resolve([AnyRef(vals[0].nodeId)]);
-                } else static if (__traits(hasMember, NodeIdType, "id")) {
-                    return resolve([AnyRef(vals[0].nodeId.id)]);
-                }
-            }
-        }
-        return resolve(cast(AnyRef[])[]);
-    }
 }
 
 // ============================================================================

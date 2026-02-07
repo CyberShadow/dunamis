@@ -66,41 +66,6 @@ Promise!(T[]) evalAs(T)(ExprBase expr, EvalContext ctx) {
     return promise;
 }
 
-/// Interface for expressions that can be evaluated to AnyRef[].
-/// Implemented by ref-producing expressions (EveryItemOfExpr, BelongsToAccessExpr, etc.)
-/// to allow type-agnostic evaluation in internal code.
-interface AnyRefEvaluable {
-    /// Evaluate and return refs as AnyRef[] (for type-agnostic internal use)
-    Promise!(AnyRef[]) evalAsAnyRef(EvalContext ctx);
-}
-
-/// Evaluate any ref-producing expression and return as AnyRef[].
-/// Works with typed Expr!Entity expressions by using interface dispatch.
-/// Used by projection expressions that need to evaluate input refs without
-/// knowing the specific entity type at compile time.
-Promise!(AnyRef[]) evalRefAsAnyRef(ExprBase expr, EvalContext ctx) {
-    if (auto cached = ctx.getCachedEval!AnyRef(expr))
-        return cached;
-
-    // Check if it implements AnyRefEvaluable interface
-    if (auto evaluable = cast(AnyRefEvaluable) expr) {
-        auto promise = evaluable.evalAsAnyRef(ctx);
-        ctx.setCachedEval!AnyRef(expr, promise);
-        return promise;
-    }
-
-    // Fallback: try evalAs!AnyRef for expressions that actually return AnyRef
-    auto typed = cast(Expr!AnyRef) expr;
-    if (typed !is null) {
-        auto promise = typed.eval(ctx);
-        ctx.setCachedEval!AnyRef(expr, promise);
-        return promise;
-    }
-
-    // Should not reach here - indicates a type mismatch
-    assert(false, "Cannot evaluate expression as AnyRef: " ~ expr.classinfo.name);
-}
-
 // ============================================================================
 // Typed Expression Class
 // ============================================================================
@@ -474,8 +439,7 @@ auto singleton(T)(T value) {
 /// For entity types (with nodeId): copies the nodeId to construct the target type.
 /// For non-entity types (Query, Mutation): uses default-initialized value.
 ///
-/// Implements AnyRefEvaluable when To is an entity type (has nodeId).
-class EntityCastExpr(To, From) : Expr!To, AnyRefEvaluable, EntityCastInfo {
+class EntityCastExpr(To, From) : Expr!To, EntityCastInfo {
     private Expr!From _source;
 
     this(Expr!From source) {
@@ -573,22 +537,6 @@ class EntityCastExpr(To, From) : Expr!To, AnyRefEvaluable, EntityCastInfo {
     /// EntityCastInfo implementation - allows chain traversal through casts
     @property ExprBase inputExpr() { return _source; }
 
-    /// AnyRefEvaluable implementation - converts To entities to AnyRef
-    Promise!(AnyRef[]) evalAsAnyRef(EvalContext ctx) {
-        import std.algorithm : map;
-        import std.array : array;
-        import dynamo.core.types : AnyRef;
-
-        static if (__traits(hasMember, To, "nodeId")) {
-            // To is an entity type with nodeId - extract .id for AnyRef
-            return eval(ctx).then((To[] results) {
-                return results.map!(r => AnyRef(r.nodeId.id)).array;
-            });
-        } else {
-            // Non-entity types can't be converted to AnyRef
-            assert(false, "EntityCastExpr.evalAsAnyRef called on non-entity type");
-        }
-    }
 }
 
 /// Cast an expression from one entity/struct type to another compatible type.
@@ -1343,8 +1291,7 @@ auto use(Fn, Exprs...)(Fn fn, Exprs exprs)
 /// Expression that executes a side-effecting callable during evaluation.
 /// Used for mutations and other operations that should be deferred.
 /// The callable is called once per evaluation, regardless of batch size.
-/// Implements AnyRefEvaluable when T is an entity type (has nodeId).
-class EffectExpr(T, Fn) : Expr!T, AnyRefEvaluable {
+class EffectExpr(T, Fn) : Expr!T {
     private Fn _effect;
     private ExprBase _lengthSource;
 
@@ -1383,24 +1330,6 @@ class EffectExpr(T, Fn) : Expr!T, AnyRefEvaluable {
         }
     }
 
-    /// AnyRefEvaluable implementation - converts T to AnyRef
-    Promise!(AnyRef[]) evalAsAnyRef(EvalContext ctx) {
-        import std.algorithm : map;
-        import std.array : array;
-
-        static if (__traits(hasMember, T, "nodeId")) {
-            // T is an entity type with nodeId - extract .id for AnyRef
-            return eval(ctx).then((T[] results) {
-                return results.map!(r => AnyRef(r.nodeId.id)).array;
-            });
-        } else static if (is(T == AnyRef)) {
-            return eval(ctx);
-        } else {
-            // Non-entity types can't be converted to AnyRef
-            // This should not be called for such types
-            return resolve(cast(AnyRef[])[]);
-        }
-    }
 }
 
 /// Create an effect expression - a deferred side-effecting operation.
@@ -1426,8 +1355,7 @@ auto effect(Fn)(Fn fn, ExprBase lengthSource = null)
 
 /// Interface to identify any EveryItemOfExpr regardless of Entity type.
 /// Used by optimizers to find the MapExpr boundary.
-/// Extends AnyRefEvaluable for type-agnostic evaluation.
-interface EveryItemOfExprInfo : AnyRefEvaluable {
+interface EveryItemOfExprInfo {
     /// Get the parent MapExpr (as Object)
     @property Object parentMap();
 }
@@ -1466,30 +1394,6 @@ class EveryItemOfExpr(T) : Expr!T, EveryItemOfExprInfo {
         return resolve(cast(T[])[]);
     }
 
-    /// Evaluate and return as AnyRef[] (for type-agnostic internal use).
-    /// First tries to derive refs from stored values, then falls back to direct ref storage.
-    Promise!(AnyRef[]) evalAsAnyRef(EvalContext ctx) {
-        import std.algorithm : map;
-        static if (__traits(hasMember, T, "nodeId")) {
-            // First try: derive refs from stored entity values
-            auto vals = ctx.getValues!T(_parentMap);
-            if (vals.length > 0) {
-                // Handle both nodeId types: string or struct with .id
-                alias NodeIdType = typeof(T.init.nodeId);
-                static if (is(NodeIdType == string)) {
-                    return resolve(vals.map!(e => AnyRef(e.nodeId)).array);
-                } else static if (__traits(hasMember, NodeIdType, "id")) {
-                    return resolve(vals.map!(e => AnyRef(e.nodeId.id)).array);
-                }
-            }
-        }
-        // Fallback: direct ref storage (optimized paths store AnyRef[] directly)
-        auto refs = ctx.getValues!AnyRef(_parentMap);
-        if (refs.length > 0) {
-            return resolve(refs);
-        }
-        return resolve(cast(AnyRef[])[]);
-    }
 }
 
 /// Interface to query collection type from MapExpr without knowing the template params.
@@ -2495,9 +2399,7 @@ class NullableObjectExpr(T) : Expr!JSONValue {
 /// chain traversal (findMapExprFromChain) can reach the BelongsToAccessExpr.
 ///
 /// At evaluation time, it returns values set by NullableObjectExpr.
-/// For entity types (those with nodeId), also implements AnyRefEvaluable to
-/// provide refs for projection expressions inside nullable selection sets.
-class UnwrapNullableExpr(T) : Expr!T, UnwrapNullableInfo, AnyRefEvaluable {
+class UnwrapNullableExpr(T) : Expr!T, UnwrapNullableInfo {
     private ExprBase _nullableInput;  // The actual Expr!(Nullable!T) to forward to
     private T[] _values;  // Set by NullableObjectExpr during eval
 
@@ -2529,18 +2431,6 @@ class UnwrapNullableExpr(T) : Expr!T, UnwrapNullableInfo, AnyRefEvaluable {
     // UnwrapNullableInfo implementation - allows chain traversal to continue
     @property ExprBase inputExpr() { return _nullableInput; }
 
-    // AnyRefEvaluable implementation - returns refs from stored entity values
-    // This allows ProjectJoinedColumnExpr to get the filtered non-null refs
-    Promise!(AnyRef[]) evalAsAnyRef(EvalContext ctx) {
-        import dynamo.core.types : AnyRef;
-        // For entity types, extract refs from nodeId
-        static if (is(typeof(T.init.nodeId))) {
-            return resolve(std.algorithm.map!(v => AnyRef(v.nodeId.id))(_values).array);
-        } else {
-            // Non-entity types - should not reach here for BelongsTo usage
-            assert(false, "UnwrapNullableExpr.evalAsAnyRef called for non-entity type " ~ T.stringof);
-        }
-    }
 }
 
 /// Interface for EntityCastExpr to allow chain traversal during optimization.

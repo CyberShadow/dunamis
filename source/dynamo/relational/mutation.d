@@ -69,7 +69,7 @@ struct UpdateInput {
 
 /// Expression that executes INSERT and returns the new entity.
 /// Returns a single entity (Expr!Entity).
-class InsertExpr(Entity) : Expr!Entity, AnyRefEvaluable {
+class InsertExpr(Entity) : Expr!Entity {
     private InsertInput _input;
     private string _table;
     private string _typeName;
@@ -124,14 +124,6 @@ class InsertExpr(Entity) : Expr!Entity, AnyRefEvaluable {
         // Cache for future calls
         ctx.setCachedEval!Entity(this, promise);
         return promise;
-    }
-
-    /// AnyRefEvaluable implementation
-    Promise!(AnyRef[]) evalAsAnyRef(EvalContext ctx) {
-        // Use eval() internally to benefit from memoization
-        return this.eval(ctx).then((Entity[] entities) {
-            return entities.map!(e => AnyRef(e.nodeId.id)).array;
-        });
     }
 
     /// Access input for SQL generation
@@ -259,7 +251,7 @@ class DeleteExpr(Entity) : Expr!bool {
 
 /// Expression that extracts a single element from an array expression.
 /// Used by UpdateExpr.single() to get a single entity from update results.
-class SingleExpr(T) : Expr!T, AnyRefEvaluable {
+class SingleExpr(T) : Expr!T {
     private Expr!(T[]) _source;
 
     this(Expr!(T[]) source) {
@@ -291,25 +283,6 @@ class SingleExpr(T) : Expr!T, AnyRefEvaluable {
         });
     }
 
-    /// AnyRefEvaluable implementation (for entity types)
-    Promise!(AnyRef[]) evalAsAnyRef(EvalContext ctx) {
-        return evalAs!(T[])(_source, ctx).then((T[][] results) {
-            AnyRef[] refs;
-            foreach (arr; results) {
-                if (arr.length > 0) {
-                    // T must have nodeId (entity type)
-                    static if (__traits(hasMember, T, "nodeId")) {
-                        refs ~= AnyRef(arr[0].nodeId.id);
-                    } else {
-                        refs ~= AnyRef.init;
-                    }
-                } else {
-                    refs ~= AnyRef.init;
-                }
-            }
-            return refs;
-        });
-    }
 }
 
 // ============================================================================

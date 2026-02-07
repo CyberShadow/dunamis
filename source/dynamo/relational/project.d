@@ -121,6 +121,41 @@ interface ProjectJoinedColumnInfo {
 }
 
 // ============================================================================
+// Entity-to-AnyRef Adapter
+// ============================================================================
+
+/// Wraps an Expr!Entity and produces AnyRef[] by extracting nodeId.
+/// Created by the relational optimizer at the point where the entity type is known,
+/// so that downstream projection expressions can work with AnyRef[] without
+/// needing entity-type awareness.
+class EntityToAnyRefExpr(Entity) : Expr!AnyRef {
+    private ExprBase _inner;
+
+    this(ExprBase inner) {
+        _inner = inner;
+    }
+
+    override ExprBase[] dependencies() {
+        return [_inner];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0)
+            _inner = newDep;
+    }
+
+    override Promise!(AnyRef[]) eval(EvalContext ctx) {
+        return evalAs!Entity(_inner, ctx).then((Entity[] entities) {
+            static if (is(typeof(Entity.init.nodeId) == string)) {
+                return entities.map!(e => AnyRef(e.nodeId)).array;
+            } else {
+                return entities.map!(e => AnyRef(e.nodeId.id)).array;
+            }
+        });
+    }
+}
+
+// ============================================================================
 // Projection Expressions
 // ============================================================================
 
@@ -130,7 +165,7 @@ class ProjectColumnExpr(T) : Expr!T, ProjectColumnInfo {
     private {
         int _queryNodeId;
         string _column;
-        ExprBase _input;     // The input chain (for deriving refs) - may be Expr!Entity or Expr!AnyRef
+        ExprBase _input;     // The input chain (for deriving refs) - Expr!AnyRef via EntityToAnyRefExpr
         ExprBase _prefetch;  // PrefetchExpr - ensures data is loaded
     }
 
@@ -158,9 +193,9 @@ class ProjectColumnExpr(T) : Expr!T, ProjectColumnInfo {
         auto column = _column;
         auto input = _input;
 
-        // Ensure data is prefetched, then evaluate input, then read
+        // Ensure data is prefetched, then evaluate input refs, then read
         return evalAs!(AnyRef[])(_prefetch, ctx).then((_) {
-            return evalRefAsAnyRef(input, ctx);
+            return evalAs!AnyRef(input, ctx);
         }).then((AnyRef[] refs) {
             auto relCtx = ctx.getSourceContext!RelationalEvalContext();
             return relCtx.getColumnValues!T(queryNodeId, column, refs);
@@ -208,9 +243,9 @@ class ProjectJoinedColumnExpr(T) : Expr!T, ProjectJoinedColumnInfo {
         auto column = _column;
         auto input = _input;
 
-        // Ensure data is prefetched, then evaluate input, then read
+        // Ensure data is prefetched, then evaluate input refs, then read
         return evalAs!(AnyRef[])(_prefetch, ctx).then((_) {
-            return evalRefAsAnyRef(input, ctx);
+            return evalAs!AnyRef(input, ctx);
         }).then((AnyRef[] refs) {
             auto relCtx = ctx.getSourceContext!RelationalEvalContext();
             return relCtx.getJoinedColumnValues!T(queryNodeId, joinAlias, column, refs);
@@ -348,9 +383,9 @@ class ProjectBelongsToExpr : Expr!AnyRef {
         auto parentTypeName = _parentTypeName;
         auto input = _input;
 
-        // Ensure data is prefetched, then derive refs, then read FK values
+        // Ensure data is prefetched, then evaluate input refs, then read FK values
         return evalAs!(AnyRef[])(_prefetch, ctx).then((_) {
-            return evalRefAsAnyRef(input, ctx);
+            return evalAs!AnyRef(input, ctx);
         }).then((AnyRef[] refs) {
             auto relCtx = ctx.getSourceContext!RelationalEvalContext();
             // Read FK as string to support non-numeric IDs
@@ -370,7 +405,7 @@ class ProjectBelongsToExpr : Expr!AnyRef {
 ///
 /// Implements BelongsToInfo to allow chain traversal for nested BelongsTo
 /// relationships (e.g., task.assignee.department).
-class ProjectTypedBelongsToExpr(Child, Parent, ResultType, string fk) : Expr!ResultType, AnyRefEvaluable, BelongsToInfo {
+class ProjectTypedBelongsToExpr(Child, Parent, ResultType, string fk) : Expr!ResultType, BelongsToInfo {
     import std.typecons : Nullable;
     import dynamo.relational.schema : EntityID;
 
@@ -405,13 +440,9 @@ class ProjectTypedBelongsToExpr(Child, Parent, ResultType, string fk) : Expr!Res
         });
     }
 
-    /// AnyRefEvaluable implementation for chain traversal
-    Promise!(AnyRef[]) evalAsAnyRef(EvalContext ctx) {
-        return _inner.eval(ctx);
-    }
-
     // BelongsToInfo implementation for nested BelongsTo chain traversal
     @property ExprBase inputExpr() { return _baseInput; }
+    @property ExprBase inputAsAnyRefExpr() { return _baseInput; }  // Already Expr!AnyRef (EntityToAnyRefExpr)
     @property string childTable() { return EntityID!Child.table; }
     @property string parentTable() { return EntityID!Parent.table; }
     @property string parentTypeName() { return EntityID!Parent.typeName; }
@@ -450,12 +481,13 @@ unittest {
     auto node = new QueryNode(0, "User", "users");
     auto prefetch = new PrefetchExpr(node);
 
-    // Create a mock input that returns the refs
+    // Create a mock input that returns the refs via EntityToAnyRefExpr
     auto item = new EveryItemOfExpr!TestUser();
-    ctx.setValues!AnyRef(null, [AnyRef("User:1"), AnyRef("User:2")]);
+    ctx.setValues!TestUser(null, [TestUser("User:1"), TestUser("User:2")]);
+    auto refInput = new EntityToAnyRefExpr!TestUser(item);
 
     // Create projection with input and prefetch
-    auto proj = new ProjectColumnExpr!string(0, "first_name", item, prefetch);
+    auto proj = new ProjectColumnExpr!string(0, "first_name", refInput, prefetch);
 
     // Evaluate
     auto names = awaitSync(proj.eval(ctx));
@@ -516,11 +548,12 @@ unittest {
     auto node = new QueryNode(0, "Post", "posts");
     auto prefetch = new PrefetchExpr(node);
 
-    // Create a mock input that returns the refs
+    // Create a mock input that returns the refs via EntityToAnyRefExpr
     auto item = new EveryItemOfExpr!TestPost();
-    ctx.setValues!AnyRef(null, [AnyRef("Post:1"), AnyRef("Post:2")]);
+    ctx.setValues!TestPost(null, [TestPost("Post:1"), TestPost("Post:2")]);
+    auto refInput = new EntityToAnyRefExpr!TestPost(item);
 
-    auto proj = new ProjectBelongsToExpr(0, "author_id", "User", item, prefetch);
+    auto proj = new ProjectBelongsToExpr(0, "author_id", "User", refInput, prefetch);
     auto parentRefs = awaitSync(proj.eval(ctx));
 
     assert(parentRefs == [AnyRef("User:10"), AnyRef("User:20")]);
