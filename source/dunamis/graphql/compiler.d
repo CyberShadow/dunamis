@@ -112,7 +112,7 @@ GraphQLResult compileQuery(alias SchemaOrQuery)(string queryString, JSONValue va
         }
     } else {
         // Query operation - compile using QueryType directly
-        // Entity return types are already wrapped by ForwardFieldWithTypeMap
+        // Entity return types are already wrapped by ForwardField (with TypeMap)
         return compileRootSelectionSet!(QueryType, SchemaOrQuery)(op.ss, variables);
     }
 }

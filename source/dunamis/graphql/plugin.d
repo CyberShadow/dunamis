@@ -109,12 +109,26 @@ template ArrayFieldElementType(alias fn) {
 }
 
 // ============================================================================
+// Identity TypeMap
+// ============================================================================
+
+/// Identity type map - returns types unchanged.
+/// Used as the default TypeMap for forwarding mixins.
+template IdentityTypeMap(T) {
+    alias IdentityTypeMap = T;
+}
+
+// ============================================================================
 // Field Forwarding
 // ============================================================================
 
 /// Mixin template to forward a single field from SourceType.
 /// Preserves UDAs from the source field and handles type conversion
 /// for the first parameter (Expr!SourceType -> Expr!TargetType).
+///
+/// When TypeMap is provided, entity type references in the return value
+/// are remapped via wrapEntityResult. With the default IdentityTypeMap,
+/// this is a compile-time no-op.
 ///
 /// Example:
 /// ---
@@ -124,11 +138,12 @@ template ArrayFieldElementType(alias fn) {
 ///     // OriginalQuery.users(Expr!OriginalQuery) with automatic type casting
 /// }
 /// ---
-mixin template ForwardField(SourceType, string fieldName) {
+mixin template ForwardField(SourceType, string fieldName, alias TypeMap = IdentityTypeMap) {
     import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
     import std.meta : AliasSeq;
     import std.conv : to;
     import dunamis.core.expr : Expr, ExprResultType, entityCast;
+    import dunamis.graphql.transform : wrapEntityResult;
 
     // Get the source function and its metadata
     alias _srcFn = __traits(getMember, SourceType, fieldName);
@@ -174,9 +189,10 @@ mixin template ForwardField(SourceType, string fieldName) {
     }();
 
     // Generate the forwarding method with UDAs preserved
+    // wrapEntityResult remaps entity types via TypeMap (no-op for IdentityTypeMap)
     @(__traits(getAttributes, _srcFn))
     mixin("static auto " ~ fieldName ~ "(" ~ _paramListStr ~ ") { " ~
-          "return _srcFn(" ~ _argListStr ~ "); }");
+          "return wrapEntityResult!(TypeMap)(_srcFn(" ~ _argListStr ~ ")); }");
 }
 
 /// Mixin template to forward a plain method from a source type.
@@ -193,7 +209,7 @@ mixin template ForwardField(SourceType, string fieldName) {
 ///     // Now FilteredUser.displayName() calls User.displayName()
 /// }
 /// ---
-mixin template ForwardPlainMethod(SourceType, string methodName) {
+mixin template ForwardPlainMethod(SourceType, string methodName, alias TypeMap = IdentityTypeMap) {
     import std.traits : ReturnType;
 
     alias _srcMethod = __traits(getMember, SourceType, methodName);
@@ -219,14 +235,14 @@ mixin template ForwardPlainMethod(SourceType, string methodName) {
 ///     static auto apiVersion(Expr!ExtendedQuery q) { ... }
 /// }
 /// ---
-mixin template CopyFields(SourceType) {
+mixin template CopyFields(SourceType, alias TypeMap = IdentityTypeMap) {
     import dunamis.graphql.plugin : getFieldMembers, ForwardField, ForwardPlainMethod, isComputedField;
 
     static foreach (member; getFieldMembers!SourceType) {
         static if (isComputedField!(SourceType, member)) {
-            mixin ForwardField!(SourceType, member);
+            mixin ForwardField!(SourceType, member, TypeMap);
         } else {
-            mixin ForwardPlainMethod!(SourceType, member);
+            mixin ForwardPlainMethod!(SourceType, member, TypeMap);
         }
     }
 }
@@ -237,8 +253,8 @@ mixin template CopyFields(SourceType) {
 /// This is the common skeleton for plugin entity/Query/Mutation wrapping:
 /// 1. Copy nodeId + constructor + toString (if present on SourceType)
 /// 2. Copy plain fields (struct instance fields)
-/// 3. Dispatch fields: arrays → ArrayFieldMixin, computed → ForwardFieldWithTypeMap,
-///    plain methods → ForwardPlainMethodWithTypeMap
+/// 3. Dispatch fields: arrays → ArrayFieldMixin, computed → ForwardField,
+///    plain methods → ForwardPlainMethod
 ///
 /// Example:
 /// ---
@@ -251,8 +267,8 @@ mixin template CopyFields(SourceType) {
 /// ---
 mixin template WrapFields(SourceType, alias TypeMap, alias ArrayFieldMixin) {
     import dunamis.core.types : isPlainField;
-    import dunamis.graphql.plugin : getFieldMembers, isComputedField, isArrayReturningField;
-    import dunamis.graphql.transform : ForwardFieldWithTypeMap, ForwardPlainMethodWithTypeMap;
+    import dunamis.graphql.plugin : getFieldMembers, isComputedField, isArrayReturningField,
+        ForwardField, ForwardPlainMethod;
 
     // 1. Copy entity infrastructure (nodeId)
     static if (__traits(hasMember, SourceType, "nodeId")) {
@@ -278,9 +294,9 @@ mixin template WrapFields(SourceType, alias TypeMap, alias ArrayFieldMixin) {
         static if (isArrayReturningField!(__traits(getMember, SourceType, member))) {
             mixin ArrayFieldMixin!(SourceType, member, TypeMap);
         } else static if (isComputedField!(SourceType, member)) {
-            mixin ForwardFieldWithTypeMap!(SourceType, member, TypeMap);
+            mixin ForwardField!(SourceType, member, TypeMap);
         } else {
-            mixin ForwardPlainMethodWithTypeMap!(SourceType, member, TypeMap);
+            mixin ForwardPlainMethod!(SourceType, member, TypeMap);
         }
     }
 }
@@ -299,6 +315,10 @@ mixin template WrapFields(SourceType, alias TypeMap, alias ArrayFieldMixin) {
 /// so downstream consumers (schema generator, compiler, plugins) only need
 /// one code path.
 ///
+/// When TypeMap is provided, entity type references in return values are
+/// remapped (e.g., stats() → Expr!NormalizedUserStats). With the default
+/// IdentityTypeMap, this is a compile-time no-op.
+///
 /// Example:
 /// ---
 /// struct NormalizedUser {
@@ -310,10 +330,11 @@ mixin template WrapFields(SourceType, alias TypeMap, alias ArrayFieldMixin) {
 ///     //   static auto displayName(Expr!NormalizedUser) -> Expr!string  (from plain method)
 /// }
 /// ---
-mixin template NormalizeFields(SourceType) {
+mixin template NormalizeFields(SourceType, alias TypeMap = IdentityTypeMap) {
     import dunamis.core.expr : Expr, use;
     import dunamis.core.types : isPlainField, isPlainMethod;
     import dunamis.graphql.plugin : getFieldMembers, isComputedField, ForwardField;
+    import dunamis.graphql.transform : wrapEntityResult;
 
     // Store original struct for data access by normalized methods
     SourceType _normalizedSource;
@@ -328,7 +349,7 @@ mixin template NormalizeFields(SourceType) {
     // Forward computed fields (already static Expr methods)
     static foreach (_nf_member; getFieldMembers!SourceType) {
         static if (isComputedField!(SourceType, _nf_member)) {
-            mixin ForwardField!(SourceType, _nf_member);
+            mixin ForwardField!(SourceType, _nf_member, TypeMap);
         }
     }
 
@@ -339,9 +360,10 @@ mixin template NormalizeFields(SourceType) {
             mixin("private static auto _nf_read_" ~ _nf_member ~
                   "(typeof(this) _n) { return _n._normalizedSource." ~ _nf_member ~ "; }");
             // Public method with UDAs preserved from source field
+            // wrapEntityResult remaps entity types via TypeMap (no-op for IdentityTypeMap)
             @(__traits(getAttributes, __traits(getMember, SourceType, _nf_member)))
             mixin("static auto " ~ _nf_member ~
-                  "(Expr!(typeof(this)) _self) { return use(&_nf_read_" ~ _nf_member ~ ", _self); }");
+                  "(Expr!(typeof(this)) _self) { return wrapEntityResult!(TypeMap)(use(&_nf_read_" ~ _nf_member ~ ", _self)); }");
         }
     }
 
@@ -352,55 +374,7 @@ mixin template NormalizeFields(SourceType) {
             mixin("private static auto _nf_call_" ~ _nf_member ~
                   "(typeof(this) _n) { return _n._normalizedSource." ~ _nf_member ~ "(); }");
             // Public method with UDAs preserved from source method
-            @(__traits(getAttributes, __traits(getMember, SourceType, _nf_member)))
-            mixin("static auto " ~ _nf_member ~
-                  "(Expr!(typeof(this)) _self) { return use(&_nf_call_" ~ _nf_member ~ ", _self); }");
-        }
-    }
-}
-
-/// Like NormalizeFields but applies TypeMap to remap entity/object types in
-/// return values. Used by NormalizePlugin to ensure normalized methods return
-/// references to other normalized types (e.g., stats() → Expr!NormalizedUserStats).
-mixin template NormalizeFieldsWithTypeMap(SourceType, alias TypeMap) {
-    import dunamis.core.expr : Expr, use;
-    import dunamis.core.types : isPlainField, isPlainMethod;
-    import dunamis.graphql.plugin : getFieldMembers, isComputedField;
-    import dunamis.graphql.transform : ForwardFieldWithTypeMap, wrapEntityResult;
-
-    // Store original struct for data access by normalized methods
-    SourceType _normalizedSource;
-
-    // Copy nodeId infrastructure
-    static if (__traits(hasMember, SourceType, "nodeId")) {
-        typeof(SourceType.nodeId) nodeId;
-        this(string id) { nodeId = typeof(nodeId)(id); }
-        string toString() const { return nodeId.toString(); }
-    }
-
-    // Forward computed fields with type remapping
-    static foreach (_nf_member; getFieldMembers!SourceType) {
-        static if (isComputedField!(SourceType, _nf_member)) {
-            mixin ForwardFieldWithTypeMap!(SourceType, _nf_member, TypeMap);
-        }
-    }
-
-    // Normalize plain fields → static Expr methods with type remapping
-    static foreach (_nf_member; __traits(allMembers, SourceType)) {
-        static if (isPlainField!(SourceType, _nf_member)) {
-            mixin("private static auto _nf_read_" ~ _nf_member ~
-                  "(typeof(this) _n) { return _n._normalizedSource." ~ _nf_member ~ "; }");
-            @(__traits(getAttributes, __traits(getMember, SourceType, _nf_member)))
-            mixin("static auto " ~ _nf_member ~
-                  "(Expr!(typeof(this)) _self) { return wrapEntityResult!(TypeMap)(use(&_nf_read_" ~ _nf_member ~ ", _self)); }");
-        }
-    }
-
-    // Normalize plain methods → static Expr methods with type remapping
-    static foreach (_nf_member; getFieldMembers!SourceType) {
-        static if (!isComputedField!(SourceType, _nf_member)) {
-            mixin("private static auto _nf_call_" ~ _nf_member ~
-                  "(typeof(this) _n) { return _n._normalizedSource." ~ _nf_member ~ "(); }");
+            // wrapEntityResult remaps entity types via TypeMap (no-op for IdentityTypeMap)
             @(__traits(getAttributes, __traits(getMember, SourceType, _nf_member)))
             mixin("static auto " ~ _nf_member ~
                   "(Expr!(typeof(this)) _self) { return wrapEntityResult!(TypeMap)(use(&_nf_call_" ~ _nf_member ~ ", _self)); }");
@@ -424,7 +398,7 @@ mixin template NormalizeFieldsWithTypeMap(SourceType, alias TypeMap) {
 template NormalizePlugin(RawQuery, RawMutation) {
     import std.meta : staticMap;
     import dunamis.graphql.schema : getAllEntityTypes, getGraphQLTypeName, GqlName;
-    import dunamis.graphql.transform : isTypeInList, ForwardFieldWithTypeMap;
+    import dunamis.graphql.transform : isTypeInList;
 
     // Discover all entity and POD types reachable from the Query root
     alias _AllTypes = getAllEntityTypes!RawQuery;
@@ -433,7 +407,7 @@ template NormalizePlugin(RawQuery, RawMutation) {
     template _NormalizedType(T) {
         @GqlName(getGraphQLTypeName!T)
         struct _NormalizedType {
-            mixin NormalizeFieldsWithTypeMap!(T, _TypeMap);
+            mixin NormalizeFields!(T, _TypeMap);
         }
     }
 
@@ -450,12 +424,12 @@ template NormalizePlugin(RawQuery, RawMutation) {
 
     // Wrap Query: forward all fields with type remapping
     struct Query {
-        mixin WrapFields!(RawQuery, _TypeMap, ForwardFieldWithTypeMap);
+        mixin WrapFields!(RawQuery, _TypeMap, ForwardField);
     }
 
     // Wrap Mutation: forward all fields with type remapping
     struct Mutation {
-        mixin WrapFields!(RawMutation, _TypeMap, ForwardFieldWithTypeMap);
+        mixin WrapFields!(RawMutation, _TypeMap, ForwardField);
     }
 }
 

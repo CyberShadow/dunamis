@@ -111,7 +111,7 @@ template applyMappingsToResult(alias TypeMap, Mappings...) {
 // ============================================================================
 
 /// Forward a computed field with value mapping applied to return type and arguments.
-/// Like ForwardFieldWithTypeMap but also:
+/// Like ForwardField (with TypeMap) but also:
 /// - Maps argument types (deserializes mapped args before forwarding)
 /// - Maps return types (serializes after forwarding)
 mixin template ForwardFieldWithMappings(SourceType, string fieldName, alias TypeMap, Mappings...) {
