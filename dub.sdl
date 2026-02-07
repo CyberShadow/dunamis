@@ -10,9 +10,8 @@ sourcePaths "source"
 dependency "graphqld:parser" repository="git+https://github.com/vpanteleev-sym/graphqld.git" version="542374109b26018c9542631c90d1ba2acef32a8b"
 dependency "ae" repository="git+https://github.com/CyberShadow/ae.git" version="85f44a586afccdaf652a60489dc3604b23dba893"
 
-# Exclude sqlite and mysql modules from main package (available via subpackages)
+# Exclude sqlite modules from main package (available via subpackage, requires ae:sqlite)
 excludedSourceFiles "source/dunamis/sqlite/*"
-excludedSourceFiles "source/dunamis/mysql/*"
 
 # Exclude integration tests from library build
 excludedSourceFiles "source/integration/*"
@@ -42,8 +41,6 @@ configuration "mysql-integration" {
     targetType "executable"
     mainSourceFile "source/integration/mysql_test.d"
     sourceFiles "source/integration/test_framework.d" "source/integration/tests.d" "source/integration/schema.d" "source/integration/test_runner.d"
-    # Include mysql sources directly for integration test
-    sourceFiles "source/dunamis/mysql/ddl.d" "source/dunamis/mysql/dialect.d" "source/dunamis/mysql/fetcher.d" "source/dunamis/mysql/sql.d" "source/dunamis/mysql/connection.d" "source/dunamis/mysql/package.d"
     debugVersions "ASOCKETS_DEBUG_IDLE"
 }
 
@@ -55,26 +52,9 @@ subPackage {
     # Include both sqlite sources and main package sources
     sourcePaths "source"
 
-    # Exclude other database backends and integration tests
+    # Exclude integration tests
     excludedSourceFiles "source/integration/*"
-    excludedSourceFiles "source/dunamis/mysql/*"
 
     dependency "graphqld:parser" repository="git+https://github.com/vpanteleev-sym/graphqld.git" version="542374109b26018c9542631c90d1ba2acef32a8b"
     dependency "ae:sqlite" repository="git+https://github.com/CyberShadow/ae.git" version="85f44a586afccdaf652a60489dc3604b23dba893"
-}
-
-# MySQL subpackage - for users who want mysql support
-subPackage {
-    name "mysql"
-    targetType "library"
-
-    # Include both mysql sources and main package sources
-    sourcePaths "source"
-
-    # Exclude other database backends and integration tests
-    excludedSourceFiles "source/integration/*"
-    excludedSourceFiles "source/dunamis/sqlite/*"
-
-    dependency "graphqld:parser" repository="git+https://github.com/vpanteleev-sym/graphqld.git" version="542374109b26018c9542631c90d1ba2acef32a8b"
-    dependency "ae" repository="git+https://github.com/CyberShadow/ae.git" version="85f44a586afccdaf652a60489dc3604b23dba893"
 }
