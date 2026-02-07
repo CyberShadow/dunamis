@@ -473,6 +473,23 @@ class QueryResult {
         return false;
     }
 
+    /// Check if any of the given refs exist in this result.
+    /// Used by fetchBelongsTo to disambiguate cached results that share
+    /// the same FK column name (e.g., author_id on both Comment and Post).
+    bool containsAnyRef(AnyRef[] refs) {
+        if (_allRefs.length == 0 || refs.length == 0) return false;
+
+        // Build a set for O(1) lookup
+        bool[string] refSet;
+        foreach (r; _allRefs) {
+            refSet[r.nodeId] = true;
+        }
+        foreach (r; refs) {
+            if (r.nodeId in refSet) return true;
+        }
+        return false;
+    }
+
     private T extractValue(T)(JSONValue val) {
         import std.typecons : Nullable;
         import dynamo.core.types : isCustomScalar;
@@ -730,7 +747,24 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
             if (joinedCols is null) continue;
 
             // Get FK values to determine joined refs
-            auto fkValues = fetchColumnJsonSync(node.table, joinInfo.fk, refs);
+            JSONValue[] fkValues;
+            if (joinInfo.sourceAlias !is null) {
+                // Multi-hop: FK is on a previously joined table, read from result
+                auto fkKey = joinInfo.sourceAlias ~ "__" ~ joinInfo.fk;
+                auto colData = result._columns.get(fkKey, null);
+                foreach (r; refs) {
+                    if (colData !is null) {
+                        if (auto valPtr = r.nodeId in colData) {
+                            fkValues ~= *valPtr;
+                            continue;
+                        }
+                    }
+                    fkValues ~= JSONValue(null);
+                }
+            } else {
+                // Single hop: FK is on the root table
+                fkValues = fetchColumnJsonSync(node.table, joinInfo.fk, refs);
+            }
 
             AnyRef[] joinedRefs;
             foreach (fkVal; fkValues) {

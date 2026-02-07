@@ -747,13 +747,13 @@ Object findMapExprFromChain(ExprBase expr, ref JoinHop[] joinPath, out ExprBase 
             continue;
         }
         if (auto belongs = cast(BelongsToInfo) expr) {
-            // When entering a belongsTo chain, save the input that produces base entity refs
-            // and its pre-wrapped AnyRef adapter (BelongsToInfo knows the Child type)
-            if (!inBelongsToChain) {
-                lastBeforeBelongsTo = belongs.inputExpr;
-                lastBeforeBelongsToAsAnyRef = belongs.inputAsAnyRefExpr;
-                inBelongsToChain = true;
-            }
+            // Track the input that produces base entity refs for the query node.
+            // Always update (not just first hop) so that for multi-hop chains
+            // (e.g., c.post.author.firstName) we get the innermost input (Comment refs),
+            // not an intermediate one (Post refs). Columns are keyed by root entity refs.
+            lastBeforeBelongsTo = belongs.inputExpr;
+            lastBeforeBelongsToAsAnyRef = belongs.inputAsAnyRefExpr;
+            inBelongsToChain = true;
             // Collect join info for belongsTo hops
             joinPath = [JoinHop(
                 belongs.childTable,
@@ -1605,10 +1605,15 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
         // Each hop: source table -> target table via FK
         string lastAlias;
         foreach (hop; joinPath) {
-            // Add the FK column to ensure it's fetched (needed for JOIN)
-            node.addColumn(hop.fk);
-            // Add JOIN and get alias
-            lastAlias = node.addJoin(hop.targetTable, hop.targetType, hop.fk);
+            if (lastAlias is null) {
+                // First hop: FK is on the root table
+                node.addColumn(hop.fk);
+            } else {
+                // Subsequent hops: FK is on the previously joined table
+                node.addJoinedColumn(lastAlias, hop.fk);
+            }
+            // Add JOIN and get alias, tracking source for multi-hop
+            lastAlias = node.addJoin(hop.targetTable, hop.targetType, hop.fk, lastAlias);
         }
 
         // Track the column needed from the final joined table

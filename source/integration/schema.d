@@ -86,6 +86,16 @@ void seedDatabase() {
     assertNoErrors(post3);
     writeln("  Created post: D Programming");
 
+    // Create comments (for multi-hop belongsTo testing: comment -> post -> author)
+    auto post1Id = post1["data"]["createPost"]["id"];
+    auto comment1 = graphql(`mutation { createComment(input: {body: "Great post!", post_id: ` ~ post1Id.toString() ~ `, author_id: ` ~ bobId.toString() ~ `}) { id } }`);
+    assertNoErrors(comment1);
+    writeln("  Created comment: Great post! (by Bob on Hello World)");
+
+    auto comment2 = graphql(`mutation { createComment(input: {body: "Thanks for sharing", post_id: ` ~ post2["data"]["createPost"]["id"].toString() ~ `, author_id: ` ~ charlieId.toString() ~ `}) { id } }`);
+    assertNoErrors(comment2);
+    writeln("  Created comment: Thanks for sharing (by Charlie on GraphQL Rocks)");
+
     // Create tasks with different statuses
     auto task1 = graphql(`mutation { createTask(input: {title: "Write tests", status: "pending", assignee_id: ` ~ aliceId.toString() ~ `}) { id } }`);
     assertNoErrors(task1);
@@ -109,6 +119,7 @@ mixin template TestSchema(alias db) {
     import std.typecons : Nullable;
     import dynamo.core.expr : Expr;
     import dynamo.graphql : Schema, SortingPlugin, FilterPlugin;
+    import dynamo.graphql.schema : GqlName;
     import dynamo.relational.schema : Table, ForeignKey, BelongsTo, HasMany, Col, getAll, hasMany;
     import dynamo.relational.demo : DemoEntity, CrudMutations;
     import dynamo.relational.mutation : insert;
@@ -187,6 +198,7 @@ mixin template TestSchema(alias db) {
         mixin Col!("title", string);
         mixin Col!("authorId", ForeignKey!User);
         mixin BelongsTo!("author", "authorId");
+        mixin HasMany!("comments", Comment, "post_id");
 
         /// Computed field: is the author an adult? (tests pushdown through BelongsTo)
         static auto authorIsAdult(Expr!Post p) {
@@ -198,6 +210,20 @@ mixin template TestSchema(alias db) {
             import dynamo.core.expr : ternary;
             return ternary(p.author.age.lt(13), "child",
                    ternary(p.author.age.lt(20), "teen", "adult"));
+        }
+    }
+
+    struct Comment {
+        mixin DemoEntity!(db, "comments");
+        @GqlName("body") mixin Col!("body_", string, "body");
+        mixin Col!("postId", ForeignKey!Post);
+        mixin Col!("authorId", ForeignKey!User);
+        mixin BelongsTo!("post", "postId");
+        mixin BelongsTo!("author", "authorId");
+
+        /// Computed field: 2-hop belongsTo chain (comment -> post -> author)
+        static auto postAuthorName(Expr!Comment c) {
+            return c.post.author.fullName;
         }
     }
 
@@ -222,12 +248,14 @@ mixin template TestSchema(alias db) {
     struct Query {
         mixin Table!(User, "users");
         mixin Table!(Post, "posts");
+        mixin Table!(Comment, "comments");
         mixin Table!(Task, "tasks");
     }
 
     struct Mutation {
         mixin CrudMutations!User;
         mixin CrudMutations!Post;
+        mixin CrudMutations!Comment;
         mixin CrudMutations!Task;
 
         static auto createUserWithName(Expr!Mutation parent, string firstName, string lastName) {

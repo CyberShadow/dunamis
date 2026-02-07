@@ -292,8 +292,8 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
         // Try to get FK values from cached query results first
         foreach (result; _cachedResults.byValue) {
-            if (result.hasColumn(fk)) {
-                // Found the FK column in cached results
+            if (result.hasColumn(fk) && result.containsAnyRef(childRefs)) {
+                // Found the FK column in a result that actually contains our refs
                 auto fkValues = result.getColumnRaw(fk, childRefs);
                 AnyRef[] refs;
                 refs.reserve(fkValues.length);

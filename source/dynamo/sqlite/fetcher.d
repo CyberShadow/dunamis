@@ -164,38 +164,38 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
             return resolve(cast(string[])[]);
         }
 
-        // Build ID -> index map for result ordering (only for valid refs)
-        size_t[string] idxByLocalId;
+        // Collect unique valid IDs for query
         string[] validIds;
-        foreach (i, r; refs) {
-            if (r.isValid && r.localId.length > 0) {
-                idxByLocalId[r.localId] = i;
+        bool[string] seen;
+        foreach (r; refs) {
+            if (r.isValid && r.localId.length > 0 && r.localId !in seen) {
                 validIds ~= r.localId;
+                seen[r.localId] = true;
             }
         }
 
-        string[] result;
-        result.length = refs.length;
-
         if (validIds.length == 0) {
-            return resolve(result);  // All refs were invalid
+            string[] result;
+            result.length = refs.length;
+            return resolve(result);
         }
 
         // Query the column values
         auto idList = validIds.join(",");
         auto sql = format("SELECT id, %s FROM %s WHERE id IN (%s)", column, table, idList);
 
+        // Build value lookup map
+        string[string] values;
         foreach (cells, columns; _db.query(sql)) {
             if (cells.length >= 2) {
                 auto id = cells[0] !is null ? cells[0].idup : "";
                 auto value = cells[1] !is null ? cells[1].idup : "";
-                if (auto idxPtr = id in idxByLocalId) {
-                    result[*idxPtr] = value;
-                }
+                values[id] = value;
             }
         }
 
-        return resolve(result);
+        // Return in ref order (handles duplicate refs correctly)
+        return resolve(refs.map!(r => r.isValid ? values.get(r.localId, "") : "").array);
     }
 
     override Promise!(long[]) fetchColumnLong(string table, string column, AnyRef[] refs) {
@@ -203,38 +203,38 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
             return resolve(cast(long[])[]);
         }
 
-        // Build ID -> index map for result ordering (only for valid refs)
-        size_t[string] idxByLocalId;
+        // Collect unique valid IDs for query
         string[] validIds;
-        foreach (i, r; refs) {
-            if (r.isValid && r.localId.length > 0) {
-                idxByLocalId[r.localId] = i;
+        bool[string] seen;
+        foreach (r; refs) {
+            if (r.isValid && r.localId.length > 0 && r.localId !in seen) {
                 validIds ~= r.localId;
+                seen[r.localId] = true;
             }
         }
 
-        long[] result;
-        result.length = refs.length;
-
         if (validIds.length == 0) {
-            return resolve(result);  // All refs were invalid
+            long[] result;
+            result.length = refs.length;
+            return resolve(result);
         }
 
         // Query the column values
         auto idList = validIds.join(",");
         auto sql = format("SELECT id, %s FROM %s WHERE id IN (%s)", column, table, idList);
 
+        // Build value lookup map
+        long[string] values;
         foreach (cells, columns; _db.query(sql)) {
             if (cells.length >= 2) {
                 auto id = cells[0] !is null ? cells[0].idup : "";
                 auto valueStr = cells[1] !is null ? cells[1].idup : "0";
-                if (auto idxPtr = id in idxByLocalId) {
-                    result[*idxPtr] = valueStr.to!long;
-                }
+                values[id] = valueStr.to!long;
             }
         }
 
-        return resolve(result);
+        // Return in ref order (handles duplicate refs correctly)
+        return resolve(refs.map!(r => r.isValid ? values.get(r.localId, 0L) : 0L).array);
     }
 
     override Promise!(long[]) fetchAllIds(string table) {
@@ -313,8 +313,8 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
         // Try to get FK values from cached query results first
         // The FK column is included in the main query, so we can avoid an extra query
         foreach (result; _cachedResults.byValue) {
-            if (result.hasColumn(fk)) {
-                // Found the FK column in cached results
+            if (result.hasColumn(fk) && result.containsAnyRef(childRefs)) {
+                // Found the FK column in a result that actually contains our refs
                 auto fkValues = result.getColumnRaw(fk, childRefs);
                 AnyRef[] refs;
                 refs.reserve(fkValues.length);
@@ -393,49 +393,49 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
             return resolve(cast(JSONValue[])[]);
         }
 
-        // Build ID -> index map for result ordering (only for valid refs)
-        size_t[string] idxByLocalId;
+        // Collect unique valid IDs for query
         string[] validIds;
-        foreach (i, r; refs) {
-            if (r.isValid && r.localId.length > 0) {
-                idxByLocalId[r.localId] = i;
+        bool[string] seen;
+        foreach (r; refs) {
+            if (r.isValid && r.localId.length > 0 && r.localId !in seen) {
                 validIds ~= r.localId;
+                seen[r.localId] = true;
             }
         }
 
-        JSONValue[] result;
-        result.length = refs.length;
-        foreach (ref r; result) r = JSONValue(null);
-
         if (validIds.length == 0) {
-            return resolve(result);  // All refs were invalid
+            JSONValue[] result;
+            result.length = refs.length;
+            foreach (ref r; result) r = JSONValue(null);
+            return resolve(result);
         }
 
         // Query the column values
         auto idList = validIds.join(",");
         auto sql = format("SELECT id, %s FROM %s WHERE id IN (%s)", column, table, idList);
 
+        // Build value lookup map
+        JSONValue[string] values;
         foreach (cells, columns; _db.query(sql)) {
             if (cells.length >= 2) {
                 auto id = cells[0] !is null ? cells[0].idup : "";
-                if (auto idxPtr = id in idxByLocalId) {
-                    if (cells[1] is null) {
-                        result[*idxPtr] = JSONValue(null);
+                if (cells[1] is null) {
+                    values[id] = JSONValue(null);
+                } else {
+                    auto val = cells[1].idup;
+                    // Try to parse as number, otherwise use string
+                    long longVal;
+                    if (!collectException(val.to!long, longVal)) {
+                        values[id] = JSONValue(longVal);
                     } else {
-                        auto val = cells[1].idup;
-                        // Try to parse as number, otherwise use string
-                        long longVal;
-                        if (!collectException(val.to!long, longVal)) {
-                            result[*idxPtr] = JSONValue(longVal);
-                        } else {
-                            result[*idxPtr] = JSONValue(val);
-                        }
+                        values[id] = JSONValue(val);
                     }
                 }
             }
         }
 
-        return resolve(result);
+        // Return in ref order (handles duplicate refs correctly)
+        return resolve(refs.map!(r => r.isValid ? values.get(r.localId, JSONValue(null)) : JSONValue(null)).array);
     }
 
     // =========================================================================

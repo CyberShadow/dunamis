@@ -206,6 +206,11 @@ struct Comment {
     mixin BelongsTo!("post", "postId");
     mixin BelongsTo!("author", "authorId");
 
+    /// Computed: 2-hop belongsTo (comment -> post -> author)
+    static auto postAuthorName(Expr!Comment c) {
+        return c.post.author.fullName;
+    }
+
     /// Computed: render comment as HTML with author name
     static auto html(Expr!Comment c) {
         return use(
@@ -901,6 +906,7 @@ type Comment {
   body: String!
   post: Post!
   author: User!
+  postAuthorName: String!
   html: String!
 }
 
@@ -1507,9 +1513,94 @@ EOF";
     assert(db.getSQL() == expectedSQL, db.getSQL());
 }
 
-// NOTE: Multi-hop belongsTo chains (e.g. comment.post.author.firstName)
-// currently generate incorrect JOINs - the second hop uses the wrong
-// source table FK. This is a known limitation to be fixed separately.
+// Test multi-hop belongsTo chain (comment.post.author.firstName - 2 JOINs)
+unittest {
+    auto db = createMockDB();
+    auto executor = new Executor();
+
+    // Two-hop belongsTo: comment -> post -> author
+    auto query = map!(
+        (Expr!Comment c) => jsonObject(
+            "body", c.body_,
+            "postAuthor", c.post.author.firstName
+        )
+    )(getByIds!Comment([101, 102]));
+
+    auto result = awaitSync(executor.execute(query));
+
+    assert(result.length == 2);
+    assert(result[0]["body"].str == "Great post!");
+    // Both comments 101 and 102 are on post 1, authored by Alice
+    assert(result[0]["postAuthor"].str == "Alice");
+    assert(result[1]["postAuthor"].str == "Alice");
+
+    // Verify generated SQL - two chained LEFT JOINs, second references first join alias
+    enum expectedSQL = q"EOF
+WITH
+  layer0 AS (
+    SELECT comments.id, comments.body, comments.post_id, j0.id AS j0__id, j0.author_id AS j0__author_id, j1.id AS j1__id, j1.first_name AS j1__first_name
+    FROM comments
+    LEFT JOIN posts j0 ON comments.post_id = j0.id
+    LEFT JOIN users j1 ON j0.author_id = j1.id
+    WHERE comments.id = ANY($1)
+  )
+SELECT json_build_object(
+  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer0 t)
+)
+EOF";
+    assert(db.getSQL() == expectedSQL, db.getSQL());
+}
+
+// Test multi-hop belongsTo via compileQuery (comment.post.author - 2 JOINs)
+unittest {
+    import dynamo.graphql : compileQuery;
+
+    createMockDB();  // Sets up the static db
+    auto executor = new Executor();
+
+    auto query = compileQuery!Query(`{
+        comments {
+            body
+            postAuthorName
+        }
+    }`);
+
+    auto result = awaitSync(executor.execute(query));
+
+    auto comments = result["comments"].array;
+    assert(comments.length == 3);
+    // Comment 101 is on post 1 (by Alice), comment 103 is on post 2 (by Bob)
+    // Verify postAuthorName resolves through 2-hop chain
+    assert(comments[0]["postAuthorName"].str == "Alice Smith", comments[0]["postAuthorName"].str);
+    assert(comments[2]["postAuthorName"].str == "Bob Jones", comments[2]["postAuthorName"].str);
+}
+
+// Test multi-hop belongsTo via nested GraphQL sub-selection (comment.post.author)
+unittest {
+    import dynamo.graphql : compileQuery;
+
+    createMockDB();
+    auto executor = new Executor();
+
+    auto query = compileQuery!Query(`{
+        comments {
+            body
+            post {
+                title
+                author { firstName }
+            }
+        }
+    }`);
+
+    auto result = awaitSync(executor.execute(query));
+
+    auto comments = result["comments"].array;
+    assert(comments.length == 3, "Expected 3 comments, got " ~ comments.length.to!string);
+    // Comment 101 is on post 1 ("Hello World") by Alice
+    assert(comments[0]["post"]["title"].str == "Hello World", comments[0]["post"]["title"].str);
+    assert(comments[0]["post"]["author"]["firstName"].str == "Alice",
+        "Expected Alice, got: " ~ comments[0]["post"]["author"]["firstName"].str);
+}
 
 // Test getAll root expression (no ID filtering)
 unittest {

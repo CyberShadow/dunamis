@@ -137,18 +137,19 @@ class QueryNode {
     }
 
     /// Add a JOIN for belongsTo chain access.
+    /// sourceAlias: for multi-hop chains, the alias of the previous join (null = root table).
     /// Returns the join alias to use for column access.
-    string addJoin(string targetTable, string targetType, string fk) {
+    string addJoin(string targetTable, string targetType, string fk, string sourceAlias = null) {
         // Check if we already have this join
         foreach (j; joins) {
-            if (j.targetTable == targetTable && j.fk == fk) {
+            if (j.targetTable == targetTable && j.fk == fk && j.sourceAlias == sourceAlias) {
                 return j.alias_;
             }
         }
 
         // Create new join
         auto alias_ = "j" ~ (_nextJoinAlias++).to!string;
-        joins ~= JoinInfo(targetTable, targetType, fk, alias_);
+        joins ~= JoinInfo(targetTable, targetType, fk, alias_, sourceAlias);
         return alias_;
     }
 
@@ -223,6 +224,7 @@ struct JoinInfo {
     string targetType;    // Entity type name
     string fk;            // Foreign key column in source table
     string alias_;        // SQL alias (e.g., "j0")
+    string sourceAlias;   // Source alias for multi-hop chains (null = root table)
 }
 
 // ============================================================================

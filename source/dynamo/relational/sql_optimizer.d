@@ -978,9 +978,10 @@ private string toCTEWithComputed(QueryNode node, SqlOptimizer sqlOpt) {
 
     // Add JOINs for belongsTo relationships
     foreach (joinInfo; node.joins) {
+        auto sourceRef = joinInfo.sourceAlias !is null ? joinInfo.sourceAlias : node.table;
         sql ~= format("\n    LEFT JOIN %s %s ON %s.%s = %s.id",
             joinInfo.targetTable, joinInfo.alias_,
-            node.table, joinInfo.fk, joinInfo.alias_);
+            sourceRef, joinInfo.fk, joinInfo.alias_);
     }
 
     // WHERE clause
@@ -1074,9 +1075,10 @@ private string toCTEWithWindowFunction(QueryNode node, SqlOptimizer sqlOpt) {
 
     // Add JOINs for belongsTo relationships in the inner query
     foreach (joinInfo; node.joins) {
+        auto sourceRef = joinInfo.sourceAlias !is null ? joinInfo.sourceAlias : node.table;
         sql ~= format("      LEFT JOIN %s %s ON %s.%s = %s.id\n",
             joinInfo.targetTable, joinInfo.alias_,
-            node.table, joinInfo.fk, joinInfo.alias_);
+            sourceRef, joinInfo.fk, joinInfo.alias_);
     }
 
     // WHERE clause for inner query

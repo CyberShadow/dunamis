@@ -1043,6 +1043,82 @@ void testQueryPlainMethodOnPodStruct() {
 }
 
 // ============================================================================
+// Multi-hop BelongsTo Tests
+// ============================================================================
+
+void testQueryMultiHopBelongsTo() {
+    // Test 2-hop belongsTo: comment -> post -> author
+    // postAuthorName is a computed field that traverses comment.post.author.fullName
+    auto response = graphql(`{
+        comments {
+            body
+            postAuthorName
+            post {
+                title
+                author {
+                    fullName
+                }
+            }
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto comments = response["data"]["comments"].array;
+    assertTrue(comments.length >= 2, "Expected at least 2 comments");
+
+    // Verify that postAuthorName matches post.author.fullName for each comment
+    foreach (comment; comments) {
+        auto postAuthorName = comment["postAuthorName"].str;
+        auto authorFullName = comment["post"]["author"]["fullName"].str;
+        auto body = comment["body"].str;
+
+        assertTrue(postAuthorName == authorFullName,
+            "postAuthorName for comment '" ~ body ~ "' should be '" ~ authorFullName ~
+            "' but got '" ~ postAuthorName ~ "'");
+    }
+}
+
+void testQueryMultiHopBelongsToValues() {
+    // Test specific values from seed data:
+    // Both comments are on Alice's posts, so postAuthorName should be "Alice Smith"
+    auto response = graphql(`{
+        comments {
+            body
+            postAuthorName
+            post {
+                title
+                author { firstName }
+            }
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto comments = response["data"]["comments"].array;
+    assertTrue(comments.length >= 2, "Expected at least 2 comments");
+
+    foreach (comment; comments) {
+        auto body = comment["body"].str;
+
+        // First verify the BelongsTo chain resolves correctly
+        auto postTitle = comment["post"]["title"].str;
+        assertTrue(postTitle.length > 0,
+            "post.title should be non-empty for comment '" ~ body ~ "', got '" ~ postTitle ~ "'");
+
+        auto authorFirstName = comment["post"]["author"]["firstName"].str;
+        assertTrue(authorFirstName.length > 0,
+            "post.author.firstName should be non-empty for comment '" ~ body ~ "', got '" ~ authorFirstName ~ "'");
+
+        auto postAuthorName = comment["postAuthorName"].str;
+
+        // Both seeded comments are on Alice's posts
+        if (body == "Great post!" || body == "Thanks for sharing") {
+            assertTrue(postAuthorName == "Alice Smith",
+                "postAuthorName for '" ~ body ~ "' should be 'Alice Smith' but got '" ~ postAuthorName ~ "'");
+        }
+    }
+}
+
+// ============================================================================
 // Recursive Input Type Tests
 // ============================================================================
 
@@ -1520,6 +1596,10 @@ static this() {
     registerTest("Query plain method null nickname", "tests", &testQueryPlainMethodNullNickname);
     registerTest("Query plain method returning struct", "tests", &testQueryPlainMethodReturningStruct);
     registerTest("Query plain method on POD struct", "tests", &testQueryPlainMethodOnPodStruct);
+
+    // Multi-hop belongsTo tests
+    registerTest("Multi-hop belongsTo (comment.post.author)", "tests", &testQueryMultiHopBelongsTo);
+    registerTest("Multi-hop belongsTo values", "tests", &testQueryMultiHopBelongsToValues);
 
     // Recursive input type tests
     registerTest("Recursive filter input", "tests", &testRecursiveFilterInput);
