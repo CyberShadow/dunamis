@@ -18,6 +18,7 @@ import dunamis.relational.eval_context;
 import dunamis.relational.query_node;
 import dunamis.relational.sql_optimizer;
 import dunamis.postgres.dialect : postgresDialect;
+import dunamis.postgres.sql : toSQL;
 
 /// PostgreSQL data fetcher using ae.net.db.psql.
 /// Executes SQL generated from QueryNodes against a PostgreSQL database.

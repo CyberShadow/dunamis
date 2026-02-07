@@ -1214,7 +1214,7 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
 /// Parameterized by DBConfig for compile-time feature configuration.
 class DebugSqlDB(DBConfig config = defaultDBConfig) : DataFetcher {
     import std.stdio : writeln;
-    import dunamis.relational.sql_optimizer : toSQL, CapturingSqlOptimizer;
+    import dunamis.relational.sql_optimizer : SqlOptimizer, CapturingSqlOptimizer;
     import dunamis.relational.sql_dialect : SqlDialect;
     import dunamis.core.optimize : ExprOptimizer;
 
@@ -1226,11 +1226,14 @@ class DebugSqlDB(DBConfig config = defaultDBConfig) : DataFetcher {
     private string _cachedSQL;  // Cached to avoid duplicate debug output
     private CapturingSqlOptimizer _sqlOptimizer;
     private SqlDialect _dialect;
+    private string function(QueryNode[], SqlOptimizer) _toSQLFn;
 
-    this(DataFetcher delegate_, SqlDialect dialect) {
+    this(DataFetcher delegate_, SqlDialect dialect,
+         string function(QueryNode[], SqlOptimizer) toSQLFn = null) {
         _delegate = delegate_;
         _dialect = dialect;
         _sqlOptimizer = new CapturingSqlOptimizer(dialect);
+        _toSQLFn = toSQLFn;
     }
 
     /// Return the CapturingSqlOptimizer to enable SQL push-down
@@ -1256,9 +1259,10 @@ class DebugSqlDB(DBConfig config = defaultDBConfig) : DataFetcher {
     /// Get the combined SQL for all executed nodes as a string.
     /// Caches the result to avoid regenerating (and re-printing in debug mode).
     /// Includes computed columns from SQL push-down optimization.
+    /// Requires a toSQL function to be provided at construction time.
     string getSQL() {
-        if (_cachedSQL.length == 0 && _executedNodes.length > 0) {
-            _cachedSQL = toSQL(_executedNodes, _sqlOptimizer);
+        if (_toSQLFn !is null && _cachedSQL.length == 0 && _executedNodes.length > 0) {
+            _cachedSQL = _toSQLFn(_executedNodes, _sqlOptimizer);
         }
         return _cachedSQL;
     }

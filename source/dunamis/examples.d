@@ -10,6 +10,7 @@ import ae.utils.promise.await : awaitSync;
 import dunamis.core;
 import dunamis.relational;
 import dunamis.relational.sql_dialect : SqlDialect;
+import dunamis.postgres.sql : toSQL;
 
 // ============================================================================
 // Data Source Configuration
@@ -261,7 +262,7 @@ private DebugSqlDB!() createMockDB() {
     ]`);
 
     // Set the module-level static for Query to use
-    db = new DebugSqlDB!()(mock, testDialect());
+    db = new DebugSqlDB!()(mock, testDialect(), &toSQL);
     return db;
 }
 
@@ -1073,7 +1074,7 @@ unittest {
         {"id": 3, "first_name": "Bob", "last_name": "Xavier"}
     ]`);
 
-    db = new DebugSqlDB!()(mock, testDialect());
+    db = new DebugSqlDB!()(mock, testDialect(), &toSQL);
     auto executor = new Executor();
 
     // Sort by first_name ASC using getAll
@@ -1122,7 +1123,7 @@ unittest {
         {"id": 3, "first_name": "Bob"}
     ]`);
 
-    db = new DebugSqlDB!()(mock, testDialect());
+    db = new DebugSqlDB!()(mock, testDialect(), &toSQL);
     auto executor = new Executor();
 
     // Sort by first_name DESC
@@ -1165,7 +1166,7 @@ unittest {
         {"id": 3, "first_name": "Bob"}
     ]`);
 
-    db = new DebugSqlDB!()(mock, testDialect());
+    db = new DebugSqlDB!()(mock, testDialect(), &toSQL);
     auto executor = new Executor();
 
     // Sort by firstName using predicate (a.lt(b) for ASC)
@@ -1200,7 +1201,7 @@ unittest {
         {"id": 3, "first_name": "Bob"}
     ]`);
 
-    db = new DebugSqlDB!()(mock, testDialect());
+    db = new DebugSqlDB!()(mock, testDialect(), &toSQL);
     auto executor = new Executor();
 
     // Sort by firstName using predicate (a.gt(b) for DESC)
@@ -1231,7 +1232,7 @@ unittest {
         {"id": 5, "first_name": "Eve"}
     ]`);
 
-    db = new DebugSqlDB!()(mock, testDialect());
+    db = new DebugSqlDB!()(mock, testDialect(), &toSQL);
     auto executor = new Executor();
 
     // Sort by first_name ASC, then skip 1 and take 2
@@ -1287,7 +1288,7 @@ unittest {
         {"id": 3, "author_id": 2, "title": "", "body": "Bob's post"}
     ]`);
 
-    db = new DebugSqlDB!()(mock, testDialect());
+    db = new DebugSqlDB!()(mock, testDialect(), &toSQL);
     auto executor = new Executor();
 
     // Test: which users have at least one post with non-empty title
@@ -1345,7 +1346,7 @@ unittest {
     ]`);
     // Charlie has no posts
 
-    db = new DebugSqlDB!()(mock, testDialect());
+    db = new DebugSqlDB!()(mock, testDialect(), &toSQL);
     auto executor = new Executor();
 
     // Test: which users have ALL posts with non-empty title
@@ -1398,7 +1399,7 @@ unittest {
     ]`);
     mock.setTableData("posts", `[]`);  // No posts at all
 
-    db = new DebugSqlDB!()(mock, testDialect());
+    db = new DebugSqlDB!()(mock, testDialect(), &toSQL);
     auto executor = new Executor();
 
     // Test: some() on empty collection should return false
@@ -1420,7 +1421,7 @@ unittest {
     ]`);
     mock.setTableData("posts", `[]`);  // No posts at all
 
-    db = new DebugSqlDB!()(mock, testDialect());
+    db = new DebugSqlDB!()(mock, testDialect(), &toSQL);
     auto executor = new Executor();
 
     // Test: every() on empty collection should return true (vacuous truth)

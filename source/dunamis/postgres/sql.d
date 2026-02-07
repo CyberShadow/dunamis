@@ -8,6 +8,8 @@ import std.json;
 import std.range : iota;
 
 import dunamis.relational.mutation : InsertInput, UpdateInput;
+import dunamis.relational.query_node : QueryNode, QueryNodeId, FilterType;
+import dunamis.relational.sql_optimizer : SqlOptimizer;
 
 // ============================================================================
 // Mutation SQL Generation
@@ -219,4 +221,303 @@ unittest {
     assert(jsonToSqlLiteral(JSONValue(true)) == "TRUE");
     assert(jsonToSqlLiteral(JSONValue(false)) == "FALSE");
     assert(jsonToSqlLiteral(JSONValue(null)) == "NULL");
+}
+
+// ============================================================================
+// Query SQL Generation (CTE-based)
+// ============================================================================
+
+/// Generate a complete CTE-based SQL query (without computed columns).
+string toSQL(QueryNode[] nodes) {
+    return toSQL(nodes, null);
+}
+
+/// Generate a complete CTE-based SQL query with computed columns.
+string toSQL(QueryNode[] nodes, SqlOptimizer sqlOpt) {
+    if (nodes.length == 0)
+        return "";
+
+    auto sql = appender!string;
+
+    // Build CTEs for each layer
+    sql ~= "WITH\n";
+
+    string[] ctes;
+    foreach (node; nodes) {
+        ctes ~= toCTEWithComputed(node, sqlOpt);
+    }
+    sql ~= ctes.join(",\n");
+
+    // Final SELECT: aggregate all layers into JSON
+    // PostgreSQL: use subquery with ORDER BY to preserve sorting in json_agg
+    sql ~= "\nSELECT json_build_object(\n";
+    string[] jsonParts;
+    foreach (node; nodes) {
+        if (node.orderBy_.length > 0) {
+            // Subquery orders rows before json_agg processes them
+            string[] orderParts;
+            foreach (spec; node.orderBy_) {
+                orderParts ~= format("%s%s", spec.column, spec.descending ? " DESC" : "");
+            }
+            auto orderByClause = orderParts.join(", ");
+            jsonParts ~= format("  'layer%d', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (SELECT * FROM layer%d ORDER BY %s) t)",
+                node.id.value, node.id.value, orderByClause);
+        } else {
+            jsonParts ~= format("  'layer%d', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer%d t)",
+                node.id.value, node.id.value);
+        }
+    }
+    sql ~= jsonParts.join(",\n");
+    sql ~= "\n)\n";
+
+    auto result = sql.data;
+
+    // Debug output for real applications running with -debug=sql
+    debug(sql) {
+        import std.stdio : writeln;
+        writeln(result);
+    }
+
+    return result;
+}
+
+/// Generate CTE for a single QueryNode with computed columns
+private string toCTEWithComputed(QueryNode node, SqlOptimizer sqlOpt) {
+    // Use window function for per-parent pagination on child nodes
+    if (node.useWindowFunction) {
+        return toCTEWithWindowFunction(node, sqlOpt);
+    }
+
+    auto sql = appender!string;
+
+    sql ~= format("  layer%d AS (\n", node.id.value);
+    sql ~= "    SELECT ";
+    sql ~= toSelectWithComputed(node, sqlOpt);
+    sql ~= format("\n    FROM %s", node.table);
+
+    // Add JOINs for belongsTo relationships
+    foreach (joinInfo; node.joins) {
+        auto sourceRef = !joinInfo.sourceAlias.isNull ? joinInfo.sourceAlias.get.value : node.table;
+        sql ~= format("\n    LEFT JOIN %s %s ON %s.%s = %s.id",
+            joinInfo.targetTable, joinInfo.alias_.value,
+            sourceRef, joinInfo.fk, joinInfo.alias_.value);
+    }
+
+    // WHERE clause
+    sql ~= "\n    WHERE ";
+    if (node.isRoot) {
+        final switch (node.rootFilter) {
+            case FilterType.none:
+            case FilterType.all:
+                sql ~= "1=1";
+                break;
+            case FilterType.byId:
+            case FilterType.byIds:
+                sql ~= format("%s.id = ANY($1)", node.table);
+                break;
+        }
+    } else {
+        sql ~= format("%s.%s IN (SELECT id FROM layer%d)",
+            node.table, node.parentFk, node.parent.id.value);
+    }
+
+    // Add custom WHERE clause from filter predicates
+    if (node.whereClause_.length > 0) {
+        sql ~= format("\n      AND (%s)", node.whereClause_);
+    }
+
+    // ORDER BY clause (sorting)
+    if (node.orderBy_.length > 0) {
+        string[] orderParts;
+        foreach (spec; node.orderBy_) {
+            orderParts ~= format("%s.%s%s", node.table, spec.column,
+                spec.descending ? " DESC" : "");
+        }
+        sql ~= format("\n    ORDER BY %s", orderParts.join(", "));
+    }
+
+    // LIMIT clause (pagination)
+    if (!node.limit_.isNull) {
+        sql ~= format("\n    LIMIT %d", node.limit_.get);
+    }
+
+    // OFFSET clause (pagination)
+    if (!node.offset_.isNull) {
+        sql ~= format("\n    OFFSET %d", node.offset_.get);
+    }
+
+    sql ~= "\n  )";
+    return sql.data;
+}
+
+/// Generate CTE for a child node with per-parent pagination using window functions.
+///
+/// Generates SQL like:
+/// ```sql
+/// layer1 AS (
+///   SELECT id, title, author_id FROM (
+///     SELECT posts.*, ROW_NUMBER() OVER (PARTITION BY author_id ORDER BY id) as _rn
+///     FROM posts WHERE author_id IN (SELECT id FROM layer0)
+///   ) t WHERE _rn > offset AND _rn <= offset + limit
+/// )
+/// ```
+private string toCTEWithWindowFunction(QueryNode node, SqlOptimizer sqlOpt) {
+    assert(!node.isRoot, "Window function pagination only applies to child nodes");
+
+    auto sql = appender!string;
+
+    // Build ORDER BY for window function (defaults to id if not specified)
+    string windowOrderBy;
+    if (node.orderBy_.length > 0) {
+        string[] orderParts;
+        foreach (spec; node.orderBy_) {
+            orderParts ~= format("%s%s", spec.column, spec.descending ? " DESC" : "");
+        }
+        windowOrderBy = orderParts.join(", ");
+    } else {
+        windowOrderBy = "id";
+    }
+
+    sql ~= format("  layer%d AS (\n", node.id.value);
+
+    // Outer SELECT: project needed columns from the windowed subquery
+    sql ~= "    SELECT ";
+    sql ~= toSelectWithComputed(node, sqlOpt, "_inner");  // Use _inner alias prefix
+    sql ~= " FROM (\n";
+
+    // Inner SELECT: compute row numbers partitioned by parent FK
+    sql ~= format("      SELECT %s.*, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS _rn\n",
+        node.table, node.parentFk, windowOrderBy);
+    sql ~= format("      FROM %s\n", node.table);
+
+    // Add JOINs for belongsTo relationships in the inner query
+    foreach (joinInfo; node.joins) {
+        auto sourceRef = !joinInfo.sourceAlias.isNull ? joinInfo.sourceAlias.get.value : node.table;
+        sql ~= format("      LEFT JOIN %s %s ON %s.%s = %s.id\n",
+            joinInfo.targetTable, joinInfo.alias_.value,
+            sourceRef, joinInfo.fk, joinInfo.alias_.value);
+    }
+
+    // WHERE clause for inner query
+    sql ~= format("      WHERE %s.%s IN (SELECT id FROM layer%d)",
+        node.table, node.parentFk, node.parent.id.value);
+
+    // Add custom WHERE clause from filter predicates
+    if (node.whereClause_.length > 0) {
+        sql ~= format("\n        AND (%s)", node.whereClause_);
+    }
+
+    sql ~= "\n    ) _inner\n";
+
+    // WHERE clause for outer query: filter by row number
+    sql ~= "    WHERE ";
+    if (!node.perParentOffset_.isNull && !node.perParentLimit_.isNull) {
+        // Both offset and limit: _rn > offset AND _rn <= offset + limit
+        auto offset = node.perParentOffset_.get;
+        auto limit = node.perParentLimit_.get;
+        sql ~= format("_rn > %d AND _rn <= %d", offset, offset + limit);
+    } else if (!node.perParentOffset_.isNull) {
+        // Only offset: _rn > offset
+        sql ~= format("_rn > %d", node.perParentOffset_.get);
+    } else if (!node.perParentLimit_.isNull) {
+        // Only limit: _rn <= limit
+        sql ~= format("_rn <= %d", node.perParentLimit_.get);
+    } else {
+        // No pagination (shouldn't happen if useWindowFunction is true)
+        sql ~= "1=1";
+    }
+
+    sql ~= "\n  )";
+    return sql.data;
+}
+
+/// Generate SQL SELECT clause including computed columns.
+/// If tableAlias is provided, uses that instead of node.table for column references.
+/// For window function CTEs, this is used to select from the inner subquery.
+string toSelectWithComputed(QueryNode node, SqlOptimizer sqlOpt, string tableAlias = null) {
+    string[] selectParts;
+
+    // Use provided alias or default to table name
+    auto tableName = tableAlias !is null ? tableAlias : node.table;
+
+    // Regular columns from main table
+    foreach (col; node.columns) {
+        selectParts ~= format("%s.%s", tableName, col);
+    }
+
+    // Columns from JOINed tables
+    // For window function queries, joined columns are already computed in the inner subquery
+    // and appear as aliased columns (e.g., j0__id)
+    foreach (joinInfo; node.joins) {
+        if (auto cols = joinInfo.alias_ in node.joinedColumns) {
+            foreach (col; *cols) {
+                if (tableAlias !is null) {
+                    // From window subquery: columns are already aliased
+                    selectParts ~= format("%s.%s__%s AS %s__%s",
+                        tableName, joinInfo.alias_.value, col, joinInfo.alias_.value, col);
+                } else {
+                    selectParts ~= format("%s.%s AS %s__%s",
+                        joinInfo.alias_.value, col, joinInfo.alias_.value, col);
+                }
+            }
+        }
+    }
+
+    // Computed columns (if SqlOptimizer is provided)
+    // Note: Computed columns are not supported with window functions yet
+    if (sqlOpt !is null && tableAlias is null) {
+        foreach (computed; sqlOpt.getComputedColumns(node.id)) {
+            selectParts ~= format("%s AS %s", computed.sqlExpr, computed.alias_);
+        }
+    }
+
+    return selectParts.join(", ");
+}
+
+// ============================================================================
+// Query SQL Generation Tests
+// ============================================================================
+
+unittest {
+    // Test SQL generation with LIMIT/OFFSET
+    auto node = new QueryNode(QueryNodeId(0), "User", "users");
+    node.addColumn("first_name");
+    node.setRootFilter(FilterType.all);
+    node.setLimit(10);
+    node.setOffset(20);
+
+    auto sql = toCTEWithComputed(node, null);
+
+    // Verify SQL contains LIMIT and OFFSET clauses
+    assert(sql.canFind("LIMIT 10"), "SQL should contain LIMIT 10: " ~ sql);
+    assert(sql.canFind("OFFSET 20"), "SQL should contain OFFSET 20: " ~ sql);
+    assert(sql.canFind("users.first_name"), "SQL should contain column: " ~ sql);
+}
+
+unittest {
+    // Test SQL generation with LIMIT only (no offset)
+    auto node = new QueryNode(QueryNodeId(0), "Post", "posts");
+    node.addColumn("title");
+    node.setRootFilter(FilterType.all);
+    node.setLimit(5);
+    // No offset
+
+    auto sql = toCTEWithComputed(node, null);
+
+    assert(sql.canFind("LIMIT 5"), "SQL should contain LIMIT 5: " ~ sql);
+    assert(!sql.canFind("OFFSET"), "SQL should not contain OFFSET: " ~ sql);
+}
+
+unittest {
+    // Test SQL generation with OFFSET only (no limit)
+    auto node = new QueryNode(QueryNodeId(0), "Comment", "comments");
+    node.addColumn("body");
+    node.setRootFilter(FilterType.all);
+    node.setOffset(15);
+    // No limit
+
+    auto sql = toCTEWithComputed(node, null);
+
+    assert(sql.canFind("OFFSET 15"), "SQL should contain OFFSET 15: " ~ sql);
+    assert(!sql.canFind("LIMIT"), "SQL should not contain LIMIT: " ~ sql);
 }
