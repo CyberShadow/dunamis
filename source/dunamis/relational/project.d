@@ -34,6 +34,9 @@ class PrefetchExpr : Expr!(AnyRef[]) {
     }
 
     this(QueryNode node, PrefetchExpr parentPrefetch = null) {
+        assert(node !is null, "PrefetchExpr requires a non-null QueryNode");
+        assert((parentPrefetch !is null) == (node.parent !is null),
+            "parentPrefetch must be provided iff node has a parent");
         _node = node;
         _parentPrefetch = parentPrefetch;
     }
@@ -171,6 +174,9 @@ class ProjectColumnExpr(T) : Expr!T, ProjectColumnInfo {
 
     /// Accepts ExprBase to work with both typed Expr!Entity and untyped Expr!AnyRef
     this(int queryNodeId, string column, ExprBase input, PrefetchExpr prefetch) {
+        assert(column.length > 0, "ProjectColumnExpr column must not be empty");
+        assert(input !is null, "ProjectColumnExpr input must not be null");
+        assert(prefetch !is null, "ProjectColumnExpr prefetch must not be null");
         _queryNodeId = queryNodeId;
         _column = column;
         _input = input;
@@ -219,6 +225,10 @@ class ProjectJoinedColumnExpr(T) : Expr!T, ProjectJoinedColumnInfo {
 
     /// Accepts ExprBase to work with both typed Expr!Entity and untyped Expr!AnyRef
     this(int queryNodeId, string joinAlias, string column, ExprBase input, PrefetchExpr prefetch) {
+        assert(joinAlias.length > 0, "ProjectJoinedColumnExpr joinAlias must not be empty");
+        assert(column.length > 0, "ProjectJoinedColumnExpr column must not be empty");
+        assert(input !is null, "ProjectJoinedColumnExpr input must not be null");
+        assert(prefetch !is null, "ProjectJoinedColumnExpr prefetch must not be null");
         _queryNodeId = queryNodeId;
         _joinAlias = joinAlias;
         _column = column;
@@ -359,6 +369,10 @@ class ProjectBelongsToExpr : Expr!AnyRef {
 
     /// Accepts ExprBase to work with both typed Expr!Entity and untyped Expr!AnyRef
     this(int queryNodeId, string fkColumn, string parentTypeName, ExprBase input, PrefetchExpr prefetch) {
+        assert(fkColumn.length > 0, "ProjectBelongsToExpr fkColumn must not be empty");
+        assert(parentTypeName.length > 0, "ProjectBelongsToExpr parentTypeName must not be empty");
+        assert(input !is null, "ProjectBelongsToExpr input must not be null");
+        assert(prefetch !is null, "ProjectBelongsToExpr prefetch must not be null");
         _queryNodeId = queryNodeId;
         _fkColumn = fkColumn;
         _parentTypeName = parentTypeName;

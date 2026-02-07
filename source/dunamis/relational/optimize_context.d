@@ -27,6 +27,7 @@ class RelationalOptimizeContext {
     /// Get or create a QueryNode for a MapExpr.
     /// Called by access expressions during optimization.
     QueryNode getOrCreateNode(Object mapExpr, string typeName, string table) {
+        assert(mapExpr !is null, "mapExpr must not be null for QueryNode lookup");
         auto key = cast(void*) mapExpr;
         if (key in _queryNodes) {
             return _queryNodes[key];
@@ -97,6 +98,20 @@ class RelationalOptimizeContext {
 
         foreach (node; nodes) {
             addWithDeps(node);
+        }
+
+        // Assert parent-before-child ordering
+        foreach (i, node; result) {
+            if (node.parent !is null) {
+                bool parentFound = false;
+                foreach (j; 0 .. i) {
+                    if (result[j] is node.parent) {
+                        parentFound = true;
+                        break;
+                    }
+                }
+                assert(parentFound, "Parent node must appear before child in nodesInOrder");
+            }
         }
 
         return result;

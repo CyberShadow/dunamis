@@ -106,6 +106,8 @@ class QueryNode {
     private int _nextJoinAlias = 0;
 
     this(int id, string typeName, string table) {
+        assert(typeName.length > 0, "QueryNode typeName must not be empty");
+        assert(table.length > 0, "QueryNode table must not be empty");
         this.id = id;
         this.typeName = typeName;
         this.table = table;
@@ -121,6 +123,9 @@ class QueryNode {
 
     /// Set this as a child node (hasMany relationship)
     void setParent(QueryNode parent, string fk, string parentTypeName) {
+        assert(this.parent is null, "setParent must only be called once");
+        assert(parent !is null, "parent must not be null");
+        assert(fk.length > 0, "FK column must not be empty");
         this.parent = parent;
         this.parentFk = fk;
         this.parentTypeName = parentTypeName;
@@ -149,6 +154,7 @@ class QueryNode {
 
         // Create new join
         auto alias_ = "j" ~ (_nextJoinAlias++).to!string;
+        assert(!joins.map!(j => j.alias_).canFind(alias_), "Generated join alias collision: " ~ alias_);
         joins ~= JoinInfo(targetTable, targetType, fk, alias_, sourceAlias);
         return alias_;
     }

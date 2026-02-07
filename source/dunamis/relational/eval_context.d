@@ -384,6 +384,8 @@ class QueryResult {
 
     /// Load a column's data
     void loadColumn(string column, AnyRef[] refs, JSONValue[] values) {
+        assert(refs.length == values.length,
+            "loadColumn: refs and values length mismatch");
         JSONValue[string] colData;
         foreach (i, r; refs) {
             colData[r.nodeId] = values[i];
@@ -577,6 +579,7 @@ class RelationalEvalContext {
 
     /// Store results from a QueryNode execution
     void storeQueryResult(int queryNodeId, QueryResult result) {
+        assert(result !is null, "Cannot store null QueryResult");
         _queryResults[queryNodeId] = result;
     }
 
@@ -615,6 +618,8 @@ class RelationalEvalContext {
     /// Store mutation result for later field access.
     /// Called by InsertExpr/UpdateExpr after executing the mutation.
     void storeMutationResult(string typeName, QueryResult result) {
+        assert(typeName.length > 0, "Mutation typeName must not be empty");
+        assert(result !is null, "Cannot store null mutation QueryResult");
         _mutationResults[typeName] = result;
     }
 
