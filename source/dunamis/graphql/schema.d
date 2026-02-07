@@ -903,21 +903,18 @@ package template uniqueTypesForExpand(Types...) {
     }
 }
 
-/// Expand all input types - performs BFS to discover nested types up to 4 levels deep.
-/// This is sufficient for most recursive type structures.
+/// Fixpoint input type discovery - expands nested input types until no new types are found.
 template expandAllInputTypes(InputTypes...) {
-    // Level 0: direct input types
-    alias Level0 = InputTypes;
-    // Level 1: add types nested in Level0
-    alias Level1 = uniqueTypesForExpand!(AliasSeq!(Level0, expandInputOneLevel!Level0));
-    // Level 2: add types nested in Level1
-    alias Level2 = uniqueTypesForExpand!(AliasSeq!(Level1, expandInputOneLevel!Level1));
-    // Level 3: add types nested in Level2
-    alias Level3 = uniqueTypesForExpand!(AliasSeq!(Level2, expandInputOneLevel!Level2));
-    // Level 4: add types nested in Level3
-    alias Level4 = uniqueTypesForExpand!(AliasSeq!(Level3, expandInputOneLevel!Level3));
+    alias expandAllInputTypes = expandInputFixpoint!InputTypes;
+}
 
-    alias expandAllInputTypes = Level4;
+private template expandInputFixpoint(PrevTypes...) {
+    alias NewOnly = uniqueTypesForExpand!(ExcludeTypes!(PrevTypes).From!(expandInputOneLevel!PrevTypes));
+
+    static if (NewOnly.length == 0)
+        alias expandInputFixpoint = PrevTypes;
+    else
+        alias expandInputFixpoint = expandInputFixpoint!(AliasSeq!(PrevTypes, NewOnly));
 }
 
 /// Helper to collect input types from entity members (iterative)
@@ -1147,6 +1144,21 @@ template staticContains(T, Types...) {
     }
 }
 
+/// Filter a type list to exclude types present in a known set.
+/// Uses a wrapper template to work around D's single variadic pack limitation.
+/// Usage: ExcludeTypes!(Known...).From!(Candidates...)
+private template ExcludeTypes(Known...) {
+    template From(Candidates...) {
+        static if (Candidates.length == 0) {
+            alias From = AliasSeq!();
+        } else static if (staticContains!(Candidates[0], Known)) {
+            alias From = From!(Candidates[1..$]);
+        } else {
+            alias From = AliasSeq!(Candidates[0], From!(Candidates[1..$]));
+        }
+    }
+}
+
 /// Extract object type from a result type (handles T, T[], Nullable!T).
 /// Returns void if no object type is found.
 template extractEntityFromType(T) {
@@ -1298,19 +1310,18 @@ template expandOneLevel(Types...) {
     }
 }
 
-/// Fixed-depth type discovery (sufficient for most schemas)
-/// Expands relationships up to 4 levels deep
+/// Fixpoint entity type discovery - expands relationships until no new types are found.
 template getAllEntityTypes(Query) {
-    // Start with root types
-    alias Level0 = getRootTypes!Query;
+    alias getAllEntityTypes = expandEntityFixpoint!(getRootTypes!Query);
+}
 
-    // Expand level by level, deduping at each step
-    alias Level1 = uniqueTypes!(Level0, expandOneLevel!Level0);
-    alias Level2 = uniqueTypes!(Level1, expandOneLevel!Level1);
-    alias Level3 = uniqueTypes!(Level2, expandOneLevel!Level2);
-    alias Level4 = uniqueTypes!(Level3, expandOneLevel!Level3);
+private template expandEntityFixpoint(PrevTypes...) {
+    alias NewOnly = uniqueTypes!(ExcludeTypes!(PrevTypes).From!(expandOneLevel!PrevTypes));
 
-    alias getAllEntityTypes = Level4;
+    static if (NewOnly.length == 0)
+        alias expandEntityFixpoint = PrevTypes;
+    else
+        alias expandEntityFixpoint = expandEntityFixpoint!(AliasSeq!(PrevTypes, NewOnly));
 }
 
 // ============================================================================
@@ -2418,4 +2429,30 @@ unittest {
     alias relatedTypes = getRelatedTypes!Article;
     static assert(staticContains!(Tag, relatedTypes),
         "Tag should be discovered from Article via array plain field type");
+}
+
+// Test fixpoint entity type discovery with deep POD chain (depth > 4)
+unittest {
+    // Chain of 7 POD types linked via plain fields:
+    // Query -> L0 -> L1 -> L2 -> L3 -> L4 -> L5
+    // Old 4-level expansion would miss L4 and L5.
+
+    static struct L5 { string value; }
+    static struct L4 { string name; L5 child; }
+    static struct L3 { string name; L4 child; }
+    static struct L2 { string name; L3 child; }
+    static struct L1 { string name; L2 child; }
+    static struct L0 { string name; L1 child; }
+
+    static struct DeepQuery {
+        static Expr!(L0[]) items(Expr!DeepQuery self) { assert(false); }
+    }
+
+    alias AllTypes = getAllEntityTypes!DeepQuery;
+    static assert(staticContains!(L0, AllTypes), "L0 should be discovered");
+    static assert(staticContains!(L1, AllTypes), "L1 should be discovered");
+    static assert(staticContains!(L2, AllTypes), "L2 should be discovered");
+    static assert(staticContains!(L3, AllTypes), "L3 should be discovered");
+    static assert(staticContains!(L4, AllTypes), "L4 should be discovered");
+    static assert(staticContains!(L5, AllTypes), "L5 should be discovered");
 }
