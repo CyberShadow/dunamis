@@ -11,8 +11,8 @@ import std.json : JSONValue, JSONType;
 import dunamis.core.types : CustomScalar;
 import dunamis.relational.schema : Entity, EntityID;
 
-// Re-export MockDB for convenience
-public import dunamis.relational.eval_context : MockDB;
+// Re-export MockDB and DebugSqlDB for convenience
+public import dunamis.relational.mock : MockDB, DebugSqlDB;
 
 // ============================================================================
 // Custom Scalars for Demo
