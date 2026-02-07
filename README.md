@@ -203,6 +203,12 @@ The optimizer uses interface-based pattern matching to recognize and transform e
 
 Different data sources register their own optimizers. The relational package contributes `RelationalOptimizer` and `SqlOptimizer`; future packages (e.g., REST APIs, in-memory stores) can add their own without modifying core.
 
+To list all pattern-matching interfaces in the codebase:
+
+```bash
+grep -rn 'interface.*Info' source/dunamis/ --include='*.d' | grep -v unittest
+```
+
 ### 5. Plugins as Composable Type Transformers
 
 A plugin is a compile-time function from Schema to Schema. Each plugin takes the output of the previous one, transforms its types, and produces a new schema. Plugins compose by chaining:
