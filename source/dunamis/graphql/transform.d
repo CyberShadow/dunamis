@@ -328,25 +328,28 @@ unittest {
 
 // Test _normalizedSource in entityCastValue with entities
 unittest {
-    import dunamis.relational.demo : DemoEntity, MockDB;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "originals")
     static struct Original {
-        mixin DemoEntity!(db, "originals");
+        mixin DemoId;
         string name;
         int age;
     }
 
     // Normalized wrapper with _normalizedSource
+    @DemoEntity!(db, "originals")
     static struct Normalized {
-        mixin DemoEntity!(db, "originals");
+        mixin DemoId;
         Original _normalizedSource;
     }
 
     // Plugin wrapper that carries _normalizedSource through chain
+    @DemoEntity!(db, "originals")
     static struct PluginWrapped {
-        mixin DemoEntity!(db, "originals");
+        mixin DemoId;
         Original _normalizedSource;
     }
 

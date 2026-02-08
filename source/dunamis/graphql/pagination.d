@@ -62,6 +62,7 @@ template PaginationPlugin(alias S) if (isSchema!S) {
 
     // Generate paginated versions of each entity type.
     template PaginatedEntity(Entity) {
+        @(__traits(getAttributes, Entity))
         @GqlName(getGraphQLTypeName!Entity)
         struct PaginatedEntity {
             mixin WrapFields!(Entity, EntityTypeMap, PaginatedArrayField);
@@ -178,8 +179,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -224,8 +226,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -280,8 +283,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -324,13 +328,15 @@ unittest {
     // In D, we can use a mixin template with string for deferred resolution.
 
     // Simple test case: User has posts (no back-reference to avoid circular issue)
+    @DemoEntity!(db, "posts")
     static struct Post {
-        mixin DemoEntity!(db, "posts");
+        mixin DemoId;
         mixin Col!("title", string);
     }
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
         mixin HasMany!("posts", Post, "author_id");
     }
@@ -373,14 +379,16 @@ unittest {
     struct TestSchema {
         static MockDB!() db;
 
+        @DemoEntity!(db, "posts")
         struct Post {
-            mixin DemoEntity!(db, "posts");
+            mixin DemoId;
             mixin Col!("title", string);
             @GqlHidden mixin Col!("authorId", long, "author_id");
         }
 
+        @DemoEntity!(db, "users")
         struct User {
-            mixin DemoEntity!(db, "users");
+            mixin DemoId;
             mixin Col!("name", string);
             mixin HasMany!("posts", Post, "author_id");
         }
@@ -470,14 +478,16 @@ unittest {
     struct TestSchema {
         static MockDB!() db;
 
+        @DemoEntity!(db, "posts")
         struct Post {
-            mixin DemoEntity!(db, "posts");
+            mixin DemoId;
             mixin Col!("title", string);
             @GqlHidden mixin Col!("authorId", long, "author_id");
         }
 
+        @DemoEntity!(db, "users")
         struct User {
-            mixin DemoEntity!(db, "users");
+            mixin DemoId;
             mixin Col!("name", string);
             mixin HasMany!("posts", Post, "author_id");
         }

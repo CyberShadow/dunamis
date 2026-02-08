@@ -784,6 +784,7 @@ unittest {
     @Entity!(db, "test_entities")
     static struct TestEntity {
         @PrimaryKeyAttr long id;
+        enum _pkField = "id";
         string nickname;       // Plain field - auto-detected
         string displayName;    // Plain field - auto-detected
     }
@@ -831,13 +832,13 @@ unittest {
 
 unittest {
     import std.traits : hasUDA, getUDAs;
-    import dunamis.relational.demo : DemoEntity, Int64, MockDB;
+    import dunamis.relational.demo : DemoEntity, DemoId, Int64, MockDB;
 
     static MockDB!() db;
 
     @Entity!(db, "comments")
     static struct Comment {
-        mixin DemoEntity!(db, "comments");
+        mixin DemoId;
     }
     static assert(EntityID!Comment.table == "comments");
     static assert(hasUDA!(Comment.id, SqlColumn));
@@ -845,7 +846,7 @@ unittest {
 
     @Entity!(db, "items")
     static struct UuidEntity {
-        mixin DemoEntity!(db, "items", string);
+        mixin DemoId!string;
     }
     static assert(hasUDA!(UuidEntity.id, SqlColumn));
 }
@@ -853,13 +854,13 @@ unittest {
 // Test optimization creates QueryNode
 unittest {
     import std.json : parseJSON;
-    import dunamis.relational.demo : DemoEntity, MockDB;
+    import dunamis.relational.demo : DemoId, MockDB;
 
     static MockDB!() db;
 
     @Entity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);
         mixin Col!("lastName", string);
     }
@@ -891,13 +892,13 @@ unittest {
 unittest {
     import std.json : parseJSON;
     import ae.utils.promise.await : awaitSync;
-    import dunamis.relational.demo : DemoEntity, MockDB;
+    import dunamis.relational.demo : DemoId, MockDB;
 
     static MockDB!() db;
 
     @Entity!(db, "items")
     static struct Item {
-        mixin DemoEntity!(db, "items", string);
+        mixin DemoId!string;
         mixin Col!("name", string);
     }
 
@@ -923,17 +924,19 @@ unittest {
 unittest {
     import std.json : parseJSON;
     import ae.utils.promise.await : awaitSync;
-    import dunamis.relational.demo : DemoEntity, MockDB;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "categories")
     static struct Category {
-        mixin DemoEntity!(db, "categories", string);
+        mixin DemoId!string;
         mixin Col!("name", string);
     }
 
+    @DemoEntity!(db, "products")
     static struct Product {
-        mixin DemoEntity!(db, "products", string);
+        mixin DemoId!string;
         mixin Col!("name", string);
         mixin Col!("categoryId", ForeignKey!Category);
         mixin BelongsTo!("category", "categoryId");
@@ -1058,13 +1061,13 @@ unittest {
 // Test makeEntity and decodeAsLong
 unittest {
     import dunamis.core.types : AnyRef;
-    import dunamis.relational.demo : DemoEntity, MockDB;
+    import dunamis.relational.demo : DemoId, MockDB;
 
     static MockDB!() db;
 
     @Entity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
     }
 
     auto user1 = makeEntity!User(42);

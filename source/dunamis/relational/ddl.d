@@ -318,16 +318,18 @@ template generateDDL(Dialect, Query) {
 unittest {
     import std.typecons : Nullable;
     import dunamis.relational.schema : Col, BelongsTo, ForeignKey;
-    import dunamis.relational.demo : DemoEntity, MockDB;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "managers")
     static struct Manager {
-        mixin DemoEntity!(db, "managers");
+        mixin DemoId;
     }
 
+    @DemoEntity!(db, "employees")
     static struct Employee {
-        mixin DemoEntity!(db, "employees");
+        mixin DemoId;
         mixin Col!("managerId", Nullable!(ForeignKey!Manager));
         mixin BelongsTo!("manager", "managerId");
     }
@@ -347,12 +349,13 @@ unittest {
 
 // Test that plain fields are included in column definitions
 unittest {
-    import dunamis.relational.demo : DemoEntity, MockDB;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "persons")
     static struct Person {
-        mixin DemoEntity!(db, "persons");
+        mixin DemoId;
         string nickname;  // Plain field - automatically detected
     }
 

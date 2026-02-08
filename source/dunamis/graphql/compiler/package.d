@@ -124,8 +124,9 @@ unittest {
     static MockDB!() db;
 
     // Define test entities
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);
         mixin Col!("lastName", string);
 
@@ -172,8 +173,9 @@ unittest {
     static MockDB!() db;
 
     // Test computed fields
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);
         mixin Col!("lastName", string);
 
@@ -212,13 +214,15 @@ unittest {
     // Test nested hasMany relationships
     static MockDB!() db;
 
+    @DemoEntity!(db, "posts")
     static struct Post {
-        mixin DemoEntity!(db, "posts");
+        mixin DemoId;
         mixin Col!("title", string);
     }
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);
         mixin HasMany!("posts", Post, "author_id");
     }
@@ -269,8 +273,9 @@ unittest {
     // Test computed fields with arguments
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);
 
         // Computed field with required argument
@@ -334,13 +339,15 @@ unittest {
     // Test multiple root fields
     static MockDB!() db;
 
+    @DemoEntity!(db, "posts")
     static struct Post {
-        mixin DemoEntity!(db, "posts");
+        mixin DemoId;
         mixin Col!("title", string);
     }
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);
     }
 
@@ -401,8 +408,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);
         mixin Col!("lastName", string);
 
@@ -462,8 +470,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);
         mixin Col!("lastName", string);
 
@@ -511,8 +520,9 @@ unittest {
     // Test GraphQL variables
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);
 
         // Computed field with arguments
@@ -571,8 +581,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);
         mixin Col!("lastName", string);
 
@@ -625,8 +636,9 @@ unittest {
     // Test compileQuery with Schema type (rather than raw Query type)
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);
     }
 
@@ -694,8 +706,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -765,8 +778,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -819,8 +833,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -864,8 +879,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
         mixin Col!("email", string);
     }
@@ -924,8 +940,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -1013,8 +1030,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -1124,8 +1142,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -1204,8 +1223,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -1269,15 +1289,16 @@ unittest {
 unittest {
     import ae.utils.promise.await : awaitSync;
     import dunamis.core.executor : Executor;
-    import dunamis.relational.demo : DemoEntity, MockDB;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
     import dunamis.relational.schema : Col, Table, getAll;
 
     enum Status { pending, inProgress, completed }
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "tasks")
     static struct Task {
-        mixin DemoEntity!(db, "tasks");
+        mixin DemoId;
         mixin Col!("title", string);
         mixin Col!("status", Status);
     }
@@ -1329,8 +1350,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
 
         // Computed field taking recursive pointer input
@@ -1399,8 +1421,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
 
         static auto traverseList(Expr!User u, NodeInput* head) {
@@ -1458,8 +1481,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
 
         static auto matchFilter(Expr!User u, FilterInput filter) {
@@ -1504,8 +1528,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);
     }
 
@@ -1548,8 +1573,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);
     }
 
@@ -1600,8 +1626,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);
         mixin Col!("lastName", string);
     }
@@ -1661,8 +1688,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "items")
     static struct Item {
-        mixin DemoEntity!(db, "items");
+        mixin DemoId;
         mixin Col!("title", string);
 
         string label() => "item-label";

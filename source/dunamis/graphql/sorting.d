@@ -65,6 +65,7 @@ template SortingPlugin(alias S) if (isSchema!S) {
 
     // Generate sorted versions of each entity type.
     template SortedEntity(Entity) {
+        @(__traits(getAttributes, Entity))
         @GqlName(getGraphQLTypeName!Entity)
         struct SortedEntity {
             mixin WrapFields!(Entity, EntityTypeMap, SortedArrayField);
@@ -344,8 +345,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);
         mixin Col!("lastName", string);
     }
@@ -385,8 +387,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);
         mixin Col!("lastName", string);
 
@@ -418,8 +421,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -465,8 +469,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -510,8 +515,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -550,13 +556,15 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "posts")
     static struct Post {
-        mixin DemoEntity!(db, "posts");
+        mixin DemoId;
         mixin Col!("title", string);
     }
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
         mixin HasMany!("posts", Post, "author_id");
     }
@@ -593,14 +601,16 @@ unittest {
     struct TestSchema {
         static MockDB!() db;
 
+        @DemoEntity!(db, "posts")
         struct Post {
-            mixin DemoEntity!(db, "posts");
+            mixin DemoId;
             mixin Col!("title", string);
             @GqlHidden mixin Col!("authorId", long, "author_id");
         }
 
+        @DemoEntity!(db, "users")
         struct User {
-            mixin DemoEntity!(db, "users");
+            mixin DemoId;
             mixin Col!("name", string);
             mixin HasMany!("posts", Post, "author_id");
         }
@@ -662,19 +672,22 @@ unittest {
     struct TestSchema {
         static MockDB!() db;
 
+        @DemoEntity!(db, "comments")
         struct Comment {
-            mixin DemoEntity!(db, "comments");
+            mixin DemoId;
             mixin Col!("text", string);
         }
 
+        @DemoEntity!(db, "posts")
         struct Post {
-            mixin DemoEntity!(db, "posts");
+            mixin DemoId;
             mixin Col!("title", string);
             mixin HasMany!("comments", Comment, "post_id");
         }
 
+        @DemoEntity!(db, "users")
         struct User {
-            mixin DemoEntity!(db, "users");
+            mixin DemoId;
             mixin Col!("name", string);
             mixin HasMany!("posts", Post, "author_id");
         }
@@ -719,8 +732,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);  // firstName -> first_name in SQL
         mixin Col!("lastName", string);   // lastName -> last_name in SQL
     }

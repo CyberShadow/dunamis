@@ -47,16 +47,18 @@ unittest {
     import std.algorithm : canFind;
     import std.typecons : Nullable;
     import dunamis.relational.schema : Col, BelongsTo, ForeignKey;
-    import dunamis.relational.demo : DemoEntity, MockDB;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "departments")
     static struct Department {
-        mixin DemoEntity!(db, "departments");
+        mixin DemoId;
     }
 
+    @DemoEntity!(db, "employees")
     static struct Employee {
-        mixin DemoEntity!(db, "employees");
+        mixin DemoId;
         mixin Col!("departmentId", ForeignKey!Department);
         mixin BelongsTo!("department", "departmentId");
     }

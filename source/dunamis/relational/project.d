@@ -479,6 +479,7 @@ unittest {
     @Entity!(_testDb, "users", "User")
     static struct TestUser {
         @PrimaryKeyAttr long id;
+        enum _pkField = "id";
     }
 
     // Test ProjectColumnExpr
@@ -552,6 +553,7 @@ unittest {
     @Entity!(_testDb2, "posts", "Post")
     static struct TestPost {
         @PrimaryKeyAttr long id;
+        enum _pkField = "id";
     }
 
     // Test ProjectBelongsToExpr

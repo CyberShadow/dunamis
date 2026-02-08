@@ -101,9 +101,9 @@ The Executor is data-source agnostic. Data sources travel with expressions - roo
 Entity structs hold only the minimal state needed to identify an object—typically just an ID:
 
 ```d
+@Entity!(db, "users")
 struct User {
-    mixin Entity!(db, "users");  // Adds nodeId field
-    // nodeId contains: compile-time metadata (db, table) + runtime ID string
+    @PrimaryKey long id;             // Just an ID — no column data stored
 
     mixin Col!("firstName", string);  // No data stored here—just generates accessor
     mixin Col!("lastName", string);
@@ -171,8 +171,9 @@ Entity types bind to their data source through a compile-time alias to a static/
 ```d
 static PostgresDB db;  // or MockDB, SQLiteDB, MySQLDB
 
+@Entity!(db, "users")  // Binds User to db at compile time
 struct User {
-    mixin Entity!(db, "users");  // Binds User to db
+    @PrimaryKey long id;
     // ...
 }
 ```
@@ -184,8 +185,8 @@ struct User {
    static PostgresDB mainDb;
    static ClickHouseDB analyticsDb;
 
-   struct User { mixin Entity!(mainDb, "users"); }
-   struct PageView { mixin Entity!(analyticsDb, "page_views"); }
+   @Entity!(mainDb, "users") struct User { @PrimaryKey long id; }
+   @Entity!(analyticsDb, "page_views") struct PageView { @PrimaryKey long id; }
    ```
 
 2. **Compile-time dialect selection** - The optimizer knows at compile time which SQL dialect to use. PostgreSQL gets `||` for concatenation, MySQL gets `CONCAT()`. No runtime dialect switching needed.
@@ -236,15 +237,17 @@ import dunamis.core;
 import dunamis.relational;
 import dunamis.graphql;
 
-// Data source - static variable bound to entities via DemoEntity mixin
+// Data source - static variable bound to entities via @Entity UDA
 // Options: MockDB (testing), PostgresDB, SQLiteDB, MySQLDB
 static MockDB!() db;
 
-// Entity definitions with mixins
-// DemoEntity is a convenience wrapper that adds an `id` column automatically.
-// For full control, use the low-level Entity + Col + PrimaryKey mixins.
+// Entity definitions with UDA + mixins
+// @DemoEntity binds an entity to its data source and table.
+// DemoId adds a standard `id` primary key column (Int64).
+// For full control, use @Entity + explicit @PrimaryKey fields.
+@DemoEntity!(db, "users")
 struct User {
-    mixin DemoEntity!(db, "users");
+    mixin DemoId;
 
     @GqlDescription("The user's first name")
     mixin Col!("firstName", string);
@@ -289,8 +292,9 @@ struct FormatOptions {
     Nullable!(Nullable!bool) uppercase;      // Three-state (absent/null/value): Boolean
 }
 
+@DemoEntity!(db, "posts")
 struct Post {
-    mixin DemoEntity!(db, "posts");
+    mixin DemoId;
     mixin Col!("title", string);
 
     @GqlName("body")  // D keyword conflict: body_ → body in GraphQL
@@ -306,8 +310,9 @@ struct Post {
     // mixin BelongsTo!("editor", "editorId");              // Automatically nullable
 }
 
+@DemoEntity!(db, "comments")
 struct Comment {
-    mixin DemoEntity!(db, "comments");
+    mixin DemoId;
 
     @GqlName("body")
     mixin Col!("body_", string, "body");
@@ -428,8 +433,9 @@ Plain fields are:
 - Accessible directly (return `T`, not `Expr!T`)
 
 ```d
+@DemoEntity!(db, "users")
 struct User {
-    mixin DemoEntity!(db, "users");
+    mixin DemoId;
     mixin Col!("firstName", string);     // Lazy: u.firstName returns Expr!string
 
     Nullable!string nickname;             // Eager: populated on fetch
@@ -442,8 +448,9 @@ struct User {
 Plain methods are instance methods that operate on populated entity data. Unlike computed fields (static methods taking `Expr!Entity`), plain methods work with concrete values and are evaluated in D at runtime.
 
 ```d
+@DemoEntity!(db, "users")
 struct User {
-    mixin DemoEntity!(db, "users");
+    mixin DemoId;
     mixin Col!("firstName", string);
     Nullable!string nickname;  // Plain field
 
@@ -504,8 +511,9 @@ struct UserStats {
     bool isActive() => totalActivity() > 10;
 }
 
+@DemoEntity!(db, "users")
 struct User {
-    mixin DemoEntity!(db, "users");
+    mixin DemoId;
 
     // Plain method returning POD struct
     UserStats stats() => UserStats(42, 99);

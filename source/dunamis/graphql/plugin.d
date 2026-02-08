@@ -275,12 +275,7 @@ mixin template WrapFields(SourceType, alias TypeMap, alias ArrayFieldMixin) {
         typeof(SourceType._normalizedSource) _normalizedSource;
     }
 
-    // 1b. Copy entity metadata (for EntityID on wrapped types)
-    static if (__traits(hasMember, SourceType, "_entityTable")) {
-        alias _entityDb = __traits(getMember, SourceType, "_entityDb");
-        enum _entityTable = __traits(getMember, SourceType, "_entityTable");
-        enum _entityTypeName = __traits(getMember, SourceType, "_entityTypeName");
-    }
+    // 1b. Copy _pkField (PK lookup optimization for NormalizeFields)
     static if (__traits(hasMember, SourceType, "_pkField")) {
         enum _pkField = __traits(getMember, SourceType, "_pkField");
     }
@@ -342,12 +337,7 @@ mixin template NormalizeFields(SourceType, alias TypeMap = IdentityTypeMap) {
     // Store original struct for data access by normalized methods
     SourceType _normalizedSource;
 
-    // Copy entity metadata (for EntityID on normalized types)
-    static if (__traits(hasMember, SourceType, "_entityTable")) {
-        alias _entityDb = __traits(getMember, SourceType, "_entityDb");
-        enum _entityTable = __traits(getMember, SourceType, "_entityTable");
-        enum _entityTypeName = __traits(getMember, SourceType, "_entityTypeName");
-    }
+    // Copy _pkField (PK lookup optimization — plain fields become methods in normalized types)
     static if (__traits(hasMember, SourceType, "_pkField")) {
         enum _pkField = __traits(getMember, SourceType, "_pkField");
     }
@@ -422,6 +412,7 @@ template NormalizePlugin(RawQuery, RawMutation) {
 
     // Create normalized version of each discovered type
     template _NormalizedType(T) {
+        @(__traits(getAttributes, T))
         @GqlName(getGraphQLTypeName!T)
         struct _NormalizedType {
             mixin NormalizeFields!(T, _TypeMap);
@@ -499,8 +490,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -530,8 +522,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -551,8 +544,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -589,8 +583,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -635,8 +630,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -679,8 +675,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -736,8 +733,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -771,8 +769,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -828,8 +827,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -903,8 +903,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -1006,8 +1007,9 @@ unittest {
     static MockDB!() db;
 
     // Base User entity
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
 
         static auto greeting(Expr!User u) {
@@ -1016,8 +1018,9 @@ unittest {
     }
 
     // Extended User with additional computed field
+    @DemoEntity!(db, "users")  // Same table
     static struct ExtendedUser {
-        mixin DemoEntity!(db, "users");  // Same table
+        mixin DemoId;
 
         // Copy fields from User
         mixin CopyFields!User;
@@ -1082,8 +1085,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);
 
         // Plain field

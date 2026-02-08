@@ -136,7 +136,7 @@ struct FormatOptions {
 struct User {
     import dunamis.graphql : GqlDescription, GqlDeprecated;
 
-    mixin DemoEntity!(db, "users");
+    mixin DemoId;
 
     @GqlDescription("The user's first name")
     mixin Col!("firstName", string);
@@ -175,7 +175,7 @@ struct User {
 struct Post {
     import dunamis.graphql : GqlHidden, GqlName;
 
-    mixin DemoEntity!(db, "posts");
+    mixin DemoId;
     mixin Col!("title", string);
 
     @GqlName("body")  // D keyword conflict: body_ in D → body in GraphQL
@@ -232,7 +232,7 @@ struct Post {
 struct Comment {
     import dunamis.graphql : GqlHidden, GqlName;
 
-    mixin DemoEntity!(db, "comments");
+    mixin DemoId;
 
     @GqlName("body")  // D keyword conflict: body_ in D → body in GraphQL
     mixin Col!("body_", string, "body");

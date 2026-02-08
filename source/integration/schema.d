@@ -12,7 +12,7 @@ import std.typecons : Nullable;
 import dunamis.core;
 import dunamis.core.expr : ternary, some, every;
 import dunamis.relational.schema : Table, ForeignKey, BelongsTo, HasMany, Col;
-import dunamis.relational.demo : DemoEntity, CrudMutations;
+import dunamis.relational.demo : DemoEntity, DemoId, CrudMutations;
 import dunamis.relational.mutation : insert;
 
 import std.stdio : writeln, writefln;
@@ -121,11 +121,12 @@ mixin template TestSchema(alias db) {
     import dunamis.graphql : Schema, SortingPlugin, FilterPlugin;
     import dunamis.graphql.schema : GqlName;
     import dunamis.relational.schema : Table, ForeignKey, BelongsTo, HasMany, Col, getAll, hasMany;
-    import dunamis.relational.demo : DemoEntity, CrudMutations;
+    import dunamis.relational.demo : DemoEntity, DemoId, CrudMutations;
     import dunamis.relational.mutation : insert;
 
+    @DemoEntity!(db, "users")
     struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);
         mixin Col!("lastName", string);
         mixin Col!("age", int);
@@ -193,8 +194,9 @@ mixin template TestSchema(alias db) {
         }
     }
 
+    @DemoEntity!(db, "posts")
     struct Post {
-        mixin DemoEntity!(db, "posts");
+        mixin DemoId;
         mixin Col!("title", string);
         mixin Col!("authorId", ForeignKey!User);
         mixin BelongsTo!("author", "authorId");
@@ -213,8 +215,9 @@ mixin template TestSchema(alias db) {
         }
     }
 
+    @DemoEntity!(db, "comments")
     struct Comment {
-        mixin DemoEntity!(db, "comments");
+        mixin DemoId;
         @GqlName("body") mixin Col!("body_", string, "body");
         mixin Col!("postId", ForeignKey!Post);
         mixin Col!("authorId", ForeignKey!User);
@@ -227,8 +230,9 @@ mixin template TestSchema(alias db) {
         }
     }
 
+    @DemoEntity!(db, "tasks")
     struct Task {
-        mixin DemoEntity!(db, "tasks");
+        mixin DemoId;
         mixin Col!("title", string);
         mixin Col!("status", TaskStatus);
         mixin Col!("assigneeId", Nullable!(ForeignKey!User));

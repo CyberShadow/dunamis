@@ -929,8 +929,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct TestUser {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);
         mixin Col!("lastName", string);
 
@@ -1035,8 +1036,9 @@ unittest {
 
     enum Color { red, green, blue }
 
+    @DemoEntity!(db, "items")
     static struct Item {
-        mixin DemoEntity!(db, "items");
+        mixin DemoId;
         mixin Col!("name", string);
         mixin Col!("color", Color);
     }
@@ -1076,8 +1078,9 @@ unittest {
         Nullable!string suffix;
     }
 
+    @DemoEntity!(db, "users")
     static struct FmtUser {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);
 
         static auto formattedName(Expr!FmtUser u, FormatOptions options) {

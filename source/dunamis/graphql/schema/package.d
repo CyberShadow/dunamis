@@ -141,13 +141,14 @@ unittest {
 // Test @GqlHidden with actual Col mixin
 unittest {
     import std.algorithm : canFind;
-    import dunamis.relational.demo : DemoEntity, MockDB;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
     import dunamis.relational.schema : Col;
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
 
         @GqlHidden
@@ -181,13 +182,14 @@ unittest {
 unittest {
     import std.algorithm : canFind;
     import std.typecons : Nullable;
-    import dunamis.relational.demo : DemoEntity, MockDB;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
     import dunamis.relational.schema : Col;
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "persons")
     static struct Person {
-        mixin DemoEntity!(db, "persons");
+        mixin DemoId;
         mixin Col!("name", string);  // Column field
 
         // Plain fields (struct instance fields)
@@ -225,13 +227,14 @@ unittest {
 // Test @GqlDescription and @GqlDeprecated UDAs
 unittest {
     import std.algorithm : canFind;
-    import dunamis.relational.demo : DemoEntity, MockDB;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
     import dunamis.relational.schema : Col;
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "articles")
     static struct Article {
-        mixin DemoEntity!(db, "articles");
+        mixin DemoId;
 
         @GqlDescription("The article title")
         mixin Col!("title", string);
@@ -285,13 +288,14 @@ unittest {
 
 // Test Schema template
 unittest {
-    import dunamis.relational.demo : DemoEntity, MockDB;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
     import dunamis.relational.schema : Col, Table, getAll;
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -333,14 +337,15 @@ unittest {
 // Test mutation SDL generation
 unittest {
     import std.algorithm : canFind;
-    import dunamis.relational.demo : DemoEntity, MockDB;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
     import dunamis.relational.schema : Col, Table, getAll;
 
     static MockDB!() db;
 
     // Define an entity for mutation results
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -426,13 +431,14 @@ unittest {
 // Test Schema without mutations generates no Mutation type
 unittest {
     import std.algorithm : canFind;
-    import dunamis.relational.demo : DemoEntity, MockDB;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
     import dunamis.relational.schema : Col, Table, getAll;
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -455,7 +461,7 @@ unittest {
 unittest {
     import std.algorithm : canFind;
     import std.typecons : Nullable;
-    import dunamis.relational.demo : DemoEntity, MockDB;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
     import dunamis.relational.schema : Col, Table, getAll;
 
     // Define a D enum
@@ -463,8 +469,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "tasks")
     static struct Task {
-        mixin DemoEntity!(db, "tasks");
+        mixin DemoId;
         mixin Col!("title", string);
         mixin Col!("status", Status);
     }
@@ -499,7 +506,7 @@ unittest {
 // Test nested input type discovery
 unittest {
     import std.algorithm : canFind;
-    import dunamis.relational.demo : DemoEntity, MockDB;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
     import dunamis.relational.schema : Col, Table;
 
     // Nested input types
@@ -514,8 +521,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
 
         // Computed field with nested input type
@@ -533,13 +541,14 @@ unittest {
     // Both input types should be discovered
     static assert(sdl.canFind("input Outer"), "SDL should contain input Outer: " ~ sdl);
     static assert(sdl.canFind("input Inner"), "SDL should contain input Inner: " ~ sdl);
+
     static assert(sdl.canFind("inner: Inner!"), "Outer should have inner: Inner! field: " ~ sdl);
 }
 
 // Test self-referential input type via array
 unittest {
     import std.algorithm : canFind;
-    import dunamis.relational.demo : DemoEntity, MockDB;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
     import dunamis.relational.schema : Col, Table;
 
     // Self-referential via array
@@ -550,8 +559,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
 
         static auto filter(Expr!User u, FilterInput f) {
@@ -573,7 +583,7 @@ unittest {
 // Test self-referential input type via pointer
 unittest {
     import std.algorithm : canFind;
-    import dunamis.relational.demo : DemoEntity, MockDB;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
     import dunamis.relational.schema : Col, Table;
 
     // Self-referential via pointer (nullable reference)
@@ -584,8 +594,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
 
         static auto traverse(Expr!User u, NodeInput* head) {
@@ -609,7 +620,7 @@ unittest {
 // Test deeply nested input types via pointer
 unittest {
     import std.algorithm : canFind;
-    import dunamis.relational.demo : DemoEntity, MockDB;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
     import dunamis.relational.schema : Col, Table;
 
     // Deeply nested via pointer (A -> B -> C via pointers)
@@ -629,8 +640,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
 
         static auto process(Expr!User u, TypeA input) {
@@ -708,7 +720,7 @@ unittest {
 // Test POD type discovery through plain method return type
 unittest {
     import std.algorithm : canFind;
-    import dunamis.relational.demo : DemoEntity, MockDB;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
     import dunamis.relational.schema : Col, Table;
 
     // POD struct to be returned by plain method
@@ -721,8 +733,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
 
         // Plain method returning POD struct

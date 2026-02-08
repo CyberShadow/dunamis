@@ -23,8 +23,9 @@ public import dunamis.relational.mock : MockDB, DebugSqlDB;
 ///
 /// Example:
 /// ---
-/// struct Entity {
-///     mixin DemoEntity!("table", Int64);  // Use Int64 as ID type
+/// @DemoEntity!(db, "table")
+/// struct MyEntity {
+///     mixin DemoId;                       // Uses Int64 as ID type
 ///     mixin Col!("bigValue", Int64);      // Use Int64 for columns
 /// }
 /// ---
@@ -35,32 +36,47 @@ alias Int64 = CustomScalar!(
 );
 
 // ============================================================================
-// Demo Entity Mixin
+// DemoEntity UDA
 // ============================================================================
 
-/// High-level convenience mixin for demos and examples.
-/// Adds Entity metadata plus a standard `id` column (BIGINT primary key).
+/// UDA for demo/example entity structs. Wraps the Entity UDA interface
+/// with the same duck-typed detection (has `.db` and `.table` members).
 ///
-/// By default, uses Int64 for the ID type (64-bit integer with proper
-/// GraphQL scalar support). You can override this with any type.
-///
-/// For full control over primary keys (natural keys, composite keys, etc.),
-/// use the low-level Entity + Col + PrimaryKey mixins instead.
+/// Use this together with `DemoId` mixin for a convenient entity declaration:
 ///
 /// Example:
 /// ---
 /// static MyDB db;
 ///
+/// @DemoEntity!(db, "users")
 /// struct User {
-///     mixin DemoEntity!(db, "users");           // ID is Int64
+///     mixin DemoId;                  // Adds @PrimaryKey id column (Int64)
 ///     mixin Col!("email", string);
 /// }
 ///
+/// @DemoEntity!(db, "items")
 /// struct Item {
-///     mixin DemoEntity!(db, "items", string);   // ID is string (UUID)
+///     mixin DemoId!string;           // Adds @PrimaryKey id column (string)
 /// }
 /// ---
-mixin template DemoEntity(alias db, string tableName, IdType = Int64, string typeName = "") {
+struct DemoEntity(alias _db, string _tableName, string _typeName = "") {
+    alias db = _db;
+    enum table = _tableName;
+    enum typeName = _typeName;
+}
+
+// ============================================================================
+// DemoId Mixin
+// ============================================================================
+
+/// Convenience mixin that adds a standard `id` primary key column.
+///
+/// By default, uses Int64 for the ID type (64-bit integer with proper
+/// GraphQL scalar support). You can override this with any type.
+///
+/// For full control over primary keys (natural keys, composite keys, etc.),
+/// use explicit `@PrimaryKeyAttr` fields instead.
+mixin template DemoId(IdType = Int64) {
     import dunamis.core.types : PrimaryKeyAttr;
     import dunamis.relational.schema.attrs : SqlColumn;
 
@@ -69,11 +85,6 @@ mixin template DemoEntity(alias db, string tableName, IdType = Int64, string typ
 
     /// Compile-time PK field name (avoids __traits(allMembers) during mixin expansion)
     enum _pkField = "id";
-
-    /// Entity metadata (used by EntityID when @Entity UDA is not present on the struct)
-    alias _entityDb = db;
-    enum _entityTable = tableName;
-    enum _entityTypeName = typeName;
 }
 
 // ============================================================================
@@ -151,9 +162,9 @@ unittest {
     // Test entity
     static MockDB!() db;
 
-    @Entity!(db, "users")
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
         mixin Col!("email", string);
     }
@@ -221,9 +232,9 @@ unittest {
 
     static MockDB!() db;
 
-    @Entity!(db, "users")
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
@@ -243,15 +254,15 @@ unittest {
 
     static MockDB!() db;
 
-    @Entity!(db, "users")
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 
-    @Entity!(db, "posts")
+    @DemoEntity!(db, "posts")
     static struct Post {
-        mixin DemoEntity!(db, "posts");
+        mixin DemoId;
         mixin Col!("title", string);
     }
 

@@ -207,8 +207,9 @@ unittest {
     static MockDB!() db;
 
     // Test: Optimized execution produces same results as naive
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);
         mixin Col!("lastName", string);
     }
@@ -252,8 +253,9 @@ unittest {
     static MockDB!() db;
 
     // Test: QueryNode inspection - verify optimization creates correct nodes
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);
         mixin Col!("age", long);
     }
@@ -293,13 +295,15 @@ unittest {
     static MockDB!() db;
 
     // Test: Nested hasMany creates linked QueryNodes
+    @DemoEntity!(db, "posts")
     static struct Post {
-        mixin DemoEntity!(db, "posts");
+        mixin DemoId;
         mixin Col!("title", string);
     }
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);
         mixin HasMany!("posts", Post, "author_id");
     }
@@ -349,13 +353,15 @@ unittest {
     static MockDB!() db;
 
     // Test: BelongsTo creates JOINs (not separate QueryNodes)
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);
     }
 
+    @DemoEntity!(db, "posts")
     static struct Post {
-        mixin DemoEntity!(db, "posts");
+        mixin DemoId;
         mixin Col!("title", string);
         mixin Col!("authorId", ForeignKey!User);
         mixin BelongsTo!("author", "authorId");
@@ -434,8 +440,9 @@ unittest {
     static MockDB!() db;
 
     // Test: Pagination expressions push values to QueryNode
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);
     }
 
@@ -476,8 +483,9 @@ unittest {
     static MockDB!() db;
 
     // Test: Limit only (no offset)
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("firstName", string);
     }
 

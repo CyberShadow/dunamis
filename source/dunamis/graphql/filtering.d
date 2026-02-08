@@ -1085,6 +1085,7 @@ template FilterPlugin(alias S) if (isSchema!S) {
 
     // Generate filtered versions of each entity type
     template FilteredEntity(Entity) {
+        @(__traits(getAttributes, Entity))
         @GqlName(getGraphQLTypeName!Entity)
         struct FilteredEntity {
             mixin WrapFields!(Entity, EntityTypeMap, FilteredArrayField);
@@ -1232,8 +1233,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
     }
 

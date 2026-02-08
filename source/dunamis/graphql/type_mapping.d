@@ -223,6 +223,7 @@ template ExternalTypesPlugin(alias S, NewMappings...) if (isSchema!S) {
     //   (from Schema's NormalizePlugin), so just forward with value mapping.
     // For POD types: normalize plain fields/methods + apply value mapping.
     template _MappedType(T) {
+        @(__traits(getAttributes, T))
         @GqlName(getGraphQLTypeName!T)
         struct _MappedType {
             // Carry _normalizedSource through plugin chain
@@ -233,12 +234,7 @@ template ExternalTypesPlugin(alias S, NewMappings...) if (isSchema!S) {
                 T _normalizedSource;
             }
 
-            // Copy entity metadata (for EntityID on mapped types)
-            static if (__traits(hasMember, T, "_entityTable")) {
-                alias _entityDb = __traits(getMember, T, "_entityDb");
-                enum _entityTable = __traits(getMember, T, "_entityTable");
-                enum _entityTypeName = __traits(getMember, T, "_entityTypeName");
-            }
+            // Copy _pkField (PK lookup optimization)
             static if (__traits(hasMember, T, "_pkField")) {
                 enum _pkField = __traits(getMember, T, "_pkField");
             }
@@ -310,7 +306,7 @@ unittest {
     import std.typecons : Nullable;
     import dunamis.core.types : TypeMapping;
     import dunamis.graphql.schema : Schema, generateSchemaSDL;
-    import dunamis.relational.demo : DemoEntity, MockDB;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
     import dunamis.relational.schema : Col, Table;
     import dunamis.core.expr : Expr;
 
@@ -332,8 +328,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "events")
     static struct Event {
-        mixin DemoEntity!(db, "events");
+        mixin DemoId;
         mixin Col!("title", string);
 
         // Plain method returning mapped type
@@ -372,7 +369,7 @@ unittest {
     import std.typecons : Nullable;
     import dunamis.core.types : TypeMapping;
     import dunamis.graphql.schema : Schema, generateSchemaSDL;
-    import dunamis.relational.demo : DemoEntity, MockDB;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
     import dunamis.relational.schema : Col, Table;
     import dunamis.core.expr : Expr;
 
@@ -392,8 +389,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
 
         // Plain method returning POD with mapped-type fields
@@ -434,8 +432,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "events")
     static struct Event {
-        mixin DemoEntity!(db, "events");
+        mixin DemoId;
         mixin Col!("title", string);
 
         Date startDate() => Date(2024, 1, 15);
@@ -508,8 +507,9 @@ unittest {
 
     static MockDB!() db;
 
+    @DemoEntity!(db, "users")
     static struct User {
-        mixin DemoEntity!(db, "users");
+        mixin DemoId;
         mixin Col!("name", string);
 
         static auto eventsAfter(Expr!User u, Date since) {

@@ -40,59 +40,44 @@ struct Entity(alias _db, string _tableName, string _typeName = "") {
     enum typeName = _typeName;
 }
 
-/// Check if a type has entity metadata (@Entity UDA or DemoEntity mixin members)
+/// Check if a type has entity metadata (@Entity or @DemoEntity UDA)
 template hasEntityAttr(T) {
     enum hasEntityAttr = () {
-        // Check for @Entity UDA
         static foreach (attr; __traits(getAttributes, T)) {
             static if (__traits(compiles, attr.db) && __traits(compiles, attr.table)) {
                 return true;
             }
         }
-        // Fallback: check for DemoEntity-provided members
-        static if (__traits(hasMember, T, "_entityTable")) {
-            return true;
-        }
         return false;
     }();
 }
 
-/// Extract the data source alias from @Entity UDA or DemoEntity members
+/// Extract the data source alias from @Entity or @DemoEntity UDA
 template getEntityDb(T) {
-    static if (_hasEntityUDA!T) {
-        alias attrs = __traits(getAttributes, T);
-        template Impl(A...) {
-            static foreach (attr; A) {
-                static if (__traits(compiles, attr.db) && __traits(compiles, attr.table)) {
-                    alias Impl = attr.db;
-                }
+    alias attrs = __traits(getAttributes, T);
+    template Impl(A...) {
+        static foreach (attr; A) {
+            static if (__traits(compiles, attr.db) && __traits(compiles, attr.table)) {
+                alias Impl = attr.db;
             }
         }
-        alias getEntityDb = Impl!attrs;
-    } else static if (__traits(hasMember, T, "_entityDb")) {
-        alias getEntityDb = __traits(getMember, T, "_entityDb");
-    } else {
-        static assert(false, "No @Entity UDA or _entityDb found on " ~ T.stringof);
     }
+    alias getEntityDb = Impl!attrs;
 }
 
-/// Extract the SQL table name from @Entity UDA or DemoEntity members
+/// Extract the SQL table name from @Entity or @DemoEntity UDA
 template getEntityTable(T) {
-    static assert(hasEntityAttr!T, "No @Entity UDA or DemoEntity mixin found on " ~ T.stringof);
+    static assert(hasEntityAttr!T, "No @Entity or @DemoEntity UDA found on " ~ T.stringof);
     enum getEntityTable = () {
         static foreach (attr; __traits(getAttributes, T)) {
             static if (__traits(compiles, attr.db) && __traits(compiles, attr.table)) {
                 return attr.table;
             }
         }
-        // Fallback: DemoEntity-provided table name
-        static if (__traits(hasMember, T, "_entityTable")) {
-            return __traits(getMember, T, "_entityTable");
-        }
     }();
 }
 
-/// Extract the GraphQL type name from @Entity UDA, DemoEntity members, or struct name
+/// Extract the GraphQL type name from @Entity or @DemoEntity UDA, or struct name
 template getEntityTypeName(T) {
     enum getEntityTypeName = () {
         static foreach (attr; __traits(getAttributes, T)) {
@@ -103,24 +88,7 @@ template getEntityTypeName(T) {
                     return __traits(identifier, T);
             }
         }
-        // Fallback: DemoEntity-provided type name
-        static if (__traits(hasMember, T, "_entityTypeName")) {
-            static if (__traits(getMember, T, "_entityTypeName").length > 0)
-                return __traits(getMember, T, "_entityTypeName");
-        }
         return __traits(identifier, T);
-    }();
-}
-
-/// Internal: check if a type has the @Entity UDA (not DemoEntity fallback)
-private template _hasEntityUDA(T) {
-    enum _hasEntityUDA = () {
-        static foreach (attr; __traits(getAttributes, T)) {
-            static if (__traits(compiles, attr.db) && __traits(compiles, attr.table)) {
-                return true;
-            }
-        }
-        return false;
     }();
 }
 
