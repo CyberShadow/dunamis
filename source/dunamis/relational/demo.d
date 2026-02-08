@@ -75,13 +75,13 @@ struct DemoEntity(alias _db, string _tableName, string _typeName = "") {
 /// GraphQL scalar support). You can override this with any type.
 ///
 /// For full control over primary keys (natural keys, composite keys, etc.),
-/// use explicit `@PrimaryKeyAttr` fields instead.
+/// use explicit `@PrimaryKey` fields instead.
 mixin template DemoId(IdType = Int64) {
-    import dunamis.core.types : PrimaryKeyAttr;
+    import dunamis.core.types : PrimaryKey;
     import dunamis.relational.schema.attrs : SqlColumn;
 
     /// Primary key field - identifies this entity instance
-    @PrimaryKeyAttr @SqlColumn("id") IdType id;
+    @PrimaryKey @SqlColumn("id") IdType id;
 }
 
 // ============================================================================

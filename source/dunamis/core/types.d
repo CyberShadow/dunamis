@@ -12,19 +12,19 @@ import std.typecons : Nullable;
 
 /// Marks a field as part of the primary key.
 /// Used on plain fields to identify entity instances.
-enum PrimaryKeyAttr;
+enum PrimaryKey;
 
-/// Check if a member has @PrimaryKeyAttr UDA
+/// Check if a specific member has @PrimaryKey UDA
 template hasPrimaryKeyAttr(T, string member) {
     import std.meta : staticIndexOf;
     static if (__traits(compiles, __traits(getAttributes, __traits(getMember, T, member)))) {
-        enum hasPrimaryKeyAttr = staticIndexOf!(PrimaryKeyAttr, __traits(getAttributes, __traits(getMember, T, member))) >= 0;
+        enum hasPrimaryKeyAttr = staticIndexOf!(PrimaryKey, __traits(getAttributes, __traits(getMember, T, member))) >= 0;
     } else {
         enum hasPrimaryKeyAttr = false;
     }
 }
 
-/// Check if any field in the type has @PrimaryKeyAttr.
+/// Check if any field in the type has @PrimaryKey.
 ///
 /// Uses a two-phase approach to avoid DMD forward reference cycles:
 ///
@@ -39,7 +39,7 @@ template hasPrimaryKeyAttr(T, string member) {
 ///
 /// Phase 2: __traits(allMembers) fallback. Needed for normalized entity types where
 /// NormalizeFields converts PK plain fields into static methods (preserving the
-/// @PrimaryKeyAttr UDA). These types are always fully constructed, so
+/// @PrimaryKey UDA). These types are always fully constructed, so
 /// __traits(allMembers) is safe — the forward reference issue only affects types
 /// that are mid-construction.
 ///
@@ -51,7 +51,7 @@ template hasPrimaryKey(T) {
     enum hasPrimaryKey = () {
         // Phase 1: check tupleof (plain data fields) — safe during mixin expansion
         static foreach (field; T.tupleof) {
-            static if (staticIndexOf!(PrimaryKeyAttr, __traits(getAttributes, field)) >= 0) {
+            static if (staticIndexOf!(PrimaryKey, __traits(getAttributes, field)) >= 0) {
                 return true;
             }
         }
@@ -71,7 +71,7 @@ template getPrimaryKeyFieldName(T) {
     import std.meta : staticIndexOf;
     enum getPrimaryKeyFieldName = () {
         static foreach (field; T.tupleof) {
-            static if (staticIndexOf!(PrimaryKeyAttr, __traits(getAttributes, field)) >= 0) {
+            static if (staticIndexOf!(PrimaryKey, __traits(getAttributes, field)) >= 0) {
                 return __traits(identifier, field);
             }
         }
@@ -92,7 +92,7 @@ template getPrimaryKeyFieldNames(T) {
     enum getPrimaryKeyFieldNames = () {
         string[] names;
         static foreach (field; T.tupleof) {
-            static if (staticIndexOf!(PrimaryKeyAttr, __traits(getAttributes, field)) >= 0) {
+            static if (staticIndexOf!(PrimaryKey, __traits(getAttributes, field)) >= 0) {
                 names ~= __traits(identifier, field);
             }
         }

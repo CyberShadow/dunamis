@@ -478,7 +478,7 @@ unittest {
     // Minimal entity for testing
     @Entity!(_testDb, "users", "User")
     static struct TestUser {
-        @PrimaryKeyAttr long id;
+        @PrimaryKey long id;
     }
 
     // Test ProjectColumnExpr
@@ -551,7 +551,7 @@ unittest {
     // Minimal entity for testing
     @Entity!(_testDb2, "posts", "Post")
     static struct TestPost {
-        @PrimaryKeyAttr long id;
+        @PrimaryKey long id;
     }
 
     // Test ProjectBelongsToExpr

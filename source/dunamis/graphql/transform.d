@@ -228,7 +228,7 @@ To entityCastValue(To, From)(From from) {
 // ============================================================================
 
 version (unittest) {
-    import dunamis.core.types : PrimaryKeyAttr;
+    import dunamis.core.types : PrimaryKey;
     import dunamis.relational.schema : Entity, Col, HasMany, BelongsTo, ForeignKey, Table;
     import dunamis.relational.demo : MockDB;
 
@@ -237,7 +237,7 @@ version (unittest) {
     // Test types with circular references (Post must be before Author for HasMany)
     @Entity!(_testDb, "posts", "TestPost")
     struct TestPost {
-        @PrimaryKeyAttr int id;
+        @PrimaryKey int id;
         mixin Col!("title", string);
         mixin Col!("authorId", ForeignKey!TestAuthor);
         mixin BelongsTo!("author", "authorId");
@@ -245,7 +245,7 @@ version (unittest) {
 
     @Entity!(_testDb, "authors", "TestAuthor")
     struct TestAuthor {
-        @PrimaryKeyAttr int id;
+        @PrimaryKey int id;
         mixin Col!("name", string);
         mixin HasMany!("posts", TestPost, "author_id");
     }

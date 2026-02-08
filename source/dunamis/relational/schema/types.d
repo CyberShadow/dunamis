@@ -24,7 +24,7 @@ template EntityID(T) {
 // Entity Construction Helpers
 // ============================================================================
 
-import dunamis.core.types : AnyRef, PrimaryKeyAttr, isPlainField;
+import dunamis.core.types : AnyRef, PrimaryKey, isPlainField;
 
 private template pkFieldOf(T) {
     import dunamis.core.types : getPrimaryKeyFieldName;

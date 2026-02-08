@@ -69,9 +69,9 @@ class Executor {
 
 /// Dummy entity type for tests (with @PrimaryKey field)
 private struct TestEntity {
-    import dunamis.core.types : PrimaryKeyAttr;
+    import dunamis.core.types : PrimaryKey;
 
-    @PrimaryKeyAttr string id;
+    @PrimaryKey string id;
 }
 
 /// Helper: expression that returns a fixed array of entities.

@@ -519,9 +519,9 @@ import dunamis.core.expr.primitives : FieldAccessExpr;
 
 /// Dummy entity type for tests (with @PrimaryKey field)
 private struct TestEntity {
-    import dunamis.core.types : PrimaryKeyAttr;
+    import dunamis.core.types : PrimaryKey;
 
-    @PrimaryKeyAttr string id;      // Primary key
+    @PrimaryKey string id;      // Primary key
     string typeName;                // Extra field for test assertions
 }
 

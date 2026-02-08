@@ -62,7 +62,7 @@ template getColumnDefs(Entity) {
     import std.traits : hasUDA, getUDAs, ReturnType;
     import std.meta : staticIndexOf;
     import std.typecons : Nullable;
-    import dunamis.relational.schema : SqlColumn, PrimaryKeyAttr;
+    import dunamis.relational.schema : SqlColumn, PrimaryKey;
     import dunamis.relational.schema : ForeignKeyRef, hasForeignKeyRef, extractForeignKeyRef;
     import dunamis.relational.schema : BelongsToFK, hasBelongsToFK, getBelongsToFK;
     import dunamis.relational.schema : BelongsToParent, hasBelongsToParent, extractBelongsToParent;
@@ -105,8 +105,8 @@ template getColumnDefs(Entity) {
                     enum columnName = getUDAs!(fieldMethod, SqlColumn)[0].name;
 
                     if (columnName !in seenColumns) {
-                        // Check if primary key (via @PrimaryKeyAttr UDA)
-                        enum bool isPK = hasUDA!(fieldMethod, PrimaryKeyAttr);
+                        // Check if primary key (via @PrimaryKey UDA)
+                        enum bool isPK = hasUDA!(fieldMethod, PrimaryKey);
 
                         // Get the D type from method return type
                         alias ColType = ExprResultType!(ReturnType!fieldMethod);

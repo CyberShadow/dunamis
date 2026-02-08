@@ -16,7 +16,7 @@ struct SqlColumn {
 }
 
 /// Marks a column as part of the primary key for DDL generation.
-public import dunamis.core.types : PrimaryKeyAttr;
+public import dunamis.core.types : PrimaryKey;
 
 // ============================================================================
 // Entity UDA
@@ -315,14 +315,7 @@ template hasSqlColumn(alias method) {
     enum hasSqlColumn = getSqlColumn!method.length > 0;
 }
 
-/// Check if a method has @PrimaryKeyAttr UDA (single-alias overload for methods)
-template hasPrimaryKeyAttr(alias method) {
-    import std.meta : staticIndexOf;
-    enum hasPrimaryKeyAttr = staticIndexOf!(PrimaryKeyAttr, __traits(getAttributes, method)) >= 0;
-}
-
-// Also re-export the two-parameter version from core for entity-level checks
-public import dunamis.core.types : hasPrimaryKey, getPrimaryKeyFieldName, getPrimaryKeyType;
+public import dunamis.core.types : hasPrimaryKey, hasPrimaryKeyAttr, getPrimaryKeyFieldName, getPrimaryKeyType;
 
 /// Check if a method returns a nullable type (Expr!(Nullable!T))
 template hasNullableReturn(alias method) {

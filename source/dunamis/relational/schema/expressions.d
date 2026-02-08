@@ -783,7 +783,7 @@ unittest {
 
     @Entity!(db, "test_entities")
     static struct TestEntity {
-        @PrimaryKeyAttr long id;
+        @PrimaryKey long id;
         string nickname;       // Plain field - auto-detected
         string displayName;    // Plain field - auto-detected
     }
@@ -809,22 +809,22 @@ unittest {
 
     @Entity!(db, "users")
     static struct User {
-        @PrimaryKeyAttr @SqlColumn("id") long id;
+        @PrimaryKey @SqlColumn("id") long id;
     }
     static assert(EntityID!User.table == "users");
     static assert(EntityID!User.typeName == "User");
     static assert(hasUDA!(User.id, SqlColumn));
-    static assert(hasUDA!(User.id, PrimaryKeyAttr));
+    static assert(hasUDA!(User.id, PrimaryKey));
     static assert(getUDAs!(User.id, SqlColumn)[0].name == "id");
 
     @Entity!(db, "posts", "BlogPost")
     static struct Post {
-        @PrimaryKeyAttr @SqlColumn("id") long id;
+        @PrimaryKey @SqlColumn("id") long id;
     }
     static assert(EntityID!Post.table == "posts");
     static assert(EntityID!Post.typeName == "BlogPost");
     static assert(hasUDA!(Post.id, SqlColumn));
-    static assert(hasUDA!(Post.id, PrimaryKeyAttr));
+    static assert(hasUDA!(Post.id, PrimaryKey));
 }
 
 unittest {
@@ -839,7 +839,7 @@ unittest {
     }
     static assert(EntityID!Comment.table == "comments");
     static assert(hasUDA!(Comment.id, SqlColumn));
-    static assert(hasUDA!(Comment.id, PrimaryKeyAttr));
+    static assert(hasUDA!(Comment.id, PrimaryKey));
 
     @Entity!(db, "items")
     static struct UuidEntity {
@@ -979,14 +979,14 @@ unittest {
 
     @Entity!(db, "order_items")
     static struct OrderItem {
-        @PrimaryKeyAttr @SqlColumn("order_id") long orderId;
-        @PrimaryKeyAttr @SqlColumn("product_id") long productId;
+        @PrimaryKey @SqlColumn("order_id") long orderId;
+        @PrimaryKey @SqlColumn("product_id") long productId;
         mixin Col!("quantity", long);
         mixin Col!("price", string);
     }
 
-    static assert(hasUDA!(OrderItem.orderId, PrimaryKeyAttr));
-    static assert(hasUDA!(OrderItem.productId, PrimaryKeyAttr));
+    static assert(hasUDA!(OrderItem.orderId, PrimaryKey));
+    static assert(hasUDA!(OrderItem.productId, PrimaryKey));
     static assert(EntityID!OrderItem.table == "order_items");
     static assert(EntityID!OrderItem.typeName == "OrderItem");
 
@@ -1030,8 +1030,8 @@ unittest {
 
     @Entity!(db, "order_items")
     static struct OrderItem {
-        @PrimaryKeyAttr @SqlColumn("order_id") long orderId;
-        @PrimaryKeyAttr @SqlColumn("product_id") long productId;
+        @PrimaryKey @SqlColumn("order_id") long orderId;
+        @PrimaryKey @SqlColumn("product_id") long productId;
         mixin Col!("quantity", long);
     }
 
