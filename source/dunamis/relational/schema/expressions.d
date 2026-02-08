@@ -129,7 +129,8 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
         auto relCtx = ctx.getSourceContext!RelationalOptimizeContext();
 
         // Get or create QueryNode for this MapExpr
-        auto node = relCtx.getOrCreateNode(mapExpr, EntityID!Entity.typeName, EntityID!Entity.table);
+        auto node = relCtx.getOrCreateNode(mapExpr, EntityID!Entity.typeName, EntityID!Entity.table,
+                                           getPkSqlColumns!Entity);
 
         // Set the data fetcher on the node (for mutation-returned entities that bypass GetByIdsExpr)
         if (node.dataFetcher is null && EntityID!Entity.db !is null) {
@@ -264,7 +265,7 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
                 node.addJoinedColumn(lastAlias.get, hop.fk);
             }
             // Add JOIN and get alias, tracking source for multi-hop
-            lastAlias = node.addJoin(hop.targetTable, hop.targetType, hop.fk, lastAlias);
+            lastAlias = node.addJoin(hop.targetTable, hop.targetType, hop.fk, lastAlias, hop.targetPkColumns);
         }
 
         // Track the column needed from the final joined table
@@ -468,7 +469,7 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
 
         // Fallback: naive path using fetchAllIdsString
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-        return relCtx.fetchAllIdsString(EntityID!Entity.table, EntityID!Entity.typeName).then((AnyRef[] refs) {
+        return relCtx.fetchAllIdsString(EntityID!Entity.table, EntityID!Entity.typeName, getPkSqlColumns!Entity).then((AnyRef[] refs) {
             auto entities = refs.map!(r => makeEntityFromRef!Entity(r)).array;
 
             enum plainFields = getPlainFieldNames!Entity;
@@ -728,6 +729,7 @@ class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultTyp
     @property string parentTable() { return EntityID!Parent.table; }
     @property string parentTypeName() { return EntityID!Parent.typeName; }
     @property string fkColumn() { return fk; }
+    @property string[] parentPkColumns() { return getPkSqlColumns!Parent; }
 }
 
 // ============================================================================

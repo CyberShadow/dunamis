@@ -28,6 +28,7 @@ interface BelongsToInfo {
     @property string parentTable();
     @property string parentTypeName();
     @property string fkColumn();
+    @property string[] parentPkColumns();
 }
 
 /// Interface for hasMany expressions to expose their metadata.

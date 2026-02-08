@@ -109,6 +109,32 @@ void seedDatabase() {
     assertNoErrors(task3);
     writeln("  Created task: Deploy app (completed)");
 
+    // Create tags (composite PK: category + name)
+    auto tag1 = graphql(`mutation { createTag(category: "language", name: "D", description: "D programming language") { category name } }`);
+    assertNoErrors(tag1);
+    writeln("  Created tag: language/D");
+
+    auto tag2 = graphql(`mutation { createTag(category: "language", name: "Rust", description: "Rust programming language") { category name } }`);
+    assertNoErrors(tag2);
+    writeln("  Created tag: language/Rust");
+
+    auto tag3 = graphql(`mutation { createTag(category: "tool", name: "GraphQL", description: "Query language for APIs") { category name } }`);
+    assertNoErrors(tag3);
+    writeln("  Created tag: tool/GraphQL");
+
+    // Create user badges (composite PK: user_id + badge_name)
+    auto badge1 = graphql(`mutation { createUserBadge(userId: ` ~ aliceId.toString() ~ `, badgeName: "contributor", description: "Active contributor") { userId badgeName } }`);
+    assertNoErrors(badge1);
+    writeln("  Created badge: Alice/contributor");
+
+    auto badge2 = graphql(`mutation { createUserBadge(userId: ` ~ aliceId.toString() ~ `, badgeName: "reviewer", description: "Code reviewer") { userId badgeName } }`);
+    assertNoErrors(badge2);
+    writeln("  Created badge: Alice/reviewer");
+
+    auto badge3 = graphql(`mutation { createUserBadge(userId: ` ~ bobId.toString() ~ `, badgeName: "contributor", description: "Active contributor") { userId badgeName } }`);
+    assertNoErrors(badge3);
+    writeln("  Created badge: Bob/contributor");
+
     writeln("Seeding complete.");
 }
 
@@ -121,7 +147,7 @@ mixin template TestSchema(alias db) {
     import dunamis.graphql : Schema, SortingPlugin, FilterPlugin;
     import dunamis.graphql.schema : GqlName;
     import dunamis.relational.schema : Table, ForeignKey, BelongsTo, HasMany, Col, getAll, hasMany;
-    import dunamis.relational.demo : DemoEntity, DemoId, CrudMutations;
+    import dunamis.relational.demo : DemoEntity, DemoId, Int64, CrudMutations;
     import dunamis.relational.mutation : insert;
 
     @DemoEntity!(db, "users")
@@ -249,11 +275,36 @@ mixin template TestSchema(alias db) {
         }
     }
 
+    /// Composite primary key entity: Tag with (category, name) PK
+    @DemoEntity!(db, "tags")
+    struct Tag {
+        import dunamis.core.types : PrimaryKey;
+        import dunamis.relational.schema.attrs : SqlColumn;
+
+        @PrimaryKey @SqlColumn("category") string category;
+        @PrimaryKey @SqlColumn("name") string name;
+        string description;
+    }
+
+    /// Composite primary key entity with BelongsTo relationship
+    /// PK is (user_id, badge_name), and user_id is also an FK to User
+    @DemoEntity!(db, "user_badges")
+    struct UserBadge {
+        import dunamis.core.types : PrimaryKey;
+        import dunamis.relational.schema.attrs : SqlColumn;
+
+        @PrimaryKey @SqlColumn("user_id") long userId;
+        @PrimaryKey @SqlColumn("badge_name") string badgeName;
+        string description;
+    }
+
     struct Query {
         mixin Table!(User, "users");
         mixin Table!(Post, "posts");
         mixin Table!(Comment, "comments");
         mixin Table!(Task, "tasks");
+        mixin Table!(Tag, "tags");
+        mixin Table!(UserBadge, "userBadges");
     }
 
     struct Mutation {
@@ -286,6 +337,24 @@ mixin template TestSchema(alias db) {
                 "last_name": JSONValue(lastName),
                 "age": JSONValue(age),
                 "nickname": JSONValue(nickname)
+            ]);
+        }
+
+        /// Create tag (composite PK: category + name)
+        static auto createTag(Expr!Mutation parent, string category, string name, string description) {
+            return insert!Tag([
+                "category": JSONValue(category),
+                "name": JSONValue(name),
+                "description": JSONValue(description)
+            ]);
+        }
+
+        /// Create user badge (composite PK: user_id + badge_name)
+        static auto createUserBadge(Expr!Mutation parent, Int64 userId, string badgeName, string description) {
+            return insert!UserBadge([
+                "user_id": JSONValue(userId.value),
+                "badge_name": JSONValue(badgeName),
+                "description": JSONValue(description)
             ]);
         }
     }

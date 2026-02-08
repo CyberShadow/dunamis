@@ -76,8 +76,13 @@ class PostgresDialect : SqlDialect {
         }
     }
 
-    override string rootIdFilter(string table) {
-        return format("%s.id = ANY($1)", table);
+    override string rootIdFilter(string table, string[] pkColumns = ["id"]) {
+        if (pkColumns.length == 1) {
+            return format("%s.%s = ANY($1)", table, pkColumns[0]);
+        }
+        // Composite PK: use IN ({{IDS}}) with tuple syntax
+        auto cols = pkColumns.map!(c => table ~ "." ~ c).array.join(", ");
+        return format("(%s) IN ({{IDS}})", cols);
     }
 
     override string jsonObjectFunc() { return "json_build_object"; }

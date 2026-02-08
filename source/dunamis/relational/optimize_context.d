@@ -26,14 +26,15 @@ class RelationalOptimizeContext {
 
     /// Get or create a QueryNode for a MapExpr.
     /// Called by access expressions during optimization.
-    QueryNode getOrCreateNode(Object mapExpr, string typeName, string table) {
+    /// pkColumns: SQL column names for the entity's primary key (default ["id"]).
+    QueryNode getOrCreateNode(Object mapExpr, string typeName, string table, string[] pkColumns = ["id"]) {
         assert(mapExpr !is null, "mapExpr must not be null for QueryNode lookup");
         auto key = cast(void*) mapExpr;
         if (key in _queryNodes) {
             return _queryNodes[key];
         }
 
-        auto node = new QueryNode(QueryNodeId(_nextNodeId++), typeName, table);
+        auto node = new QueryNode(QueryNodeId(_nextNodeId++), typeName, table, pkColumns);
         node.mapExpr = mapExpr;  // Store for looking up currentRefs at eval time
         _queryNodes[key] = node;
         return node;

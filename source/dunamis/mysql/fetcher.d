@@ -131,14 +131,14 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
                 auto result = new QueryResult();
 
                 if (node.isRoot) {
-                    result.loadFromRows(layerRows, node.typeName);
+                    result.loadFromRowsComposite(layerRows, node.typeName, node.pkColumns);
                     rootResult = result;
                     // Also cache root result so fetchBelongsTo can find FK columns
                     _cachedResults[node.id] = result;
                     _cachedResultsByType[node.typeName] = result;
                 } else {
-                    result.loadFromRows(layerRows, node.typeName, "id",
-                                       node.parentFk, node.parentTypeName);
+                    result.loadFromRowsComposite(layerRows, node.typeName, node.pkColumns,
+                                                 node.parentFk, node.parentTypeName);
                     // Cache child results for later retrieval (by node ID and type name)
                     _cachedResults[node.id] = result;
                     _cachedResultsByType[node.typeName] = result;
@@ -154,6 +154,45 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
     // Individual fetch methods (for naive/fallback path)
     // These return Promises to support async database operations.
     // =========================================================================
+
+    /// Generate SQL to fetch a column value, keyed by PK columns.
+    private string buildFetchColumnSQL(string table, string column, string[] validIds) {
+        import std.format : format;
+        import dunamis.core.types : decodeCompositeKey;
+        auto pkColumns = getPkColumnsForTable(table);
+
+        if (pkColumns.length == 1) {
+            return format("SELECT %s, %s FROM %s WHERE %s IN (%s)",
+                pkColumns[0], column, table, pkColumns[0], validIds.join(","));
+        } else {
+            auto dialect = mysqlDialect();
+            string[] conditions;
+            foreach (id; validIds) {
+                auto parts = decodeCompositeKey(id);
+                string[] eqs;
+                foreach (i, col; pkColumns) {
+                    eqs ~= format("%s = %s", col, dialect.escapeSqlString(i < parts.length ? parts[i] : ""));
+                }
+                conditions ~= "(" ~ eqs.join(" AND ") ~ ")";
+            }
+            return format("SELECT %s, %s FROM %s WHERE %s",
+                pkColumns.join(", "), column, table, conditions.join(" OR "));
+        }
+    }
+
+    /// Build composite key from a row result (PK columns come first).
+    private string buildKeyFromRow(MySqlConnection.Row row, size_t pkCount) {
+        import dunamis.core.types : encodeCompositeKey;
+        if (pkCount == 1) {
+            return row.column!string(0);
+        } else {
+            string[] parts;
+            foreach (i; 0 .. pkCount) {
+                parts ~= row.column!string(cast(int) i);
+            }
+            return encodeCompositeKey(parts);
+        }
+    }
 
     override Promise!(string[]) fetchColumnString(string table, string column, AnyRef[] refs) {
         if (refs.length == 0) return resolve(cast(string[])[]);
@@ -173,16 +212,17 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
             return resolve(result);
         }
 
-        auto sql = "SELECT id, " ~ column ~ " FROM " ~ table ~
-                   " WHERE id IN (" ~ validIds.join(",") ~ ")";
+        auto pkColumns = getPkColumnsForTable(table);
+        auto pkCount = pkColumns.length;
+        auto sql = buildFetchColumnSQL(table, column, validIds);
 
         return _conn.query(sql).array().then((MySqlConnection.Row[] rows) {
             // Build lookup map
             string[string] values;
             foreach (row; rows) {
-                auto id = row.column!string(0);
-                auto val = row.column!string(1);
-                values[id] = val;
+                auto key = buildKeyFromRow(row, pkCount);
+                auto val = row.column!string(cast(int) pkCount);
+                values[key] = val;
             }
             // Return in ref order (invalid refs get empty string)
             return refs.map!(r => r.isValid ? values.get(r.localId, "") : "").array;
@@ -207,27 +247,40 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
             return resolve(result);
         }
 
-        auto sql = "SELECT id, " ~ column ~ " FROM " ~ table ~
-                   " WHERE id IN (" ~ validIds.join(",") ~ ")";
+        auto pkColumns = getPkColumnsForTable(table);
+        auto pkCount = pkColumns.length;
+        auto sql = buildFetchColumnSQL(table, column, validIds);
 
         return _conn.query(sql).array().then((MySqlConnection.Row[] rows) {
             // Build lookup map
             long[string] values;
             foreach (row; rows) {
-                auto id = row.column!string(0);
-                auto val = row.column!long(1);
-                values[id] = val;
+                auto key = buildKeyFromRow(row, pkCount);
+                auto val = row.column!long(cast(int) pkCount);
+                values[key] = val;
             }
             // Return in ref order (invalid refs get 0)
             return refs.map!(r => r.isValid ? values.get(r.localId, 0L) : 0L).array;
         });
     }
 
-    override Promise!(string[]) fetchAllIdsString(string table) {
-        auto sql = "SELECT id FROM " ~ table;
+    override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns = ["id"]) {
+        import dunamis.core.types : encodeCompositeKey;
 
+        auto sql = "SELECT " ~ pkColumns.join(", ") ~ " FROM " ~ table;
+
+        auto numPkCols = pkColumns.length;
         return _conn.query(sql).array().then((MySqlConnection.Row[] rows) {
-            return rows.map!(r => r.column!string(0)).array;
+            return rows.map!((r) {
+                if (numPkCols == 1) {
+                    return r.column!string(0);
+                }
+                string[] parts;
+                foreach (i; 0 .. numPkCols) {
+                    parts ~= r.column!string(cast(int) i);
+                }
+                return encodeCompositeKey(parts);
+            }).array;
         });
     }
 
@@ -255,15 +308,17 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
         }
 
         // Naive path: query children grouped by parent FK
-        auto sql = "SELECT id, " ~ fk ~ " FROM " ~ childTable ~
+        auto childPkColumns = getPkColumnsForTable(childTable);
+        auto childPkCount = childPkColumns.length;
+        auto sql = "SELECT " ~ childPkColumns.join(", ") ~ ", " ~ fk ~ " FROM " ~ childTable ~
                    " WHERE " ~ fk ~ " IN (" ~ validIds.join(",") ~ ")";
 
         return _conn.query(sql).array().then((MySqlConnection.Row[] rows) {
             // Group children by parent
             AnyRef[][string] childrenByParent;
             foreach (row; rows) {
-                auto childId = row.column!string(0);
-                auto parentId = row.column!string(1);
+                auto childId = buildKeyFromRow(row, childPkCount);
+                auto parentId = row.column!string(cast(int) childPkCount);
                 childrenByParent[parentId] ~= makeAnyRef(childType, childId);
             }
             // Return in parent ref order (invalid refs get empty array)
@@ -308,18 +363,19 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
         }
 
         // Naive path: query FK values
-        auto sql = "SELECT id, " ~ fk ~ " FROM " ~ childTable ~
-                   " WHERE id IN (" ~ validIds.join(",") ~ ")";
+        auto pkColumns = getPkColumnsForTable(childTable);
+        auto pkCount = pkColumns.length;
+        auto sql = buildFetchColumnSQL(childTable, fk, validIds);
 
         return _conn.query(sql).array().then((MySqlConnection.Row[] rows) {
             import std.typecons : Nullable;
             // Build lookup map
             string[string] fkValues;
             foreach (row; rows) {
-                auto id = row.column!string(0);
+                auto key = buildKeyFromRow(row, pkCount);
                 // FK column may be NULL
-                auto fkVal = row.column!(Nullable!string)(1);
-                fkValues[id] = fkVal.isNull ? "" : fkVal.get;
+                auto fkVal = row.column!(Nullable!string)(cast(int) pkCount);
+                fkValues[key] = fkVal.isNull ? "" : fkVal.get;
             }
             // Return in ref order (invalid refs get AnyRef.init)
             AnyRef[] result;
@@ -372,24 +428,26 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
             return resolve(result);
         }
 
-        auto sql = "SELECT id, " ~ column ~ " FROM " ~ table ~
-                   " WHERE id IN (" ~ validIds.join(",") ~ ")";
+        auto pkColumns = getPkColumnsForTable(table);
+        auto pkCount = pkColumns.length;
+        auto sql = buildFetchColumnSQL(table, column, validIds);
 
         return _conn.query(sql).array().then((MySqlConnection.Row[] rows) {
             // Build lookup map
             JSONValue[string] values;
             foreach (row; rows) {
-                auto id = row.column!string(0);
+                auto key = buildKeyFromRow(row, pkCount);
+                auto valCol = cast(int) pkCount;
                 // Try to get as string first, then as other types
                 try {
-                    auto val = row.column!string(1);
-                    values[id] = JSONValue(val);
+                    auto val = row.column!string(valCol);
+                    values[key] = JSONValue(val);
                 } catch (Exception e) {
                     try {
-                        auto val = row.column!long(1);
-                        values[id] = JSONValue(val);
+                        auto val = row.column!long(valCol);
+                        values[key] = JSONValue(val);
                     } catch (Exception e2) {
-                        values[id] = JSONValue(null);
+                        values[key] = JSONValue(null);
                     }
                 }
             }
@@ -410,8 +468,8 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
     import dunamis.relational.mutation : InsertInput, UpdateInput;
 
     /// Execute INSERT and return the new row.
-    /// MySQL doesn't have RETURNING, so we use LAST_INSERT_ID().
-    override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input) {
+    /// MySQL doesn't have RETURNING, so we use LAST_INSERT_ID() or PK values.
+    override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns = ["id"]) {
         auto insertSql = generateInsertSQL(table, input);
         _cachedSQL = insertSql;
 
@@ -419,11 +477,17 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
         // Execute INSERT and fetch the inserted row as JSON
         return _conn.query(insertSql).array().then((MySqlConnection.Row[] _) {
-            // Fetch the inserted row using LAST_INSERT_ID()
-            auto selectSql = generateSelectLastInsertSQL(table, columns);
+            // For auto-increment single PK, use LAST_INSERT_ID()
+            // For composite/explicit PKs, use PK values from input
+            string selectSql;
+            if (pkColumns == ["id"] && "id" !in input.values) {
+                selectSql = generateSelectLastInsertSQL(table, columns);
+            } else {
+                selectSql = generateSelectByPkSQL(table, pkColumns, columns, input);
+            }
             return _conn.query(selectSql).array();
         }).then((MySqlConnection.Row[] rows) {
-            return parseJsonResult(rows, typeName);
+            return parseJsonResult(rows, typeName, pkColumns);
         });
     }
 
@@ -465,7 +529,7 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
     /// Parse JSON result from SELECT query.
     /// Expects rows with a single column containing JSON.
-    private QueryResult parseJsonResult(MySqlConnection.Row[] rows, string typeName) {
+    private QueryResult parseJsonResult(MySqlConnection.Row[] rows, string typeName, string[] pkColumns = ["id"]) {
         auto result = new QueryResult();
         if (rows.length == 0) {
             return result;
@@ -478,7 +542,7 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
             jsonRows ~= parseJSON(jsonStr);
         }
 
-        result.loadFromRows(jsonRows, typeName);
+        result.loadFromRowsComposite(jsonRows, typeName, pkColumns);
         return result;
     }
 }

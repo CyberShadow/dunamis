@@ -191,7 +191,7 @@ TestResults runAllTests() {
 private __gshared string graphqlEndpoint = "http://localhost:8080/graphql";
 
 /// Current optimization mode for tests (controlled by runAllTests)
-private __gshared bool currentOptimizeMode = true;
+__gshared bool currentOptimizeMode = true;
 
 /// Set the GraphQL endpoint URL
 void setGraphQLEndpoint(string url) {

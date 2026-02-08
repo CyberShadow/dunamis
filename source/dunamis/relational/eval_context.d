@@ -80,6 +80,15 @@ abstract class DataFetcher {
     import dunamis.core.optimize : ExprOptimizer;
     import dunamis.core.expr : ExprBase;
 
+    /// Cache of PK column names per table, populated by fetchAllIdsString calls.
+    /// Used by naive-path fetchColumn* methods to generate correct WHERE clauses.
+    protected string[][string] _pkColumnsByTable;
+
+    /// Get the PK columns for a table (defaults to ["id"] if not cached)
+    protected string[] getPkColumnsForTable(string table) {
+        return _pkColumnsByTable.get(table, ["id"]);
+    }
+
     /// Get the optimizers this data source needs.
     /// Default: no additional optimizers.
     /// SQL-backed fetchers would override to return [new SqlOptimizer()].
@@ -230,7 +239,7 @@ abstract class DataFetcher {
     }
 
     /// Fetch all IDs from a table as strings (supports any ID type including composite keys)
-    abstract Promise!(string[]) fetchAllIdsString(string table);
+    abstract Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns = ["id"]);
 
     /// Fetch children for parent refs (hasMany)
     /// Returns AnyRef[][] - one AnyRef[] per parent
@@ -251,7 +260,7 @@ abstract class DataFetcher {
 
     /// Execute INSERT and return the new row as QueryResult.
     /// Default implementation returns empty result (no-op).
-    Promise!QueryResult executeInsert(string table, string typeName, InsertInput input) {
+    Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns = ["id"]) {
         return resolve(new QueryResult());
     }
 
@@ -330,7 +339,7 @@ class QueryResult {
             foreach (col; idColumns) {
                 keyParts ~= jsonValToString(row[col]);
             }
-            string idStr = idColumns.length == 1 ? keyParts[0] : encodeCompositeKey(keyParts);
+            string idStr = encodeCompositeKey(keyParts);
             auto nodeId = typeName ~ ":" ~ idStr;
             _allRefs ~= AnyRef(nodeId);
 
@@ -608,9 +617,11 @@ class RelationalEvalContext {
     }
 
     /// Fetch all IDs for a table as strings, wrapped in AnyRef (delegates to fetcher)
-    Promise!(AnyRef[]) fetchAllIdsString(string table, string typeName) {
+    Promise!(AnyRef[]) fetchAllIdsString(string table, string typeName, string[] pkColumns = ["id"]) {
         if (fetcher !is null) {
-            return fetcher.fetchAllIdsString(table).then((string[] ids) {
+            // Cache PK columns for later use by fetchColumn* methods
+            fetcher._pkColumnsByTable[table] = pkColumns;
+            return fetcher.fetchAllIdsString(table, pkColumns).then((string[] ids) {
                 return ids.map!(id => makeAnyRef(typeName, id)).array;
             });
         }

@@ -220,7 +220,7 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
         return result;
     }
 
-    override Promise!(string[]) fetchAllIdsString(string table) {
+    override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns = ["id"]) {
         return resolve(fetchAllIdsStringSync(table));
     }
 
@@ -474,14 +474,17 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
     private long[string] _nextId;  // Auto-increment ID per table
 
     /// Execute INSERT into in-memory data.
-    override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input) {
-        // Get next ID
-        auto nextId = _nextId.get(table, 1);
-        _nextId[table] = nextId + 1;
-
+    override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns = ["id"]) {
         // Build new row
         auto newRow = JSONValue.emptyObject;
-        newRow["id"] = JSONValue(nextId);
+
+        // Only auto-generate ID for single-column "id" PK when not provided in input
+        if (pkColumns == ["id"] && "id" !in input.values) {
+            auto nextId = _nextId.get(table, 1);
+            _nextId[table] = nextId + 1;
+            newRow["id"] = JSONValue(nextId);
+        }
+
         foreach (col, val; input.values) {
             newRow[col] = val;
         }
@@ -496,7 +499,7 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
         // Return as QueryResult
         auto result = new QueryResult();
-        result.loadFromRows([newRow], typeName);
+        result.loadFromRowsComposite([newRow], typeName, pkColumns);
         return resolve(result);
     }
 
@@ -661,8 +664,8 @@ class DebugSqlDB(DBConfig config = defaultDBConfig) : DataFetcher {
         return _delegate.fetchColumnLong(table, column, refs);
     }
 
-    override Promise!(string[]) fetchAllIdsString(string table) {
-        return _delegate.fetchAllIdsString(table);
+    override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns = ["id"]) {
+        return _delegate.fetchAllIdsString(table, pkColumns);
     }
 
     override Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs) {

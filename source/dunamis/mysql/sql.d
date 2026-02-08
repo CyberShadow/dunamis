@@ -63,6 +63,44 @@ string generateSelectLastInsertSQL(string table, string[] columns) {
     );
 }
 
+/// Generate SELECT SQL to fetch a row by PK values from insert input.
+/// Used for composite PKs or non-auto-increment PKs where LAST_INSERT_ID() doesn't apply.
+/// Returns JSON with PK columns and all other input columns.
+string generateSelectByPkSQL(string table, string[] pkColumns, string[] inputColumns, InsertInput input) {
+    import std.algorithm : canFind;
+
+    // Build JSON_OBJECT arguments from PK columns + input columns
+    string[] jsonArgs;
+    bool[string] seen;
+    foreach (col; pkColumns) {
+        jsonArgs ~= format("'%s'", col);
+        jsonArgs ~= col;
+        seen[col] = true;
+    }
+    foreach (col; inputColumns) {
+        if (col !in seen) {
+            jsonArgs ~= format("'%s'", col);
+            jsonArgs ~= col;
+            seen[col] = true;
+        }
+    }
+
+    // Build WHERE clause from PK values
+    string[] conditions;
+    foreach (col; pkColumns) {
+        if (col in input.values) {
+            conditions ~= format("%s = %s", col, jsonToSqlLiteral(input.values[col]));
+        }
+    }
+
+    return format(
+        "SELECT JSON_OBJECT(%s) AS json_row FROM %s WHERE %s",
+        jsonArgs.join(", "),
+        table,
+        conditions.join(" AND ")
+    );
+}
+
 /// Generate UPDATE SQL for MySQL.
 string generateUpdateSQL(string table, UpdateInput input) {
     auto columns = input.columns;

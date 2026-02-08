@@ -192,7 +192,17 @@ template generateCreateTable(Dialect, Entity) {
         string[] fkConstraints;
 
         foreach (col; columns) {
-            string sqlType = Dialect.sqlTypeName(col.dType);
+            string sqlType;
+
+            // For PK columns in composite keys, use PK-safe type if dialect provides one
+            // (e.g., MySQL needs VARCHAR(255) instead of TEXT for PK columns)
+            static if (__traits(hasMember, Dialect, "primaryKeySqlTypeName")) {
+                sqlType = col.isPrimaryKey
+                    ? Dialect.primaryKeySqlTypeName(col.dType)
+                    : Dialect.sqlTypeName(col.dType);
+            } else {
+                sqlType = Dialect.sqlTypeName(col.dType);
+            }
 
             // Handle auto-increment for single-column primary keys
             if (col.isPrimaryKey && !isCompositePK) {

@@ -138,14 +138,14 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
                 auto result = new QueryResult();
 
                 if (node.isRoot) {
-                    result.loadFromRows(layerRows, node.typeName);
+                    result.loadFromRowsComposite(layerRows, node.typeName, node.pkColumns);
                     rootResult = result;
                     // Also cache root result so fetchBelongsTo can find FK columns
                     _cachedResults[node.id] = result;
                     _cachedResultsByType[node.typeName] = result;
                 } else {
-                    result.loadFromRows(layerRows, node.typeName, "id",
-                                       node.parentFk, node.parentTypeName);
+                    result.loadFromRowsComposite(layerRows, node.typeName, node.pkColumns,
+                                                 node.parentFk, node.parentTypeName);
                     _cachedResults[node.id] = result;
                     _cachedResultsByType[node.typeName] = result;
                 }
@@ -159,6 +159,48 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
     // Individual fetch methods (for naive/fallback path)
     // SQLite is synchronous, so results are wrapped in resolve().
     // =========================================================================
+
+    /// Generate SQL to fetch a column value, keyed by PK columns.
+    /// For single PK: SELECT pk, column FROM table WHERE pk IN (...)
+    /// For composite PK: SELECT pk1, pk2, ..., column FROM table WHERE (pk1=v1 AND pk2=v2) OR ...
+    private string buildFetchColumnSQL(string table, string column, string[] validIds) {
+        import dunamis.core.types : decodeCompositeKey;
+        auto pkColumns = getPkColumnsForTable(table);
+
+        if (pkColumns.length == 1) {
+            auto idList = validIds.join(",");
+            return format("SELECT %s, %s FROM %s WHERE %s IN (%s)",
+                pkColumns[0], column, table, pkColumns[0], idList);
+        } else {
+            // Composite PK: build OR conditions
+            auto dialect = sqliteDialect();
+            string[] conditions;
+            foreach (id; validIds) {
+                auto parts = decodeCompositeKey(id);
+                string[] eqs;
+                foreach (i, col; pkColumns) {
+                    eqs ~= format("%s = %s", col, dialect.escapeSqlString(i < parts.length ? parts[i] : ""));
+                }
+                conditions ~= "(" ~ eqs.join(" AND ") ~ ")";
+            }
+            return format("SELECT %s, %s FROM %s WHERE %s",
+                pkColumns.join(", "), column, table, conditions.join(" OR "));
+        }
+    }
+
+    /// Build composite key from result cells (PK columns come first in result)
+    private string buildKeyFromCells(Cells)(Cells cells, size_t pkCount) {
+        import dunamis.core.types : encodeCompositeKey;
+        if (pkCount == 1) {
+            return cells[0] !is null ? cells[0].idup : "";
+        } else {
+            string[] parts;
+            foreach (i; 0 .. pkCount) {
+                parts ~= cells[i] !is null ? cells[i].idup : "";
+            }
+            return encodeCompositeKey(parts);
+        }
+    }
 
     override Promise!(string[]) fetchColumnString(string table, string column, AnyRef[] refs) {
         if (refs.length == 0) {
@@ -181,17 +223,17 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
             return resolve(result);
         }
 
-        // Query the column values
-        auto idList = validIds.join(",");
-        auto sql = format("SELECT id, %s FROM %s WHERE id IN (%s)", column, table, idList);
+        auto pkColumns = getPkColumnsForTable(table);
+        auto sql = buildFetchColumnSQL(table, column, validIds);
 
         // Build value lookup map
         string[string] values;
         foreach (cells, columns; _db.query(sql)) {
-            if (cells.length >= 2) {
-                auto id = cells[0] !is null ? cells[0].idup : "";
-                auto value = cells[1] !is null ? cells[1].idup : "";
-                values[id] = value;
+            auto pkCount = pkColumns.length;
+            if (cells.length > pkCount) {
+                auto key = buildKeyFromCells(cells, pkCount);
+                auto value = cells[pkCount] !is null ? cells[pkCount].idup : "";
+                values[key] = value;
             }
         }
 
@@ -220,17 +262,17 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
             return resolve(result);
         }
 
-        // Query the column values
-        auto idList = validIds.join(",");
-        auto sql = format("SELECT id, %s FROM %s WHERE id IN (%s)", column, table, idList);
+        auto pkColumns = getPkColumnsForTable(table);
+        auto sql = buildFetchColumnSQL(table, column, validIds);
 
         // Build value lookup map
         long[string] values;
         foreach (cells, columns; _db.query(sql)) {
-            if (cells.length >= 2) {
-                auto id = cells[0] !is null ? cells[0].idup : "";
-                auto valueStr = cells[1] !is null ? cells[1].idup : "0";
-                values[id] = valueStr.to!long;
+            auto pkCount = pkColumns.length;
+            if (cells.length > pkCount) {
+                auto key = buildKeyFromCells(cells, pkCount);
+                auto valueStr = cells[pkCount] !is null ? cells[pkCount].idup : "0";
+                values[key] = valueStr.to!long;
             }
         }
 
@@ -238,13 +280,23 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
         return resolve(refs.map!(r => r.isValid ? values.get(r.localId, 0L) : 0L).array);
     }
 
-    override Promise!(string[]) fetchAllIdsString(string table) {
-        auto sql = format("SELECT id FROM %s", table);
+    override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns = ["id"]) {
+        import dunamis.core.types : encodeCompositeKey;
+
+        auto sql = format("SELECT %s FROM %s", pkColumns.join(", "), table);
         string[] result;
 
         foreach (cells, columns; _db.query(sql)) {
             if (cells.length >= 1 && cells[0] !is null) {
-                result ~= cells[0].idup;
+                if (pkColumns.length == 1) {
+                    result ~= cells[0].idup;
+                } else {
+                    string[] parts;
+                    foreach (i; 0 .. pkColumns.length) {
+                        parts ~= cells[i] !is null ? cells[i].idup : "";
+                    }
+                    result ~= encodeCompositeKey(parts);
+                }
             }
         }
 
@@ -273,14 +325,17 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
         AnyRef[][string] childrenByParentId;
 
         if (validIds.length > 0) {
+            auto childPkColumns = getPkColumnsForTable(childTable);
             auto idList = validIds.join(",");
-            auto sql = format("SELECT id, %s FROM %s WHERE %s IN (%s)", fk, childTable, fk, idList);
+            auto sql = format("SELECT %s, %s FROM %s WHERE %s IN (%s)",
+                childPkColumns.join(", "), fk, childTable, fk, idList);
 
             // Group children by parent FK
             foreach (cells, columns; _db.query(sql)) {
-                if (cells.length >= 2) {
-                    auto childId = cells[0] !is null ? cells[0].idup : "";
-                    auto parentId = cells[1] !is null ? cells[1].idup : "";
+                auto pkCount = childPkColumns.length;
+                if (cells.length > pkCount) {
+                    auto childId = buildKeyFromCells(cells, pkCount);
+                    auto parentId = cells[pkCount] !is null ? cells[pkCount].idup : "";
                     if (parentId.length > 0) {
                         childrenByParentId[parentId] ~= makeAnyRef(childType, childId);
                     }
@@ -343,16 +398,17 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
             return resolve(childRefs.map!(_ => AnyRef.init).array);
         }
 
-        auto idList = validIds.join(",");
-        auto sql = format("SELECT id, %s FROM %s WHERE id IN (%s)", fk, childTable, idList);
+        auto pkColumns = getPkColumnsForTable(childTable);
+        auto sql = buildFetchColumnSQL(childTable, fk, validIds);
 
         // Build id -> fk value map from query results
         string[string] fkByChildId;
         foreach (cells, columns; _db.query(sql)) {
-            if (cells.length >= 2) {
-                auto childId = cells[0] !is null ? cells[0].idup : "";
-                auto fkValue = cells[1] !is null ? cells[1].idup : "";
-                fkByChildId[childId] = fkValue;
+            auto pkCount = pkColumns.length;
+            if (cells.length > pkCount) {
+                auto key = buildKeyFromCells(cells, pkCount);
+                auto fkValue = cells[pkCount] !is null ? cells[pkCount].idup : "";
+                fkByChildId[key] = fkValue;
             }
         }
 
@@ -411,25 +467,25 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
             return resolve(result);
         }
 
-        // Query the column values
-        auto idList = validIds.join(",");
-        auto sql = format("SELECT id, %s FROM %s WHERE id IN (%s)", column, table, idList);
+        auto pkColumns = getPkColumnsForTable(table);
+        auto sql = buildFetchColumnSQL(table, column, validIds);
 
         // Build value lookup map
         JSONValue[string] values;
         foreach (cells, columns; _db.query(sql)) {
-            if (cells.length >= 2) {
-                auto id = cells[0] !is null ? cells[0].idup : "";
-                if (cells[1] is null) {
-                    values[id] = JSONValue(null);
+            auto pkCount = pkColumns.length;
+            if (cells.length > pkCount) {
+                auto key = buildKeyFromCells(cells, pkCount);
+                if (cells[pkCount] is null) {
+                    values[key] = JSONValue(null);
                 } else {
-                    auto val = cells[1].idup;
+                    auto val = cells[pkCount].idup;
                     // Try to parse as number, otherwise use string
                     long longVal;
                     if (!collectException(val.to!long, longVal)) {
-                        values[id] = JSONValue(longVal);
+                        values[key] = JSONValue(longVal);
                     } else {
-                        values[id] = JSONValue(val);
+                        values[key] = JSONValue(val);
                     }
                 }
             }
@@ -447,20 +503,26 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
     /// Execute INSERT and return the new row.
     /// SQLite is synchronous, so we return an immediately resolved promise.
-    override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input) {
+    override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns = ["id"]) {
         auto insertSql = generateInsertSQL(table, input);
         _cachedSQL = insertSql;
 
         // Execute INSERT
         _db.exec(insertSql);
 
-        // Fetch the inserted row
-        auto selectSql = generateSelectLastInsertSQL(table);
+        // Fetch the inserted row — use PK values from input for composite keys,
+        // fall back to last_insert_rowid() for auto-increment single PK
+        string selectSql;
+        if (pkColumns == ["id"] && "id" !in input.values) {
+            selectSql = generateSelectLastInsertSQL(table);
+        } else {
+            selectSql = generateSelectByPkSQL(table, pkColumns, input);
+        }
         auto result = new QueryResult();
 
         foreach (cells, columns; _db.query(selectSql)) {
             auto jsonRow = rowToJson(cells, columns);
-            result.loadFromRows([jsonRow], typeName);
+            result.loadFromRowsComposite([jsonRow], typeName, pkColumns);
             break;
         }
 

@@ -86,9 +86,10 @@ private string toCTE(QueryNode node, SqlDialect dialect, SqlOptimizer sqlOpt) {
     // JOINs for belongsTo relationships
     foreach (joinInfo; node.joins) {
         auto sourceRef = !joinInfo.sourceAlias.isNull ? joinInfo.sourceAlias.get.value : node.table;
-        sql ~= format("\n    LEFT JOIN %s %s ON %s.%s = %s.id",
+        auto targetPk = joinInfo.targetPkColumns.length > 0 ? joinInfo.targetPkColumns[0] : "id";
+        sql ~= format("\n    LEFT JOIN %s %s ON %s.%s = %s.%s",
             joinInfo.targetTable, joinInfo.alias_.value,
-            sourceRef, joinInfo.fk, joinInfo.alias_.value);
+            sourceRef, joinInfo.fk, joinInfo.alias_.value, targetPk);
     }
 
     // WHERE clause
@@ -101,12 +102,15 @@ private string toCTE(QueryNode node, SqlDialect dialect, SqlOptimizer sqlOpt) {
                 break;
             case FilterType.byId:
             case FilterType.byIds:
-                sql ~= dialect.rootIdFilter(node.table);
+                sql ~= dialect.rootIdFilter(node.table, node.pkColumns);
                 break;
         }
     } else {
-        sql ~= format("%s.%s IN (SELECT id FROM layer%d)",
-            node.table, node.parentFk, node.parent.id.value);
+        // Use parent's PK columns for the subselect
+        auto parentPkCols = node.parent.pkColumns;
+        auto parentPkSelect = parentPkCols.length == 1 ? parentPkCols[0] : parentPkCols.join(", ");
+        sql ~= format("%s.%s IN (SELECT %s FROM layer%d)",
+            node.table, node.parentFk, parentPkSelect, node.parent.id.value);
     }
 
     // Custom WHERE clause from filter predicates
@@ -153,7 +157,7 @@ private string toCTEWithWindowFunction(QueryNode node, SqlDialect dialect, SqlOp
         }
         windowOrderBy = orderParts.join(", ");
     } else {
-        windowOrderBy = "id";
+        windowOrderBy = node.pkColumns.join(", ");
     }
 
     sql ~= format("  layer%d AS (\n", node.id.value);
@@ -179,14 +183,17 @@ private string toCTEWithWindowFunction(QueryNode node, SqlDialect dialect, SqlOp
     // JOINs in the inner query
     foreach (joinInfo; node.joins) {
         auto sourceRef = !joinInfo.sourceAlias.isNull ? joinInfo.sourceAlias.get.value : node.table;
-        sql ~= format("      LEFT JOIN %s %s ON %s.%s = %s.id\n",
+        auto targetPk = joinInfo.targetPkColumns.length > 0 ? joinInfo.targetPkColumns[0] : "id";
+        sql ~= format("      LEFT JOIN %s %s ON %s.%s = %s.%s\n",
             joinInfo.targetTable, joinInfo.alias_.value,
-            sourceRef, joinInfo.fk, joinInfo.alias_.value);
+            sourceRef, joinInfo.fk, joinInfo.alias_.value, targetPk);
     }
 
     // WHERE clause for inner query
-    sql ~= format("      WHERE %s.%s IN (SELECT id FROM layer%d)",
-        node.table, node.parentFk, node.parent.id.value);
+    auto parentPkCols = node.parent.pkColumns;
+    auto parentPkSelect = parentPkCols.length == 1 ? parentPkCols[0] : parentPkCols.join(", ");
+    sql ~= format("      WHERE %s.%s IN (SELECT %s FROM layer%d)",
+        node.table, node.parentFk, parentPkSelect, node.parent.id.value);
 
     // Custom WHERE clause
     if (node.whereClause_.length > 0) {

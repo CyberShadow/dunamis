@@ -24,6 +24,12 @@ struct MySQLDialect {
         }
     }
 
+    /// MySQL can't use TEXT in primary keys — use VARCHAR(255) for strings
+    static string primaryKeySqlTypeName(string dType) {
+        if (dType == "string") return "VARCHAR(255)";
+        return sqlTypeName(dType);
+    }
+
     /// MySQL uses AUTO_INCREMENT for auto-increment columns
     static string autoIncrementType(string baseType) {
         // AUTO_INCREMENT is a modifier, not a type replacement

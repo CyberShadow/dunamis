@@ -9,6 +9,12 @@ import std.conv : to;
 import std.json : JSONType, JSONValue;
 import integration.test_framework;
 
+/// Return a mode-dependent suffix to avoid UNIQUE constraint failures
+/// when mutation tests run in both optimized and naive modes.
+private string modeSuffix() {
+    return currentOptimizeMode ? "opt" : "naive";
+}
+
 // ============================================================================
 // Query Tests
 // ============================================================================
@@ -1533,6 +1539,203 @@ void testFilterCaseSensitiveVsInsensitive() {
 }
 
 // ============================================================================
+// Composite Primary Key Tests
+// ============================================================================
+
+void testQueryAllTags() {
+    auto response = graphql(`{ tags { category name description } }`);
+
+    assertNoErrors(response);
+    auto tags = response["data"]["tags"].array;
+    assertTrue(tags.length >= 3, "Expected at least 3 tags");
+
+    // Verify all tags have expected fields
+    foreach (tag; tags) {
+        assertTrue(("category" in tag) !is null, "Tag should have category");
+        assertTrue(("name" in tag) !is null, "Tag should have name");
+        assertTrue(("description" in tag) !is null, "Tag should have description");
+    }
+}
+
+void testQueryTagsByCategory() {
+    // Query all tags and check category grouping
+    auto response = graphql(`{ tags { category name } }`);
+
+    assertNoErrors(response);
+    auto tags = response["data"]["tags"].array;
+
+    // Find language tags
+    int languageTags = 0;
+    int toolTags = 0;
+    foreach (tag; tags) {
+        if (tag["category"].str == "language") languageTags++;
+        if (tag["category"].str == "tool") toolTags++;
+    }
+    assertTrue(languageTags >= 2, "Expected at least 2 language tags");
+    assertTrue(toolTags >= 1, "Expected at least 1 tool tag");
+}
+
+void testQueryTagValues() {
+    auto response = graphql(`{ tags { category name description } }`);
+
+    assertNoErrors(response);
+    auto tags = response["data"]["tags"].array;
+
+    // Find specific tags and verify their data
+    bool foundD = false;
+    bool foundGraphQL = false;
+    foreach (tag; tags) {
+        if (tag["category"].str == "language" && tag["name"].str == "D") {
+            assertTrue(tag["description"].str == "D programming language",
+                "D tag description should match");
+            foundD = true;
+        }
+        if (tag["category"].str == "tool" && tag["name"].str == "GraphQL") {
+            assertTrue(tag["description"].str == "Query language for APIs",
+                "GraphQL tag description should match");
+            foundGraphQL = true;
+        }
+    }
+    assertTrue(foundD, "Expected to find language/D tag");
+    assertTrue(foundGraphQL, "Expected to find tool/GraphQL tag");
+}
+
+void testCreateTagMutation() {
+    // Test creating a new tag with composite PK (use mode suffix for uniqueness)
+    auto suffix = modeSuffix();
+    auto name = "Vibe-" ~ suffix;
+    auto response = graphql(`mutation {
+        createTag(category: "framework", name: "` ~ name ~ `", description: "D web framework") {
+            category
+            name
+            description
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto tag = response["data"]["createTag"];
+    assertTrue(tag["category"].str == "framework", "Expected category 'framework'");
+    assertTrue(tag["name"].str == name, "Expected name '" ~ name ~ "'");
+    assertTrue(tag["description"].str == "D web framework", "Expected correct description");
+}
+
+void testQueryAllUserBadges() {
+    auto response = graphql(`{ userBadges { userId badgeName description } }`);
+
+    assertNoErrors(response);
+    auto badges = response["data"]["userBadges"].array;
+    assertTrue(badges.length >= 3, "Expected at least 3 user badges");
+
+    // Verify all badges have expected fields
+    foreach (badge; badges) {
+        assertTrue(("userId" in badge) !is null, "Badge should have userId");
+        assertTrue(("badgeName" in badge) !is null, "Badge should have badgeName");
+        assertTrue(("description" in badge) !is null, "Badge should have description");
+    }
+}
+
+void testQueryUserBadgeValues() {
+    auto response = graphql(`{ userBadges { userId badgeName description } }`);
+
+    assertNoErrors(response);
+    auto badges = response["data"]["userBadges"].array;
+
+    // Count contributor badges (Alice and Bob both have one)
+    int contributorCount = 0;
+    foreach (badge; badges) {
+        if (badge["badgeName"].str == "contributor") contributorCount++;
+    }
+    assertTrue(contributorCount >= 2, "Expected at least 2 contributor badges");
+}
+
+void testCreateUserBadgeMutation() {
+    // Test creating a new user badge with composite PK (use mode suffix for uniqueness)
+    auto suffix = modeSuffix();
+    auto badgeName = "tester-" ~ suffix;
+    auto response = graphql(`mutation {
+        createUserBadge(userId: 1, badgeName: "` ~ badgeName ~ `", description: "Test writer") {
+            userId
+            badgeName
+            description
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto badge = response["data"]["createUserBadge"];
+    assertTrue(badge["badgeName"].str == badgeName, "Expected badgeName '" ~ badgeName ~ "'");
+    assertTrue(badge["description"].str == "Test writer", "Expected correct description");
+}
+
+void testCompositePkPersistence() {
+    // Create a tag and verify it persists (use mode suffix for uniqueness)
+    auto suffix = modeSuffix();
+    auto name = "persist-" ~ suffix;
+    auto createResponse = graphql(`mutation {
+        createTag(category: "test", name: "` ~ name ~ `", description: "Persistence test") {
+            category
+            name
+        }
+    }`);
+    assertNoErrors(createResponse);
+
+    // Query to verify it was persisted
+    auto queryResponse = graphql(`{ tags { category name description } }`);
+    assertNoErrors(queryResponse);
+
+    auto tags = queryResponse["data"]["tags"].array;
+    bool found = false;
+    foreach (tag; tags) {
+        if (tag["category"].str == "test" && tag["name"].str == name) {
+            assertTrue(tag["description"].str == "Persistence test",
+                "Persisted tag should have correct description");
+            found = true;
+            break;
+        }
+    }
+    assertTrue(found, "Created tag should be queryable");
+}
+
+void testSortTagsByName() {
+    auto response = graphql(`{
+        tags(orderBy: [{field: name, direction: ASC}]) {
+            category
+            name
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto tags = response["data"]["tags"].array;
+    assertTrue(tags.length >= 2, "Expected at least 2 tags");
+
+    // Verify ascending order by name
+    for (size_t i = 1; i < tags.length; i++) {
+        auto prev = tags[i - 1]["name"].str;
+        auto curr = tags[i]["name"].str;
+        assertTrue(prev <= curr,
+            "Tags should be sorted by name ascending, got '" ~ prev ~ "' before '" ~ curr ~ "'");
+    }
+}
+
+void testFilterTagsByCategory() {
+    auto response = graphql(`{
+        tags(filter: {category: {equalTo: "language"}}) {
+            category
+            name
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto tags = response["data"]["tags"].array;
+    assertTrue(tags.length >= 2, "Expected at least 2 language tags");
+
+    // All returned tags should be in the "language" category
+    foreach (tag; tags) {
+        assertTrue(tag["category"].str == "language",
+            "Expected category 'language', got '" ~ tag["category"].str ~ "'");
+    }
+}
+
+// ============================================================================
 // Test Registration
 // ============================================================================
 
@@ -1624,4 +1827,16 @@ static this() {
     registerTest("Filter startsWithInsensitive", "tests", &testFilterStartsWithInsensitive);
     registerTest("Filter endsWithInsensitive", "tests", &testFilterEndsWithInsensitive);
     registerTest("Filter case-sensitive vs insensitive", "tests", &testFilterCaseSensitiveVsInsensitive);
+
+    // Composite primary key tests
+    registerTest("Query all tags (composite PK)", "tests", &testQueryAllTags);
+    registerTest("Query tags by category", "tests", &testQueryTagsByCategory);
+    registerTest("Query tag values", "tests", &testQueryTagValues);
+    registerTest("Create tag mutation (composite PK)", "tests", &testCreateTagMutation);
+    registerTest("Query all user badges (composite PK)", "tests", &testQueryAllUserBadges);
+    registerTest("Query user badge values", "tests", &testQueryUserBadgeValues);
+    registerTest("Create user badge mutation (composite PK)", "tests", &testCreateUserBadgeMutation);
+    registerTest("Composite PK persistence", "tests", &testCompositePkPersistence);
+    registerTest("Sort tags by name (composite PK)", "tests", &testSortTagsByName);
+    registerTest("Filter tags by category (composite PK)", "tests", &testFilterTagsByCategory);
 }

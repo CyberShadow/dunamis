@@ -73,8 +73,11 @@ private class TestDialect : SqlDialect {
             case JSONType.object: return escapeSqlString(val.toString());
         }
     }
-    override string rootIdFilter(string table) {
-        return table ~ ".id = ANY($1)";
+    override string rootIdFilter(string table, string[] pkColumns = ["id"]) {
+        if (pkColumns.length == 1)
+            return table ~ "." ~ pkColumns[0] ~ " = ANY($1)";
+        auto cols = pkColumns.map!(c => table ~ "." ~ c).array.join(", ");
+        return "(" ~ cols ~ ") IN ({{IDS}})";
     }
     override string jsonObjectFunc() { return "json_build_object"; }
     override string rowJsonFunc() { return ""; }

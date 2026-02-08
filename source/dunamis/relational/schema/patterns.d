@@ -54,7 +54,8 @@ Object findMapExprFromChain(ExprBase expr, ref JoinHop[] joinPath, out ExprBase 
                 belongs.childTable,
                 belongs.parentTable,
                 belongs.parentTypeName,
-                belongs.fkColumn
+                belongs.fkColumn,
+                belongs.parentPkColumns
             )] ~ joinPath;
             expr = belongs.inputExpr;
             continue;
@@ -78,10 +79,11 @@ Object findMapExprFromChain(ExprBase expr, ref JoinHop[] joinPath, out ExprBase 
 
 /// A single hop in a belongsTo chain (for JOIN generation)
 struct JoinHop {
-    string sourceTable;   // e.g., "posts"
-    string targetTable;   // e.g., "users"
-    string targetType;    // e.g., "User"
-    string fk;            // e.g., "author_id"
+    string sourceTable;       // e.g., "posts"
+    string targetTable;       // e.g., "users"
+    string targetType;        // e.g., "User"
+    string fk;                // e.g., "author_id"
+    string[] targetPkColumns; // e.g., ["id"] — SQL column names of target's PK
 }
 
 // ============================================================================

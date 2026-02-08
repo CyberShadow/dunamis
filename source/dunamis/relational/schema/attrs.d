@@ -317,6 +317,19 @@ template hasSqlColumn(alias method) {
 
 public import dunamis.core.types : hasPrimaryKey, hasPrimaryKeyAttr, getPrimaryKeyFieldNames;
 
+/// Get SQL column names for @PrimaryKey fields.
+/// Maps each PK D field name to its SQL column name via @SqlColumn UDA or snake_case.
+template getPkSqlColumns(Entity) {
+    enum getPkSqlColumns = () {
+        string[] result;
+        static foreach (fieldName; getPrimaryKeyFieldNames!Entity) {
+            result ~= getPlainFieldColumnName!(Entity, fieldName);
+        }
+        if (result.length == 0) result = ["id"];  // fallback
+        return result;
+    }();
+}
+
 /// Check if a method returns a nullable type (Expr!(Nullable!T))
 template hasNullableReturn(alias method) {
     import std.traits : ReturnType;

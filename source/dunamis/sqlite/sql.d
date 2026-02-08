@@ -54,6 +54,22 @@ string generateSelectLastInsertSQL(string table) {
     );
 }
 
+/// Generate SELECT SQL to fetch a row by PK values from insert input.
+/// Used for composite PKs or non-auto-increment PKs where last_insert_rowid() doesn't apply.
+string generateSelectByPkSQL(string table, string[] pkColumns, InsertInput input) {
+    string[] conditions;
+    foreach (col; pkColumns) {
+        if (col in input.values) {
+            conditions ~= format("%s = %s", col, jsonToSqlLiteral(input.values[col]));
+        }
+    }
+    return format(
+        "SELECT * FROM %s WHERE %s",
+        table,
+        conditions.join(" AND ")
+    );
+}
+
 /// Generate UPDATE SQL for SQLite.
 string generateUpdateSQL(string table, UpdateInput input) {
     auto columns = input.columns;

@@ -948,7 +948,7 @@ unittest {
         override string name() { return "Test"; }
         override string escapeSqlString(string s) { return "'" ~ s ~ "'"; }
         override string jsonToSqlLiteral(JSONValue) { return "NULL"; }
-        override string rootIdFilter(string table) { return table ~ ".id = ANY($1)"; }
+        override string rootIdFilter(string table, string[] pkColumns = ["id"]) { return table ~ "." ~ pkColumns[0] ~ " = ANY($1)"; }
         override string jsonObjectFunc() { return "json_build_object"; }
         override string rowJsonFunc() { return ""; }
         override string emptyJsonArray() { return "'[]'::json"; }
@@ -1018,7 +1018,7 @@ unittest {
         override string name() { return "Test"; }
         override string escapeSqlString(string s) { return "'" ~ s ~ "'"; }
         override string jsonToSqlLiteral(JSONValue) { return "NULL"; }
-        override string rootIdFilter(string table) { return table ~ ".id = ANY($1)"; }
+        override string rootIdFilter(string table, string[] pkColumns = ["id"]) { return table ~ "." ~ pkColumns[0] ~ " = ANY($1)"; }
         override string jsonObjectFunc() { return "json_build_object"; }
         override string rowJsonFunc() { return ""; }
         override string emptyJsonArray() { return "'[]'::json"; }

@@ -84,8 +84,12 @@ class MySQLDialect : SqlDialect {
         }
     }
 
-    override string rootIdFilter(string table) {
-        return format("%s.id IN ({{IDS}})", table);
+    override string rootIdFilter(string table, string[] pkColumns = ["id"]) {
+        if (pkColumns.length == 1) {
+            return format("%s.%s IN ({{IDS}})", table, pkColumns[0]);
+        }
+        auto cols = pkColumns.map!(c => table ~ "." ~ c).array.join(", ");
+        return format("(%s) IN ({{IDS}})", cols);
     }
 
     override string jsonObjectFunc() { return "JSON_OBJECT"; }

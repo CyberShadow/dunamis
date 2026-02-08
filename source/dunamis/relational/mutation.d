@@ -70,9 +70,12 @@ struct UpdateInput {
 /// Expression that executes INSERT and returns the new entity.
 /// Returns a single entity (Expr!Entity).
 class InsertExpr(Entity) : Expr!Entity {
+    import dunamis.relational.schema.attrs : getPkSqlColumns;
+
     private InsertInput _input;
     private string _table;
     private string _typeName;
+    private enum string[] _pkColumns = getPkSqlColumns!Entity;
 
     this(InsertInput input) {
         _input = input;
@@ -111,20 +114,44 @@ class InsertExpr(Entity) : Expr!Entity {
         }
 
         // Execute INSERT via DataFetcher
-        auto promise = relCtx.fetcher.executeInsert(_table, _typeName, _input)
+        auto promise = relCtx.fetcher.executeInsert(_table, _typeName, _input, _pkColumns)
             .then((QueryResult result) {
                 // Store result for field access
                 relCtx.storeMutationResult(_typeName, result);
 
                 // Convert refs to entities
                 auto refs = result.allRefs();
-                import dunamis.relational.schema : makeEntityFromRef;
-                return refs.map!(r => makeEntityFromRef!Entity(r)).array;
+                import dunamis.relational.schema : makeEntityFromRef, entityToRef;
+                auto entities = refs.map!(r => makeEntityFromRef!Entity(r)).array;
+
+                // Populate plain fields from the mutation result
+                // (makeEntityFromRef only sets PK fields; plain fields like
+                // description need to be read from the QueryResult)
+                _populatePlainFields(entities, refs, result);
+
+                return entities;
             });
 
         // Cache for future calls
         ctx.setCachedEval!Entity(this, promise);
         return promise;
+    }
+
+    /// Populate plain non-PK fields on entities from a QueryResult.
+    private static void _populatePlainFields(ref Entity[] entities, AnyRef[] refs, QueryResult result) {
+        import dunamis.core.types : getPlainFieldNames, hasPrimaryKeyAttr;
+        import dunamis.relational.schema.attrs : getPlainFieldColumnName;
+
+        static foreach (fieldName; getPlainFieldNames!Entity) {{
+            static if (!hasPrimaryKeyAttr!(Entity, fieldName)) {
+                enum columnName = getPlainFieldColumnName!(Entity, fieldName);
+                alias FieldType = typeof(__traits(getMember, Entity.init, fieldName));
+                auto values = result.getColumn!FieldType(columnName, refs);
+                foreach (i, ref e; entities) {
+                    __traits(getMember, e, fieldName) = values[i];
+                }
+            }
+        }}
     }
 
     /// Access input for SQL generation

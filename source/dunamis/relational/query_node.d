@@ -63,7 +63,10 @@ class QueryNode {
     /// Table name (e.g., "users")
     string table;
 
-    /// Columns to fetch (always includes "id")
+    /// Primary key SQL column names for this entity (e.g., ["id"] or ["order_id", "product_id"])
+    string[] pkColumns;
+
+    /// Columns to fetch (always includes PK columns)
     string[] columns;
 
     /// Parent node (for hasMany relationships)
@@ -123,13 +126,14 @@ class QueryNode {
     /// Next join alias counter
     private int _nextJoinAlias = 0;
 
-    this(QueryNodeId id, string typeName, string table) {
+    this(QueryNodeId id, string typeName, string table, string[] pkColumns = ["id"]) {
         assert(typeName.length > 0, "QueryNode typeName must not be empty");
         assert(table.length > 0, "QueryNode table must not be empty");
         this.id = id;
         this.typeName = typeName;
         this.table = table;
-        this.columns = ["id"];  // Always need ID
+        this.pkColumns = pkColumns;
+        this.columns = pkColumns.dup;  // Always need PK columns
     }
 
     /// Add a column to fetch
@@ -162,7 +166,9 @@ class QueryNode {
     /// Add a JOIN for belongsTo chain access.
     /// sourceAlias: for multi-hop chains, the alias of the previous join (null = root table).
     /// Returns the join alias to use for column access.
-    JoinAlias addJoin(string targetTable, string targetType, string fk, Nullable!JoinAlias sourceAlias = Nullable!JoinAlias.init) {
+    JoinAlias addJoin(string targetTable, string targetType, string fk,
+                      Nullable!JoinAlias sourceAlias = Nullable!JoinAlias.init,
+                      string[] targetPkColumns = ["id"]) {
         // Check if we already have this join
         foreach (j; joins) {
             if (j.targetTable == targetTable && j.fk == fk && j.sourceAlias == sourceAlias) {
@@ -173,14 +179,26 @@ class QueryNode {
         // Create new join
         auto alias_ = JoinAlias("j" ~ (_nextJoinAlias++).to!string);
         assert(!joins.map!(j => j.alias_).canFind(alias_), "Generated join alias collision: " ~ alias_.value);
-        joins ~= JoinInfo(targetTable, targetType, fk, alias_, sourceAlias);
+        joins ~= JoinInfo(targetTable, targetType, fk, alias_, sourceAlias, targetPkColumns);
+
+        // Pre-seed joined columns with target PK columns
+        joinedColumns[alias_] = targetPkColumns.dup;
+
         return alias_;
     }
 
     /// Add a column to fetch from a joined table.
     void addJoinedColumn(JoinAlias joinAlias, string column) {
         if (joinAlias !in joinedColumns) {
-            joinedColumns[joinAlias] = ["id"];  // Always need id
+            // Fallback: look up PK columns from JoinInfo if available
+            string[] seed = ["id"];
+            foreach (j; joins) {
+                if (j.alias_ == joinAlias) {
+                    seed = j.targetPkColumns.dup;
+                    break;
+                }
+            }
+            joinedColumns[joinAlias] = seed;
         }
         if (!joinedColumns[joinAlias].canFind(column)) {
             joinedColumns[joinAlias] ~= column;
@@ -249,6 +267,7 @@ struct JoinInfo {
     string fk;                    // Foreign key column in source table
     JoinAlias alias_;             // SQL alias (e.g., "j0")
     Nullable!JoinAlias sourceAlias;  // Source alias for multi-hop chains (null = root table)
+    string[] targetPkColumns;     // PK columns of the target table (e.g., ["id"])
 }
 
 // ============================================================================
@@ -261,6 +280,7 @@ unittest {
     assert(node.id == QueryNodeId(0));
     assert(node.typeName == "User");
     assert(node.table == "users");
+    assert(node.pkColumns == ["id"]);
     assert(node.columns == ["id"]);
     assert(node.isRoot);
 

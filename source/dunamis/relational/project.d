@@ -459,6 +459,10 @@ class ProjectTypedBelongsToExpr(Child, Parent, ResultType, string fk) : Expr!Res
     @property string parentTable() { return EntityID!Parent.table; }
     @property string parentTypeName() { return EntityID!Parent.typeName; }
     @property string fkColumn() { return fk; }
+    @property string[] parentPkColumns() {
+        import dunamis.relational.schema.attrs : getPkSqlColumns;
+        return getPkSqlColumns!Parent;
+    }
 
     @property QueryNodeId queryNodeId() { return _inner.queryNodeId; }
 }
