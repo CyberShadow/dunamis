@@ -67,7 +67,7 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
                     break;
                 case FilterType.all:
                     // Use string IDs to support any key type including composite keys
-                    auto ids = fetchAllIdsString(node.table);
+                    auto ids = fetchAllIdsStringSync(node.table);
                     refs = ids.map!(id => makeAnyRef(node.typeName, id)).array;
                     result.initialize(node.typeName, refs);
                     break;
@@ -178,13 +178,12 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
         }
     }
 
-    /// Build composite key string from a row using the table's PK columns
+    /// Build key string from a row using the table's PK columns.
+    /// For single-column PKs, produces the same result as direct ID extraction
+    /// since encodeCompositeKey(["123"]) == "123".
     private string buildKeyFromRow(string table, JSONValue row) {
         import dunamis.core.types : encodeCompositeKey;
         auto pkCols = getPrimaryKey(table);
-        if (pkCols.length == 1) {
-            return jsonIdToString(row[pkCols[0]]);
-        }
         string[] keyParts;
         foreach (col; pkCols) {
             keyParts ~= jsonIdToString(row[col]);
@@ -221,21 +220,12 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
         return result;
     }
 
-    override Promise!(long[]) fetchAllIds(string table) {
-        return resolve(fetchAllIdsSync(table));
+    override Promise!(string[]) fetchAllIdsString(string table) {
+        return resolve(fetchAllIdsStringSync(table));
     }
 
-    /// Synchronous implementation of fetchAllIds (used internally)
-    private long[] fetchAllIdsSync(string table) {
-        if (table !in _tableData) return [];
-        return _tableData[table].array
-            .filter!(row => row["id"].type == JSONType.integer)
-            .map!(row => row["id"].integer)
-            .array;
-    }
-
-    /// Fetch all IDs as strings (supports any ID type including composite keys)
-    string[] fetchAllIdsString(string table) {
+    /// Synchronous implementation of fetchAllIdsString (used internally)
+    string[] fetchAllIdsStringSync(string table) {
         if (table !in _tableData) return [];
         return _tableData[table].array.map!(row => buildKeyFromRow(table, row)).array;
     }
@@ -671,8 +661,8 @@ class DebugSqlDB(DBConfig config = defaultDBConfig) : DataFetcher {
         return _delegate.fetchColumnLong(table, column, refs);
     }
 
-    override Promise!(long[]) fetchAllIds(string table) {
-        return _delegate.fetchAllIds(table);
+    override Promise!(string[]) fetchAllIdsString(string table) {
+        return _delegate.fetchAllIdsString(table);
     }
 
     override Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs) {
@@ -707,8 +697,8 @@ unittest {
     auto names = awaitSync(fetcher.fetchColumn!string("users", "first_name", refs));
     assert(names == ["Alice", "Bob"]);
 
-    auto allIds = awaitSync(fetcher.fetchAllIds("users"));
-    assert(allIds == [1, 2]);
+    auto allIds = awaitSync(fetcher.fetchAllIdsString("users"));
+    assert(allIds == ["1", "2"]);
 }
 
 unittest {
@@ -761,7 +751,7 @@ unittest {
     assert(names == ["First", "Second"]);
 
     // Fetch all IDs as strings
-    auto allIds = fetcher.fetchAllIdsString("items");
+    auto allIds = fetcher.fetchAllIdsStringSync("items");
     assert(allIds == ["abc-123", "def-456", "ghi-789"]);
 }
 
@@ -813,7 +803,7 @@ unittest {
     auto ref3 = AnyRef("OrderItem:2,100");  // order 2, product 100
 
     // Verify key building
-    assert(fetcher.fetchAllIdsString("order_items") == ["1,100", "1,101", "2,100", "2,102"]);
+    assert(fetcher.fetchAllIdsStringSync("order_items") == ["1,100", "1,101", "2,100", "2,102"]);
 
     // Fetch column values by composite key
     auto quantities = awaitSync(fetcher.fetchColumn!long("order_items", "quantity", [ref1, ref2, ref3]));

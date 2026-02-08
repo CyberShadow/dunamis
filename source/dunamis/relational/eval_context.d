@@ -229,8 +229,8 @@ abstract class DataFetcher {
         return resolve(result);
     }
 
-    /// Fetch all IDs from a table (returns native long IDs)
-    abstract Promise!(long[]) fetchAllIds(string table);
+    /// Fetch all IDs from a table as strings (supports any ID type including composite keys)
+    abstract Promise!(string[]) fetchAllIdsString(string table);
 
     /// Fetch children for parent refs (hasMany)
     /// Returns AnyRef[][] - one AnyRef[] per parent
@@ -607,12 +607,14 @@ class RelationalEvalContext {
         return result.getJoinedColumn!T(joinAlias, column, refs);
     }
 
-    /// Fetch all IDs for a table (delegates to fetcher)
-    Promise!(long[]) fetchAllIds(string table) {
+    /// Fetch all IDs for a table as strings, wrapped in AnyRef (delegates to fetcher)
+    Promise!(AnyRef[]) fetchAllIdsString(string table, string typeName) {
         if (fetcher !is null) {
-            return fetcher.fetchAllIds(table);
+            return fetcher.fetchAllIdsString(table).then((string[] ids) {
+                return ids.map!(id => makeAnyRef(typeName, id)).array;
+            });
         }
-        return resolve(cast(long[])[]);
+        return resolve(cast(AnyRef[])[]);
     }
 
     /// Store mutation result for later field access.

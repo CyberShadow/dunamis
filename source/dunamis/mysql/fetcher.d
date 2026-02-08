@@ -223,11 +223,11 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
         });
     }
 
-    override Promise!(long[]) fetchAllIds(string table) {
+    override Promise!(string[]) fetchAllIdsString(string table) {
         auto sql = "SELECT id FROM " ~ table;
 
         return _conn.query(sql).array().then((MySqlConnection.Row[] rows) {
-            return rows.map!(r => r.column!long(0)).array;
+            return rows.map!(r => r.column!string(0)).array;
         });
     }
 

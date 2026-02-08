@@ -83,47 +83,6 @@ private Promise!(Entity[]) populatePlainFields(Entity)(DataFetcher fetcher, Enti
 }
 
 // ============================================================================
-// Entity ID Decoding Utilities
-// ============================================================================
-
-/// Decode an entity's primary key to a long (assumes ID is numeric)
-/// Works with AnyRef (has localId method) and entities (have @PrimaryKey field)
-long decodeAsLong(T)(T entity) {
-    import dunamis.core.types : hasPrimaryKey, getPrimaryKeyFieldName;
-    static if (__traits(hasMember, T, "localId")) {
-        // AnyRef or similar with direct localId method
-        return entity.localId.to!long;
-    } else static if (hasPrimaryKey!T) {
-        // Entity with @PrimaryKey field
-        enum pkField = getPrimaryKeyFieldName!T;
-        return __traits(getMember, entity, pkField).to!long;
-    } else {
-        static assert(false, "Type " ~ T.stringof ~ " has no localId accessor or @PrimaryKey field");
-    }
-}
-
-/// Decode multiple entities to long IDs
-long[] decodeAsLongs(T)(T[] entities) {
-    return entities.map!(e => decodeAsLong(e)).array;
-}
-
-/// Decode an entity's primary key as composite key parts
-/// Works with AnyRef (has localId method) and entities (have @PrimaryKey field)
-string[] decodeEntityCompositeKey(T)(T entity) {
-    import dunamis.core.types : decodeCompositeKey, hasPrimaryKey, getPrimaryKeyFieldName;
-    static if (__traits(hasMember, T, "localId")) {
-        // AnyRef or similar with direct localId method
-        return decodeCompositeKey(entity.localId);
-    } else static if (hasPrimaryKey!T) {
-        // Entity with @PrimaryKey field
-        enum pkField = getPrimaryKeyFieldName!T;
-        return decodeCompositeKey(__traits(getMember, entity, pkField).to!string);
-    } else {
-        static assert(false, "Type " ~ T.stringof ~ " has no localId accessor or @PrimaryKey field");
-    }
-}
-
-// ============================================================================
 // Column Access Expression
 // ============================================================================
 
@@ -507,10 +466,10 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
             });
         }
 
-        // Fallback: naive path using fetchAllIds
+        // Fallback: naive path using fetchAllIdsString
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-        return relCtx.fetchAllIds(EntityID!Entity.table).then((long[] ids) {
-            auto entities = ids.map!(id => .makeEntity!(Entity, long)(id)).array;
+        return relCtx.fetchAllIdsString(EntityID!Entity.table, EntityID!Entity.typeName).then((AnyRef[] refs) {
+            auto entities = refs.map!(r => makeEntityFromRef!Entity(r)).array;
 
             enum plainFields = getPlainFieldNames!Entity;
             static if (plainFields.length > 0) {
@@ -1055,9 +1014,9 @@ unittest {
     assert(result[1] == 3);
 }
 
-// Test makeEntity and decodeAsLong
+// Test makeEntity and entityToRef roundtrip
 unittest {
-    import dunamis.core.types : AnyRef;
+    import dunamis.core.types : AnyRef, decodeCompositeKey;
     import dunamis.relational.demo : DemoId, MockDB;
 
     static MockDB!() db;
@@ -1071,17 +1030,12 @@ unittest {
     assert(entityToRef(user1).nodeId == "User:42");
     static assert(is(typeof(user1) == User));
 
-    assert(decodeAsLong(user1) == 42);
-    assert(decodeAsLong(AnyRef("User:123")) == 123);
+    // Roundtrip: entity → ref → entity
+    auto ref1 = entityToRef(user1);
+    auto user2 = makeEntityFromRef!User(ref1);
+    assert(entityToRef(user2) == ref1);
 
-    auto users = [makeEntity!User(1), makeEntity!User(2), makeEntity!User(3)];
-    assert(decodeAsLongs(users) == [1, 2, 3]);
-}
-
-// Test decodeEntityCompositeKey with AnyRef
-unittest {
-    import dunamis.core.types : AnyRef;
-
-    assert(decodeEntityCompositeKey(AnyRef("OrderItem:100,200")) == ["100", "200"]);
-    assert(decodeEntityCompositeKey(AnyRef("OrderItem:order-1,prod-2")) == ["order-1", "prod-2"]);
+    // Composite key decoding via AnyRef
+    assert(decodeCompositeKey(AnyRef("OrderItem:100,200").localId) == ["100", "200"]);
+    assert(decodeCompositeKey(AnyRef("OrderItem:order-1,prod-2").localId) == ["order-1", "prod-2"]);
 }

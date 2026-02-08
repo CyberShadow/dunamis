@@ -26,43 +26,39 @@ template EntityID(T) {
 
 import dunamis.core.types : AnyRef, PrimaryKey, isPlainField;
 
-private template pkFieldOf(T) {
-    import dunamis.core.types : getPrimaryKeyFieldName;
-    enum pkFieldOf = getPrimaryKeyFieldName!T;
-}
-
-/// Create an entity with its @PrimaryKey field set from a local ID value.
+/// Create an entity with its first @PrimaryKey field set from a local ID value.
+/// Convenience for single-key entities (used by GetByIdsExpr and tests).
 T makeEntity(T, IdType)(IdType localId) {
     import std.conv : to;
+    import dunamis.core.types : getPrimaryKeyFieldNames;
     T e;
-    enum pkField = pkFieldOf!T;
+    enum pkField = getPrimaryKeyFieldNames!T[0];
     __traits(getMember, e, pkField) = to!(typeof(__traits(getMember, T.init, pkField)))(localId);
+    return e;
+}
+
+/// Create an entity with ALL @PrimaryKey fields set from string parts.
+/// Handles CustomScalar types (e.g., Int64) by converting through the base type.
+T makeEntityFromParts(T)(string[] keyParts) {
+    import std.conv : to;
+    import dunamis.core.types : isCustomScalar, getPrimaryKeyFieldNames;
+    enum pkFields = getPrimaryKeyFieldNames!T;
+    T e;
+    static foreach (i, f; pkFields) {{
+        alias PkType = typeof(__traits(getMember, T.init, f));
+        static if (isCustomScalar!PkType) {
+            __traits(getMember, e, f) = PkType(keyParts[i].to!(PkType.DType));
+        } else {
+            __traits(getMember, e, f) = keyParts[i].to!PkType;
+        }
+    }}
     return e;
 }
 
 /// Create an entity from an AnyRef (parses localId and converts to PK type).
 T makeEntityFromRef(T)(AnyRef ref_) {
-    import std.conv : to;
-    import dunamis.core.types : isCustomScalar, decodeCompositeKey, getPrimaryKeyFieldNames;
-    enum pkFields = getPrimaryKeyFieldNames!T;
-    static if (pkFields.length == 1) {
-        enum pkField = pkFields[0];
-        alias PkType = typeof(__traits(getMember, T.init, pkField));
-        // For CustomScalar (e.g., Int64), convert through the base type
-        static if (isCustomScalar!PkType) {
-            return makeEntity!T(PkType(ref_.localId.to!(PkType.DType)));
-        } else {
-            return makeEntity!T(ref_.localId.to!PkType);
-        }
-    } else {
-        // Composite key: decode "val1,val2" into parts and set each PK field
-        auto parts = decodeCompositeKey(ref_.localId);
-        T e;
-        static foreach (i, f; pkFields) {
-            __traits(getMember, e, f) = parts[i].to!(typeof(__traits(getMember, T.init, f)));
-        }
-        return e;
-    }
+    import dunamis.core.types : decodeCompositeKey;
+    return makeEntityFromParts!T(decodeCompositeKey(ref_.localId));
 }
 
 /// Extract an AnyRef from an entity (reads @PrimaryKey field(s)).
@@ -70,30 +66,29 @@ AnyRef entityToRef(T)(T entity) {
     import std.conv : to;
     import dunamis.core.types : encodeCompositeKey, getPrimaryKeyFieldNames;
     enum pkFields = getPrimaryKeyFieldNames!T;
-    static if (pkFields.length == 1) {
-        return AnyRef(EntityID!T.typeName ~ ":" ~ __traits(getMember, entity, pkFields[0]).to!string);
-    } else {
-        // Composite key: encode all PK fields
-        string[] values;
-        static foreach (f; pkFields) {
-            values ~= __traits(getMember, entity, f).to!string;
-        }
-        return AnyRef(EntityID!T.typeName ~ ":" ~ encodeCompositeKey(values));
+    string[] values;
+    static foreach (f; pkFields) {
+        values ~= __traits(getMember, entity, f).to!string;
     }
+    return AnyRef(EntityID!T.typeName ~ ":" ~ encodeCompositeKey(values));
 }
 
 /// Check if an entity has a valid (non-default) primary key.
+/// For composite keys, ALL PK fields must be non-default.
 /// Works via UFCS: entity.isValid()
 bool isValid(T)(T entity) {
-    import std.conv : to;
-    enum pkField = pkFieldOf!T;
-    alias PkType = typeof(__traits(getMember, T.init, pkField));
-    auto val = __traits(getMember, entity, pkField);
-    // For numeric types, 0 is invalid (default); for strings, empty is invalid
-    static if (is(PkType == string))
-        return val.length > 0;
-    else
-        return val != PkType.init;
+    import dunamis.core.types : getPrimaryKeyFieldNames;
+    enum pkFields = getPrimaryKeyFieldNames!T;
+    static foreach (f; pkFields) {{
+        alias PkType = typeof(__traits(getMember, T.init, f));
+        auto val = __traits(getMember, entity, f);
+        static if (is(PkType == string)) {
+            if (val.length == 0) return false;
+        } else {
+            if (val == PkType.init) return false;
+        }
+    }}
+    return true;
 }
 
 // ============================================================================

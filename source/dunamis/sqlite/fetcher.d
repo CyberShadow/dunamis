@@ -238,13 +238,13 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
         return resolve(refs.map!(r => r.isValid ? values.get(r.localId, 0L) : 0L).array);
     }
 
-    override Promise!(long[]) fetchAllIds(string table) {
+    override Promise!(string[]) fetchAllIdsString(string table) {
         auto sql = format("SELECT id FROM %s", table);
-        long[] result;
+        string[] result;
 
         foreach (cells, columns; _db.query(sql)) {
             if (cells.length >= 1 && cells[0] !is null) {
-                result ~= cells[0].idup.to!long;
+                result ~= cells[0].idup;
             }
         }
 

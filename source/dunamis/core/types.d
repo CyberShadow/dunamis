@@ -65,27 +65,7 @@ template hasPrimaryKey(T) {
     }();
 }
 
-/// Get the name of the @PrimaryKey field.
-/// Uses T.tupleof to avoid forward reference cycles — see hasPrimaryKey for details.
-template getPrimaryKeyFieldName(T) {
-    import std.meta : staticIndexOf;
-    enum getPrimaryKeyFieldName = () {
-        static foreach (field; T.tupleof) {
-            static if (staticIndexOf!(PrimaryKey, __traits(getAttributes, field)) >= 0) {
-                return __traits(identifier, field);
-            }
-        }
-        assert(false, "No @PrimaryKey field found on " ~ T.stringof);
-    }();
-}
-
-/// Get the type of the @PrimaryKey field
-template getPrimaryKeyType(T) {
-    enum _name = getPrimaryKeyFieldName!T;
-    alias getPrimaryKeyType = typeof(__traits(getMember, T.init, _name));
-}
-
-/// Get ALL @PrimaryKey field names (for composite key support).
+/// Get @PrimaryKey field names.
 /// Uses T.tupleof to avoid forward reference cycles — see hasPrimaryKey for details.
 template getPrimaryKeyFieldNames(T) {
     import std.meta : staticIndexOf;
@@ -322,27 +302,20 @@ struct AnyRef {
 enum AnyRef queryRoot = AnyRef("Query:");
 
 // ============================================================================
-// Node ID Encoding/Decoding Utilities
+// AnyRef Construction
 // ============================================================================
 
-/// Encode a native long ID as a node ID
-string encodeNodeId(string typeName, long id) {
-    return typeName ~ ":" ~ id.to!string;
-}
-
-/// Encode a native string ID as a node ID
-string encodeNodeId(string typeName, string id) {
-    return typeName ~ ":" ~ id;
-}
-
-/// Create an untyped AnyRef from type name and long ID (for internal use)
-AnyRef makeAnyRef(string typeName, long id) {
-    return AnyRef(encodeNodeId(typeName, id));
-}
-
-/// Create an untyped AnyRef from type name and string ID (for internal use)
+/// Create an untyped AnyRef from type name and string ID (for internal use).
+/// The ID can be a single key value or a pre-encoded composite key string.
 AnyRef makeAnyRef(string typeName, string id) {
-    return AnyRef(encodeNodeId(typeName, id));
+    return AnyRef(typeName ~ ":" ~ id);
+}
+
+/// Create an untyped AnyRef from type name and composite key parts.
+/// Encodes the parts into a single key string.
+/// For single-element arrays, produces the same result as makeAnyRef(typeName, keyValues[0]).
+AnyRef makeAnyRef(string typeName, string[] keyValues) {
+    return AnyRef(typeName ~ ":" ~ encodeCompositeKey(keyValues));
 }
 
 // ============================================================================
@@ -413,10 +386,6 @@ string[] decodeCompositeKey(string encoded) {
     return result;
 }
 
-/// Create an untyped AnyRef from type name and multiple key values (for internal use)
-AnyRef makeAnyCompositeRef(string typeName, string[] keyValues) {
-    return AnyRef(typeName ~ ":" ~ encodeCompositeKey(keyValues));
-}
 
 // ============================================================================
 // Custom Scalar Support
@@ -663,13 +632,11 @@ unittest {
     assert(queryRoot.typeName == "Query");
     assert(!queryRoot.isValid);  // Query root is special
 
-    // Test encoding
-    assert(encodeNodeId("User", 42) == "User:42");
-    assert(encodeNodeId("Post", "abc-123") == "Post:abc-123");
-
-    // Test untyped makeAnyRef
-    auto anyRef = makeAnyRef("User", 42);
+    // Test makeAnyRef
+    auto anyRef = makeAnyRef("User", "42");
     assert(anyRef.nodeId == "User:42");
+    auto compositeRef = makeAnyRef("OrderItem", ["order-1", "prod-2"]);
+    assert(compositeRef.nodeId == "OrderItem:order-1,prod-2");
 
     // Test equality
     assert(AnyRef("User:1") == AnyRef("User:1"));
@@ -708,9 +675,10 @@ unittest {
     auto decoded = decodeCompositeKey(encoded);
     assert(decoded == original);
 
-    // Test untyped makeAnyCompositeRef
-    auto ref2 = makeAnyCompositeRef("OrderItem", ["order-1", "prod-2"]);
-    assert(ref2.nodeId == "OrderItem:order-1,prod-2");
+    // Test single-element composite key roundtrip matches simple makeAnyRef
+    assert(encodeCompositeKey(["123"]) == "123");
+    assert(decodeCompositeKey("123") == ["123"]);
+    assert(makeAnyRef("User", ["42"]) == makeAnyRef("User", "42"));
 }
 
 // Test isPlainMethod detection

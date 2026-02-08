@@ -315,7 +315,7 @@ template hasSqlColumn(alias method) {
     enum hasSqlColumn = getSqlColumn!method.length > 0;
 }
 
-public import dunamis.core.types : hasPrimaryKey, hasPrimaryKeyAttr, getPrimaryKeyFieldName, getPrimaryKeyType;
+public import dunamis.core.types : hasPrimaryKey, hasPrimaryKeyAttr, getPrimaryKeyFieldNames;
 
 /// Check if a method returns a nullable type (Expr!(Nullable!T))
 template hasNullableReturn(alias method) {

@@ -234,13 +234,13 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
         });
     }
 
-    override Promise!(long[]) fetchAllIds(string table) {
+    override Promise!(string[]) fetchAllIdsString(string table) {
         auto sql = "SELECT id FROM " ~ table;
 
         return _conn.prepare(sql).then((PreparedStatement stmt) {
             return stmt.query().array();
         }).then((PgSqlConnection.Row[] rows) {
-            return rows.map!(r => r.column!long(0)).array;
+            return rows.map!(r => r.column!string(0)).array;
         });
     }
 
