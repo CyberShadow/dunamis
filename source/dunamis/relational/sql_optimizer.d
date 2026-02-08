@@ -965,7 +965,8 @@ unittest {
 
     // Minimal entity for testing
     static struct TestUser {
-        string nodeId;
+        import dunamis.core.types : PrimaryKeyAttr;
+        @PrimaryKeyAttr string id;
     }
 
     // Create mock QueryNode and PrefetchExpr
@@ -1036,7 +1037,8 @@ unittest {
 unittest {
     // Test ProjectComputedExpr
     static struct TestUser {
-        string nodeId;
+        import dunamis.core.types : PrimaryKeyAttr;
+        @PrimaryKeyAttr string id;
     }
 
     auto node = new QueryNode(QueryNodeId(0), "User", "users");

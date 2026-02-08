@@ -120,7 +120,7 @@ interface EntityCastInfo {
 /// Expression that casts between compatible entity/struct types.
 /// Used by plugin infrastructure to forward fields between schema types.
 ///
-/// For entity types (with nodeId): copies the nodeId to construct the target type.
+/// For entity types (with @PrimaryKey): copies the PK field to construct the target type.
 /// For non-entity types (Query, Mutation): uses default-initialized value.
 ///
 class EntityCastExpr(To, From) : Expr!To, EntityCastInfo {
@@ -144,49 +144,33 @@ class EntityCastExpr(To, From) : Expr!To, EntityCastInfo {
         return _source.eval(ctx).then((From[] items) {
             To[] result = new To[items.length];
             foreach (i, ref from; items) {
-                static if (__traits(hasMember, From, "nodeId") && __traits(hasMember, To, "nodeId")) {
-                    // Entity types - copy nodeId
-                    result[i] = To(from.nodeId.id);
-                    // Copy all instance fields that exist in both types
-                    // Skip internal members (starting with _) and system members
-                    static foreach (member; __traits(allMembers, From)) {{
-                        static if (member.length > 0 && member[0] != '_' &&
-                                   member != "nodeId" &&
-                                   member != "toString" &&
-                                   member != "toHash" &&
-                                   member != "opEquals" &&
-                                   member != "opCmp" &&
-                                   member != "opAssign" &&
-                                   member != "factory" &&
-                                   member != "Monitor" &&
-                                   __traits(hasMember, To, member)) {
-                            // Check if it's an instance field (not a method/type/etc)
-                            static if (__traits(compiles, __traits(getMember, from, member)) &&
-                                       __traits(compiles, __traits(getMember, result[i], member) = __traits(getMember, from, member))) {
-                                __traits(getMember, result[i], member) = __traits(getMember, from, member);
+                static if (is(From == struct) && is(To == struct)) {
+                    // Check if casting back from normalized type to source type
+                    // (e.g., NormalizedUser → User: extract _normalizedSource)
+                    static if (__traits(hasMember, From, "_normalizedSource") &&
+                               is(typeof(From._normalizedSource) == To)) {
+                        result[i] = from._normalizedSource;
+                    } else {
+                        // Struct types (entities, PODs) - copy all matching instance fields
+                        result[i] = To.init;
+                        static foreach (member; __traits(allMembers, From)) {{
+                            static if (member.length > 0 && member[0] != '_' &&
+                                       member != "toString" &&
+                                       member != "toHash" &&
+                                       member != "opEquals" &&
+                                       member != "opCmp" &&
+                                       member != "opAssign" &&
+                                       member != "factory" &&
+                                       member != "Monitor" &&
+                                       __traits(hasMember, To, member)) {
+                                // Check if it's an instance field (not a method/type/etc)
+                                static if (__traits(compiles, __traits(getMember, from, member)) &&
+                                           __traits(compiles, __traits(getMember, result[i], member) = __traits(getMember, from, member))) {
+                                    __traits(getMember, result[i], member) = __traits(getMember, from, member);
+                                }
                             }
-                        }
-                    }}
-                } else static if (is(From == struct) && is(To == struct)) {
-                    // POD types (structs without nodeId) - copy all matching fields
-                    result[i] = To.init;
-                    static foreach (member; __traits(allMembers, From)) {{
-                        static if (member.length > 0 && member[0] != '_' &&
-                                   member != "toString" &&
-                                   member != "toHash" &&
-                                   member != "opEquals" &&
-                                   member != "opCmp" &&
-                                   member != "opAssign" &&
-                                   member != "factory" &&
-                                   member != "Monitor" &&
-                                   __traits(hasMember, To, member)) {
-                            // Check if it's an instance field (not a method/type/etc)
-                            static if (__traits(compiles, __traits(getMember, from, member)) &&
-                                       __traits(compiles, __traits(getMember, result[i], member) = __traits(getMember, from, member))) {
-                                __traits(getMember, result[i], member) = __traits(getMember, from, member);
-                            }
-                        }
-                    }}
+                        }}
+                    }
                 } else {
                     // Non-struct types (Query, Mutation) - use default init
                     result[i] = To.init;

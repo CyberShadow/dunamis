@@ -55,7 +55,7 @@ private Promise!(Entity[]) populatePlainFields(Entity)(DataFetcher fetcher, Enti
         return resolve(entities);
     }
 
-    auto refs = entities.map!(e => AnyRef(e.nodeId.id)).array;
+    auto refs = entities.map!(e => entityToRef(e)).array;
     enum table = EntityID!Entity.table;
     enum plainFields = getPlainFieldNames!Entity;
 
@@ -83,46 +83,22 @@ private Promise!(Entity[]) populatePlainFields(Entity)(DataFetcher fetcher, Enti
 }
 
 // ============================================================================
-// Entity Creation and Decoding Utilities
+// Entity ID Decoding Utilities
 // ============================================================================
 
-/// Create an Entity with its nodeId set from a long ID
-Entity makeEntity(Entity)(long id) {
-    return Entity(EntityID!Entity.typeName ~ ":" ~ id.to!string);
-}
-
-/// Create an Entity with its nodeId set from a string ID
-Entity makeEntity(Entity)(string id) {
-    return Entity(EntityID!Entity.typeName ~ ":" ~ id);
-}
-
-/// Create an Entity with its nodeId set from multiple key values (composite key)
-Entity makeCompositeEntity(Entity)(string[] keyValues) {
-    import dunamis.core.types : encodeCompositeKey;
-    return Entity(EntityID!Entity.typeName ~ ":" ~ encodeCompositeKey(keyValues));
-}
-
-/// Convenience overload for two-part composite keys
-Entity makeCompositeEntity(Entity, T1, T2)(T1 val1, T2 val2) {
-    return makeCompositeEntity!Entity([val1.to!string, val2.to!string]);
-}
-
-/// Convenience overload for three-part composite keys
-Entity makeCompositeEntity(Entity, T1, T2, T3)(T1 val1, T2 val2, T3 val3) {
-    return makeCompositeEntity!Entity([val1.to!string, val2.to!string, val3.to!string]);
-}
-
-/// Decode an entity's nodeId to a long (assumes ID portion is numeric)
-/// Works with AnyRef (has localId method) and entities (have nodeId.localId)
+/// Decode an entity's primary key to a long (assumes ID is numeric)
+/// Works with AnyRef (has localId method) and entities (have @PrimaryKey field)
 long decodeAsLong(T)(T entity) {
+    import dunamis.core.types : hasPrimaryKey, getPrimaryKeyFieldName;
     static if (__traits(hasMember, T, "localId")) {
         // AnyRef or similar with direct localId method
         return entity.localId.to!long;
-    } else static if (__traits(hasMember, T, "nodeId") && __traits(hasMember, typeof(T.init.nodeId), "localId")) {
-        // Entity with nodeId struct that has localId
-        return entity.nodeId.localId.to!long;
+    } else static if (hasPrimaryKey!T) {
+        // Entity with @PrimaryKey field
+        enum pkField = getPrimaryKeyFieldName!T;
+        return __traits(getMember, entity, pkField).to!long;
     } else {
-        static assert(false, "Type " ~ T.stringof ~ " has no localId accessor");
+        static assert(false, "Type " ~ T.stringof ~ " has no localId accessor or @PrimaryKey field");
     }
 }
 
@@ -131,18 +107,19 @@ long[] decodeAsLongs(T)(T[] entities) {
     return entities.map!(e => decodeAsLong(e)).array;
 }
 
-/// Decode an entity's localId as composite key parts
-/// Works with AnyRef (has localId method) and entities (have nodeId.localId)
+/// Decode an entity's primary key as composite key parts
+/// Works with AnyRef (has localId method) and entities (have @PrimaryKey field)
 string[] decodeEntityCompositeKey(T)(T entity) {
-    import dunamis.core.types : decodeCompositeKey;
+    import dunamis.core.types : decodeCompositeKey, hasPrimaryKey, getPrimaryKeyFieldName;
     static if (__traits(hasMember, T, "localId")) {
         // AnyRef or similar with direct localId method
         return decodeCompositeKey(entity.localId);
-    } else static if (__traits(hasMember, T, "nodeId") && __traits(hasMember, typeof(T.init.nodeId), "localId")) {
-        // Entity with nodeId struct that has localId
-        return decodeCompositeKey(entity.nodeId.localId);
+    } else static if (hasPrimaryKey!T) {
+        // Entity with @PrimaryKey field
+        enum pkField = getPrimaryKeyFieldName!T;
+        return decodeCompositeKey(__traits(getMember, entity, pkField).to!string);
     } else {
-        static assert(false, "Type " ~ T.stringof ~ " has no localId accessor");
+        static assert(false, "Type " ~ T.stringof ~ " has no localId accessor or @PrimaryKey field");
     }
 }
 
@@ -350,12 +327,12 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
 
         // Get the entity refs from the input chain, then fetch column
         return evalAs!Entity(input, ctx).then((Entity[] entities) {
-            AnyRef[] entityRefs = entities.map!(e => AnyRef(e.nodeId.id)).array;
+            AnyRef[] entityRefs = entities.map!(e => entityToRef(e)).array;
 
             debug(filter) {
                 import std.stdio : writefln;
                 writefln("    ColumnAccessExpr.eval: table=%s, column=%s, refs=%s",
-                    EntityID!Entity.table, column, entityRefs.map!(r => r.nodeId).array);
+                    EntityID!Entity.table, column, entityRefs.map!(r => r.toString()).array);
             }
 
             // First, check for mutation results (mutations store their results here)
@@ -387,9 +364,9 @@ class GetByIdsExpr(Entity) : Expr!(Entity[]), RootExprInfo {
 
     private Entity[] _entities;
 
-    /// Construct from array of IDs (any type convertible to string)
+    /// Construct from array of IDs (any type convertible to PK type)
     this(IdType)(IdType[] ids) {
-        _entities = ids.map!(id => Entity(EntityID!Entity.typeName ~ ":" ~ id.to!string)).array;
+        _entities = ids.map!(id => .makeEntity!(Entity, IdType)(id)).array;
     }
 
     this(Entity[] entities) {
@@ -437,7 +414,7 @@ class GetByIdsExpr(Entity) : Expr!(Entity[]), RootExprInfo {
 
     // RootExprInfo implementation
     FilterType filterType() { return FilterType.byIds; }
-    AnyRef[] filterRefs() { return _entities.map!(e => AnyRef(e.nodeId.id)).array; }
+    AnyRef[] filterRefs() { return _entities.map!(e => entityToRef(e)).array; }
     string entityTypeName() { return EntityID!Entity.typeName; }
     string entityTable() { return EntityID!Entity.table; }
     DataFetcher dataFetcher() { return EntityID!Entity.db; }
@@ -450,7 +427,7 @@ auto getByIds(Entity, IdType)(IdType[] ids) {
 
 /// Factory function to create GetByIdsExpr for composite keys.
 auto getByCompositeIds(Entity, IdType)(IdType[][] keyParts) {
-    import dunamis.core.types : encodeCompositeKey;
+    import dunamis.core.types : AnyRef, encodeCompositeKey;
 
     Entity[] entities;
     foreach (parts; keyParts) {
@@ -458,7 +435,8 @@ auto getByCompositeIds(Entity, IdType)(IdType[][] keyParts) {
         foreach (p; parts) {
             strParts ~= p.to!string;
         }
-        entities ~= Entity(EntityID!Entity.typeName ~ ":" ~ encodeCompositeKey(strParts));
+        auto ref_ = AnyRef(EntityID!Entity.typeName ~ ":" ~ encodeCompositeKey(strParts));
+        entities ~= makeEntityFromRef!Entity(ref_);
     }
     return new GetByIdsExpr!Entity(entities);
 }
@@ -524,7 +502,7 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
         if (_prefetch !is null) {
             return evalAs!(AnyRef[])(_prefetch, ctx).then((AnyRef[][] prefetchResults) {
                 auto refs = prefetchResults.length > 0 ? prefetchResults[0] : [];
-                auto entities = refs.map!(r => Entity(r.nodeId)).array;
+                auto entities = refs.map!(r => makeEntityFromRef!Entity(r)).array;
                 return [entities];
             });
         }
@@ -532,7 +510,7 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
         // Fallback: naive path using fetchAllIds
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
         return relCtx.fetchAllIds(EntityID!Entity.table).then((long[] ids) {
-            auto entities = ids.map!(id => Entity(EntityID!Entity.typeName ~ ":" ~ id.to!string)).array;
+            auto entities = ids.map!(id => .makeEntity!(Entity, long)(id)).array;
 
             enum plainFields = getPlainFieldNames!Entity;
             static if (plainFields.length > 0) {
@@ -610,7 +588,7 @@ class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Child[]), HasManyInfo 
 
         static if (!is(Parent == void)) {
             auto refsPromise = evalAs!Parent(input, ctx).then((Parent[] parents) {
-                return parents.map!(e => AnyRef(e.nodeId.id)).array;
+                return parents.map!(e => entityToRef(e)).array;
             });
         } else {
             auto refsPromise = evalAs!AnyRef(input, ctx);
@@ -619,7 +597,7 @@ class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Child[]), HasManyInfo 
             debug(filter) {
                 import std.stdio : writefln, stdout;
                 writefln("    HasManyAccessExpr.eval: parentRefs=%s, fk=%s, childTable=%s",
-                    parentRefs.map!(r => r.nodeId).array, fk, EntityID!Child.table);
+                    parentRefs.map!(r => r.toString()).array, fk, EntityID!Child.table);
                 stdout.flush();
             }
             if (relCtx.fetcher !is null) {
@@ -628,10 +606,10 @@ class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Child[]), HasManyInfo 
                         debug(filter) {
                             import std.stdio : writefln, stdout;
                             writefln("    HasManyAccessExpr.eval: fetched children=%s",
-                                children.map!(g => g.map!(r => r.nodeId).array).array);
+                                children.map!(g => g.map!(r => r.toString()).array).array);
                             stdout.flush();
                         }
-                        return children.map!(group => group.map!(r => Child(r.nodeId)).array).array;
+                        return children.map!(group => group.map!(r => makeEntityFromRef!Child(r)).array).array;
                     });
             }
 
@@ -746,7 +724,7 @@ class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultTyp
 
         static if (!is(Child == void)) {
             auto refsPromise = evalAs!Child(input, ctx).then((Child[] children) {
-                return children.map!(e => AnyRef(e.nodeId.id)).array;
+                return children.map!(e => entityToRef(e)).array;
             });
         } else {
             auto refsPromise = evalAs!AnyRef(input, ctx);
@@ -760,9 +738,9 @@ class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultTyp
                     return relCtx.fetcher.fetchBelongsTo(EntityID!Child.table, fk, EntityID!Parent.typeName, childRefs)
                         .then((AnyRef[] parentRefs) {
                             static if (is(ResultType == Parent)) {
-                                return parentRefs.map!(r => Parent(r.nodeId)).array;
+                                return parentRefs.map!(r => makeEntityFromRef!Parent(r)).array;
                             } else static if (is(ResultType == Nullable!Parent)) {
-                                return parentRefs.map!(r => r.isValid ? Nullable!Parent(Parent(r.nodeId)) : Nullable!Parent.init).array;
+                                return parentRefs.map!(r => r.isValid ? Nullable!Parent(makeEntityFromRef!Parent(r)) : Nullable!Parent.init).array;
                             } else {
                                 static assert(false, "ResultType must be Parent or Nullable!Parent");
                             }
@@ -803,18 +781,19 @@ unittest {
 
     static MockDB!() db;
 
+    @Entity!(db, "test_entities")
     static struct TestEntity {
-        mixin Entity!(db, "test_entities");
+        @PrimaryKeyAttr long id;
         string nickname;       // Plain field - auto-detected
         string displayName;    // Plain field - auto-detected
     }
 
     static assert(isPlainField!(TestEntity, "nickname"), "nickname should be a plain field");
     static assert(isPlainField!(TestEntity, "displayName"), "displayName should be a plain field");
-    static assert(!isPlainField!(TestEntity, "nodeId"), "nodeId should NOT be a plain field");
+    static assert(isPlainField!(TestEntity, "id"), "id should be a plain field");
 
     alias plainFields = getPlainFieldNames!TestEntity;
-    static assert(plainFields.length == 2, "Should have 2 plain fields");
+    static assert(plainFields.length == 3, "Should have 3 plain fields (id, nickname, displayName)");
 
     static assert(getPlainFieldColumnName!(TestEntity, "nickname") == "nickname",
         "nickname column name should be 'nickname'");
@@ -828,9 +807,10 @@ unittest {
 
     static MockDB!() db;
 
+    @Entity!(db, "users")
     static struct User {
-        mixin Entity!(db, "users");
-        @PrimaryKeyAttr mixin Col!("id", long);
+        @PrimaryKeyAttr @SqlColumn("id") long id;
+        enum _pkField = "id";
     }
     static assert(EntityID!User.table == "users");
     static assert(EntityID!User.typeName == "User");
@@ -838,9 +818,10 @@ unittest {
     static assert(hasUDA!(User.id, PrimaryKeyAttr));
     static assert(getUDAs!(User.id, SqlColumn)[0].name == "id");
 
+    @Entity!(db, "posts", "BlogPost")
     static struct Post {
-        mixin Entity!(db, "posts", "BlogPost");
-        @PrimaryKeyAttr mixin Col!("id", long);
+        @PrimaryKeyAttr @SqlColumn("id") long id;
+        enum _pkField = "id";
     }
     static assert(EntityID!Post.table == "posts");
     static assert(EntityID!Post.typeName == "BlogPost");
@@ -854,6 +835,7 @@ unittest {
 
     static MockDB!() db;
 
+    @Entity!(db, "comments")
     static struct Comment {
         mixin DemoEntity!(db, "comments");
     }
@@ -861,6 +843,7 @@ unittest {
     static assert(hasUDA!(Comment.id, SqlColumn));
     static assert(hasUDA!(Comment.id, PrimaryKeyAttr));
 
+    @Entity!(db, "items")
     static struct UuidEntity {
         mixin DemoEntity!(db, "items", string);
     }
@@ -874,6 +857,7 @@ unittest {
 
     static MockDB!() db;
 
+    @Entity!(db, "users")
     static struct User {
         mixin DemoEntity!(db, "users");
         mixin Col!("firstName", string);
@@ -911,6 +895,7 @@ unittest {
 
     static MockDB!() db;
 
+    @Entity!(db, "items")
     static struct Item {
         mixin DemoEntity!(db, "items", string);
         mixin Col!("name", string);
@@ -986,15 +971,16 @@ unittest {
     import std.json : parseJSON;
     import std.traits : hasUDA;
     import ae.utils.promise.await : awaitSync;
+    import dunamis.core.types : AnyRef;
     import dunamis.core.types : encodeCompositeKey;
     import dunamis.relational.demo : MockDB;
 
     static MockDB!() db;
 
+    @Entity!(db, "order_items")
     static struct OrderItem {
-        mixin Entity!(db, "order_items");
-        @PrimaryKeyAttr mixin Col!("orderId", long);
-        @PrimaryKeyAttr mixin Col!("productId", long);
+        @PrimaryKeyAttr @SqlColumn("order_id") long orderId;
+        @PrimaryKeyAttr @SqlColumn("product_id") long productId;
         mixin Col!("quantity", long);
         mixin Col!("price", string);
     }
@@ -1013,8 +999,8 @@ unittest {
     ]`);
 
     auto refs = [
-        OrderItem("OrderItem:1,100"),
-        OrderItem("OrderItem:1,101")
+        makeEntityFromRef!OrderItem(AnyRef("OrderItem:1,100")),
+        makeEntityFromRef!OrderItem(AnyRef("OrderItem:1,101"))
     ];
 
     auto query = map!(
@@ -1042,10 +1028,10 @@ unittest {
 
     static MockDB!() db;
 
+    @Entity!(db, "order_items")
     static struct OrderItem {
-        mixin Entity!(db, "order_items");
-        @PrimaryKeyAttr mixin Col!("orderId", long);
-        @PrimaryKeyAttr mixin Col!("productId", long);
+        @PrimaryKeyAttr @SqlColumn("order_id") long orderId;
+        @PrimaryKeyAttr @SqlColumn("product_id") long productId;
         mixin Col!("quantity", long);
     }
 
@@ -1076,16 +1062,14 @@ unittest {
 
     static MockDB!() db;
 
+    @Entity!(db, "users")
     static struct User {
         mixin DemoEntity!(db, "users");
     }
 
     auto user1 = makeEntity!User(42);
-    assert(user1.nodeId.id == "User:42");
+    assert(entityToRef(user1).nodeId == "User:42");
     static assert(is(typeof(user1) == User));
-
-    auto user2 = makeEntity!User("abc-123");
-    assert(user2.nodeId.id == "User:abc-123");
 
     assert(decodeAsLong(user1) == 42);
     assert(decodeAsLong(AnyRef("User:123")) == 123);
@@ -1094,27 +1078,10 @@ unittest {
     assert(decodeAsLongs(users) == [1, 2, 3]);
 }
 
-// Test makeCompositeEntity and decodeEntityCompositeKey
+// Test decodeEntityCompositeKey with AnyRef
 unittest {
     import dunamis.core.types : AnyRef;
-    import dunamis.relational.demo : MockDB;
 
-    static MockDB!() db;
-
-    static struct OrderItem {
-        mixin Entity!(db, "order_items");
-        @PrimaryKeyAttr mixin Col!("orderId", long);
-        @PrimaryKeyAttr mixin Col!("productId", long);
-    }
-
-    auto item1 = makeCompositeEntity!(OrderItem, int, int)(100, 200);
-    assert(item1.nodeId.id == "OrderItem:100,200");
-    assert(item1.nodeId.localId == "100,200");
-    static assert(is(typeof(item1) == OrderItem));
-
-    auto item2 = makeCompositeEntity!OrderItem(["order-1", "prod-2"]);
-    assert(item2.nodeId.id == "OrderItem:order-1,prod-2");
-
-    assert(decodeEntityCompositeKey(item1) == ["100", "200"]);
     assert(decodeEntityCompositeKey(AnyRef("OrderItem:100,200")) == ["100", "200"]);
+    assert(decodeEntityCompositeKey(AnyRef("OrderItem:order-1,prod-2")) == ["order-1", "prod-2"]);
 }

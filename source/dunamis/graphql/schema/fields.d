@@ -227,9 +227,30 @@ template getFields(T) {
     import dunamis.core.expr : ExprResultType;
 
     enum getFields = () {
-        import dunamis.core.types : isPlainField, isPlainMethod;
+        import dunamis.core.types : isPlainField, isPlainMethod, hasPrimaryKeyAttr;
 
         FieldInfo[] fields;
+
+        // Zeroth pass: @PrimaryKey plain fields (so id appears first)
+        static foreach (member; __traits(allMembers, T)) {{
+            static if (!isInternalMember!member) {
+                static if (isPlainField!(T, member) && hasPrimaryKeyAttr!(T, member)) {
+                    alias FieldType = typeof(__traits(getMember, T.init, member));
+                    enum gqlFieldName0 = member;
+                    enum gqlType0 = graphqlTypeName!FieldType;
+
+                    fields ~= FieldInfo(
+                        gqlFieldName0,
+                        gqlType0,
+                        false,  // isConnection
+                        false,  // isHidden
+                        "",     // description
+                        "",     // deprecation
+                        []      // arguments
+                    );
+                }
+            }
+        }}
 
         // First pass: field methods (static functions)
         static foreach (member; __traits(allMembers, T)) {{
@@ -276,10 +297,10 @@ template getFields(T) {
             }
         }}
 
-        // Second pass: plain fields (struct instance fields)
+        // Second pass: non-PK plain fields (struct instance fields)
         static foreach (member; __traits(allMembers, T)) {{
             static if (!isInternalMember!member) {
-                static if (isPlainField!(T, member)) {
+                static if (isPlainField!(T, member) && !hasPrimaryKeyAttr!(T, member)) {
                     alias FieldType = typeof(__traits(getMember, T.init, member));
                     // Use D field name directly (GraphQL uses camelCase like D)
                     enum gqlFieldName = member;

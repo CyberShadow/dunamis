@@ -219,25 +219,28 @@ template ExternalTypesPlugin(alias S, NewMappings...) if (isSchema!S) {
     }
 
     // Create wrapped version of each discovered type.
-    // For entity types (with nodeId): all fields are already static Expr methods
+    // For entity types (with @PrimaryKey): all fields are already static Expr methods
     //   (from Schema's NormalizePlugin), so just forward with value mapping.
     // For POD types: normalize plain fields/methods + apply value mapping.
     template _MappedType(T) {
         @GqlName(getGraphQLTypeName!T)
         struct _MappedType {
-            // Entity infrastructure
-            static if (__traits(hasMember, T, "nodeId")) {
-                typeof(T.nodeId) nodeId;
-                this(string id) { nodeId = typeof(nodeId)(id); }
-                string toString() const { return nodeId.toString(); }
-            }
-
             // Carry _normalizedSource through plugin chain
             static if (__traits(hasMember, T, "_normalizedSource")) {
                 typeof(T._normalizedSource) _normalizedSource;
-            } else static if (!__traits(hasMember, T, "nodeId")) {
-                // POD type: needs _normalizedSource for normalization
+            } else {
+                // POD type or first wrapper: needs _normalizedSource for normalization
                 T _normalizedSource;
+            }
+
+            // Copy entity metadata (for EntityID on mapped types)
+            static if (__traits(hasMember, T, "_entityTable")) {
+                alias _entityDb = __traits(getMember, T, "_entityDb");
+                enum _entityTable = __traits(getMember, T, "_entityTable");
+                enum _entityTypeName = __traits(getMember, T, "_entityTypeName");
+            }
+            static if (__traits(hasMember, T, "_pkField")) {
+                enum _pkField = __traits(getMember, T, "_pkField");
             }
 
             // Forward computed fields with value mapping

@@ -6,72 +6,111 @@ import std.typecons : Nullable;
 import dunamis.core.expr : Expr, ExprResultType, isExpr;
 
 // ============================================================================
-// Entity Reference Type
+// Entity Metadata Extraction
 // ============================================================================
 
-/// Runtime entity reference with compile-time metadata.
-/// The struct carries both the ID string and type-level metadata (db, table, typeName).
-struct EntityRef(alias _db, string _tableName, string _typeName) {
-    import std.string : indexOf;
+public import dunamis.relational.schema.attrs : hasEntityAttr, getEntityDb, getEntityTable, getEntityTypeName;
 
-    /// Data source (compile-time alias)
-    alias db = _db;
+/// Extract entity metadata from the @Entity UDA.
+/// Usage: EntityID!User.db, EntityID!User.table, EntityID!User.typeName
+template EntityID(T) {
+    import dunamis.relational.schema.attrs : getEntityDb, getEntityTable, getEntityTypeName;
+    alias db = getEntityDb!T;
+    enum table = getEntityTable!T;
+    enum typeName = getEntityTypeName!T;
+}
 
-    /// SQL table name (compile-time)
-    enum table = _tableName;
+// ============================================================================
+// Entity Construction Helpers
+// ============================================================================
 
-    /// GraphQL type name (compile-time)
-    enum typeName = _typeName;
+import dunamis.core.types : AnyRef, PrimaryKeyAttr, isPlainField;
 
-    /// Runtime ID string (format: "TypeName:localId")
-    string id;
-
-    /// Construct from ID string
-    this(string id) { this.id = id; }
-
-    /// Extract the local ID portion (after the colon)
-    string localId() const {
-        auto sep = id.indexOf(':');
-        return sep >= 0 ? id[sep + 1 .. $] : "";
+// Helper: resolve PK field name without iterating allMembers (avoids forward references
+// during mixin expansion). Prefers _pkField enum if available (set by DemoEntity mixin),
+// falls back to getPrimaryKeyFieldName for structs with @PrimaryKey on Col or plain fields.
+private template pkFieldOf(T) {
+    static if (__traits(hasMember, T, "_pkField")) {
+        enum pkFieldOf = __traits(getMember, T, "_pkField");
+    } else {
+        import dunamis.core.types : getPrimaryKeyFieldName;
+        enum pkFieldOf = getPrimaryKeyFieldName!T;
     }
-
-    /// For debugging
-    string toString() const { return id; }
 }
 
-/// Extract entity metadata type from any entity struct.
-/// Usage: EntityID!User.table, EntityID!User.typeName, EntityID!User.db
-alias EntityID(Entity) = typeof(Entity.init.nodeId);
+// Helper: resolve ALL PK field names (for composite key support).
+private template pkFieldsOf(T) {
+    static if (__traits(hasMember, T, "_pkField")) {
+        enum pkFieldsOf = [__traits(getMember, T, "_pkField")];
+    } else {
+        import dunamis.core.types : getPrimaryKeyFieldNames;
+        enum pkFieldsOf = getPrimaryKeyFieldNames!T;
+    }
+}
 
-/// Check if an entity reference is valid (has non-empty ID).
+/// Create an entity with its @PrimaryKey field set from a local ID value.
+T makeEntity(T, IdType)(IdType localId) {
+    import std.conv : to;
+    T e;
+    enum pkField = pkFieldOf!T;
+    __traits(getMember, e, pkField) = to!(typeof(__traits(getMember, T.init, pkField)))(localId);
+    return e;
+}
+
+/// Create an entity from an AnyRef (parses localId and converts to PK type).
+T makeEntityFromRef(T)(AnyRef ref_) {
+    import std.conv : to;
+    import dunamis.core.types : isCustomScalar, decodeCompositeKey;
+    enum pkFields = pkFieldsOf!T;
+    static if (pkFields.length == 1) {
+        enum pkField = pkFields[0];
+        alias PkType = typeof(__traits(getMember, T.init, pkField));
+        // For CustomScalar (e.g., Int64), convert through the base type
+        static if (isCustomScalar!PkType) {
+            return makeEntity!T(PkType(ref_.localId.to!(PkType.DType)));
+        } else {
+            return makeEntity!T(ref_.localId.to!PkType);
+        }
+    } else {
+        // Composite key: decode "val1,val2" into parts and set each PK field
+        auto parts = decodeCompositeKey(ref_.localId);
+        T e;
+        static foreach (i, f; pkFields) {
+            __traits(getMember, e, f) = parts[i].to!(typeof(__traits(getMember, T.init, f)));
+        }
+        return e;
+    }
+}
+
+/// Extract an AnyRef from an entity (reads @PrimaryKey field(s)).
+AnyRef entityToRef(T)(T entity) {
+    import std.conv : to;
+    import dunamis.core.types : encodeCompositeKey;
+    enum pkFields = pkFieldsOf!T;
+    static if (pkFields.length == 1) {
+        return AnyRef(EntityID!T.typeName ~ ":" ~ __traits(getMember, entity, pkFields[0]).to!string);
+    } else {
+        // Composite key: encode all PK fields
+        string[] values;
+        static foreach (f; pkFields) {
+            values ~= __traits(getMember, entity, f).to!string;
+        }
+        return AnyRef(EntityID!T.typeName ~ ":" ~ encodeCompositeKey(values));
+    }
+}
+
+/// Check if an entity has a valid (non-default) primary key.
 /// Works via UFCS: entity.isValid()
-bool isValid(E)(E entity) if (is(typeof(E.init.nodeId))) {
-    return entity.nodeId.id.length > 0;
-}
-
-// ============================================================================
-// Entity Mixin
-// ============================================================================
-
-/// The entity struct becomes a reference type - it holds a nodeId that identifies
-/// a specific row in the database. Schema metadata is static, nodeId is runtime.
-///
-/// The data source is bound by alias, so it must be a static/module-level variable.
-/// This allows both Table queries and mutations to access the same data source.
-mixin template Entity(alias db, string tableName, string typeName = "") {
-    import dunamis.relational.schema.types : EntityRef;
-
-    /// Entity reference with compile-time metadata and runtime ID
-    static if (typeName.length > 0)
-        EntityRef!(db, tableName, typeName) nodeId;
+bool isValid(T)(T entity) {
+    import std.conv : to;
+    enum pkField = pkFieldOf!T;
+    alias PkType = typeof(__traits(getMember, T.init, pkField));
+    auto val = __traits(getMember, entity, pkField);
+    // For numeric types, 0 is invalid (default); for strings, empty is invalid
+    static if (is(PkType == string))
+        return val.length > 0;
     else
-        EntityRef!(db, tableName, __traits(identifier, typeof(this))) nodeId;
-
-    /// Construct from ID string
-    this(string id) { nodeId = typeof(nodeId)(id); }
-
-    /// For debugging
-    string toString() const { return nodeId.toString(); }
+        return val != PkType.init;
 }
 
 // ============================================================================
@@ -87,12 +126,18 @@ struct ForeignKey(Entity, string idField = "id") {
     /// The referenced column name
     enum referencedColumn = idField;
 
-    /// The underlying storage type (derived from referenced column method's return type)
-    private alias _FieldMethod = __traits(getMember, Entity, idField);
-    private alias _ReturnType = getMethodReturnType!(_FieldMethod, Expr!Entity);
-    static assert(isExpr!_ReturnType,
-        "Field '" ~ idField ~ "' in " ~ Entity.stringof ~ " must return an Expr type");
-    alias StorageType = ExprResultType!_ReturnType;
+    /// The underlying storage type.
+    /// For plain fields (@PrimaryKey long id): uses the field type directly.
+    /// For Col-generated methods: extracts T from the Expr!T return type.
+    static if (isPlainField!(Entity, idField)) {
+        alias StorageType = typeof(__traits(getMember, Entity.init, idField));
+    } else {
+        private alias _FieldMethod = __traits(getMember, Entity, idField);
+        private alias _ReturnType = getMethodReturnType!(_FieldMethod, Expr!Entity);
+        static assert(isExpr!_ReturnType,
+            "Field '" ~ idField ~ "' in " ~ Entity.stringof ~ " must return an Expr type");
+        alias StorageType = ExprResultType!_ReturnType;
+    }
 }
 
 /// Helper to get return type of a method, handling both regular and template functions.

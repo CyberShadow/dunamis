@@ -118,7 +118,8 @@ class InsertExpr(Entity) : Expr!Entity {
 
                 // Convert refs to entities
                 auto refs = result.allRefs();
-                return refs.map!(r => Entity(r.nodeId)).array;
+                import dunamis.relational.schema : makeEntityFromRef;
+                return refs.map!(r => makeEntityFromRef!Entity(r)).array;
             });
 
         // Cache for future calls
@@ -177,7 +178,8 @@ class UpdateExpr(Entity) : Expr!(Entity[]) {
         return relCtx.fetcher.executeUpdate(_table, _typeName, _input)
             .then((QueryResult result) {
                 auto refs = result.allRefs();
-                auto entities = refs.map!(r => Entity(r.nodeId)).array;
+                import dunamis.relational.schema : makeEntityFromRef;
+                auto entities = refs.map!(r => makeEntityFromRef!Entity(r)).array;
                 return [entities];
             });
     }

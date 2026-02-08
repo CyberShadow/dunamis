@@ -7,17 +7,75 @@ import std.string : indexOf;
 import std.typecons : Nullable;
 
 // ============================================================================
+// Primary Key Support
+// ============================================================================
+
+/// Marks a field as part of the primary key.
+/// Used on plain fields to identify entity instances.
+enum PrimaryKeyAttr;
+
+/// Check if a member has @PrimaryKeyAttr UDA
+template hasPrimaryKeyAttr(T, string member) {
+    import std.meta : staticIndexOf;
+    static if (__traits(compiles, __traits(getAttributes, __traits(getMember, T, member)))) {
+        enum hasPrimaryKeyAttr = staticIndexOf!(PrimaryKeyAttr, __traits(getAttributes, __traits(getMember, T, member))) >= 0;
+    } else {
+        enum hasPrimaryKeyAttr = false;
+    }
+}
+
+/// Check if any field in the type has @PrimaryKeyAttr
+template hasPrimaryKey(T) {
+    enum hasPrimaryKey = () {
+        static foreach (member; __traits(allMembers, T)) {
+            static if (hasPrimaryKeyAttr!(T, member)) {
+                return true;
+            }
+        }
+        return false;
+    }();
+}
+
+/// Get the name of the @PrimaryKey field
+template getPrimaryKeyFieldName(T) {
+    enum getPrimaryKeyFieldName = () {
+        static foreach (member; __traits(allMembers, T)) {
+            static if (hasPrimaryKeyAttr!(T, member)) {
+                return member;
+            }
+        }
+        assert(false, "No @PrimaryKey field found on " ~ T.stringof);
+    }();
+}
+
+/// Get the type of the @PrimaryKey field
+template getPrimaryKeyType(T) {
+    enum _name = getPrimaryKeyFieldName!T;
+    alias getPrimaryKeyType = typeof(__traits(getMember, T.init, _name));
+}
+
+/// Get ALL @PrimaryKey field names (for composite key support)
+template getPrimaryKeyFieldNames(T) {
+    enum getPrimaryKeyFieldNames = () {
+        string[] names;
+        static foreach (member; __traits(allMembers, T)) {
+            static if (hasPrimaryKeyAttr!(T, member)) {
+                names ~= member;
+            }
+        }
+        return names;
+    }();
+}
+
+// ============================================================================
 // Internal Member Filtering
 // ============================================================================
 
 /// Check if a member name is an internal member that should be skipped
-/// during type introspection. Filters out Entity mixin infrastructure,
-/// D built-in methods, and private members.
+/// during type introspection. Filters out D built-in methods and private members.
 template isInternalMember(string name) {
     import std.algorithm : startsWith;
     enum isInternalMember =
-        // Entity internal field (all metadata is in nodeId's type)
-        name == "nodeId" ||
         // D built-in methods
         name == "toString" ||
         name == "toHash" ||

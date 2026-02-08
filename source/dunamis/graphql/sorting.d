@@ -399,7 +399,7 @@ unittest {
 
     // Test that sortable fields are correctly detected
     enum sortableFields = getSortableFields!User;
-    static assert(sortableFields.length >= 3, "Should have at least id, firstName, lastName");
+    static assert(sortableFields.length >= 2, "Should have at least firstName, lastName");
 
     // Verify hidden fields are not included
     import std.algorithm : canFind;

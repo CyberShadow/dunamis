@@ -876,7 +876,7 @@ unittest {
             return effect(() {
                 // In a real implementation, this would INSERT and return the new ID
                 // For testing, we'll just return an existing user
-                return User("User:1");
+                return makeEntity!User(1);
             }, parent);
         }
     }
@@ -934,7 +934,7 @@ unittest {
         static Expr!(User[]) getActiveUsers(Expr!Mutation parent) {
             return effect(() {
                 // Return array of user refs
-                return [User("User:1"), User("User:2")];
+                return [makeEntity!User(1), makeEntity!User(2)];
             }, parent);
         }
     }
@@ -1135,7 +1135,7 @@ unittest {
         static auto user(Expr!CreateUserPayload p) {
             // In reality, this would return the newly created user
             // For testing, return a reference to user 1
-            return effect(() => User("User:1"), p);
+            return effect(() => makeEntity!User(1), p);
         }
 
         // Return a success message
@@ -1216,7 +1216,7 @@ unittest {
     // Payload that includes access to the Query root
     static struct CreateUserPayload {
         static auto user(Expr!CreateUserPayload p) {
-            return effect(() => User("User:1"), p);
+            return effect(() => makeEntity!User(1), p);
         }
 
         // Return the Query root - allows refetching any data after mutation

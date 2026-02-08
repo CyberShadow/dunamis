@@ -149,9 +149,10 @@ template getFilterableColumns(Entity) {
     }();
 }
 
-/// Check if a type is an entity (has nodeId from Entity mixin).
+/// Check if a type is an entity (has @PrimaryKey field).
 template isEntityType(T) {
-    enum isEntityType = __traits(hasMember, T, "nodeId");
+    import dunamis.core.types : hasPrimaryKey;
+    enum isEntityType = hasPrimaryKey!T;
 }
 
 /// Check if a member is an array-returning method (returns Expr!(T[]) for any T).
@@ -192,7 +193,7 @@ template isArrayReturningMethod(Entity, string member) {
     }
 }
 
-/// Check if an array field returns entity elements (has nodeId).
+/// Check if an array field returns entity elements (has @PrimaryKey).
 template isEntityArrayField(Entity, string member) {
     static if (isArrayReturningMethod!(Entity, member)) {
         alias ElementT = getArrayElementType!(Entity, member);
@@ -225,7 +226,7 @@ template getArrayFields(Entity) {
     }();
 }
 
-/// Get entity array field names (arrays of entities with nodeId).
+/// Get entity array field names (arrays of entities with @PrimaryKey).
 template getEntityArrayFields(Entity) {
     enum string[] getEntityArrayFields = () {
         string[] fields;

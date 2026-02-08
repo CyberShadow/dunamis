@@ -179,13 +179,13 @@ auto wrapEntityResult(alias TypeMap, R)(R result)
 }
 
 /// Value-level entity cast for Nullable wrapping in wrapEntityResult.
-/// Converts Nullable!From to Nullable!To by copying nodeId and matching fields.
+/// Converts Nullable!From to Nullable!To by copying matching fields.
 Nullable!To nullableEntityCastValue(To, From)(Nullable!From val) {
     if (val.isNull) return Nullable!To.init;
     return Nullable!To(entityCastValue!(To, From)(val.get));
 }
 
-/// Value-level entity cast. Copies nodeId and matching instance fields from From to To.
+/// Value-level entity cast. Copies all matching instance fields from From to To.
 ///
 /// Special handling for `_normalizedSource`: if To has a `_normalizedSource` field,
 /// it is populated to carry original entity data through the plugin wrapper chain.
@@ -193,23 +193,7 @@ Nullable!To nullableEntityCastValue(To, From)(Nullable!From val) {
 /// - If both From and To have `_normalizedSource` of the same type: copy transitively (plugin chain)
 To entityCastValue(To, From)(From from) {
     To to;
-    static if (__traits(hasMember, From, "nodeId") && __traits(hasMember, To, "nodeId")) {
-        to = To(from.nodeId.id);
-        static foreach (member; __traits(allMembers, From)) {{
-            static if (member.length > 0 && member[0] != '_' &&
-                       member != "nodeId" &&
-                       member != "toString" && member != "toHash" &&
-                       member != "opEquals" && member != "opCmp" &&
-                       member != "opAssign" && member != "factory" &&
-                       member != "Monitor" &&
-                       __traits(hasMember, To, member)) {
-                static if (__traits(compiles, __traits(getMember, from, member)) &&
-                           __traits(compiles, __traits(getMember, to, member) = __traits(getMember, from, member))) {
-                    __traits(getMember, to, member) = __traits(getMember, from, member);
-                }
-            }
-        }}
-    } else static if (is(From == struct) && is(To == struct)) {
+    static if (is(From == struct) && is(To == struct)) {
         static foreach (member; __traits(allMembers, From)) {{
             static if (member.length > 0 && member[0] != '_' &&
                        member != "toString" && member != "toHash" &&
@@ -244,23 +228,26 @@ To entityCastValue(To, From)(From from) {
 // ============================================================================
 
 version (unittest) {
+    import dunamis.core.types : PrimaryKeyAttr;
     import dunamis.relational.schema : Entity, Col, HasMany, BelongsTo, ForeignKey, Table;
     import dunamis.relational.demo : MockDB;
 
     static MockDB!() _testDb;
 
     // Test types with circular references (Post must be before Author for HasMany)
+    @Entity!(_testDb, "posts", "TestPost")
     struct TestPost {
-        mixin Entity!(_testDb, "posts", "TestPost");
-        mixin Col!("id", int);
+        @PrimaryKeyAttr int id;
+        enum _pkField = "id";
         mixin Col!("title", string);
         mixin Col!("authorId", ForeignKey!TestAuthor);
         mixin BelongsTo!("author", "authorId");
     }
 
+    @Entity!(_testDb, "authors", "TestAuthor")
     struct TestAuthor {
-        mixin Entity!(_testDb, "authors", "TestAuthor");
-        mixin Col!("id", int);
+        @PrimaryKeyAttr int id;
+        enum _pkField = "id";
         mixin Col!("name", string);
         mixin HasMany!("posts", TestPost, "author_id");
     }
@@ -306,13 +293,12 @@ unittest {
 unittest {
     enum fields = getTransformFieldInfo!TestAuthor;
 
-    bool foundId, foundName, foundPosts;
+    bool foundName, foundPosts;
     foreach (f; fields) {
-        if (f.name == "id") { foundId = true; assert(!f.isArray); }
         if (f.name == "name") { foundName = true; assert(!f.isArray); }
         if (f.name == "posts") { foundPosts = true; assert(f.isArray); }
     }
-    assert(foundId && foundName && foundPosts);
+    assert(foundName && foundPosts);
 }
 
 // Test ForwardField with TypeMap (unified - replaces ForwardFieldWithTypeMap)
@@ -365,7 +351,7 @@ unittest {
     }
 
     // Direct: Original → Normalized (stores original in _normalizedSource)
-    auto orig = Original("1");
+    Original orig;
     orig.name = "Alice";
     orig.age = 30;
     auto norm = entityCastValue!(Normalized, Original)(orig);
@@ -378,7 +364,7 @@ unittest {
     assert(wrapped._normalizedSource.age == 30);
 }
 
-// Test _normalizedSource with POD types (no nodeId)
+// Test _normalizedSource with POD types (no @PrimaryKey)
 unittest {
     static struct POD {
         int x;

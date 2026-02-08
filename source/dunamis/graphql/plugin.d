@@ -251,8 +251,8 @@ mixin template CopyFields(SourceType, alias TypeMap = IdentityTypeMap) {
 /// plugin-specific array field handling.
 ///
 /// This is the common skeleton for plugin entity/Query/Mutation wrapping:
-/// 1. Copy nodeId + constructor + toString (if present on SourceType)
-/// 2. Copy plain fields (struct instance fields)
+/// 1. Copy _normalizedSource (if present on SourceType)
+/// 2. Copy plain fields (struct instance fields, including @PrimaryKey)
 /// 3. Dispatch fields: arrays → ArrayFieldMixin, computed → ForwardField,
 ///    plain methods → ForwardPlainMethod
 ///
@@ -270,26 +270,29 @@ mixin template WrapFields(SourceType, alias TypeMap, alias ArrayFieldMixin) {
     import dunamis.graphql.plugin : getFieldMembers, isComputedField, isArrayReturningField,
         ForwardField, ForwardPlainMethod;
 
-    // 1. Copy entity infrastructure (nodeId)
-    static if (__traits(hasMember, SourceType, "nodeId")) {
-        typeof(SourceType.nodeId) nodeId;
-        this(string id) { nodeId = typeof(nodeId)(id); }
-        string toString() const { return nodeId.toString(); }
-    }
-
-    // 2. Copy _normalizedSource (carries original entity data through plugin chain)
+    // 1. Copy _normalizedSource (carries original entity data through plugin chain)
     static if (__traits(hasMember, SourceType, "_normalizedSource")) {
         typeof(SourceType._normalizedSource) _normalizedSource;
     }
 
-    // 3. Copy plain fields (struct instance fields)
+    // 1b. Copy entity metadata (for EntityID on wrapped types)
+    static if (__traits(hasMember, SourceType, "_entityTable")) {
+        alias _entityDb = __traits(getMember, SourceType, "_entityDb");
+        enum _entityTable = __traits(getMember, SourceType, "_entityTable");
+        enum _entityTypeName = __traits(getMember, SourceType, "_entityTypeName");
+    }
+    static if (__traits(hasMember, SourceType, "_pkField")) {
+        enum _pkField = __traits(getMember, SourceType, "_pkField");
+    }
+
+    // 2. Copy plain fields (struct instance fields, including @PrimaryKey)
     static foreach (member; __traits(allMembers, SourceType)) {
         static if (isPlainField!(SourceType, member)) {
             mixin("typeof(__traits(getMember, SourceType.init, \"" ~ member ~ "\")) " ~ member ~ ";");
         }
     }
 
-    // 4. Field iteration with dispatch
+    // 3. Field iteration with dispatch
     static foreach (member; getFieldMembers!SourceType) {
         static if (isArrayReturningField!(__traits(getMember, SourceType, member))) {
             mixin ArrayFieldMixin!(SourceType, member, TypeMap);
@@ -332,18 +335,32 @@ mixin template WrapFields(SourceType, alias TypeMap, alias ArrayFieldMixin) {
 /// ---
 mixin template NormalizeFields(SourceType, alias TypeMap = IdentityTypeMap) {
     import dunamis.core.expr : Expr, use;
-    import dunamis.core.types : isPlainField, isPlainMethod;
+    import dunamis.core.types : isPlainField, isPlainMethod, hasPrimaryKeyAttr;
     import dunamis.graphql.plugin : getFieldMembers, isComputedField, ForwardField;
     import dunamis.graphql.transform : wrapEntityResult;
 
     // Store original struct for data access by normalized methods
     SourceType _normalizedSource;
 
-    // Copy nodeId infrastructure
-    static if (__traits(hasMember, SourceType, "nodeId")) {
-        typeof(SourceType.nodeId) nodeId;
-        this(string id) { nodeId = typeof(nodeId)(id); }
-        string toString() const { return nodeId.toString(); }
+    // Copy entity metadata (for EntityID on normalized types)
+    static if (__traits(hasMember, SourceType, "_entityTable")) {
+        alias _entityDb = __traits(getMember, SourceType, "_entityDb");
+        enum _entityTable = __traits(getMember, SourceType, "_entityTable");
+        enum _entityTypeName = __traits(getMember, SourceType, "_entityTypeName");
+    }
+    static if (__traits(hasMember, SourceType, "_pkField")) {
+        enum _pkField = __traits(getMember, SourceType, "_pkField");
+    }
+
+    // Normalize @PrimaryKey plain fields first (so id appears before other fields)
+    static foreach (_nf_member; __traits(allMembers, SourceType)) {
+        static if (isPlainField!(SourceType, _nf_member) && hasPrimaryKeyAttr!(SourceType, _nf_member)) {
+            mixin("private static auto _nf_read_" ~ _nf_member ~
+                  "(typeof(this) _n) { return _n._normalizedSource." ~ _nf_member ~ "; }");
+            @(__traits(getAttributes, __traits(getMember, SourceType, _nf_member)))
+            mixin("static auto " ~ _nf_member ~
+                  "(Expr!(typeof(this)) _self) { return wrapEntityResult!(TypeMap)(use(&_nf_read_" ~ _nf_member ~ ", _self)); }");
+        }
     }
 
     // Forward computed fields (already static Expr methods)
@@ -353,9 +370,9 @@ mixin template NormalizeFields(SourceType, alias TypeMap = IdentityTypeMap) {
         }
     }
 
-    // Normalize plain fields → static Expr methods
+    // Normalize non-PK plain fields → static Expr methods
     static foreach (_nf_member; __traits(allMembers, SourceType)) {
-        static if (isPlainField!(SourceType, _nf_member)) {
+        static if (isPlainField!(SourceType, _nf_member) && !hasPrimaryKeyAttr!(SourceType, _nf_member)) {
             // Helper: reads field from _normalizedSource
             mixin("private static auto _nf_read_" ~ _nf_member ~
                   "(typeof(this) _n) { return _n._normalizedSource." ~ _nf_member ~ "; }");
@@ -386,11 +403,11 @@ mixin template NormalizeFields(SourceType, alias TypeMap = IdentityTypeMap) {
 // Normalize Plugin
 // ============================================================================
 
-/// Internal plugin that normalizes entity types (those with nodeId) to use
+/// Internal plugin that normalizes entity types (those with @PrimaryKey) to use
 /// only static Expr methods. Plain fields and plain methods are converted to
 /// computed fields via `use()`, making all field access uniform for entities.
 ///
-/// POD types (structs without nodeId) are left unchanged — they keep their
+/// POD types (structs without @PrimaryKey) are left unchanged — they keep their
 /// plain fields/methods and remain compatible with ExternalTypesPlugin.
 ///
 /// Used internally by Schema to normalize types before external plugins
@@ -411,11 +428,12 @@ template NormalizePlugin(RawQuery, RawMutation) {
         }
     }
 
-    // Map entity types (with nodeId) to normalized versions.
+    // Map entity types (with @PrimaryKey) to normalized versions.
     // POD types pass through unchanged — they keep plain fields/methods
     // and remain compatible with ExternalTypesPlugin type mappings.
     template _TypeMap(T) {
-        static if (isTypeInList!(T, _AllTypes) && __traits(hasMember, T, "nodeId")) {
+        import dunamis.core.types : hasPrimaryKey;
+        static if (isTypeInList!(T, _AllTypes) && hasPrimaryKey!T) {
             alias _TypeMap = _NormalizedType!T;
         } else {
             alias _TypeMap = T;
@@ -464,8 +482,8 @@ unittest {
     static struct TestQuery {
         static auto foo(Expr!TestQuery q) { return q; }
         static auto bar(Expr!TestQuery q) { return q; }
-        // nodeId should be filtered out (internal member)
-        int nodeId;
+        // _underscore members should be filtered out (internal member)
+        int _internal;
     }
 
     enum members = getFieldMembers!TestQuery;
@@ -1095,7 +1113,7 @@ unittest {
     }
 
     static struct Query {
-        mixin Table!(NormalizedUser, "users");
+        mixin Table!(User, "users");
     }
 
     alias MySchema = Schema!Query;

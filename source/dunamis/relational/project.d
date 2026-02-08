@@ -127,7 +127,7 @@ interface ProjectJoinedColumnInfo {
 // Entity-to-AnyRef Adapter
 // ============================================================================
 
-/// Wraps an Expr!Entity and produces AnyRef[] by extracting nodeId.
+/// Wraps an Expr!Entity and produces AnyRef[] by extracting the primary key.
 /// Created by the relational optimizer at the point where the entity type is known,
 /// so that downstream projection expressions can work with AnyRef[] without
 /// needing entity-type awareness.
@@ -148,12 +148,9 @@ class EntityToAnyRefExpr(Entity) : Expr!AnyRef {
     }
 
     override Promise!(AnyRef[]) eval(EvalContext ctx) {
+        import dunamis.relational.schema.types : entityToRef;
         return evalAs!Entity(_inner, ctx).then((Entity[] entities) {
-            static if (is(typeof(Entity.init.nodeId) == string)) {
-                return entities.map!(e => AnyRef(e.nodeId)).array;
-            } else {
-                return entities.map!(e => AnyRef(e.nodeId.id)).array;
-            }
+            return entities.map!(e => entityToRef(e)).array;
         });
     }
 }
@@ -441,13 +438,14 @@ class ProjectTypedBelongsToExpr(Child, Parent, ResultType, string fk) : Expr!Res
     }
 
     override Promise!(ResultType[]) eval(EvalContext ctx) {
+        import dunamis.relational.schema.types : makeEntityFromRef;
         return _inner.eval(ctx).then((AnyRef[] refs) {
             static if (is(ResultType == Parent)) {
                 // Required FK - convert AnyRef to Parent
-                return refs.map!(r => Parent(r.nodeId)).array;
+                return refs.map!(r => makeEntityFromRef!Parent(r)).array;
             } else static if (is(ResultType == Nullable!Parent)) {
                 // Optional FK - wrap valid refs in Nullable, invalid as null
-                return refs.map!(r => r.isValid ? Nullable!Parent(Parent(r.nodeId)) : Nullable!Parent.init).array;
+                return refs.map!(r => r.isValid ? Nullable!Parent(makeEntityFromRef!Parent(r)) : Nullable!Parent.init).array;
             } else {
                 static assert(false, "ResultType must be Parent or Nullable!Parent");
             }
@@ -473,9 +471,14 @@ class ProjectTypedBelongsToExpr(Child, Parent, ResultType, string fk) : Expr!Res
 unittest {
     import std.json : parseJSON;
 
+    import dunamis.relational.schema.attrs : Entity;
+    import dunamis.relational.mock : MockDB;
+    static MockDB!() _testDb;
+
     // Minimal entity for testing
+    @Entity!(_testDb, "users", "User")
     static struct TestUser {
-        string nodeId;
+        @PrimaryKeyAttr long id;
     }
 
     // Test ProjectColumnExpr
@@ -497,7 +500,7 @@ unittest {
 
     // Create a mock input that returns the refs via EntityToAnyRefExpr
     auto item = new EveryItemOfExpr!TestUser();
-    ctx.setValues!TestUser(null, [TestUser("User:1"), TestUser("User:2")]);
+    ctx.setValues!TestUser(null, [TestUser(1), TestUser(2)]);
     auto refInput = new EntityToAnyRefExpr!TestUser(item);
 
     // Create projection with input and prefetch
@@ -541,9 +544,14 @@ unittest {
 unittest {
     import std.json : parseJSON;
 
+    import dunamis.relational.schema.attrs : Entity;
+    import dunamis.relational.mock : MockDB;
+    static MockDB!() _testDb2;
+
     // Minimal entity for testing
+    @Entity!(_testDb2, "posts", "Post")
     static struct TestPost {
-        string nodeId;
+        @PrimaryKeyAttr long id;
     }
 
     // Test ProjectBelongsToExpr
@@ -564,7 +572,7 @@ unittest {
 
     // Create a mock input that returns the refs via EntityToAnyRefExpr
     auto item = new EveryItemOfExpr!TestPost();
-    ctx.setValues!TestPost(null, [TestPost("Post:1"), TestPost("Post:2")]);
+    ctx.setValues!TestPost(null, [TestPost(1), TestPost(2)]);
     auto refInput = new EntityToAnyRefExpr!TestPost(item);
 
     auto proj = new ProjectBelongsToExpr(QueryNodeId(0), "author_id", "User", refInput, prefetch);

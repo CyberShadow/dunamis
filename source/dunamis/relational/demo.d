@@ -61,16 +61,19 @@ alias Int64 = CustomScalar!(
 /// }
 /// ---
 mixin template DemoEntity(alias db, string tableName, IdType = Int64, string typeName = "") {
-    import dunamis.relational.schema : Entity, column, SqlColumn, PrimaryKeyAttr;
-    import dunamis.core.expr : Expr;
+    import dunamis.core.types : PrimaryKeyAttr;
+    import dunamis.relational.schema.attrs : SqlColumn;
 
-    mixin Entity!(db, tableName, typeName);
+    /// Primary key field - identifies this entity instance
+    @PrimaryKeyAttr @SqlColumn("id") IdType id;
 
-    /// ID accessor with UDAs - reads the id column
-    @SqlColumn("id") @PrimaryKeyAttr
-    static auto id(Expr!(typeof(this)) e) {
-        return e.column!(IdType, typeof(this))("id");
-    }
+    /// Compile-time PK field name (avoids __traits(allMembers) during mixin expansion)
+    enum _pkField = "id";
+
+    /// Entity metadata (used by EntityID when @Entity UDA is not present on the struct)
+    alias _entityDb = db;
+    enum _entityTable = tableName;
+    enum _entityTypeName = typeName;
 }
 
 // ============================================================================
@@ -148,6 +151,7 @@ unittest {
     // Test entity
     static MockDB!() db;
 
+    @Entity!(db, "users")
     static struct User {
         mixin DemoEntity!(db, "users");
         mixin Col!("name", string);
@@ -213,10 +217,11 @@ unittest {
 
 // Test CrudMutations mixin
 unittest {
-    import dunamis.relational.schema : Col;
+    import dunamis.relational.schema : Entity, Col;
 
     static MockDB!() db;
 
+    @Entity!(db, "users")
     static struct User {
         mixin DemoEntity!(db, "users");
         mixin Col!("name", string);
@@ -234,15 +239,17 @@ unittest {
 
 // Test AllCrudMutations mixin
 unittest {
-    import dunamis.relational.schema : Col;
+    import dunamis.relational.schema : Entity, Col;
 
     static MockDB!() db;
 
+    @Entity!(db, "users")
     static struct User {
         mixin DemoEntity!(db, "users");
         mixin Col!("name", string);
     }
 
+    @Entity!(db, "posts")
     static struct Post {
         mixin DemoEntity!(db, "posts");
         mixin Col!("title", string);

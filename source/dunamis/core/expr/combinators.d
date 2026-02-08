@@ -178,9 +178,10 @@ interface EveryItemOfExprInfo {
     @property Object parentMap();
 }
 
-/// Check if a type is an entity (has nodeId from Entity mixin).
+/// Check if a type is an entity (has @PrimaryKey field).
 template isEntityType(T) {
-    enum isEntityType = __traits(hasMember, T, "nodeId");
+    import dunamis.core.types : hasPrimaryKey;
+    enum isEntityType = hasPrimaryKey!T;
 }
 
 /// Placeholder representing "current item" within a map iteration.
@@ -188,7 +189,7 @@ template isEntityType(T) {
 /// EveryItemOfExpr just returns those refs unchanged - it's a pass-through
 /// that represents "the items being iterated over".
 ///
-/// Typed with the Entity being iterated. Returns Entity with nodeId populated.
+/// Typed with the Entity being iterated. Returns Entity with PK populated.
 class EveryItemOfExpr(T) : Expr!T, EveryItemOfExprInfo {
     /// Back-reference to owning MapExpr (set at construction)
     Object _parentMap;  // Use Object to avoid template instantiation issues
@@ -516,36 +517,12 @@ auto every(alias pred, Coll)(Coll collection)
 import ae.utils.promise.await : awaitSync;
 import dunamis.core.expr.primitives : FieldAccessExpr;
 
-/// Minimal EntityRef for testing (no db alias needed)
-private struct TestEntityRef(string _typeName) {
-    import std.string : indexOf;
-
-    enum typeName = _typeName;
-    string id;
-    this(string id) { this.id = id; }
-    string toString() const { return id; }
-
-    string localId() const {
-        auto sep = id.indexOf(':');
-        return sep >= 0 ? id[sep + 1 .. $] : "";
-    }
-}
-
-/// Dummy entity type for tests (with Entity-like structure)
+/// Dummy entity type for tests (with @PrimaryKey field)
 private struct TestEntity {
-    import std.string : indexOf;
+    import dunamis.core.types : PrimaryKeyAttr;
 
-    TestEntityRef!"Test" nodeId;
-    this(string id) { nodeId = typeof(nodeId)(id); }
-    string toString() const { return nodeId.toString(); }
-
-    string localId() const { return nodeId.localId(); }
-
-    // Runtime typeName extraction (from nodeId string, not compile-time)
-    string typeName() const {
-        auto sep = nodeId.id.indexOf(':');
-        return sep >= 0 ? nodeId.id[0 .. sep] : nodeId.id;
-    }
+    @PrimaryKeyAttr string id;      // Primary key
+    string typeName;                // Extra field for test assertions
 }
 
 /// Helper: expression that returns a fixed array of entities.
@@ -563,11 +540,51 @@ private class MockCollectionExpr(Entity) : Expr!(Entity[]) {
 }
 
 unittest {
-    // Test map with use combinator - extracts node IDs
-    auto collection = new MockCollectionExpr!TestEntity([TestEntity("Test:1"), TestEntity("Test:2")]);
+    // Test map with use combinator - extracts primary key
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("1", "Test"), TestEntity("2", "Test")]);
 
     auto query = map!(
-        (Expr!TestEntity item) => use((TestEntity e) => e.nodeId.id, item)
+        (Expr!TestEntity item) => use((TestEntity e) => e.id, item)
+    )(collection);
+
+    auto ctx = new EvalContext();
+    ctx.setValues!AnyRef(null, [queryRoot]);
+    auto result = awaitSync(query.eval(ctx));
+
+    assert(result.length == 1);
+    assert(result[0] == ["1", "2"]);
+}
+
+unittest {
+    // Test map with jsonObject - builds structured output
+    import dunamis.core.expr.json : jsonObject;
+
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("1", "User"), TestEntity("2", "User")]);
+
+    auto query = map!(
+        (Expr!TestEntity item) => jsonObject(
+            "id", use((TestEntity e) => e.id, item),
+            "type", use((TestEntity e) => e.typeName, item)
+        )
+    )(collection);
+
+    auto ctx = new EvalContext();
+    ctx.setValues!AnyRef(null, [queryRoot]);
+    auto result = awaitSync(query.eval(ctx));
+
+    assert(result.length == 1);
+    assert(result[0].length == 2);
+    assert(result[0][0]["id"].str == "1");
+    assert(result[0][0]["type"].str == "User");
+    assert(result[0][1]["id"].str == "2");
+}
+
+unittest {
+    // Test string concatenation with literals inside map
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("1", "Test"), TestEntity("2", "Test")]);
+
+    auto query = map!(
+        (Expr!TestEntity item) => use((TestEntity e) => e.typeName, item) ~ ":" ~ use((TestEntity e) => e.id, item)
     )(collection);
 
     auto ctx = new EvalContext();
@@ -579,55 +596,15 @@ unittest {
 }
 
 unittest {
-    // Test map with jsonObject - builds structured output
-    import dunamis.core.expr.json : jsonObject;
-
-    auto collection = new MockCollectionExpr!TestEntity([TestEntity("User:1"), TestEntity("User:2")]);
-
-    auto query = map!(
-        (Expr!TestEntity item) => jsonObject(
-            "id", use((TestEntity e) => e.nodeId.id, item),
-            "type", use((TestEntity e) => e.typeName, item)
-        )
-    )(collection);
-
-    auto ctx = new EvalContext();
-    ctx.setValues!AnyRef(null, [queryRoot]);
-    auto result = awaitSync(query.eval(ctx));
-
-    assert(result.length == 1);
-    assert(result[0].length == 2);
-    assert(result[0][0]["id"].str == "User:1");
-    assert(result[0][0]["type"].str == "User");
-    assert(result[0][1]["id"].str == "User:2");
-}
-
-unittest {
-    // Test string concatenation with literals inside map
-    auto collection = new MockCollectionExpr!TestEntity([TestEntity("Test:1"), TestEntity("Test:2")]);
-
-    auto query = map!(
-        (Expr!TestEntity item) => use((TestEntity e) => e.typeName, item) ~ ":" ~ use((TestEntity e) => e.nodeId.id, item)
-    )(collection);
-
-    auto ctx = new EvalContext();
-    ctx.setValues!AnyRef(null, [queryRoot]);
-    auto result = awaitSync(query.eval(ctx));
-
-    assert(result.length == 1);
-    assert(result[0] == ["Test:Test:1", "Test:Test:2"]);
-}
-
-unittest {
     import std.conv : to;
 
     // Test arithmetic operators with literals inside map
-    auto collection = new MockCollectionExpr!TestEntity([TestEntity("Test:1"), TestEntity("Test:2"), TestEntity("Test:3")]);
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("1"), TestEntity("2"), TestEntity("3")]);
 
     auto query = map!(
         (Expr!TestEntity item) {
-            // Use localId parsed to int for arithmetic test
-            auto id = use((TestEntity e) => e.localId.to!long, item);
+            // Use id parsed to int for arithmetic test
+            auto id = use((TestEntity e) => e.id.to!long, item);
             return id * 10 + 5;
         }
     )(collection);
@@ -644,11 +621,11 @@ unittest {
     import std.conv : to;
 
     // Test comparison operators inside map
-    auto collection = new MockCollectionExpr!TestEntity([TestEntity("Test:5"), TestEntity("Test:10"), TestEntity("Test:15")]);
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("5"), TestEntity("10"), TestEntity("15")]);
 
     auto query = map!(
         (Expr!TestEntity item) {
-            auto val = use((TestEntity e) => e.localId.to!long, item);
+            auto val = use((TestEntity e) => e.id.to!long, item);
             return val.gt(7);  // 5 > 7 = false, 10 > 7 = true, 15 > 7 = true
         }
     )(collection);
@@ -665,11 +642,11 @@ unittest {
     import std.conv : to;
 
     // Test boolean AND operator
-    auto collection = new MockCollectionExpr!TestEntity([TestEntity("Test:5"), TestEntity("Test:10"), TestEntity("Test:15")]);
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("5"), TestEntity("10"), TestEntity("15")]);
 
     auto query = map!(
         (Expr!TestEntity item) {
-            auto val = use((TestEntity e) => e.localId.to!long, item);
+            auto val = use((TestEntity e) => e.id.to!long, item);
             return val.gt(5).and(val.lt(15));  // 5>5 && 5<15 = false, 10>5 && 10<15 = true, 15>5 && 15<15 = false
         }
     )(collection);
@@ -686,11 +663,11 @@ unittest {
     import std.conv : to;
 
     // Test boolean OR operator
-    auto collection = new MockCollectionExpr!TestEntity([TestEntity("Test:5"), TestEntity("Test:10"), TestEntity("Test:15")]);
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("5"), TestEntity("10"), TestEntity("15")]);
 
     auto query = map!(
         (Expr!TestEntity item) {
-            auto val = use((TestEntity e) => e.localId.to!long, item);
+            auto val = use((TestEntity e) => e.id.to!long, item);
             return val.lt(8).or(val.gt(12));  // 5<8 || 5>12 = true, 10<8 || 10>12 = false, 15<8 || 15>12 = true
         }
     )(collection);
@@ -707,11 +684,11 @@ unittest {
     import std.conv : to;
 
     // Test boolean NOT operator
-    auto collection = new MockCollectionExpr!TestEntity([TestEntity("Test:5"), TestEntity("Test:10"), TestEntity("Test:15")]);
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("5"), TestEntity("10"), TestEntity("15")]);
 
     auto query = map!(
         (Expr!TestEntity item) {
-            auto val = use((TestEntity e) => e.localId.to!long, item);
+            auto val = use((TestEntity e) => e.id.to!long, item);
             return val.gt(8).not();  // !(5>8) = true, !(10>8) = false, !(15>8) = false
         }
     )(collection);
@@ -730,11 +707,11 @@ unittest {
     // Test ternary expression
     import dunamis.core.expr.operators : ternary;
 
-    auto collection = new MockCollectionExpr!TestEntity([TestEntity("Test:5"), TestEntity("Test:15"), TestEntity("Test:25")]);
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("5"), TestEntity("15"), TestEntity("25")]);
 
     auto query = map!(
         (Expr!TestEntity item) {
-            auto val = use((TestEntity e) => e.localId.to!long, item);
+            auto val = use((TestEntity e) => e.id.to!long, item);
             return ternary(val.ge(18), "adult", "minor");  // 5>=18 ? adult : minor, etc.
         }
     )(collection);
@@ -753,11 +730,11 @@ unittest {
     // Test nested ternary expression (chained conditions)
     import dunamis.core.expr.operators : ternary;
 
-    auto collection = new MockCollectionExpr!TestEntity([TestEntity("Test:5"), TestEntity("Test:15"), TestEntity("Test:25")]);
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("5"), TestEntity("15"), TestEntity("25")]);
 
     auto query = map!(
         (Expr!TestEntity item) {
-            auto val = use((TestEntity e) => e.localId.to!long, item);
+            auto val = use((TestEntity e) => e.id.to!long, item);
             // age < 13 -> "child", age < 20 -> "teen", else "adult"
             return ternary(val.lt(13), "child", ternary(val.lt(20), "teen", "adult"));
         }
@@ -775,11 +752,11 @@ unittest {
     import std.conv : to;
 
     // Test combined boolean operators: (a AND b) OR c
-    auto collection = new MockCollectionExpr!TestEntity([TestEntity("Test:5"), TestEntity("Test:10"), TestEntity("Test:20")]);
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("5"), TestEntity("10"), TestEntity("20")]);
 
     auto query = map!(
         (Expr!TestEntity item) {
-            auto val = use((TestEntity e) => e.localId.to!long, item);
+            auto val = use((TestEntity e) => e.id.to!long, item);
             // (val > 5 AND val < 15) OR val > 18
             // 5: (false AND true) OR false = false
             // 10: (true AND true) OR false = true
@@ -800,7 +777,7 @@ unittest {
 unittest {
     import std.conv : to;
 
-    // POD struct without nodeId
+    // POD struct without @PrimaryKey
     static struct Stats {
         int count;
         int total;

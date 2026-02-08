@@ -132,6 +132,7 @@ struct FormatOptions {
 // ============================================================================
 
 /// User entity
+@Entity!(db, "users")
 struct User {
     import dunamis.graphql : GqlDescription, GqlDeprecated;
 
@@ -170,6 +171,7 @@ struct User {
 }
 
 /// Post entity - belongs to a User (author) and has many Comments
+@Entity!(db, "posts")
 struct Post {
     import dunamis.graphql : GqlHidden, GqlName;
 
@@ -226,6 +228,7 @@ struct Post {
 }
 
 /// Comment entity - belongs to a Post and has an author (User)
+@Entity!(db, "comments")
 struct Comment {
     import dunamis.graphql : GqlHidden, GqlName;
 

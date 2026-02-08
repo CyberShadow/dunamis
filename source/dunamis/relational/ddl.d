@@ -67,11 +67,33 @@ template getColumnDefs(Entity) {
     import dunamis.relational.schema : BelongsToFK, hasBelongsToFK, getBelongsToFK;
     import dunamis.relational.schema : BelongsToParent, hasBelongsToParent, extractBelongsToParent;
     import dunamis.relational.schema : getSqlColumn, isPlainField, getPlainFieldColumnName;
+    import dunamis.core.types : hasPrimaryKeyAttr;
     import dunamis.core.expr : ExprResultType;
 
     enum getColumnDefs = () {
         ColumnDef[] columns;
         bool[string] seenColumns;
+
+        // Zeroth pass: @PrimaryKey plain fields (so id column comes first)
+        static foreach (member; __traits(allMembers, Entity)) {{
+            static if (isPlainField!(Entity, member) && hasPrimaryKeyAttr!(Entity, member)) {
+                enum columnName = getPlainFieldColumnName!(Entity, member);
+                if (columnName !in seenColumns) {
+                    alias FieldType = typeof(__traits(getMember, Entity.init, member));
+                    enum bool isNullable = is(FieldType == Nullable!U, U);
+
+                    columns ~= ColumnDef(
+                        columnName,
+                        getDTypeName!FieldType,
+                        false,   // PK is never nullable
+                        true,    // isPrimaryKey
+                        "",      // foreignKeyTable
+                        ""       // foreignKeyColumn
+                    );
+                    seenColumns[columnName] = true;
+                }
+            }
+        }}
 
         // Collect all columns from methods with @SqlColumn UDA
         static foreach (member; __traits(allMembers, Entity)) {{
@@ -119,9 +141,9 @@ template getColumnDefs(Entity) {
             }
         }}
 
-        // Collect plain fields (struct instance fields)
+        // Collect non-PK plain fields (struct instance fields)
         static foreach (member; __traits(allMembers, Entity)) {{
-            static if (isPlainField!(Entity, member)) {
+            static if (isPlainField!(Entity, member) && !hasPrimaryKeyAttr!(Entity, member)) {
                 enum columnName = getPlainFieldColumnName!(Entity, member);
                 if (columnName !in seenColumns) {
                     alias FieldType = typeof(__traits(getMember, Entity.init, member));
@@ -244,9 +266,10 @@ template generateForeignKeys(Dialect, Entity) {
     }();
 }
 
-/// Check if a type is a database entity (has Entity mixin, indicated by nodeId field)
+/// Check if a type is a database entity (has @Entity UDA)
 private template isDatabaseEntity(T) {
-    enum isDatabaseEntity = __traits(hasMember, T, "nodeId");
+    import dunamis.relational.schema : hasEntityAttr;
+    enum isDatabaseEntity = hasEntityAttr!T;
 }
 
 /// Generate DDL for all entities reachable from Query using the given dialect.
