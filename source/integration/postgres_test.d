@@ -91,11 +91,7 @@ class PostgresTestRunner : IntegrationTestRunner!(db, MySchema) {
             onDatabaseReady();
         }).except((Exception e) {
             writefln("Error: %s", e.msg);
-            mainThread.runAsync({
-                if (server !is null) server.close();
-                cleanup();
-            });
-            exitCode = 1;
+            assert(0, e.msg);
         });
 
         runEventLoop(testThread);
