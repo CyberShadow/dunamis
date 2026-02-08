@@ -39,19 +39,19 @@ mixin template Col(string fieldName, T, string columnName = toSnakeCase(fieldNam
     static if (isNullableForeignKey!T) {
         // Nullable FK column - nullability preserved in return type via getColumnStorageType
         @SqlColumn(columnName) @ForeignKeyRef!(getForeignKeyEntity!T)
-        mixin("static auto " ~ fieldName ~ "(Expr!(typeof(this)) e) {
+        mixin("static Expr!(getColumnStorageType!T) " ~ fieldName ~ "(Expr!(typeof(this)) e) {
             return e.column!(getColumnStorageType!T, typeof(this))(\"" ~ columnName ~ "\");
         }");
     } else static if (isForeignKey!T) {
         // Required FK column
         @SqlColumn(columnName) @ForeignKeyRef!(getForeignKeyEntity!T)
-        mixin("static auto " ~ fieldName ~ "(Expr!(typeof(this)) e) {
+        mixin("static Expr!(getColumnStorageType!T) " ~ fieldName ~ "(Expr!(typeof(this)) e) {
             return e.column!(getColumnStorageType!T, typeof(this))(\"" ~ columnName ~ "\");
         }");
     } else {
         // Regular column - nullability in T (e.g., Nullable!string) preserved in return type
         @SqlColumn(columnName)
-        mixin("static auto " ~ fieldName ~ "(Expr!(typeof(this)) e) {
+        mixin("static Expr!T " ~ fieldName ~ "(Expr!(typeof(this)) e) {
             return e.column!(T, typeof(this))(\"" ~ columnName ~ "\");
         }");
     }
@@ -66,7 +66,7 @@ mixin template HasMany(string fieldName, Child, string fk) {
 
     // Method with UDAs - takes Expr!Parent, returns Expr!(Child[])
     @HasManyFK(fk) @HasManyChild!Child
-    mixin("static auto " ~ fieldName ~ "(Expr!(typeof(this)) e) {
+    mixin("static Expr!(Child[]) " ~ fieldName ~ "(Expr!(typeof(this)) e) {
         return hasMany!(Child, fk, typeof(this))(e);
     }");
 }
@@ -88,14 +88,14 @@ mixin template BelongsTo(string fieldName, string fkFieldName) {
     static if (hasNullableReturn!(__traits(getMember, typeof(this), fkFieldName))) {
         @BelongsToFK(fkFieldName)
         @BelongsToParent!(extractForeignKeyRef!(__traits(getMember, typeof(this), fkFieldName)))
-        mixin("static auto " ~ fieldName ~ "(Expr!(typeof(this)) e) {
+        mixin("static Expr!(Nullable!(extractForeignKeyRef!(__traits(getMember, typeof(this), \"" ~ fkFieldName ~ "\")))) " ~ fieldName ~ "(Expr!(typeof(this)) e) {
             alias Fk = __traits(getMember, typeof(this), \"" ~ fkFieldName ~ "\");
             return e.belongsTo!(extractForeignKeyRef!Fk, Nullable!(extractForeignKeyRef!Fk), getSqlColumn!Fk, typeof(this))();
         }");
     } else {
         @BelongsToFK(fkFieldName)
         @BelongsToParent!(extractForeignKeyRef!(__traits(getMember, typeof(this), fkFieldName)))
-        mixin("static auto " ~ fieldName ~ "(Expr!(typeof(this)) e) {
+        mixin("static Expr!(extractForeignKeyRef!(__traits(getMember, typeof(this), \"" ~ fkFieldName ~ "\"))) " ~ fieldName ~ "(Expr!(typeof(this)) e) {
             alias Fk = __traits(getMember, typeof(this), \"" ~ fkFieldName ~ "\");
             return e.belongsTo!(extractForeignKeyRef!Fk, extractForeignKeyRef!Fk, getSqlColumn!Fk, typeof(this))();
         }");

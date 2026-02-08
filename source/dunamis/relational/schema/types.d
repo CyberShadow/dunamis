@@ -26,26 +26,9 @@ template EntityID(T) {
 
 import dunamis.core.types : AnyRef, PrimaryKeyAttr, isPlainField;
 
-// Helper: resolve PK field name without iterating allMembers (avoids forward references
-// during mixin expansion). Prefers _pkField enum if available (set by DemoEntity mixin),
-// falls back to getPrimaryKeyFieldName for structs with @PrimaryKey on Col or plain fields.
 private template pkFieldOf(T) {
-    static if (__traits(hasMember, T, "_pkField")) {
-        enum pkFieldOf = __traits(getMember, T, "_pkField");
-    } else {
-        import dunamis.core.types : getPrimaryKeyFieldName;
-        enum pkFieldOf = getPrimaryKeyFieldName!T;
-    }
-}
-
-// Helper: resolve ALL PK field names (for composite key support).
-private template pkFieldsOf(T) {
-    static if (__traits(hasMember, T, "_pkField")) {
-        enum pkFieldsOf = [__traits(getMember, T, "_pkField")];
-    } else {
-        import dunamis.core.types : getPrimaryKeyFieldNames;
-        enum pkFieldsOf = getPrimaryKeyFieldNames!T;
-    }
+    import dunamis.core.types : getPrimaryKeyFieldName;
+    enum pkFieldOf = getPrimaryKeyFieldName!T;
 }
 
 /// Create an entity with its @PrimaryKey field set from a local ID value.
@@ -60,8 +43,8 @@ T makeEntity(T, IdType)(IdType localId) {
 /// Create an entity from an AnyRef (parses localId and converts to PK type).
 T makeEntityFromRef(T)(AnyRef ref_) {
     import std.conv : to;
-    import dunamis.core.types : isCustomScalar, decodeCompositeKey;
-    enum pkFields = pkFieldsOf!T;
+    import dunamis.core.types : isCustomScalar, decodeCompositeKey, getPrimaryKeyFieldNames;
+    enum pkFields = getPrimaryKeyFieldNames!T;
     static if (pkFields.length == 1) {
         enum pkField = pkFields[0];
         alias PkType = typeof(__traits(getMember, T.init, pkField));
@@ -85,8 +68,8 @@ T makeEntityFromRef(T)(AnyRef ref_) {
 /// Extract an AnyRef from an entity (reads @PrimaryKey field(s)).
 AnyRef entityToRef(T)(T entity) {
     import std.conv : to;
-    import dunamis.core.types : encodeCompositeKey;
-    enum pkFields = pkFieldsOf!T;
+    import dunamis.core.types : encodeCompositeKey, getPrimaryKeyFieldNames;
+    enum pkFields = getPrimaryKeyFieldNames!T;
     static if (pkFields.length == 1) {
         return AnyRef(EntityID!T.typeName ~ ":" ~ __traits(getMember, entity, pkFields[0]).to!string);
     } else {

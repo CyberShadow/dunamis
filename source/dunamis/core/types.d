@@ -24,9 +24,38 @@ template hasPrimaryKeyAttr(T, string member) {
     }
 }
 
-/// Check if any field in the type has @PrimaryKeyAttr
+/// Check if any field in the type has @PrimaryKeyAttr.
+///
+/// Uses a two-phase approach to avoid DMD forward reference cycles:
+///
+/// Phase 1: T.tupleof (data fields only). This is safe during mixin expansion because
+/// tupleof only enumerates plain data fields without triggering semantic analysis of
+/// mixin-generated methods. The problem it avoids: when an entity has a computed field
+/// with `static auto` return type (e.g. `static auto fullName(Expr!User u) => ...`),
+/// DMD eagerly analyzes the method body for return type deduction. This triggers
+/// Expr!User.opDispatch → Col method → column!() → ColumnAccessExpr class vtable →
+/// eval() → entityToRef!User → getPrimaryKeyFieldNames!User → __traits(allMembers, User),
+/// but User's mixins haven't finished expanding yet → forward reference error.
+///
+/// Phase 2: __traits(allMembers) fallback. Needed for normalized entity types where
+/// NormalizeFields converts PK plain fields into static methods (preserving the
+/// @PrimaryKeyAttr UDA). These types are always fully constructed, so
+/// __traits(allMembers) is safe — the forward reference issue only affects types
+/// that are mid-construction.
+///
+/// A proper compiler-level fix would involve deferring semantic analysis of static
+/// method bodies (e.g. by wrapping them in zero-argument templates), but that requires
+/// changes to how mixins generate field accessor methods.
 template hasPrimaryKey(T) {
+    import std.meta : staticIndexOf;
     enum hasPrimaryKey = () {
+        // Phase 1: check tupleof (plain data fields) — safe during mixin expansion
+        static foreach (field; T.tupleof) {
+            static if (staticIndexOf!(PrimaryKeyAttr, __traits(getAttributes, field)) >= 0) {
+                return true;
+            }
+        }
+        // Phase 2: check allMembers — needed for normalized types where PK is a method
         static foreach (member; __traits(allMembers, T)) {
             static if (hasPrimaryKeyAttr!(T, member)) {
                 return true;
@@ -36,12 +65,14 @@ template hasPrimaryKey(T) {
     }();
 }
 
-/// Get the name of the @PrimaryKey field
+/// Get the name of the @PrimaryKey field.
+/// Uses T.tupleof to avoid forward reference cycles — see hasPrimaryKey for details.
 template getPrimaryKeyFieldName(T) {
+    import std.meta : staticIndexOf;
     enum getPrimaryKeyFieldName = () {
-        static foreach (member; __traits(allMembers, T)) {
-            static if (hasPrimaryKeyAttr!(T, member)) {
-                return member;
+        static foreach (field; T.tupleof) {
+            static if (staticIndexOf!(PrimaryKeyAttr, __traits(getAttributes, field)) >= 0) {
+                return __traits(identifier, field);
             }
         }
         assert(false, "No @PrimaryKey field found on " ~ T.stringof);
@@ -54,13 +85,15 @@ template getPrimaryKeyType(T) {
     alias getPrimaryKeyType = typeof(__traits(getMember, T.init, _name));
 }
 
-/// Get ALL @PrimaryKey field names (for composite key support)
+/// Get ALL @PrimaryKey field names (for composite key support).
+/// Uses T.tupleof to avoid forward reference cycles — see hasPrimaryKey for details.
 template getPrimaryKeyFieldNames(T) {
+    import std.meta : staticIndexOf;
     enum getPrimaryKeyFieldNames = () {
         string[] names;
-        static foreach (member; __traits(allMembers, T)) {
-            static if (hasPrimaryKeyAttr!(T, member)) {
-                names ~= member;
+        static foreach (field; T.tupleof) {
+            static if (staticIndexOf!(PrimaryKeyAttr, __traits(getAttributes, field)) >= 0) {
+                names ~= __traits(identifier, field);
             }
         }
         return names;

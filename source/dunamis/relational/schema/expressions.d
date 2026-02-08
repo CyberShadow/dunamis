@@ -24,20 +24,20 @@ import dunamis.relational.schema.patterns;
 
 /// Column access - reads a column value for each entity ref.
 /// Takes typed Expr!Entity for compile-time type safety.
-auto column(T, Entity)(Expr!Entity input, string name) {
+Expr!T column(T, Entity)(Expr!Entity input, string name) {
     return new ColumnAccessExpr!(T, Entity)(input, name);
 }
 
 /// HasMany relationship - returns collection of child entities for each parent.
 /// Takes typed Expr!Parent and returns Expr!(Child[]).
-auto hasMany(Child, string fk, Parent)(Expr!Parent input) {
+Expr!(Child[]) hasMany(Child, string fk, Parent)(Expr!Parent input) {
     return new HasManyAccessExpr!(Parent, Child, fk)(input);
 }
 
 /// BelongsTo relationship - returns parent entity for each child.
 /// Takes typed Expr!Child and returns Expr!Parent or Expr!(Nullable!Parent).
 /// ResultType should be Parent (required FK) or Nullable!Parent (optional FK).
-auto belongsTo(Parent, ResultType = Parent, string fk, Child)(Expr!Child input) {
+Expr!ResultType belongsTo(Parent, ResultType = Parent, string fk, Child)(Expr!Child input) {
     return new BelongsToAccessExpr!(Child, Parent, ResultType, fk)(input);
 }
 
@@ -784,7 +784,6 @@ unittest {
     @Entity!(db, "test_entities")
     static struct TestEntity {
         @PrimaryKeyAttr long id;
-        enum _pkField = "id";
         string nickname;       // Plain field - auto-detected
         string displayName;    // Plain field - auto-detected
     }
@@ -811,7 +810,6 @@ unittest {
     @Entity!(db, "users")
     static struct User {
         @PrimaryKeyAttr @SqlColumn("id") long id;
-        enum _pkField = "id";
     }
     static assert(EntityID!User.table == "users");
     static assert(EntityID!User.typeName == "User");
@@ -822,7 +820,6 @@ unittest {
     @Entity!(db, "posts", "BlogPost")
     static struct Post {
         @PrimaryKeyAttr @SqlColumn("id") long id;
-        enum _pkField = "id";
     }
     static assert(EntityID!Post.table == "posts");
     static assert(EntityID!Post.typeName == "BlogPost");

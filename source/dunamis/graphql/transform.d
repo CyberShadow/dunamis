@@ -238,7 +238,6 @@ version (unittest) {
     @Entity!(_testDb, "posts", "TestPost")
     struct TestPost {
         @PrimaryKeyAttr int id;
-        enum _pkField = "id";
         mixin Col!("title", string);
         mixin Col!("authorId", ForeignKey!TestAuthor);
         mixin BelongsTo!("author", "authorId");
@@ -247,7 +246,6 @@ version (unittest) {
     @Entity!(_testDb, "authors", "TestAuthor")
     struct TestAuthor {
         @PrimaryKeyAttr int id;
-        enum _pkField = "id";
         mixin Col!("name", string);
         mixin HasMany!("posts", TestPost, "author_id");
     }

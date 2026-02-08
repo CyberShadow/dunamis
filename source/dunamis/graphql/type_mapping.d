@@ -234,11 +234,6 @@ template ExternalTypesPlugin(alias S, NewMappings...) if (isSchema!S) {
                 T _normalizedSource;
             }
 
-            // Copy _pkField (PK lookup optimization)
-            static if (__traits(hasMember, T, "_pkField")) {
-                enum _pkField = __traits(getMember, T, "_pkField");
-            }
-
             // Forward computed fields with value mapping
             static foreach (_m; getFieldMembers!T) {
                 static if (isComputedField!(T, _m)) {

@@ -82,9 +82,6 @@ mixin template DemoId(IdType = Int64) {
 
     /// Primary key field - identifies this entity instance
     @PrimaryKeyAttr @SqlColumn("id") IdType id;
-
-    /// Compile-time PK field name (avoids __traits(allMembers) during mixin expansion)
-    enum _pkField = "id";
 }
 
 // ============================================================================

@@ -275,11 +275,6 @@ mixin template WrapFields(SourceType, alias TypeMap, alias ArrayFieldMixin) {
         typeof(SourceType._normalizedSource) _normalizedSource;
     }
 
-    // 1b. Copy _pkField (PK lookup optimization for NormalizeFields)
-    static if (__traits(hasMember, SourceType, "_pkField")) {
-        enum _pkField = __traits(getMember, SourceType, "_pkField");
-    }
-
     // 2. Copy plain fields (struct instance fields, including @PrimaryKey)
     static foreach (member; __traits(allMembers, SourceType)) {
         static if (isPlainField!(SourceType, member)) {
@@ -336,11 +331,6 @@ mixin template NormalizeFields(SourceType, alias TypeMap = IdentityTypeMap) {
 
     // Store original struct for data access by normalized methods
     SourceType _normalizedSource;
-
-    // Copy _pkField (PK lookup optimization — plain fields become methods in normalized types)
-    static if (__traits(hasMember, SourceType, "_pkField")) {
-        enum _pkField = __traits(getMember, SourceType, "_pkField");
-    }
 
     // Normalize @PrimaryKey plain fields first (so id appears before other fields)
     static foreach (_nf_member; __traits(allMembers, SourceType)) {
