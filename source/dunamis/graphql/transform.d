@@ -330,10 +330,10 @@ unittest {
 
 // Test with circular references
 unittest {
-    import dunamis.graphql.schema : Schema, getAllEntityTypes;
+    import dunamis.graphql.schema : Schema, getAllObjectTypes;
 
     alias BaseSchema = Schema!TestQuery;
-    alias AllTypes = getAllEntityTypes!TestQuery;
+    alias AllTypes = getAllObjectTypes!TestQuery;
 
     static assert(AllTypes.length == 2);
     static assert(isTypeInList!(TestAuthor, AllTypes));

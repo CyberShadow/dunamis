@@ -878,7 +878,7 @@ unittest {
         static Expr!(L0[]) items(Expr!DeepQuery self) { assert(false); }
     }
 
-    alias AllTypes = getAllEntityTypes!DeepQuery;
+    alias AllTypes = getAllObjectTypes!DeepQuery;
     static assert(staticContains!(L0, AllTypes), "L0 should be discovered");
     static assert(staticContains!(L1, AllTypes), "L1 should be discovered");
     static assert(staticContains!(L2, AllTypes), "L2 should be discovered");

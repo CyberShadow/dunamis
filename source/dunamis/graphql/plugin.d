@@ -397,11 +397,11 @@ mixin template NormalizeFields(SourceType, alias TypeMap = IdentityTypeMap) {
 /// are applied.
 template NormalizePlugin(RawQuery, RawMutation) {
     import std.meta : staticMap;
-    import dunamis.graphql.schema : getAllEntityTypes, getGraphQLTypeName, GqlName;
+    import dunamis.graphql.schema : getAllObjectTypes, getGraphQLTypeName, GqlName;
     import dunamis.graphql.transform : isTypeInList;
 
     // Discover all entity and POD types reachable from the Query root
-    alias _AllTypes = getAllEntityTypes!RawQuery;
+    alias _AllTypes = getAllObjectTypes!RawQuery;
 
     // Create normalized version of each discovered type
     template _NormalizedType(T) {

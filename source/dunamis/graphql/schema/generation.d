@@ -261,7 +261,7 @@ template generateSchemaSDL(alias SchemaOrQuery) {
     static if (isSchema!SchemaOrQuery && __traits(hasMember, SchemaOrQuery, "AllEntityTypes")) {
         alias AllTypes = SchemaOrQuery.AllEntityTypes;
     } else {
-        alias AllTypes = getAllEntityTypes!QueryType;
+        alias AllTypes = getAllObjectTypes!QueryType;
     }
 
     // Collect input types from entities AND mutations (if any)

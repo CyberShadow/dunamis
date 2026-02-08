@@ -1075,12 +1075,12 @@ T extractJsonValue(T)(JSONValue value) {
 ///   User.posts(filter: PostFilter): [Post!]!
 template FilterPlugin(alias S) if (isSchema!S) {
     import std.meta : AliasSeq, staticMap;
-    import dunamis.graphql.schema : getAllEntityTypes, getGraphQLTypeName, GqlName;
+    import dunamis.graphql.schema : getAllObjectTypes, getGraphQLTypeName, GqlName;
     import dunamis.graphql.transform : isTypeInList;
 
     // Get all entity types discovered from the schema
     alias _OriginalQuery = S.Query;
-    alias _AllEntityTypes = getAllEntityTypes!_OriginalQuery;
+    alias _AllEntityTypes = getAllObjectTypes!_OriginalQuery;
 
     // Generate filtered versions of each entity type
     template FilteredEntity(Entity) {

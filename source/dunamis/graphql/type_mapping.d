@@ -196,13 +196,13 @@ mixin template ForwardFieldWithMappings(SourceType, string fieldName, alias Type
 template ExternalTypesPlugin(alias S, NewMappings...) if (isSchema!S) {
     import dunamis.core.expr : Expr, use;
     import dunamis.core.types : isPlainField, isPlainMethod;
-    import dunamis.graphql.schema : getAllEntityTypes, getGraphQLTypeName, GqlName, isInternalMember;
+    import dunamis.graphql.schema : getAllObjectTypes, getGraphQLTypeName, GqlName, isInternalMember;
     import dunamis.graphql.transform : isTypeInList;
     import dunamis.graphql.plugin : getFieldMembers, isComputedField;
 
     // Discover all object types from the inner schema's Query
     alias _OriginalQuery = S.Query;
-    alias _AllTypes = getAllEntityTypes!_OriginalQuery;
+    alias _AllTypes = getAllObjectTypes!_OriginalQuery;
 
     // TypeMap: route types to their wrapped versions.
     // - Directly-mapped types (Date→string): identity (serialized at call site)

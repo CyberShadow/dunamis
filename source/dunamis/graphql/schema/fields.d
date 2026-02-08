@@ -12,6 +12,9 @@ import dunamis.core.types : isCustomScalar;
 import dunamis.core.expr : Expr, ExprResultType, isExpr;
 import dunamis.graphql.schema.udas;
 
+// Re-export isValidFieldMethod from core for backward compatibility
+public import dunamis.core.discovery : isValidFieldMethod;
+
 // ============================================================================
 // GraphQL Type Mapping
 // ============================================================================
@@ -328,29 +331,3 @@ template getFields(T) {
     }();
 }
 
-/// Check if a method is a valid GraphQL field method for type T.
-/// Valid field methods:
-/// - Take Expr!T as first parameter
-/// - Return an Expr type
-template isValidFieldMethod(T, alias fn) {
-    import std.traits : Parameters, ReturnType;
-
-    static if (is(typeof(fn) == function)) {
-        alias Params = Parameters!fn;
-        alias Return = ReturnType!fn;
-
-        static if (Params.length >= 1) {
-            // First parameter must be Expr!T
-            static if (is(Params[0] : Expr!E, E) && is(E == T)) {
-                // Return type must be an Expr
-                enum isValidFieldMethod = isExpr!Return;
-            } else {
-                enum isValidFieldMethod = false;
-            }
-        } else {
-            enum isValidFieldMethod = false;
-        }
-    } else {
-        enum isValidFieldMethod = false;
-    }
-}

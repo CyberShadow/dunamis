@@ -7,6 +7,36 @@ import std.string : indexOf;
 import std.typecons : Nullable;
 
 // ============================================================================
+// Internal Member Filtering
+// ============================================================================
+
+/// Check if a member name is an internal member that should be skipped
+/// during type introspection. Filters out Entity mixin infrastructure,
+/// D built-in methods, and private members.
+template isInternalMember(string name) {
+    import std.algorithm : startsWith;
+    enum isInternalMember =
+        // Entity internal field (all metadata is in nodeId's type)
+        name == "nodeId" ||
+        // D built-in methods
+        name == "toString" ||
+        name == "toHash" ||
+        name == "opEquals" ||
+        name == "opCmp" ||
+        name == "opAssign" ||
+        name == "factory" ||
+        // Module/compiler internals
+        name == "Monitor" ||
+        name == "__ctor" ||
+        name == "__dtor" ||
+        name == "__xdtor" ||
+        name == "__postblit" ||
+        name == "__xpostblit" ||
+        // Private members (used by mixins for internal aliases)
+        name.startsWith("_");
+}
+
+// ============================================================================
 // Plain Field Support
 // ============================================================================
 
@@ -14,42 +44,29 @@ import std.typecons : Nullable;
 /// Plain fields are distinguished from computed fields (static methods).
 /// Excludes internal members (nodeId, _*, toString, etc.).
 template isPlainField(Entity, string fieldName) {
-    import std.algorithm : startsWith;
-
-    enum isPlainField = () {
-        // Skip internal members
-        if (fieldName == "nodeId" ||
-            fieldName == "toString" ||
-            fieldName == "toHash" ||
-            fieldName == "opEquals" ||
-            fieldName == "opCmp" ||
-            fieldName == "opAssign" ||
-            fieldName == "factory" ||
-            fieldName == "Monitor" ||
-            fieldName.startsWith("_") ||
-            fieldName.startsWith("__"))
-        {
-            return false;
-        }
-
-        // Must be readable on an instance
-        static if (!__traits(compiles, __traits(getMember, Entity.init, fieldName))) {
-            return false;
-        } else {
-            alias member = __traits(getMember, Entity, fieldName);
-            // Skip functions/methods
-            static if (is(typeof(member) == function) || is(typeof(&member) == delegate)) {
+    static if (isInternalMember!fieldName) {
+        enum isPlainField = false;
+    } else {
+        enum isPlainField = () {
+            // Must be readable on an instance
+            static if (!__traits(compiles, __traits(getMember, Entity.init, fieldName))) {
                 return false;
             } else {
-                // It's a field - check if it's actually an instance field (not a type alias, enum, etc.)
-                static if (__traits(compiles, { auto x = __traits(getMember, Entity.init, fieldName); })) {
-                    return true;
-                } else {
+                alias member = __traits(getMember, Entity, fieldName);
+                // Skip functions/methods
+                static if (is(typeof(member) == function) || is(typeof(&member) == delegate)) {
                     return false;
+                } else {
+                    // It's a field - check if it's actually an instance field (not a type alias, enum, etc.)
+                    static if (__traits(compiles, { auto x = __traits(getMember, Entity.init, fieldName); })) {
+                        return true;
+                    } else {
+                        return false;
+                    }
                 }
             }
-        }
-    }();
+        }();
+    }
 }
 
 /// Get a tuple of all plain field names for an entity.
@@ -77,61 +94,49 @@ template getPlainFieldNames(Entity) {
 /// - Returns a non-Expr type (scalar, Nullable!scalar, arrays of scalars)
 /// - Is not a static method
 template isPlainMethod(Entity, string memberName) {
-    import std.algorithm : startsWith;
     import dunamis.core.expr : isExpr;
 
-    enum isPlainMethod = () {
-        // Skip internal members
-        if (memberName == "nodeId" ||
-            memberName == "toString" ||
-            memberName == "toHash" ||
-            memberName == "opEquals" ||
-            memberName == "opCmp" ||
-            memberName == "opAssign" ||
-            memberName == "factory" ||
-            memberName == "Monitor" ||
-            memberName.startsWith("_") ||
-            memberName.startsWith("__"))
-        {
-            return false;
-        }
-
-        // Must be accessible
-        static if (!__traits(compiles, __traits(getMember, Entity, memberName))) {
-            return false;
-        } else {
-            alias member = __traits(getMember, Entity, memberName);
-
-            // Must be a function type
-            static if (!is(typeof(member) == function)) {
-                return false;
-            }
-            // Must NOT be a static function (plain methods are instance methods)
-            else static if (__traits(isStaticFunction, member)) {
+    static if (isInternalMember!memberName) {
+        enum isPlainMethod = false;
+    } else {
+        enum isPlainMethod = () {
+            // Must be accessible
+            static if (!__traits(compiles, __traits(getMember, Entity, memberName))) {
                 return false;
             } else {
-                import std.traits : Parameters, ReturnType;
-                alias Params = Parameters!member;
-                alias Return = ReturnType!member;
+                alias member = __traits(getMember, Entity, memberName);
 
-                // Must take no parameters
-                static if (Params.length != 0) {
+                // Must be a function type
+                static if (!is(typeof(member) == function)) {
                     return false;
                 }
-                // Return type must not be void
-                else static if (is(Return == void)) {
+                // Must NOT be a static function (plain methods are instance methods)
+                else static if (__traits(isStaticFunction, member)) {
                     return false;
-                }
-                // Return type must not be an Expr (those are computed fields)
-                else static if (isExpr!Return) {
-                    return false;
-                }
-                else {
-                    return true;
+                } else {
+                    import std.traits : Parameters, ReturnType;
+                    alias Params = Parameters!member;
+                    alias Return = ReturnType!member;
+
+                    // Must take no parameters
+                    static if (Params.length != 0) {
+                        return false;
+                    }
+                    // Return type must not be void
+                    else static if (is(Return == void)) {
+                        return false;
+                    }
+                    // Return type must not be an Expr (those are computed fields)
+                    else static if (isExpr!Return) {
+                        return false;
+                    }
+                    else {
+                        return true;
+                    }
                 }
             }
-        }
-    }();
+        }();
+    }
 }
 
 /// Get a tuple of all plain method names for an entity.

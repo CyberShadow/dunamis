@@ -1,12 +1,12 @@
 module dunamis.graphql.schema.udas;
 
-import std.algorithm;
 import std.meta;
 import std.traits;
-import std.typecons : Nullable;
 
-import dunamis.core.types : isCustomScalar;
-import dunamis.core.expr : Expr, ExprResultType, isExpr;
+// Re-export type introspection templates from core for backward compatibility.
+// These were moved to dunamis.core.discovery as they are data-source agnostic.
+public import dunamis.core.discovery : isObjectType, isValidFieldMethodForType;
+public import dunamis.core.types : isInternalMember;
 
 // ============================================================================
 // GraphQL UDAs
@@ -65,34 +65,6 @@ template getGraphQLTypeName(T) {
     }();
 }
 
-/// Check if a type is an "object type" (struct with valid field methods, plain fields, or plain methods).
-/// This replaces the old isEntity check - now any struct with Expr-returning
-/// static methods, plain fields, or plain methods is treated as a GraphQL object type.
-///
-/// Exclusions:
-/// - JSONValue is treated as a scalar (passed through as raw JSON)
-/// - Custom scalars are treated as scalars
-/// - Input types (structs without valid field methods used as computed field arguments)
-template isObjectType(T) {
-    import std.json : JSONValue;
-    static if (is(T == struct)) {
-        // Exclude JSONValue (raw JSON pass-through)
-        static if (is(T == JSONValue)) {
-            enum isObjectType = false;
-        }
-        // Exclude custom scalars
-        else static if (isCustomScalar!T) {
-            enum isObjectType = false;
-        }
-        // Check if it has at least one valid field method, plain field, or plain method
-        else {
-            enum isObjectType = hasAnyValidFieldMethod!T || hasAnyPlainField!T || hasAnyPlainMethod!T;
-        }
-    } else {
-        enum isObjectType = false;
-    }
-}
-
 // ============================================================================
 // UDA Helpers
 // ============================================================================
@@ -138,109 +110,5 @@ template getGqlDeprecated(alias member) {
             }
         }
         return "";
-    }();
-}
-
-// ============================================================================
-// Member Validation Helpers
-// ============================================================================
-
-/// Check if a member name is an internal member that should be skipped.
-/// This is used by schema generation to filter out mixin helper symbols
-/// and D built-in methods.
-template isInternalMember(string name) {
-    import std.algorithm : startsWith;
-    enum isInternalMember =
-        // Entity internal field (all metadata is in nodeId's type)
-        name == "nodeId" ||
-        // D built-in methods
-        name == "toString" ||
-        name == "toHash" ||
-        name == "opEquals" ||
-        name == "opCmp" ||
-        name == "opAssign" ||
-        name == "factory" ||
-        // Module/compiler internals
-        name == "Monitor" ||
-        name == "__ctor" ||
-        name == "__dtor" ||
-        name == "__xdtor" ||
-        name == "__postblit" ||
-        name == "__xpostblit" ||
-        // Private members (used by mixins for internal aliases)
-        name.startsWith("_");
-}
-
-/// Helper to check if a member is a valid field method for type T.
-/// Uses string member name to avoid forward reference issues.
-template isValidFieldMethodForType(T, string member) {
-    static if (__traits(compiles, __traits(getMember, T, member))) {
-        alias fn = __traits(getMember, T, member);
-        static if (is(typeof(fn) == function)) {
-            alias Params = Parameters!fn;
-            alias Return = ReturnType!fn;
-            static if (Params.length >= 1) {
-                static if (is(Params[0] : Expr!E, E) && is(E == T)) {
-                    enum isValidFieldMethodForType = isExpr!Return;
-                } else {
-                    enum isValidFieldMethodForType = false;
-                }
-            } else {
-                enum isValidFieldMethodForType = false;
-            }
-        } else {
-            enum isValidFieldMethodForType = false;
-        }
-    } else {
-        enum isValidFieldMethodForType = false;
-    }
-}
-
-// ============================================================================
-// Private Helpers
-// ============================================================================
-
-/// Check if type has any valid field methods
-private template hasAnyValidFieldMethod(T) {
-    enum hasAnyValidFieldMethod = () {
-        static foreach (member; __traits(allMembers, T)) {{
-            static if (!isInternalMember!member &&
-                       is(typeof(__traits(getMember, T, member)) == function)) {
-                static if (isValidFieldMethodForType!(T, member)) {
-                    return true;
-                }
-            }
-        }}
-        return false;
-    }();
-}
-
-/// Check if type has any plain fields (struct instance fields)
-private template hasAnyPlainField(T) {
-    import dunamis.core.types : isPlainField;
-    enum hasAnyPlainField = () {
-        static foreach (member; __traits(allMembers, T)) {{
-            static if (!isInternalMember!member) {
-                static if (isPlainField!(T, member)) {
-                    return true;
-                }
-            }
-        }}
-        return false;
-    }();
-}
-
-/// Check if type has any plain methods (instance methods returning non-Expr types)
-private template hasAnyPlainMethod(T) {
-    import dunamis.core.types : isPlainMethod;
-    enum hasAnyPlainMethod = () {
-        static foreach (member; __traits(allMembers, T)) {{
-            static if (!isInternalMember!member) {
-                static if (isPlainMethod!(T, member)) {
-                    return true;
-                }
-            }
-        }}
-        return false;
     }();
 }

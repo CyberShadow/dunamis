@@ -53,12 +53,12 @@ import dunamis.graphql.schema : isSchema;
 /// ---
 template PaginationPlugin(alias S) if (isSchema!S) {
     import std.meta : AliasSeq, staticMap;
-    import dunamis.graphql.schema : getAllEntityTypes, getGraphQLTypeName, GqlName;
+    import dunamis.graphql.schema : getAllObjectTypes, getGraphQLTypeName, GqlName;
     import dunamis.graphql.transform : isTypeInList;
 
     // Get all entity types discovered from the schema
     alias _OriginalQuery = S.Query;
-    alias _AllEntityTypes = getAllEntityTypes!_OriginalQuery;
+    alias _AllEntityTypes = getAllObjectTypes!_OriginalQuery;
 
     // Generate paginated versions of each entity type.
     template PaginatedEntity(Entity) {

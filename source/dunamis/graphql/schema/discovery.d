@@ -9,6 +9,16 @@ import dunamis.graphql.schema.udas;
 import dunamis.graphql.schema.fields : isValidFieldMethod, graphqlTypeName;
 import dunamis.graphql.schema.input_types;
 
+// Re-export type discovery from core (renamed: getAllEntityTypes → getAllObjectTypes)
+public import dunamis.core.discovery :
+    getAllObjectTypes, extractObjectFromType,
+    getRelatedTypes, getRootTypes,
+    uniqueTypes, uniqueTypesForExpand,
+    staticContains, ExcludeTypes;
+
+// Backward-compatible alias
+alias getAllEntityTypes = getAllObjectTypes;
+
 // ============================================================================
 // Input Type Discovery
 // ============================================================================
@@ -144,8 +154,8 @@ template getInputTypesFromEntitiesImpl(Entities...) {
 /// Collect all input types from all entities in the schema.
 /// Uses BFS expansion to discover nested input types including recursive ones.
 template getAllInputTypes(Query) {
-    alias _AllEntityTypes = getAllEntityTypes!Query;
-    alias DirectInputTypes = getInputTypesFromEntitiesImpl!_AllEntityTypes;
+    alias _AllObjectTypes = getAllObjectTypes!Query;
+    alias DirectInputTypes = getInputTypesFromEntitiesImpl!_AllObjectTypes;
     // Expand to discover nested input types (handles recursive types via fixed-depth BFS)
     alias getAllInputTypes = expandAllInputTypes!(uniqueTypesForExpand!DirectInputTypes);
 }
@@ -308,213 +318,7 @@ template getEnumTypesFromEntitiesImpl(Entities...) {
 
 /// Collect all enum types from all entities in the schema
 template getAllEnumTypes(Query) {
-    alias _AllEntityTypes = getAllEntityTypes!Query;
-    alias AllEnumTypes = getEnumTypesFromEntitiesImpl!_AllEntityTypes;
+    alias _AllObjectTypes = getAllObjectTypes!Query;
+    alias AllEnumTypes = getEnumTypesFromEntitiesImpl!_AllObjectTypes;
     alias getAllEnumTypes = uniqueTypes!AllEnumTypes;
-}
-
-// ============================================================================
-// Entity Type Discovery
-// ============================================================================
-
-/// Check if a type is already in an AliasSeq
-template staticContains(T, Types...) {
-    static if (Types.length == 0) {
-        enum staticContains = false;
-    } else static if (is(T == Types[0])) {
-        enum staticContains = true;
-    } else {
-        enum staticContains = staticContains!(T, Types[1..$]);
-    }
-}
-
-/// Filter a type list to exclude types present in a known set.
-/// Uses a wrapper template to work around D's single variadic pack limitation.
-/// Usage: ExcludeTypes!(Known...).From!(Candidates...)
-package(dunamis.graphql) template ExcludeTypes(Known...) {
-    template From(Candidates...) {
-        static if (Candidates.length == 0) {
-            alias From = AliasSeq!();
-        } else static if (staticContains!(Candidates[0], Known)) {
-            alias From = From!(Candidates[1..$]);
-        } else {
-            alias From = AliasSeq!(Candidates[0], From!(Candidates[1..$]));
-        }
-    }
-}
-
-/// Extract object type from a result type (handles T, T[], Nullable!T).
-/// Returns void if no object type is found.
-template extractEntityFromType(T) {
-    static if (is(T == E[], E)) {
-        // Array - check element type
-        alias extractEntityFromType = extractEntityFromType!E;
-    } else static if (is(T == Nullable!U, U)) {
-        // Nullable - unwrap
-        alias extractEntityFromType = extractEntityFromType!U;
-    } else static if (isObjectType!T) {
-        // Object type (struct with valid field methods)
-        alias extractEntityFromType = T;
-    } else {
-        // Not an object type
-        alias extractEntityFromType = void;
-    }
-}
-
-/// Helper to get related types from a type by iterating over members.
-/// Scans for valid field methods, plain fields, and plain methods,
-/// and extracts object types from return types.
-template getRelatedTypesImpl(T, size_t idx, Members...) {
-    import dunamis.core.expr : ExprResultType;
-    import dunamis.core.types : isPlainField, isPlainMethod;
-
-    static if (idx >= Members.length) {
-        alias getRelatedTypesImpl = AliasSeq!();
-    } else {
-        enum member = Members[idx];
-        alias Rest = getRelatedTypesImpl!(T, idx + 1, Members);
-
-        static if (!isInternalMember!member) {
-            // 1. Check computed fields (static methods returning Expr!T)
-            static if (is(typeof(__traits(getMember, T, member)) == function)) {
-                alias fn = __traits(getMember, T, member);
-
-                static if (isValidFieldMethod!(T, fn)) {
-                    alias RetType = ReturnType!fn;
-                    alias ResultT = ExprResultType!RetType;
-
-                    // Extract object type from return type
-                    alias EntityFromReturn = extractEntityFromType!ResultT;
-
-                    static if (!is(EntityFromReturn == void)) {
-                        alias getRelatedTypesImpl = AliasSeq!(EntityFromReturn, Rest);
-                    } else {
-                        alias getRelatedTypesImpl = Rest;
-                    }
-                }
-                // 2. Check plain methods (instance methods returning non-Expr types)
-                else static if (isPlainMethod!(T, member)) {
-                    alias RetType = ReturnType!fn;
-                    alias EntityFromReturn = extractEntityFromType!RetType;
-
-                    static if (!is(EntityFromReturn == void)) {
-                        alias getRelatedTypesImpl = AliasSeq!(EntityFromReturn, Rest);
-                    } else {
-                        alias getRelatedTypesImpl = Rest;
-                    }
-                } else {
-                    alias getRelatedTypesImpl = Rest;
-                }
-            }
-            // 3. Check plain fields (struct instance fields)
-            else static if (isPlainField!(T, member)) {
-                alias FieldType = typeof(__traits(getMember, T.init, member));
-                alias EntityFromField = extractEntityFromType!FieldType;
-
-                static if (!is(EntityFromField == void)) {
-                    alias getRelatedTypesImpl = AliasSeq!(EntityFromField, Rest);
-                } else {
-                    alias getRelatedTypesImpl = Rest;
-                }
-            } else {
-                alias getRelatedTypesImpl = Rest;
-            }
-        } else {
-            alias getRelatedTypesImpl = Rest;
-        }
-    }
-}
-
-/// Get all object types directly referenced by a type (via field return types)
-template getRelatedTypes(T) {
-    alias getRelatedTypes = getRelatedTypesImpl!(T, 0, __traits(allMembers, T));
-}
-
-/// Helper to get root types from Query by iterating over members.
-/// Scans for valid field methods and extracts object types from return types.
-template getRootTypesImpl(Query, size_t idx, Members...) {
-    import dunamis.core.expr : ExprResultType;
-
-    static if (idx >= Members.length) {
-        alias getRootTypesImpl = AliasSeq!();
-    } else {
-        enum member = Members[idx];
-        alias Rest = getRootTypesImpl!(Query, idx + 1, Members);
-
-        static if (!isInternalMember!member &&
-                   is(typeof(__traits(getMember, Query, member)) == function)) {
-            alias fn = __traits(getMember, Query, member);
-
-            // Check if it's a valid field method
-            static if (isValidFieldMethod!(Query, fn)) {
-                alias RetType = ReturnType!fn;
-                alias ResultT = ExprResultType!RetType;
-
-                // Extract object type from return type
-                alias EntityFromReturn = extractEntityFromType!ResultT;
-
-                static if (!is(EntityFromReturn == void)) {
-                    alias getRootTypesImpl = AliasSeq!(EntityFromReturn, Rest);
-                } else {
-                    alias getRootTypesImpl = Rest;
-                }
-            } else {
-                alias getRootTypesImpl = Rest;
-            }
-        } else {
-            alias getRootTypesImpl = Rest;
-        }
-    }
-}
-
-/// Get root object types from Query
-template getRootTypes(Query) {
-    alias getRootTypes = getRootTypesImpl!(Query, 0, __traits(allMembers, Query));
-}
-
-/// Remove duplicates from a type list
-template uniqueTypes(Types...) {
-    static if (Types.length == 0) {
-        alias uniqueTypes = AliasSeq!();
-    } else static if (staticContains!(Types[0], Types[1..$])) {
-        alias uniqueTypes = uniqueTypes!(Types[1..$]);
-    } else {
-        alias uniqueTypes = AliasSeq!(Types[0], uniqueTypes!(Types[1..$]));
-    }
-}
-
-/// Forward declaration helper for uniqueTypes
-package(dunamis.graphql) template uniqueTypesForExpand(Types...) {
-    static if (Types.length == 0) {
-        alias uniqueTypesForExpand = AliasSeq!();
-    } else static if (staticContains!(Types[0], Types[1..$])) {
-        alias uniqueTypesForExpand = uniqueTypesForExpand!(Types[1..$]);
-    } else {
-        alias uniqueTypesForExpand = AliasSeq!(Types[0], uniqueTypesForExpand!(Types[1..$]));
-    }
-}
-
-/// Expand one level: get all related types from a set of types
-template expandOneLevel(Types...) {
-    static if (Types.length == 0) {
-        alias expandOneLevel = AliasSeq!();
-    } else {
-        alias First = getRelatedTypes!(Types[0]);
-        alias Rest = expandOneLevel!(Types[1..$]);
-        alias expandOneLevel = AliasSeq!(First, Rest);
-    }
-}
-
-/// Fixpoint entity type discovery - expands relationships until no new types are found.
-template getAllEntityTypes(Query) {
-    alias getAllEntityTypes = expandEntityFixpoint!(getRootTypes!Query);
-}
-
-private template expandEntityFixpoint(PrevTypes...) {
-    alias NewOnly = uniqueTypes!(ExcludeTypes!(PrevTypes).From!(expandOneLevel!PrevTypes));
-
-    static if (NewOnly.length == 0)
-        alias expandEntityFixpoint = PrevTypes;
-    else
-        alias expandEntityFixpoint = expandEntityFixpoint!(AliasSeq!(PrevTypes, NewOnly));
 }

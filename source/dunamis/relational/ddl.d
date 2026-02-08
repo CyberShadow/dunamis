@@ -252,10 +252,10 @@ private template isDatabaseEntity(T) {
 /// Generate DDL for all entities reachable from Query using the given dialect.
 /// Only generates tables for types that have the Entity mixin (not POD types).
 template generateDDL(Dialect, Query) {
-    import dunamis.graphql.schema : getAllEntityTypes;
+    import dunamis.core.discovery : getAllObjectTypes;
     import std.meta : Filter;
 
-    alias AllTypes = getAllEntityTypes!Query;
+    alias AllTypes = getAllObjectTypes!Query;
 
     // Filter to only include database entities (types with Entity mixin)
     alias DatabaseEntities = Filter!(isDatabaseEntity, AllTypes);

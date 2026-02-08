@@ -360,7 +360,7 @@ JSONValue buildIntrospectionJson(alias SchemaOrQuery)() {
     static if (isSchema!SchemaOrQuery && __traits(hasMember, SchemaOrQuery, "AllEntityTypes")) {
         alias AllEntityTypes = SchemaOrQuery.AllEntityTypes;
     } else {
-        alias AllEntityTypes = getAllEntityTypes!QueryType;
+        alias AllEntityTypes = getAllObjectTypes!QueryType;
     }
 
     alias AllInputTypes_ = getAllInputTypes!QueryType;
