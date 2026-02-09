@@ -144,7 +144,7 @@ mixin template TestSchema(alias db) {
     import std.json : JSONValue;
     import std.typecons : Nullable;
     import dunamis.core.expr : Expr;
-    import dunamis.graphql : Schema, SortingPlugin, FilterPlugin, CrudMutationPlugin;
+    import dunamis.graphql : Schema, SortingPlugin, FilterPlugin, CrudMutationPlugin, ApplyPlugins;
     import dunamis.graphql.schema : GqlName;
     import dunamis.relational.schema : Table, ForeignKey, BelongsTo, HasMany, Col, getAll, hasMany;
     import dunamis.relational.demo : DemoEntity, DemoId, Int64;
@@ -353,6 +353,5 @@ mixin template TestSchema(alias db) {
     }
 
     alias BaseSchema = Schema!(Query, Mutation);
-    // Compose CrudMutationPlugin, FilterPlugin, and SortingPlugin
-    alias MySchema = SortingPlugin!(FilterPlugin!(CrudMutationPlugin!BaseSchema));
+    alias MySchema = ApplyPlugins!(BaseSchema, CrudMutationPlugin, FilterPlugin, SortingPlugin);
 }

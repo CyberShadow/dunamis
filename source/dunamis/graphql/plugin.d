@@ -2,7 +2,7 @@
 ///
 /// Plugins transform schemas via template composition:
 /// ---
-/// alias FinalSchema = Plugin1!(Plugin2!BaseSchema);
+/// alias FinalSchema = ApplyPlugins!(BaseSchema, CrudMutationPlugin, FilterPlugin, SortingPlugin);
 /// ---
 ///
 /// A plugin is a template that consumes a schema and produces a new schema.
@@ -21,6 +21,34 @@ public import dunamis.graphql.schema : isSchema, getFields, FieldInfo, isInterna
 // modules loaded via .imported!q{...} import back into plugin.d during mixin
 // expansion, because plugin.d is still mid-compilation at that point)
 public import dunamis.core.discovery : getFieldMembers, isComputedField;
+
+// ============================================================================
+// Plugin Composition
+// ============================================================================
+
+/// Compose plugins left-to-right.
+///
+/// `ApplyPlugins!(Base, P1, P2, P3)` expands to `P3!(P2!(P1!Base))`.
+///
+/// Plugins are applied in declaration order — earlier plugins are innermost.
+/// This matches the mental model of "first apply P1, then P2, then P3".
+///
+/// Example:
+/// ---
+/// alias MySchema = ApplyPlugins!(Schema!(Query, Mutation),
+///     CrudMutationPlugin,
+///     FilterPlugin,
+///     SortingPlugin,
+/// );
+/// ---
+template ApplyPlugins(alias Base, Plugins...) {
+    static if (Plugins.length == 0) {
+        alias ApplyPlugins = Base;
+    } else {
+        alias FirstPlugin = Plugins[0];
+        alias ApplyPlugins = ApplyPlugins!(FirstPlugin!Base, Plugins[1 .. $]);
+    }
+}
 
 /// Check if a function returns an array type (wrapped in Expr).
 /// Useful for identifying fields that can be paginated.

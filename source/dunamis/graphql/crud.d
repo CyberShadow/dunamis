@@ -13,7 +13,7 @@
 /// Example:
 /// ---
 /// alias BaseSchema = Schema!(Query, Mutation);
-/// alias MySchema = SortingPlugin!(FilterPlugin!(CrudMutationPlugin!BaseSchema));
+/// alias MySchema = ApplyPlugins!(BaseSchema, CrudMutationPlugin, FilterPlugin, SortingPlugin);
 /// ---
 module dunamis.graphql.crud;
 
@@ -275,7 +275,7 @@ template _extractNormalizedEntity(alias QueryType, string member) {
 ///
 /// Must be applied before Filter/Sort/Pagination plugins:
 /// ---
-/// alias MySchema = SortingPlugin!(FilterPlugin!(CrudMutationPlugin!(Schema!(Query, Mutation))));
+/// alias MySchema = ApplyPlugins!(Schema!(Query, Mutation), CrudMutationPlugin, FilterPlugin, SortingPlugin);
 /// ---
 ///
 /// The plugin:
@@ -441,6 +441,7 @@ unittest {
     import dunamis.relational.schema : Col, Table;
     import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
     import dunamis.graphql.schema : Schema, generateSchemaSDL;
+    import dunamis.graphql.plugin : ApplyPlugins;
     import dunamis.graphql.filtering : FilterPlugin;
     import dunamis.graphql.sorting : SortingPlugin;
 
@@ -457,7 +458,7 @@ unittest {
     }
 
     alias BaseSchema = Schema!Query;
-    alias MySchema = SortingPlugin!(FilterPlugin!(CrudMutationPlugin!BaseSchema));
+    alias MySchema = ApplyPlugins!(BaseSchema, CrudMutationPlugin, FilterPlugin, SortingPlugin);
 
     static assert(isSchema!MySchema);
 
