@@ -16,51 +16,11 @@ import dunamis.core.expr : Expr, ExprResultType, isExpr;
 // Re-export commonly needed schema utilities
 public import dunamis.graphql.schema : isSchema, getFields, FieldInfo, isInternalMember;
 
-// ============================================================================
-// Field Introspection
-// ============================================================================
-
-/// Get all field member names from a type (excluding internal members).
-/// Returns a compile-time array of member names that are valid field methods.
-///
-/// Example:
-/// ---
-/// static foreach (member; getFieldMembers!Query) {
-///     // member is "users", "posts", etc.
-/// }
-/// ---
-template getFieldMembers(T) {
-    enum getFieldMembers = () {
-        string[] members;
-        static foreach (member; __traits(allMembers, T)) {
-            static if (!isInternalMember!member) {
-                static if (__traits(compiles, __traits(getMember, T, member)) &&
-                           is(typeof(__traits(getMember, T, member)) == function)) {
-                    members ~= member;
-                }
-            }
-        }
-        return members;
-    }();
-}
-
-/// Check if a member is a computed field (static method taking Expr!T as first parameter).
-/// Computed fields can be forwarded via ForwardField mixin.
-/// Plain methods (instance methods with no Expr parameter) should use ForwardPlainMethod instead.
-template isComputedField(T, string member) {
-    static if (__traits(compiles, __traits(getMember, T, member)) &&
-               is(typeof(__traits(getMember, T, member)) == function)) {
-        alias fn = __traits(getMember, T, member);
-        alias Params = Parameters!fn;
-        static if (Params.length >= 1) {
-            enum isComputedField = isExpr!(Params[0]);
-        } else {
-            enum isComputedField = false;
-        }
-    } else {
-        enum isComputedField = false;
-    }
-}
+// Re-export field introspection (moved to core/discovery.d to break circular
+// .imported dependencies — LDC reports forward reference errors when satellite
+// modules loaded via .imported!q{...} import back into plugin.d during mixin
+// expansion, because plugin.d is still mid-compilation at that point)
+public import dunamis.core.discovery : getFieldMembers, isComputedField;
 
 /// Check if a function returns an array type (wrapped in Expr).
 /// Useful for identifying fields that can be paginated.
@@ -242,59 +202,7 @@ mixin template WrapFields(SourceType, alias TypeMap, alias ArrayFieldMixin) {
 /// }
 /// ---
 mixin template NormalizeFields(SourceType, alias TypeMap = IdentityTypeMap) {
-    import dunamis.core.expr : Expr, use;
-    import dunamis.core.types : isPlainField, isPlainMethod, hasPrimaryKeyAttr;
-    import dunamis.graphql.plugin : getFieldMembers, isComputedField, ForwardField;
-    import dunamis.graphql.transform : wrapEntityResult;
-
-    // Store original struct for data access by normalized methods
-    SourceType _normalizedSource;
-
-    // Normalize @PrimaryKey plain fields first (so id appears before other fields)
-    static foreach (_nf_member; __traits(allMembers, SourceType)) {
-        static if (isPlainField!(SourceType, _nf_member) && hasPrimaryKeyAttr!(SourceType, _nf_member)) {
-            mixin("private static auto _nf_read_" ~ _nf_member ~
-                  "(typeof(this) _n) { return _n._normalizedSource." ~ _nf_member ~ "; }");
-            @(__traits(getAttributes, __traits(getMember, SourceType, _nf_member)))
-            mixin("static auto " ~ _nf_member ~
-                  "(Expr!(typeof(this)) _self) { return wrapEntityResult!(TypeMap)(use(&_nf_read_" ~ _nf_member ~ ", _self)); }");
-        }
-    }
-
-    // Forward computed fields (already static Expr methods)
-    static foreach (_nf_member; getFieldMembers!SourceType) {
-        static if (isComputedField!(SourceType, _nf_member)) {
-            mixin ForwardField!(SourceType, _nf_member, TypeMap);
-        }
-    }
-
-    // Normalize non-PK plain fields → static Expr methods
-    static foreach (_nf_member; __traits(allMembers, SourceType)) {
-        static if (isPlainField!(SourceType, _nf_member) && !hasPrimaryKeyAttr!(SourceType, _nf_member)) {
-            // Helper: reads field from _normalizedSource
-            mixin("private static auto _nf_read_" ~ _nf_member ~
-                  "(typeof(this) _n) { return _n._normalizedSource." ~ _nf_member ~ "; }");
-            // Public method with UDAs preserved from source field
-            // wrapEntityResult remaps entity types via TypeMap (no-op for IdentityTypeMap)
-            @(__traits(getAttributes, __traits(getMember, SourceType, _nf_member)))
-            mixin("static auto " ~ _nf_member ~
-                  "(Expr!(typeof(this)) _self) { return wrapEntityResult!(TypeMap)(use(&_nf_read_" ~ _nf_member ~ ", _self)); }");
-        }
-    }
-
-    // Normalize plain methods → static Expr methods
-    static foreach (_nf_member; getFieldMembers!SourceType) {
-        static if (!isComputedField!(SourceType, _nf_member)) {
-            // Helper: calls method on _normalizedSource
-            mixin("private static auto _nf_call_" ~ _nf_member ~
-                  "(typeof(this) _n) { return _n._normalizedSource." ~ _nf_member ~ "(); }");
-            // Public method with UDAs preserved from source method
-            // wrapEntityResult remaps entity types via TypeMap (no-op for IdentityTypeMap)
-            @(__traits(getAttributes, __traits(getMember, SourceType, _nf_member)))
-            mixin("static auto " ~ _nf_member ~
-                  "(Expr!(typeof(this)) _self) { return wrapEntityResult!(TypeMap)(use(&_nf_call_" ~ _nf_member ~ ", _self)); }");
-        }
-    }
+    mixin(.imported!q{dunamis.graphql.normalize}.NormalizeFieldsCode!(SourceType, TypeMap));
 }
 
 // ============================================================================

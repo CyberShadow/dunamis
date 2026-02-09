@@ -15,6 +15,45 @@ import dunamis.core.expr : Expr, ExprResultType, isExpr;
 import dunamis.core.types : isCustomScalar, isInternalMember, isPlainField, isPlainMethod;
 
 // ============================================================================
+// Field Introspection
+// ============================================================================
+
+/// Get all field member names from a type (excluding internal members).
+/// Returns a compile-time array of member names that are valid field methods.
+template getFieldMembers(T) {
+    enum getFieldMembers = () {
+        string[] members;
+        static foreach (member; __traits(allMembers, T)) {
+            static if (!isInternalMember!member) {
+                static if (__traits(compiles, __traits(getMember, T, member)) &&
+                           is(typeof(__traits(getMember, T, member)) == function)) {
+                    members ~= member;
+                }
+            }
+        }
+        return members;
+    }();
+}
+
+/// Check if a member is a computed field (static method taking Expr!T as first parameter).
+/// Computed fields can be forwarded via ForwardField mixin.
+/// Plain methods (instance methods with no Expr parameter) should use ForwardPlainMethod instead.
+template isComputedField(T, string member) {
+    static if (__traits(compiles, __traits(getMember, T, member)) &&
+               is(typeof(__traits(getMember, T, member)) == function)) {
+        alias fn = __traits(getMember, T, member);
+        alias Params = Parameters!fn;
+        static if (Params.length >= 1) {
+            enum isComputedField = isExpr!(Params[0]);
+        } else {
+            enum isComputedField = false;
+        }
+    } else {
+        enum isComputedField = false;
+    }
+}
+
+// ============================================================================
 // Object Type Detection
 // ============================================================================
 
