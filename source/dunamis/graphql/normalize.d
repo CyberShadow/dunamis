@@ -26,7 +26,7 @@ template NormalizeFieldsCode(SourceType, alias TypeMap) {
     private enum string _wrap = ".imported!q{dunamis.graphql.transform}.wrapEntityResult";
 
     enum NormalizeFieldsCode = () {
-        string result = "SourceType _normalizedSource;\n";
+        string result = "@(.imported!q{dunamis.graphql.schema.udas}.GqlHidden) SourceType _normalizedSource;\n";
 
         // PK plain fields first (ordering: id before other fields)
         static foreach (member; __traits(allMembers, SourceType)) {

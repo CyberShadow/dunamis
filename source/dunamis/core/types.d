@@ -108,9 +108,8 @@ template getPrimaryKeyFieldNames(T) {
 // ============================================================================
 
 /// Check if a member name is an internal member that should be skipped
-/// during type introspection. Filters out D built-in methods and private members.
+/// during type introspection. Filters out D built-in methods and compiler internals.
 template isInternalMember(string name) {
-    import std.algorithm : startsWith;
     enum isInternalMember =
         // D built-in methods
         name == "toString" ||
@@ -125,9 +124,7 @@ template isInternalMember(string name) {
         name == "__dtor" ||
         name == "__xdtor" ||
         name == "__postblit" ||
-        name == "__xpostblit" ||
-        // Private members (used by mixins for internal aliases)
-        name.startsWith("_");
+        name == "__xpostblit";
 }
 
 // ============================================================================

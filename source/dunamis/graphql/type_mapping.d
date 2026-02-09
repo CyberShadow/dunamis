@@ -227,6 +227,62 @@ template ExternalTypesPlugin(alias S, NewMappings...) if (isSchema!S) {
         }
     }
 
+    // Build the body of _MappedType as a code string to avoid symbol leaks.
+    // Eliminates _nf_read_*, _nf_call_* helpers and scoped imports by using
+    // function literals and .imported references.
+    private template _MappedTypeBody(T) {
+        private enum string _use = ".imported!q{dunamis.core.expr}.use";
+        private enum string _Expr = ".imported!q{dunamis.core.expr}.Expr";
+        private enum string _apply = ".imported!q{dunamis.graphql.type_mapping}.applyMappingsToResult";
+        private enum string _fwd = ".imported!q{dunamis.graphql.type_mapping}.ForwardFieldWithMappings";
+        private enum string _hidden = ".imported!q{dunamis.graphql.schema.udas}.GqlHidden";
+
+        enum _MappedTypeBody = () {
+            string result = "";
+
+            // _normalizedSource with @GqlHidden
+            static if (__traits(hasMember, T, "_normalizedSource")) {
+                result ~= "@(" ~ _hidden ~ ") typeof(T._normalizedSource) _normalizedSource;\n";
+            } else {
+                // POD type or first wrapper: needs _normalizedSource for normalization
+                result ~= "@(" ~ _hidden ~ ") T _normalizedSource;\n";
+            }
+
+            // Forward computed fields with value mapping (already zero-leak mixin template)
+            static foreach (member; getFieldMembers!T) {
+                static if (isComputedField!(T, member)) {
+                    result ~= "mixin " ~ _fwd ~ "!(T, \"" ~ member ~ "\", _TypeMap, NewMappings);\n";
+                }
+            }
+
+            // Plain fields: function literals instead of _nf_read_* helpers
+            static foreach (member; __traits(allMembers, T)) {
+                static if (!isInternalMember!member && isPlainField!(T, member) && member != "_normalizedSource") {
+                    result ~=
+                        "@(__traits(getAttributes, __traits(getMember, T, \"" ~ member ~ "\"))) " ~
+                        "static auto " ~ member ~ "(" ~ _Expr ~ "!(typeof(this)) _self) { " ~
+                        "return " ~ _apply ~ "!(_TypeMap, NewMappings)(" ~
+                        _use ~ "(function(typeof(this) _n) { return _n._normalizedSource." ~ member ~
+                        "; }, _self)); }\n";
+                }
+            }
+
+            // Plain methods: function literals instead of _nf_call_* helpers
+            static foreach (member; getFieldMembers!T) {
+                static if (!isComputedField!(T, member)) {
+                    result ~=
+                        "@(__traits(getAttributes, __traits(getMember, T, \"" ~ member ~ "\"))) " ~
+                        "static auto " ~ member ~ "(" ~ _Expr ~ "!(typeof(this)) _self) { " ~
+                        "return " ~ _apply ~ "!(_TypeMap, NewMappings)(" ~
+                        _use ~ "(function(typeof(this) _n) { return _n._normalizedSource." ~ member ~
+                        "(); }, _self)); }\n";
+                }
+            }
+
+            return result;
+        }();
+    }
+
     // Create wrapped version of each discovered type.
     // For entity types (with @PrimaryKey): all fields are already static Expr methods
     //   (from Schema's NormalizePlugin), so just forward with value mapping.
@@ -235,48 +291,7 @@ template ExternalTypesPlugin(alias S, NewMappings...) if (isSchema!S) {
         @(__traits(getAttributes, T))
         @GqlName(getGraphQLTypeName!T)
         struct _MappedType {
-            // Carry _normalizedSource through plugin chain
-            static if (__traits(hasMember, T, "_normalizedSource")) {
-                typeof(T._normalizedSource) _normalizedSource;
-            } else {
-                // POD type or first wrapper: needs _normalizedSource for normalization
-                T _normalizedSource;
-            }
-
-            // Forward computed fields with value mapping
-            static foreach (_m; getFieldMembers!T) {
-                static if (isComputedField!(T, _m)) {
-                    mixin ForwardFieldWithMappings!(T, _m, _TypeMap, NewMappings);
-                }
-            }
-
-            // Normalize plain fields with value mapping (POD types)
-            static foreach (_m; __traits(allMembers, T)) {
-                static if (!isInternalMember!_m && isPlainField!(T, _m)) {
-                    // Helper: reads field from _normalizedSource
-                    mixin("private static auto _nf_read_" ~ _m ~
-                          "(typeof(this) _n) { return _n._normalizedSource." ~ _m ~ "; }");
-                    // Public method: read + apply entity/value mappings
-                    @(__traits(getAttributes, __traits(getMember, T, _m)))
-                    mixin("static auto " ~ _m ~
-                          "(Expr!(typeof(this)) _self) { " ~
-                          "return applyMappingsToResult!(_TypeMap, NewMappings)(use(&_nf_read_" ~ _m ~ ", _self)); }");
-                }
-            }
-
-            // Normalize plain methods with value mapping (POD types)
-            static foreach (_m; getFieldMembers!T) {
-                static if (!isComputedField!(T, _m)) {
-                    // Helper: calls method on _normalizedSource
-                    mixin("private static auto _nf_call_" ~ _m ~
-                          "(typeof(this) _n) { return _n._normalizedSource." ~ _m ~ "(); }");
-                    // Public method: call + apply entity/value mappings
-                    @(__traits(getAttributes, __traits(getMember, T, _m)))
-                    mixin("static auto " ~ _m ~
-                          "(Expr!(typeof(this)) _self) { " ~
-                          "return applyMappingsToResult!(_TypeMap, NewMappings)(use(&_nf_call_" ~ _m ~ ", _self)); }");
-                }
-            }
+            mixin(_MappedTypeBody!T);
         }
     }
 

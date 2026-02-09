@@ -314,7 +314,8 @@ private template getRelatedTypesImpl(T, size_t idx, Members...) {
                 }
             }
             // 3. Check plain fields (struct instance fields)
-            else static if (isPlainField!(T, member)) {
+            //    Skip _normalizedSource — internal infrastructure, not a user-visible field
+            else static if (isPlainField!(T, member) && member != "_normalizedSource") {
                 alias FieldType = typeof(__traits(getMember, T.init, member));
                 alias ObjectFromField = extractObjectFromType!FieldType;
 

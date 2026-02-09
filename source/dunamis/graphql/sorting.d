@@ -164,172 +164,135 @@ private template hasEnumReturn(alias method) {
     }
 }
 
-/// Generate OrderBy enum, struct, and helper functions at compile time.
-/// All types and functions that reference the enum/struct are generated together
-/// in a single string mixin to ensure proper symbol visibility in nested mixin contexts.
-mixin template GenerateOrderByTypes(Entity, string graphqlEnumName, string graphqlStructName) {
-    import std.meta : AliasSeq;
-    import dunamis.core.sorting : sortBy;
-    import dunamis.core.expr : Expr;
-
-    // Alias for the entity type (accessible in generated code)
-    alias _SortEntity = Entity;
-
-    // Build enum, struct, and helper functions in a single string mixin
-    // This is necessary because in mixin templates, string-mixin-generated symbols
-    // aren't visible to subsequent declarations within the same template
-    enum _typesDef = () {
-        // Generate enum
-        string result = "enum _OrderByFieldEnum {\n";
-        static foreach (fieldName; getSortableFields!Entity) {
-            result ~= "    " ~ fieldName ~ ",\n";
-        }
-        result ~= "}\n\n";
-
-        // Generate struct
-        result ~= "struct _OrderByStruct {\n";
-        result ~= "    _OrderByFieldEnum field;\n";
-        result ~= "    SortDirection direction = SortDirection.ASC;\n";
-        result ~= "}\n\n";
-
-        // Generate _applySingleSort: wraps source with a single-column SortByExpr.
-        // Templated on source type so it works with both the original and plugin-wrapped entity types.
-        result ~= "private static auto _applySingleSort(S)(S source, _OrderByFieldEnum field, SortDirection dir) {\n";
-        result ~= "    static assert(is(S : Expr!(E[]), E), \"Expected Expr!(E[])\");\n";
-        result ~= "    static if (is(S : Expr!(E[]), E)) {\n";
-        result ~= "        Expr!(E[]) _result;\n";
-        result ~= "        final switch (field) {\n";
-        static foreach (member; getSortableFields!Entity) {
-            result ~= "            case _OrderByFieldEnum." ~ member ~ ":\n";
-            result ~= "                if (dir == SortDirection.ASC)\n";
-            result ~= "                    _result = sortBy!((a, b) => a." ~ member ~ ".lt(b." ~ member ~ "))(source);\n";
-            result ~= "                else\n";
-            result ~= "                    _result = sortBy!((a, b) => a." ~ member ~ ".gt(b." ~ member ~ "))(source);\n";
-            result ~= "                break;\n";
-        }
-        result ~= "        }\n";
-        result ~= "        return _result;\n";
-        result ~= "    }\n";
-        result ~= "}\n\n";
-
-        // Generate _applySorting: nests SortByExpr wrappers for multi-column sorting.
-        // Applied in reverse so the first spec (highest priority) is the outermost wrapper.
-        result ~= "private static auto _applySorting(S)(S base, _OrderByStruct[] orderBySpecs) {\n";
-        result ~= "    static assert(is(S : Expr!(E[]), E), \"Expected Expr!(E[])\");\n";
-        result ~= "    static if (is(S : Expr!(E[]), E)) {\n";
-        result ~= "        Expr!(E[]) result = base;\n";
-        result ~= "        if (orderBySpecs is null || orderBySpecs.length == 0) {\n";
-        result ~= "            return result;\n";
-        result ~= "        }\n";
-        result ~= "        foreach_reverse (ob; orderBySpecs) {\n";
-        result ~= "            result = _applySingleSort(result, ob.field, ob.direction);\n";
-        result ~= "        }\n";
-        result ~= "        return result;\n";
-        result ~= "    }\n";
-        result ~= "}\n";
-
-        return result;
-    }();
-
-    // Generate all types and functions together
-    mixin(_typesDef);
-
-    // Store graphql names for SDL generation
-    enum _orderByEnumGraphqlName = graphqlEnumName;
-    enum _orderByStructGraphqlName = graphqlStructName;
-}
-
 // ============================================================================
-// Mixin Template for Sorted Array Fields
+// Code Template for Sorted Array Fields
 // ============================================================================
 
-/// Mixin template to create a sorted version of an array-returning field.
-/// Adds orderBy parameter and wraps the result with orderBy expressions.
-mixin template SortedArrayField(SourceQuery, string fieldName, alias TypeMap) {
-    import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
-    import std.meta : AliasSeq;
+/// Eponymous code template for SortedArrayField.
+/// Builds the complete mixin string including OrderBy types, helper functions,
+/// and the sorted method. All metadata stays encapsulated — no leaks.
+template SortedArrayFieldCode(SourceQuery, string fieldName, alias TypeMap) {
     import std.conv : to;
-    import dunamis.core.expr : Expr, ExprResultType, entityCast;
-    import dunamis.core.sorting : sortBy, SortDirection;
-    import dunamis.graphql.transform : wrapEntityResult;
+    import dunamis.graphql.forward : ForwardFieldImpl;
 
-    // Get the source function and its metadata
-    alias _srcFn = __traits(getMember, SourceQuery, fieldName);
-    alias _SrcParams = Parameters!_srcFn;
-    alias _SrcDefaults = ParameterDefaults!_srcFn;
-    enum string[] _srcParamNames = [ParameterIdentifierTuple!_srcFn];
+    private alias Impl = ForwardFieldImpl!(SourceQuery, fieldName, TypeMap);
+    private alias _ElementType = ArrayFieldElementType!(Impl.srcFn);
 
-    // Extract the source entity type from first parameter
-    alias _SrcFirstParam = _SrcParams[0];
-    alias _SrcEntity = ExprResultType!_SrcFirstParam;
+    // .imported references for generated code
+    private enum string _I = ".imported!q{dunamis.graphql.forward}.ForwardFieldImpl!(SourceQuery, \"" ~ fieldName ~ "\", TypeMap)";
+    private enum string _Expr = ".imported!q{dunamis.core.expr}.Expr";
+    private enum string _entityCast = ".imported!q{dunamis.core.expr}.entityCast";
+    private enum string _sortBy = ".imported!q{dunamis.core.sorting}.sortBy";
+    private enum string _SD = ".imported!q{dunamis.core.sorting}.SortDirection";
+    private enum string _wrap = ".imported!q{dunamis.graphql.transform}.wrapEntityResult";
 
-    // Extract element type from array expression
-    alias _ElementType = ArrayFieldElementType!_srcFn;
+    // Field-specific names to avoid conflicts when multiple array fields coexist
+    private enum string _enumName = "_OrderByFieldEnum_" ~ fieldName;
+    private enum string _structName = "_OrderByStruct_" ~ fieldName;
+    private enum string _singleSort = "_applySingleSort_" ~ fieldName;
+    private enum string _sorting = "_applySorting_" ~ fieldName;
 
-    // Generate the OrderBy types for this entity (GraphQL names for SDL)
-    enum _orderByFieldEnumName = __traits(identifier, _ElementType) ~ "OrderByField";
-    enum _orderByStructName = __traits(identifier, _ElementType) ~ "OrderBy";
+    enum SortedArrayFieldCode = () {
+        string result = "";
 
-    // Only generate enum if we have sortable fields
-    static if (getSortableFields!_ElementType.length > 0) {
-        // Generate both enum and struct with fixed internal names (avoids string-based lookup)
-        mixin GenerateOrderByTypes!(_ElementType, _orderByFieldEnumName, _orderByStructName);
-        // _OrderByFieldEnum and _OrderByStruct are now defined by the mixin
-    }
+        enum sortableFields = getSortableFields!_ElementType;
 
-    // Generate type aliases for each parameter to preserve type scope
-    // Using aliases instead of stringof ensures types from outer scopes resolve correctly
-    static foreach (i; 1 .. _SrcParams.length) {
-        mixin("alias _ParamType" ~ i.to!string ~ " = _SrcParams[" ~ i.to!string ~ "];");
-    }
+        // --- OrderBy types and helper functions ---
+        static if (sortableFields.length > 0) {
+            // Enum
+            result ~= "enum " ~ _enumName ~ " {\n";
+            static foreach (f; sortableFields) {
+                result ~= "    " ~ f ~ ",\n";
+            }
+            result ~= "}\n\n";
 
-    // Build parameter list string at compile time
-    // First param: Expr!(typeof(this)) instead of Expr!SourceQuery
-    // Rest: same types with defaults preserved (using type aliases)
-    // Finally: add orderBy param
-    enum string _paramListStr = () {
-        string result = "Expr!(typeof(this)) " ~ _srcParamNames[0];
-        static foreach (i; 1 .. _SrcParams.length) {{
-            result ~= ", ";
-            // Use type alias instead of stringof to preserve type scope
-            result ~= "_ParamType" ~ i.to!string ~ " " ~ _srcParamNames[i];
-            // Add default value using alias to _SrcDefaults
-            static if (!is(_SrcDefaults[i] == void)) {
-                result ~= " = _SrcDefaults[" ~ i.to!string ~ "]";
+            // Struct
+            result ~= "struct " ~ _structName ~ " {\n";
+            result ~= "    " ~ _enumName ~ " field;\n";
+            result ~= "    " ~ _SD ~ " direction = " ~ _SD ~ ".ASC;\n";
+            result ~= "}\n\n";
+
+            // _applySingleSort: wraps source with a single-column SortByExpr.
+            // Templated on source type so it works with plugin-wrapped entity types.
+            // Local alias needed: is(S : Expr!(E[]), E) pattern matching doesn't work with .imported.
+            result ~= "private static auto " ~ _singleSort ~ "(S)(S source, " ~ _enumName ~ " field, " ~ _SD ~ " dir) {\n";
+            result ~= "    alias _E = " ~ _Expr ~ ";\n";
+            result ~= "    static assert(is(S : _E!(E[]), E), \"Expected Expr!(E[])\");\n";
+            result ~= "    static if (is(S : _E!(E[]), E)) {\n";
+            result ~= "        _E!(E[]) _result;\n";
+            result ~= "        final switch (field) {\n";
+            static foreach (member; sortableFields) {
+                result ~= "            case " ~ _enumName ~ "." ~ member ~ ":\n";
+                result ~= "                if (dir == " ~ _SD ~ ".ASC)\n";
+                result ~= "                    _result = " ~ _sortBy ~ "!((a, b) => a." ~ member ~ ".lt(b." ~ member ~ "))(source);\n";
+                result ~= "                else\n";
+                result ~= "                    _result = " ~ _sortBy ~ "!((a, b) => a." ~ member ~ ".gt(b." ~ member ~ "))(source);\n";
+                result ~= "                break;\n";
+            }
+            result ~= "        }\n";
+            result ~= "        return _result;\n";
+            result ~= "    }\n";
+            result ~= "}\n\n";
+
+            // _applySorting: nests SortByExpr wrappers for multi-column sorting.
+            // Applied in reverse so the first spec (highest priority) is the outermost wrapper.
+            result ~= "private static auto " ~ _sorting ~ "(S)(S base, " ~ _structName ~ "[] orderBySpecs) {\n";
+            result ~= "    alias _E = " ~ _Expr ~ ";\n";
+            result ~= "    static assert(is(S : _E!(E[]), E), \"Expected Expr!(E[])\");\n";
+            result ~= "    static if (is(S : _E!(E[]), E)) {\n";
+            result ~= "        _E!(E[]) result = base;\n";
+            result ~= "        if (orderBySpecs is null || orderBySpecs.length == 0) {\n";
+            result ~= "            return result;\n";
+            result ~= "        }\n";
+            result ~= "        foreach_reverse (ob; orderBySpecs) {\n";
+            result ~= "            result = " ~ _singleSort ~ "(result, ob.field, ob.direction);\n";
+            result ~= "        }\n";
+            result ~= "        return result;\n";
+            result ~= "    }\n";
+            result ~= "}\n\n";
+        }
+
+        // --- Build parameter list ---
+        string paramList = _Expr ~ "!(typeof(this)) " ~ Impl.srcParamNames[0];
+        static foreach (i; 1 .. Impl.SrcParams.length) {{
+            paramList ~= ", " ~ _I ~ ".SrcParams[" ~ i.to!string ~ "] " ~ Impl.srcParamNames[i];
+            static if (!is(Impl.SrcDefaults[i] == void)) {
+                paramList ~= " = " ~ _I ~ ".SrcDefaults[" ~ i.to!string ~ "]";
             }
         }}
-        // Add orderBy param using fixed internal type name
-        static if (getSortableFields!_ElementType.length > 0) {
-            result ~= ", _OrderByStruct[] orderBy = null";
+        static if (sortableFields.length > 0) {
+            paramList ~= ", " ~ _structName ~ "[] orderBy = null";
         }
+
+        // --- Build argument list ---
+        string argList = _entityCast ~ "!(" ~ _I ~ ".SrcEntity)(" ~ Impl.srcParamNames[0] ~ ")";
+        static foreach (i; 1 .. Impl.SrcParams.length) {
+            argList ~= ", " ~ Impl.srcParamNames[i];
+        }
+
+        // --- Generate method ---
+        // Sorting is applied AFTER wrapEntityResult so SortByExpr wraps the
+        // entity-cast MapExpr, keeping it visible to the optimizer unwrapping loop.
+        static if (sortableFields.length > 0) {
+            result ~= "@(__traits(getAttributes, " ~ _I ~ ".srcFn)) " ~
+                      "static auto " ~ fieldName ~ "(" ~ paramList ~ ") { " ~
+                      "return " ~ _sorting ~ "(" ~ _wrap ~ "!(TypeMap)(" ~
+                      _I ~ ".srcFn(" ~ argList ~ ")), orderBy); }";
+        } else {
+            result ~= "@(__traits(getAttributes, " ~ _I ~ ".srcFn)) " ~
+                      "static auto " ~ fieldName ~ "(" ~ paramList ~ ") { " ~
+                      "return " ~ _wrap ~ "!(TypeMap)(" ~
+                      _I ~ ".srcFn(" ~ argList ~ ")); }";
+        }
+
         return result;
     }();
+}
 
-    // Build argument list string for calling original function
-    // First arg: entityCast to convert Expr!(typeof(this)) -> Expr!SourceQuery
-    // Rest: pass through unchanged
-    enum string _argListStr = () {
-        string result = "entityCast!(_SrcEntity)(" ~ _srcParamNames[0] ~ ")";
-        static foreach (i; 1 .. _SrcParams.length) {
-            result ~= ", " ~ _srcParamNames[i];
-        }
-        return result;
-    }();
-
-    // Generate the sorted method.
-    // Sorting is applied AFTER wrapEntityResult so that the SortByExpr wraps the
-    // entity-cast MapExpr, not the other way around. This ensures the unwrapping loop
-    // in ColumnAccessExpr.optimize() can see the SortByExpr in the collection chain.
-    static if (getSortableFields!_ElementType.length > 0) {
-        @(__traits(getAttributes, _srcFn))
-        mixin("static auto " ~ fieldName ~ "(" ~ _paramListStr ~ ") { " ~
-              "return _applySorting(wrapEntityResult!(TypeMap)(_srcFn(" ~ _argListStr ~ ")), orderBy); }");
-    } else {
-        // No sortable fields - just forward the method unchanged
-        @(__traits(getAttributes, _srcFn))
-        mixin("static auto " ~ fieldName ~ "(" ~ _paramListStr ~ ") { " ~
-              "return wrapEntityResult!(TypeMap)(_srcFn(" ~ _argListStr ~ ")); }");
-    }
+/// Mixin template to create a sorted version of an array-returning field.
+/// Zero-leak: delegates to SortedArrayFieldCode eponymous template.
+mixin template SortedArrayField(SourceQuery, string fieldName, alias TypeMap) {
+    mixin(SortedArrayFieldCode!(SourceQuery, fieldName, TypeMap));
 }
 
 // ============================================================================

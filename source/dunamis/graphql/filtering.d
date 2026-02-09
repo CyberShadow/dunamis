@@ -315,8 +315,8 @@ mixin template GenerateShallowFilterType(Entity, string filterTypeName) {
         }
     }
 
-    // Build the shallow filter struct (columns only)
-    enum _shallowFilterTypeDef = () {
+    // Build and mix in the shallow filter struct (no intermediate enum)
+    mixin(() {
         string result = "struct _ShallowFilter {\n";
 
         // Add a field for each filterable column
@@ -347,9 +347,7 @@ mixin template GenerateShallowFilterType(Entity, string filterTypeName) {
         result ~= "alias " ~ filterTypeName ~ " = _ShallowFilter;\n";
 
         return result;
-    }();
-
-    mixin(_shallowFilterTypeDef);
+    }());
 }
 
 /// Generate an entity filter type at compile time.
@@ -399,19 +397,17 @@ mixin template GenerateEntityFilterType(Entity, string filterTypeName) {
         mixin GenerateShallowFilterType!(getArrayElementType!(Entity, member), "_" ~ member ~ "ChildFilter");
     }
 
-    // Build the filter struct definition as a string and mixin
-    enum _filterTypeDef = () {
+    // Build and mix in the filter struct definition (no intermediate enum)
+    mixin(() {
         string result = "";
 
-        // Now generate the main filter struct
+        // Main filter struct
         result ~= "struct _EntityFilter {\n";
 
         // Add a field for each filterable column
         static foreach (member; getFilterableColumns!Entity) {{
-            // Get the column type
             alias ColType = _ColTypeFor!member;
 
-            // Map to filter type name
             static if (is(ColType == string)) {
                 result ~= "    Nullable!StringFilter " ~ member ~ ";\n";
             } else static if (is(ColType == int)) {
@@ -423,7 +419,6 @@ mixin template GenerateEntityFilterType(Entity, string filterTypeName) {
             } else static if (is(ColType == bool)) {
                 result ~= "    Nullable!BooleanFilter " ~ member ~ ";\n";
             } else static if (is(ColType == enum)) {
-                // Use the type alias for the enum type
                 result ~= "    Nullable!(EnumFilter!(_EnumType_" ~ member ~ ")) " ~ member ~ ";\n";
             }
         }}
@@ -450,12 +445,7 @@ mixin template GenerateEntityFilterType(Entity, string filterTypeName) {
         result ~= "alias " ~ filterTypeName ~ " = _EntityFilter;\n";
 
         return result;
-    }();
-
-    mixin(_filterTypeDef);
-
-    // Store the filter type name for SDL generation
-    enum _filterTypeGraphqlName = filterTypeName;
+    }());
 }
 
 // ============================================================================
@@ -1131,48 +1121,15 @@ mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) 
     import dunamis.graphql.transform : wrapEntityResult;
     import std.typecons : Nullable;
 
-    alias _srcFn = __traits(getMember, SourceQuery, fieldName);
-    alias _SrcParams = Parameters!_srcFn;
-    alias _SrcDefaults = ParameterDefaults!_srcFn;
-    enum string[] _srcParamNames = [ParameterIdentifierTuple!_srcFn];
-
-    alias _SrcFirstParam = _SrcParams[0];
-    alias _SrcEntity = ExprResultType!_SrcFirstParam;
-
-    alias _ElementType = ArrayFieldElementType!_srcFn;
+    // Wrap in a template so it's not detected as a function by getFields
+    private template _srcFn() { alias _srcFn = __traits(getMember, SourceQuery, fieldName); }
+    alias _SrcParams = Parameters!(_srcFn!());
+    alias _SrcDefaults = ParameterDefaults!(_srcFn!());
+    alias _SrcEntity = ExprResultType!(_SrcParams[0]);
+    alias _ElementType = ArrayFieldElementType!(_srcFn!());
 
     // Generate the entity filter type for this element type
-    enum _filterTypeName = __traits(identifier, _ElementType) ~ "Filter";
-    mixin GenerateEntityFilterType!(_ElementType, _filterTypeName);
-
-    // Generate type aliases for each parameter to preserve type scope.
-    static foreach (i; 1 .. _SrcParams.length) {
-        mixin("alias _ParamType" ~ i.to!string ~ " = _SrcParams[" ~ i.to!string ~ "];");
-    }
-
-    // Build parameter list string using type aliases
-    enum string _paramListStr = () {
-        string result = "Expr!(typeof(this)) " ~ _srcParamNames[0];
-        static foreach (i; 1 .. _SrcParams.length) {{
-            result ~= ", ";
-            result ~= "_ParamType" ~ i.to!string ~ " " ~ _srcParamNames[i];
-            static if (!is(_SrcDefaults[i] == void)) {
-                result ~= " = _SrcDefaults[" ~ i.to!string ~ "]";
-            }
-        }}
-        // Add typed filter param
-        result ~= ", Nullable!_EntityFilter filter = Nullable!_EntityFilter.init";
-        return result;
-    }();
-
-    // Build argument list for calling original function
-    enum string _argListStr = () {
-        string result = "entityCast!(_SrcEntity)(" ~ _srcParamNames[0] ~ ")";
-        static foreach (i; 1 .. _SrcParams.length) {
-            result ~= ", " ~ _srcParamNames[i];
-        }
-        return result;
-    }();
+    mixin GenerateEntityFilterType!(_ElementType, __traits(identifier, _ElementType) ~ "Filter");
 
     // Apply filter using typed filter struct
     private static Expr!(_ElementType[]) _applyFilter(T)(T base, Nullable!_EntityFilter filter) {
@@ -1188,9 +1145,30 @@ mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) 
         return filterExpr;
     }
 
-    @(__traits(getAttributes, _srcFn))
-    mixin("static auto " ~ fieldName ~ "(" ~ _paramListStr ~ ") { " ~
-          "return wrapEntityResult!(TypeMap)(_applyFilter(_srcFn(" ~ _argListStr ~ "), filter)); }");
+    // Build and mix in the method declaration (no intermediate enum values)
+    @(__traits(getAttributes, _srcFn!()))
+    mixin(() {
+        enum string[] srcParamNames = [ParameterIdentifierTuple!(_srcFn!())];
+
+        // Parameter list — reference _SrcParams/_SrcDefaults directly (aliases, not leaked as fields)
+        string paramList = "Expr!(typeof(this)) " ~ srcParamNames[0];
+        static foreach (i; 1 .. _SrcParams.length) {{
+            paramList ~= ", _SrcParams[" ~ i.to!string ~ "] " ~ srcParamNames[i];
+            static if (!is(_SrcDefaults[i] == void)) {
+                paramList ~= " = _SrcDefaults[" ~ i.to!string ~ "]";
+            }
+        }}
+        paramList ~= ", Nullable!_EntityFilter filter = Nullable!_EntityFilter.init";
+
+        // Argument list
+        string argList = "entityCast!(_SrcEntity)(" ~ srcParamNames[0] ~ ")";
+        static foreach (i; 1 .. _SrcParams.length) {
+            argList ~= ", " ~ srcParamNames[i];
+        }
+
+        return "static auto " ~ fieldName ~ "(" ~ paramList ~ ") { " ~
+              "return wrapEntityResult!(TypeMap)(_applyFilter(_srcFn!()(" ~ argList ~ "), filter)); }";
+    }());
 }
 
 // ============================================================================
@@ -1255,4 +1233,34 @@ unittest {
     // Array field should have filter arg
     static assert(sdl.canFind("users("), "users should have arguments: " ~ sdl);
     static assert(sdl.canFind("filter:"), "should have filter arg: " ~ sdl);
+}
+
+// Test FilterPlugin with HasMany relationship
+unittest {
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+    import dunamis.graphql.schema : Schema;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "posts")
+    static struct Post {
+        mixin DemoId;
+        mixin Col!("title", string);
+    }
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("name", string);
+        mixin HasMany!("posts", Post, "author_id");
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    alias BaseSchema = Schema!Query;
+    alias FilteredSchema = FilterPlugin!BaseSchema;
+    static assert(isSchema!FilteredSchema);
 }

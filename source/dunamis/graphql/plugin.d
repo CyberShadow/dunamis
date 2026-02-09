@@ -150,12 +150,14 @@ mixin template WrapFields(SourceType, alias TypeMap, alias ArrayFieldMixin) {
 
     // 1. Copy _normalizedSource (carries original entity data through plugin chain)
     static if (__traits(hasMember, SourceType, "_normalizedSource")) {
+        @(.imported!q{dunamis.graphql.schema.udas}.GqlHidden)
         typeof(SourceType._normalizedSource) _normalizedSource;
     }
 
     // 2. Copy plain fields (struct instance fields, including @PrimaryKey)
+    //    Skip _normalizedSource — already handled above with @GqlHidden
     static foreach (member; __traits(allMembers, SourceType)) {
-        static if (isPlainField!(SourceType, member)) {
+        static if (isPlainField!(SourceType, member) && member != "_normalizedSource") {
             mixin("typeof(__traits(getMember, SourceType.init, \"" ~ member ~ "\")) " ~ member ~ ";");
         }
     }
@@ -950,5 +952,88 @@ unittest {
     // UDA descriptions should be preserved
     static assert(sdl.canFind(`"User's age"`), "Description preserved on plain field");
     static assert(sdl.canFind(`"Is the user active?"`), "Description preserved on plain method");
+}
+
+/// Compile-time test: full plugin chain produces no leaked _-prefixed members.
+///
+/// After the zero-leak mixin template refactoring, no _-prefixed member should
+/// pass isPlainField, isPlainMethod, or appear as a non-hidden field in getFields.
+unittest {
+    import std.algorithm : canFind, startsWith;
+    import std.typecons : Nullable;
+    import dunamis.core.types : isPlainField, isPlainMethod;
+    import dunamis.graphql.schema : Schema, generateSchemaSDL, getFields, FieldInfo;
+    import dunamis.graphql.filtering : FilterPlugin;
+    import dunamis.graphql.sorting : SortingPlugin;
+    import dunamis.relational.schema : Col, Table, ForeignKey, HasMany, BelongsTo;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "posts")
+    static struct Post {
+        mixin DemoId;
+        mixin Col!("title", string);
+    }
+
+    // Entity with all field types: Col, HasMany, plain field, plain method, computed field
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+        mixin Col!("lastName", string);
+        mixin HasMany!("posts", Post, "author_id");
+
+        Nullable!string nickname;   // plain field
+        string displayName() => nickname.isNull ? "Anon" : nickname.get;  // plain method
+
+        static auto fullName(Expr!User u) => u.firstName ~ " " ~ u.lastName;  // computed field
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+        mixin Table!(Post, "posts");
+    }
+
+    // Full plugin chain: Filter → Sort
+    alias FullSchema = SortingPlugin!(FilterPlugin!(Schema!(Query)));
+
+    // Check transformed entity types: no non-hidden field should start with _
+    alias EntityTypes = FullSchema.AllEntityTypes;
+    static foreach (Entity; EntityTypes) {{
+        static foreach (member; __traits(allMembers, Entity)) {{
+            static if (member.length > 0 && member[0] == '_' && member != "_normalizedSource") {
+                static assert(!isPlainField!(Entity, member),
+                    "Leaked _-prefixed plain field '" ~ member ~ "' on " ~ Entity.stringof);
+                static assert(!isPlainMethod!(Entity, member),
+                    "Leaked _-prefixed plain method '" ~ member ~ "' on " ~ Entity.stringof);
+            }
+        }}
+
+        // Check getFields: no non-hidden field should start with _
+        static foreach (field; getFields!Entity) {{
+            static if (!field.hidden) {
+                static assert(!field.name.startsWith("_"),
+                    "Non-hidden field '" ~ field.name ~ "' starts with _ on " ~ Entity.stringof);
+            }
+        }}
+    }}
+
+    // Check transformed Query type
+    alias SortedQuery = FullSchema.Query;
+    static foreach (member; __traits(allMembers, SortedQuery)) {{
+        static if (member.length > 0 && member[0] == '_') {
+            static assert(!isPlainField!(SortedQuery, member),
+                "Leaked _-prefixed plain field '" ~ member ~ "' on SortedQuery");
+            static assert(!isPlainMethod!(SortedQuery, member),
+                "Leaked _-prefixed plain method '" ~ member ~ "' on SortedQuery");
+        }
+    }}
+    static foreach (field; getFields!SortedQuery) {{
+        static if (!field.hidden) {
+            static assert(!field.name.startsWith("_"),
+                "Non-hidden field '" ~ field.name ~ "' starts with _ on SortedQuery");
+        }
+    }}
 }
 

@@ -235,6 +235,7 @@ template getFields(T) {
         static foreach (member; __traits(allMembers, T)) {{
             static if (!isInternalMember!member) {
                 static if (isPlainField!(T, member) && hasPrimaryKeyAttr!(T, member)) {
+                    enum isHidden0 = hasGqlHidden!(__traits(getMember, T, member));
                     alias FieldType = typeof(__traits(getMember, T.init, member));
                     enum gqlFieldName0 = member;
                     enum gqlType0 = graphqlTypeName!FieldType;
@@ -243,7 +244,7 @@ template getFields(T) {
                         gqlFieldName0,
                         gqlType0,
                         false,  // isConnection
-                        false,  // isHidden
+                        isHidden0,
                         "",     // description
                         "",     // deprecation
                         []      // arguments
@@ -301,6 +302,7 @@ template getFields(T) {
         static foreach (member; __traits(allMembers, T)) {{
             static if (!isInternalMember!member) {
                 static if (isPlainField!(T, member) && !hasPrimaryKeyAttr!(T, member)) {
+                    enum isHidden2 = hasGqlHidden!(__traits(getMember, T, member));
                     alias FieldType = typeof(__traits(getMember, T.init, member));
                     // Use D field name directly (GraphQL uses camelCase like D)
                     enum gqlFieldName = member;
@@ -310,7 +312,7 @@ template getFields(T) {
                         gqlFieldName,
                         gqlType,
                         false,  // isConnection
-                        false,  // isHidden
+                        isHidden2,
                         "",     // description
                         "",     // deprecation
                         []      // arguments

@@ -93,77 +93,74 @@ template PaginationPlugin(alias S) if (isSchema!S) {
     alias Mutation = PaginatedMutation;
 }
 
-/// Mixin template to create a paginated version of an array-returning field.
-/// Adds first/offset parameters and wraps the result with limit/offset expressions.
-/// Uses type aliases instead of stringof to preserve type scope across plugin composition.
-mixin template PaginatedArrayField(SourceQuery, string fieldName, alias TypeMap) {
-    import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
-    import std.meta : AliasSeq;
+/// Eponymous code template for PaginatedArrayField.
+/// Builds the complete mixin string including pagination helper and method.
+/// All metadata stays encapsulated — no leaks.
+template PaginatedArrayFieldCode(SourceQuery, string fieldName, alias TypeMap) {
     import std.conv : to;
-    import dunamis.core.expr : Expr, ExprResultType, entityCast;
-    import dunamis.core.pagination : limit, offset;
-    import dunamis.graphql.transform : wrapEntityResult;
+    import dunamis.graphql.forward : ForwardFieldImpl;
 
-    // Get the source function and its metadata
-    alias _srcFn = __traits(getMember, SourceQuery, fieldName);
-    alias _SrcParams = Parameters!_srcFn;
-    alias _SrcDefaults = ParameterDefaults!_srcFn;
-    enum string[] _srcParamNames = [ParameterIdentifierTuple!_srcFn];
+    private alias Impl = ForwardFieldImpl!(SourceQuery, fieldName, TypeMap);
 
-    // Extract the source entity type from first parameter
-    alias _SrcFirstParam = _SrcParams[0];
-    alias _SrcEntity = ExprResultType!_SrcFirstParam;
+    // .imported references for generated code
+    private enum string _I = ".imported!q{dunamis.graphql.forward}.ForwardFieldImpl!(SourceQuery, \"" ~ fieldName ~ "\", TypeMap)";
+    private enum string _Expr = ".imported!q{dunamis.core.expr}.Expr";
+    private enum string _entityCast = ".imported!q{dunamis.core.expr}.entityCast";
+    private enum string _Nullable = ".imported!q{std.typecons}.Nullable";
+    private enum string _limit = ".imported!q{dunamis.core.pagination}.limit";
+    private enum string _offset = ".imported!q{dunamis.core.pagination}.offset";
+    private enum string _wrap = ".imported!q{dunamis.graphql.transform}.wrapEntityResult";
+    // Element type for explicit return type (needed because limit/offset return different subtypes)
+    private enum string _ElemType = ".imported!q{dunamis.graphql.plugin}.ArrayFieldElementType!(" ~ _I ~ ".srcFn)";
 
-    // Generate type aliases for each parameter to preserve type scope
-    static foreach (i; 1 .. _SrcParams.length) {
-        mixin("alias _ParamType" ~ i.to!string ~ " = _SrcParams[" ~ i.to!string ~ "];");
-    }
+    enum PaginatedArrayFieldCode = () {
+        string result = "";
 
-    // Build parameter list string using type aliases
-    enum string _paramListStr = () {
-        string result = "Expr!(typeof(this)) " ~ _srcParamNames[0];
-        static foreach (i; 1 .. _SrcParams.length) {{
-            result ~= ", ";
-            result ~= "_ParamType" ~ i.to!string ~ " " ~ _srcParamNames[i];
-            static if (!is(_SrcDefaults[i] == void)) {
-                result ~= " = _SrcDefaults[" ~ i.to!string ~ "]";
+        // _applyPagination helper (template function, invisible to field detection)
+        // Explicit return type needed: limit/offset return LimitExpr/OffsetExpr, not the input type
+        result ~= "private static " ~ _Expr ~ "!(" ~ _ElemType ~ "[]) _applyPagination(T)(T base, " ~ _Nullable ~ "!int _first, " ~ _Nullable ~ "!int _off) {\n";
+        result ~= "    if (_off.isNull && _first.isNull) {\n";
+        result ~= "        return base;\n";
+        result ~= "    } else if (_off.isNull) {\n";
+        result ~= "        return " ~ _limit ~ "(base, cast(size_t) _first.get);\n";
+        result ~= "    } else if (_first.isNull) {\n";
+        result ~= "        return " ~ _offset ~ "(base, cast(size_t) _off.get);\n";
+        result ~= "    } else {\n";
+        result ~= "        return " ~ _limit ~ "(" ~ _offset ~ "(base, cast(size_t) _off.get), cast(size_t) _first.get);\n";
+        result ~= "    }\n";
+        result ~= "}\n\n";
+
+        // --- Build parameter list ---
+        string paramList = _Expr ~ "!(typeof(this)) " ~ Impl.srcParamNames[0];
+        static foreach (i; 1 .. Impl.SrcParams.length) {{
+            paramList ~= ", " ~ _I ~ ".SrcParams[" ~ i.to!string ~ "] " ~ Impl.srcParamNames[i];
+            static if (!is(Impl.SrcDefaults[i] == void)) {
+                paramList ~= " = " ~ _I ~ ".SrcDefaults[" ~ i.to!string ~ "]";
             }
         }}
-        // Add pagination params
-        result ~= ", Nullable!int first = Nullable!int.init";
-        result ~= ", Nullable!int offset = Nullable!int.init";
+        paramList ~= ", " ~ _Nullable ~ "!int first = " ~ _Nullable ~ "!int.init";
+        paramList ~= ", " ~ _Nullable ~ "!int offset = " ~ _Nullable ~ "!int.init";
+
+        // --- Build argument list ---
+        string argList = _entityCast ~ "!(" ~ _I ~ ".SrcEntity)(" ~ Impl.srcParamNames[0] ~ ")";
+        static foreach (i; 1 .. Impl.SrcParams.length) {
+            argList ~= ", " ~ Impl.srcParamNames[i];
+        }
+
+        // --- Generate method ---
+        result ~= "@(__traits(getAttributes, " ~ _I ~ ".srcFn)) " ~
+                  "static auto " ~ fieldName ~ "(" ~ paramList ~ ") { " ~
+                  "return " ~ _wrap ~ "!(TypeMap)(_applyPagination(" ~
+                  _I ~ ".srcFn(" ~ argList ~ "), first, offset)); }";
+
         return result;
     }();
+}
 
-    // Build argument list string for calling original function
-    enum string _argListStr = () {
-        string result = "entityCast!(_SrcEntity)(" ~ _srcParamNames[0] ~ ")";
-        static foreach (i; 1 .. _SrcParams.length) {
-            result ~= ", " ~ _srcParamNames[i];
-        }
-        return result;
-    }();
-
-    // Extract element type from array expression
-    alias _ElementType = ArrayFieldElementType!_srcFn;
-
-    // Helper function to apply pagination (avoids type inference issues in mixin)
-    private static Expr!(_ElementType[]) _applyPagination(T)(T base, Nullable!int first, Nullable!int offset) {
-        if (offset.isNull && first.isNull) {
-            return base;
-        } else if (offset.isNull) {
-            return base.limit(cast(size_t) first.get);
-        } else if (first.isNull) {
-            return base.offset(cast(size_t) offset.get);
-        } else {
-            return base.offset(cast(size_t) offset.get).limit(cast(size_t) first.get);
-        }
-    }
-
-    // Generate the paginated method with UDAs preserved
-    @(__traits(getAttributes, _srcFn))
-    mixin("static auto " ~ fieldName ~ "(" ~ _paramListStr ~ ") { " ~
-          "return wrapEntityResult!(TypeMap)(_applyPagination(_srcFn(" ~ _argListStr ~ "), first, offset)); }");
+/// Mixin template to create a paginated version of an array-returning field.
+/// Zero-leak: delegates to PaginatedArrayFieldCode eponymous template.
+mixin template PaginatedArrayField(SourceQuery, string fieldName, alias TypeMap) {
+    mixin(PaginatedArrayFieldCode!(SourceQuery, fieldName, TypeMap));
 }
 
 // ============================================================================
