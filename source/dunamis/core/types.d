@@ -20,24 +20,16 @@ enum PrimaryKey;
 /// (use LAST_INSERT_ID/last_insert_rowid instead of explicit PK lookup).
 enum AutoIncrement;
 
-/// Check if a specific member has @PrimaryKey UDA
+/// Check if a specific member has @PrimaryKey UDA.
 template hasPrimaryKeyAttr(T, string member) {
     import std.meta : staticIndexOf;
-    static if (__traits(compiles, __traits(getAttributes, __traits(getMember, T, member)))) {
-        enum hasPrimaryKeyAttr = staticIndexOf!(PrimaryKey, __traits(getAttributes, __traits(getMember, T, member))) >= 0;
-    } else {
-        enum hasPrimaryKeyAttr = false;
-    }
+    enum hasPrimaryKeyAttr = staticIndexOf!(PrimaryKey, __traits(getAttributes, __traits(getMember, T, member))) >= 0;
 }
 
-/// Check if a specific member has @AutoIncrement UDA
+/// Check if a specific member has @AutoIncrement UDA.
 template hasAutoIncrementAttr(T, string member) {
     import std.meta : staticIndexOf;
-    static if (__traits(compiles, __traits(getAttributes, __traits(getMember, T, member)))) {
-        enum hasAutoIncrementAttr = staticIndexOf!(AutoIncrement, __traits(getAttributes, __traits(getMember, T, member))) >= 0;
-    } else {
-        enum hasAutoIncrementAttr = false;
-    }
+    enum hasAutoIncrementAttr = staticIndexOf!(AutoIncrement, __traits(getAttributes, __traits(getMember, T, member))) >= 0;
 }
 
 /// Check if any @PrimaryKey field in the type also has @AutoIncrement.

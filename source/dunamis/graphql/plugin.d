@@ -126,99 +126,17 @@ template IdentityTypeMap(T) {
 /// Preserves UDAs from the source field and handles type conversion
 /// for the first parameter (Expr!SourceType -> Expr!TargetType).
 ///
-/// When TypeMap is provided, entity type references in the return value
-/// are remapped via wrapEntityResult. With the default IdentityTypeMap,
-/// this is a compile-time no-op.
-///
-/// Example:
-/// ---
-/// struct ExtendedQuery {
-///     mixin ForwardField!(OriginalQuery, "users");
-///     // Now ExtendedQuery.users(Expr!ExtendedQuery) delegates to
-///     // OriginalQuery.users(Expr!OriginalQuery) with automatic type casting
-/// }
-/// ---
+/// Zero-leak: no imports, aliases, or enums are mixed into the target struct.
+/// All metadata is encapsulated in ForwardFieldImpl/ForwardFieldCode (in forward.d).
 mixin template ForwardField(SourceType, string fieldName, alias TypeMap = IdentityTypeMap) {
-    import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
-    import std.meta : AliasSeq;
-    import std.conv : to;
-    import dunamis.core.expr : Expr, ExprResultType, entityCast;
-    import dunamis.graphql.transform : wrapEntityResult;
-
-    // Get the source function and its metadata
-    alias _srcFn = __traits(getMember, SourceType, fieldName);
-    alias _SrcParams = Parameters!_srcFn;
-    alias _SrcDefaults = ParameterDefaults!_srcFn;
-    enum string[] _srcParamNames = [ParameterIdentifierTuple!_srcFn];
-
-    // Extract the source entity type from first parameter
-    alias _SrcFirstParam = _SrcParams[0];
-    alias _SrcEntity = ExprResultType!_SrcFirstParam;
-
-    // Create type aliases for each parameter to avoid stringof scope issues.
-    // This ensures types like NodeInput* are properly referenced.
-    static foreach (i; 1 .. _SrcParams.length) {
-        mixin("alias _ParamType" ~ i.to!string ~ " = _SrcParams[" ~ i.to!string ~ "];");
-    }
-
-    // Build parameter list string at compile time
-    // First param: Expr!(typeof(this)) instead of Expr!SourceType
-    // Rest: use the generated _ParamTypeN aliases
-    enum string _paramListStr = () {
-        string result = "Expr!(typeof(this)) " ~ _srcParamNames[0];
-        static foreach (i; 1 .. _SrcParams.length) {{
-            result ~= ", ";
-            result ~= "_ParamType" ~ i.to!string ~ " " ~ _srcParamNames[i];
-            // Add default value if present
-            static if (!is(_SrcDefaults[i] == void)) {
-                result ~= " = _SrcDefaults[" ~ i.to!string ~ "]";
-            }
-        }}
-        return result;
-    }();
-
-    // Build argument list string for calling original function
-    // First arg: entityCast to convert Expr!(typeof(this)) -> Expr!SourceType
-    // Rest: pass through unchanged
-    enum string _argListStr = () {
-        string result = "entityCast!(_SrcEntity)(" ~ _srcParamNames[0] ~ ")";
-        static foreach (i; 1 .. _SrcParams.length) {
-            result ~= ", " ~ _srcParamNames[i];
-        }
-        return result;
-    }();
-
-    // Generate the forwarding method with UDAs preserved
-    // wrapEntityResult remaps entity types via TypeMap (no-op for IdentityTypeMap)
-    @(__traits(getAttributes, _srcFn))
-    mixin("static auto " ~ fieldName ~ "(" ~ _paramListStr ~ ") { " ~
-          "return wrapEntityResult!(TypeMap)(_srcFn(" ~ _argListStr ~ ")); }");
+    mixin(.imported!q{dunamis.graphql.forward}.ForwardFieldCode!(SourceType, fieldName, TypeMap));
 }
 
 /// Mixin template to forward a plain method from a source type.
-/// Plain methods are instance methods that don't take Expr parameters.
-///
-/// Example:
-/// ---
-/// struct User {
-///     string displayName() { return "name"; }  // Plain method
-/// }
-///
-/// struct FilteredUser {
-///     mixin ForwardPlainMethod!(User, "displayName");
-///     // Now FilteredUser.displayName() calls User.displayName()
-/// }
-/// ---
+/// Zero-leak: no imports, aliases, or enums are mixed into the target struct.
+/// Code generation is encapsulated in ForwardPlainMethodCode (in forward.d).
 mixin template ForwardPlainMethod(SourceType, string methodName, alias TypeMap = IdentityTypeMap) {
-    import std.traits : ReturnType;
-
-    alias _srcMethod = __traits(getMember, SourceType, methodName);
-    alias _RetType = ReturnType!_srcMethod;
-
-    // Generate the forwarding method with UDAs preserved
-    @(__traits(getAttributes, _srcMethod))
-    mixin("_RetType " ~ methodName ~ "() { " ~
-          "return (cast(SourceType*) &this)." ~ methodName ~ "(); }");
+    mixin(.imported!q{dunamis.graphql.forward}.ForwardPlainMethodCode!(SourceType, methodName));
 }
 
 /// Mixin template to copy all fields from SourceType.

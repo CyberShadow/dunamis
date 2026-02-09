@@ -110,65 +110,74 @@ template applyMappingsToResult(alias TypeMap, Mappings...) {
 // Field Forwarding with Value Mapping
 // ============================================================================
 
-/// Forward a computed field with value mapping applied to return type and arguments.
-/// Like ForwardField (with TypeMap) but also:
-/// - Maps argument types (deserializes mapped args before forwarding)
-/// - Maps return types (serializes after forwarding)
-mixin template ForwardFieldWithMappings(SourceType, string fieldName, alias TypeMap, Mappings...) {
+/// Top-level template holding metadata for a forwarded field with value mappings.
+template ForwardFieldWithMappingsImpl(SourceType, string fieldName, alias TypeMap, Mappings...) {
     import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
-    import std.conv : to;
-    import dunamis.core.expr : Expr, ExprResultType, entityCast;
-    import dunamis.core.types : applyDeserialize;
+    import dunamis.core.expr : ExprResultType;
 
-    alias _srcFn = __traits(getMember, SourceType, fieldName);
-    alias _SrcParams = Parameters!_srcFn;
-    alias _SrcDefaults = ParameterDefaults!_srcFn;
-    enum string[] _srcParamNames = [ParameterIdentifierTuple!_srcFn];
-    alias _SrcEntity = ExprResultType!(_SrcParams[0]);
+    alias srcFn = __traits(getMember, SourceType, fieldName);
+    alias SrcParams = Parameters!srcFn;
+    alias SrcDefaults = ParameterDefaults!srcFn;
+    enum string[] srcParamNames = [ParameterIdentifierTuple!srcFn];
+    alias SrcEntity = ExprResultType!(SrcParams[0]);
 
-    // Create resolved type aliases for each non-self parameter
-    static foreach (i; 1 .. _SrcParams.length) {
-        mixin("alias _vmParamType" ~ i.to!string ~
-              " = ResolveValueType!(_SrcParams[" ~ i.to!string ~ "], Mappings);");
+    /// Whether parameter i was mapped to a different type
+    template isParamMapped(size_t i) {
+        enum isParamMapped = !is(ResolveValueType!(SrcParams[i], Mappings) == SrcParams[i]);
     }
+}
 
-    // Build parameter list with mapped types
-    enum string _vm_paramListStr = () {
-        string result = "Expr!(typeof(this)) " ~ _srcParamNames[0];
-        static foreach (i; 1 .. _SrcParams.length) {{
-            result ~= ", _vmParamType" ~ i.to!string ~ " " ~ _srcParamNames[i];
+/// Eponymous template that builds the mixin string for a forwarded field with value mappings.
+template ForwardFieldWithMappingsCode(SourceType, string fieldName, alias TypeMap, Mappings...) {
+    import std.conv : to;
+
+    private alias Impl = ForwardFieldWithMappingsImpl!(SourceType, fieldName, TypeMap, Mappings);
+    private enum string _I = ".imported!q{dunamis.graphql.type_mapping}.ForwardFieldWithMappingsImpl!(SourceType, fieldName, TypeMap, Mappings)";
+    private enum string _tm = ".imported!q{dunamis.graphql.type_mapping}";
+
+    private enum string _paramListStr = () {
+        string result = ".imported!q{dunamis.core.expr}.Expr!(typeof(this)) " ~ Impl.srcParamNames[0];
+        static foreach (i; 1 .. Impl.SrcParams.length) {{
+            result ~= ", " ~ _tm ~ ".ResolveValueType!(" ~ _I ~ ".SrcParams[" ~ i.to!string ~ "], Mappings) " ~ Impl.srcParamNames[i];
             // Preserve defaults only if type didn't change
-            static if (!is(_SrcDefaults[i] == void)) {
-                static if (is(ResolveValueType!(_SrcParams[i], Mappings) == _SrcParams[i])) {
-                    result ~= " = _SrcDefaults[" ~ i.to!string ~ "]";
+            static if (!is(Impl.SrcDefaults[i] == void)) {
+                static if (!Impl.isParamMapped!i) {
+                    result ~= " = " ~ _I ~ ".SrcDefaults[" ~ i.to!string ~ "]";
                 }
             }
         }}
         return result;
     }();
 
-    // Build argument list with entityCast and deserialization
-    enum string _vm_argListStr = () {
-        string result = "entityCast!(_SrcEntity)(" ~ _srcParamNames[0] ~ ")";
-        static foreach (i; 1 .. _SrcParams.length) {{
+    private enum string _argListStr = () {
+        string result = ".imported!q{dunamis.core.expr}.entityCast!(" ~ _I ~ ".SrcEntity)(" ~ Impl.srcParamNames[0] ~ ")";
+        static foreach (i; 1 .. Impl.SrcParams.length) {{
             result ~= ", ";
-            static if (!is(ResolveValueType!(_SrcParams[i], Mappings) == _SrcParams[i])) {
+            static if (Impl.isParamMapped!i) {
                 // Type was mapped → deserialize before forwarding
-                result ~= "applyDeserialize!(_vmParamType" ~ i.to!string ~
-                          ", _SrcParams[" ~ i.to!string ~
-                          "], findLeafMapping!(_SrcParams[" ~ i.to!string ~
-                          "], Mappings).fromTarget)(" ~ _srcParamNames[i] ~ ")";
+                result ~= ".imported!q{dunamis.core.types}.applyDeserialize!(" ~
+                          _tm ~ ".ResolveValueType!(" ~ _I ~ ".SrcParams[" ~ i.to!string ~ "], Mappings), " ~
+                          _I ~ ".SrcParams[" ~ i.to!string ~ "], " ~
+                          _tm ~ ".findLeafMapping!(" ~ _I ~ ".SrcParams[" ~ i.to!string ~ "], Mappings).fromTarget)(" ~
+                          Impl.srcParamNames[i] ~ ")";
             } else {
-                result ~= _srcParamNames[i];
+                result ~= Impl.srcParamNames[i];
             }
         }}
         return result;
     }();
 
-    // Generate forwarding method: call source, apply result mappings
-    @(__traits(getAttributes, _srcFn))
-    mixin("static auto " ~ fieldName ~ "(" ~ _vm_paramListStr ~ ") { " ~
-          "return applyMappingsToResult!(TypeMap, Mappings)(_srcFn(" ~ _vm_argListStr ~ ")); }");
+    enum ForwardFieldWithMappingsCode =
+        "@(__traits(getAttributes, " ~ _I ~ ".srcFn)) " ~
+        "static auto " ~ fieldName ~ "(" ~ _paramListStr ~ ") { " ~
+        "return " ~ _tm ~ ".applyMappingsToResult!(TypeMap, Mappings)(" ~
+        _I ~ ".srcFn(" ~ _argListStr ~ ")); }";
+}
+
+/// Forward a computed field with value mapping applied to return type and arguments.
+/// Zero-leak: no imports, aliases, or enums are mixed into the target struct.
+mixin template ForwardFieldWithMappings(SourceType, string fieldName, alias TypeMap, Mappings...) {
+    mixin(.imported!q{dunamis.graphql.type_mapping}.ForwardFieldWithMappingsCode!(SourceType, fieldName, TypeMap, Mappings));
 }
 
 // ============================================================================
