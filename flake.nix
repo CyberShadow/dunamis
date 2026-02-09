@@ -17,7 +17,7 @@
           version = "0.0.1";
           src = self;
           dubLock = ./dub-lock.json;
-          dubBuildType = "debug";
+          dubBuildType = "ci";
           dubBuildFlags = [ "--config=postgres-integration" ];
           dontStrip = true;
           installPhase = ''
@@ -34,7 +34,7 @@
           version = "0.0.1";
           src = self;
           dubLock = ./dub-lock.json;
-          dubBuildType = "debug";
+          dubBuildType = "ci";
           dubBuildFlags = [ "--config=sqlite-integration" ];
           dontStrip = true;
           buildInputs = [ pkgs.sqlite ];
@@ -52,7 +52,7 @@
           version = "0.0.1";
           src = self;
           dubLock = ./dub-lock.json;
-          dubBuildType = "debug";
+          dubBuildType = "ci";
           dubBuildFlags = [ "--config=mysql-integration" ];
           dontStrip = true;
           installPhase = ''
@@ -76,7 +76,7 @@
             buildPhase = ''
               runHook preBuild
               echo "=== Running D unit tests ==="
-              dub test --compiler=ldc2 --config=library
+              dub test --compiler=ldc2 --config=library --build=ci
               runHook postBuild
             '';
 

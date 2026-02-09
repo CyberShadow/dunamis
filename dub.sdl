@@ -5,6 +5,11 @@ license "MIT"
 
 targetPath "build"
 
+buildType "ci" {
+    buildOptions "debugMode" "debugInfo"
+    buildRequirements "disallowDeprecations"
+}
+
 sourcePaths "source"
 
 dependency "graphqld:parser" repository="git+https://github.com/vpanteleev-sym/graphqld.git" version="542374109b26018c9542631c90d1ba2acef32a8b"

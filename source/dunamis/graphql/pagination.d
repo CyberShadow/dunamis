@@ -103,15 +103,15 @@ template PaginatedArrayFieldCode(SourceQuery, string fieldName, alias TypeMap) {
     private alias Impl = ForwardFieldImpl!(SourceQuery, fieldName, TypeMap);
 
     // .imported references for generated code
-    private enum string _I = ".imported!q{dunamis.graphql.forward}.ForwardFieldImpl!(SourceQuery, \"" ~ fieldName ~ "\", TypeMap)";
-    private enum string _Expr = ".imported!q{dunamis.core.expr}.Expr";
-    private enum string _entityCast = ".imported!q{dunamis.graphql.entity_cast}.pluginEntityCast";
-    private enum string _Nullable = ".imported!q{std.typecons}.Nullable";
-    private enum string _limit = ".imported!q{dunamis.core.pagination}.limit";
-    private enum string _offset = ".imported!q{dunamis.core.pagination}.offset";
-    private enum string _wrap = ".imported!q{dunamis.graphql.transform}.wrapEntityResult";
+    private enum string _I = "dunamis.graphql.forward.ForwardFieldImpl!(SourceQuery, \"" ~ fieldName ~ "\", TypeMap)";
+    private enum string _Expr = "dunamis.core.expr.Expr";
+    private enum string _entityCast = "dunamis.graphql.entity_cast.pluginEntityCast";
+    private enum string _Nullable = "std.typecons.Nullable";
+    private enum string _limit = "dunamis.core.pagination.limit";
+    private enum string _offset = "dunamis.core.pagination.offset";
+    private enum string _wrap = "dunamis.graphql.transform.wrapEntityResult";
     // Element type for explicit return type (needed because limit/offset return different subtypes)
-    private enum string _ElemType = ".imported!q{dunamis.graphql.plugin}.ArrayFieldElementType!(" ~ _I ~ ".srcFn)";
+    private enum string _ElemType = "dunamis.graphql.plugin.ArrayFieldElementType!(" ~ _I ~ ".srcFn)";
 
     enum PaginatedArrayFieldCode = () {
         string result = "";
@@ -162,6 +162,13 @@ template PaginatedArrayFieldCode(SourceQuery, string fieldName, alias TypeMap) {
 /// Mixin template to create a paginated version of an array-returning field.
 /// Zero-leak: delegates to PaginatedArrayFieldCode eponymous template.
 mixin template PaginatedArrayField(SourceQuery, string fieldName, alias TypeMap) {
+    static import dunamis.graphql.forward;
+    static import dunamis.core.expr;
+    static import dunamis.graphql.entity_cast;
+    static import std.typecons;
+    static import dunamis.core.pagination;
+    static import dunamis.graphql.transform;
+    static import dunamis.graphql.plugin;
     mixin(PaginatedArrayFieldCode!(SourceQuery, fieldName, TypeMap));
 }
 

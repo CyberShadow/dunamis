@@ -132,11 +132,11 @@ template ForwardFieldWithMappingsCode(SourceType, string fieldName, alias TypeMa
     import std.conv : to;
 
     private alias Impl = ForwardFieldWithMappingsImpl!(SourceType, fieldName, TypeMap, Mappings);
-    private enum string _I = ".imported!q{dunamis.graphql.type_mapping}.ForwardFieldWithMappingsImpl!(SourceType, fieldName, TypeMap, Mappings)";
-    private enum string _tm = ".imported!q{dunamis.graphql.type_mapping}";
+    private enum string _I = "dunamis.graphql.type_mapping.ForwardFieldWithMappingsImpl!(SourceType, fieldName, TypeMap, Mappings)";
+    private enum string _tm = "dunamis.graphql.type_mapping";
 
     private enum string _paramListStr = () {
-        string result = ".imported!q{dunamis.core.expr}.Expr!(typeof(this)) " ~ Impl.srcParamNames[0];
+        string result = "dunamis.core.expr.Expr!(typeof(this)) " ~ Impl.srcParamNames[0];
         static foreach (i; 1 .. Impl.SrcParams.length) {{
             result ~= ", " ~ _tm ~ ".ResolveValueType!(" ~ _I ~ ".SrcParams[" ~ i.to!string ~ "], Mappings) " ~ Impl.srcParamNames[i];
             // Preserve defaults only if type didn't change
@@ -150,12 +150,12 @@ template ForwardFieldWithMappingsCode(SourceType, string fieldName, alias TypeMa
     }();
 
     private enum string _argListStr = () {
-        string result = ".imported!q{dunamis.graphql.entity_cast}.pluginEntityCast!(" ~ _I ~ ".SrcEntity)(" ~ Impl.srcParamNames[0] ~ ")";
+        string result = "dunamis.graphql.entity_cast.pluginEntityCast!(" ~ _I ~ ".SrcEntity)(" ~ Impl.srcParamNames[0] ~ ")";
         static foreach (i; 1 .. Impl.SrcParams.length) {{
             result ~= ", ";
             static if (Impl.isParamMapped!i) {
                 // Type was mapped → deserialize before forwarding
-                result ~= ".imported!q{dunamis.core.types}.applyDeserialize!(" ~
+                result ~= "dunamis.core.types.applyDeserialize!(" ~
                           _tm ~ ".ResolveValueType!(" ~ _I ~ ".SrcParams[" ~ i.to!string ~ "], Mappings), " ~
                           _I ~ ".SrcParams[" ~ i.to!string ~ "], " ~
                           _tm ~ ".findLeafMapping!(" ~ _I ~ ".SrcParams[" ~ i.to!string ~ "], Mappings).fromTarget)(" ~
@@ -177,7 +177,11 @@ template ForwardFieldWithMappingsCode(SourceType, string fieldName, alias TypeMa
 /// Forward a computed field with value mapping applied to return type and arguments.
 /// Zero-leak: no imports, aliases, or enums are mixed into the target struct.
 mixin template ForwardFieldWithMappings(SourceType, string fieldName, alias TypeMap, Mappings...) {
-    mixin(.imported!q{dunamis.graphql.type_mapping}.ForwardFieldWithMappingsCode!(SourceType, fieldName, TypeMap, Mappings));
+    static import dunamis.graphql.type_mapping;
+    static import dunamis.core.expr;
+    static import dunamis.graphql.entity_cast;
+    static import dunamis.core.types;
+    mixin(dunamis.graphql.type_mapping.ForwardFieldWithMappingsCode!(SourceType, fieldName, TypeMap, Mappings));
 }
 
 // ============================================================================
@@ -229,16 +233,21 @@ template ExternalTypesPlugin(alias S, NewMappings...) if (isSchema!S) {
 
     // Build the body of _MappedType as a code string to avoid symbol leaks.
     // Eliminates _nf_read_*, _nf_call_* helpers and scoped imports by using
-    // function literals and .imported references.
+    // function literals and fully-qualified references.
     private template _MappedTypeBody(T) {
-        private enum string _use = ".imported!q{dunamis.core.expr}.use";
-        private enum string _Expr = ".imported!q{dunamis.core.expr}.Expr";
-        private enum string _apply = ".imported!q{dunamis.graphql.type_mapping}.applyMappingsToResult";
-        private enum string _fwd = ".imported!q{dunamis.graphql.type_mapping}.ForwardFieldWithMappings";
-        private enum string _hidden = ".imported!q{dunamis.graphql.schema.udas}.GqlHidden";
+        private enum string _use = "dunamis.core.expr.use";
+        private enum string _Expr = "dunamis.core.expr.Expr";
+        private enum string _apply = "dunamis.graphql.type_mapping.applyMappingsToResult";
+        private enum string _fwd = "dunamis.graphql.type_mapping.ForwardFieldWithMappings";
+        private enum string _hidden = "dunamis.graphql.schema.udas.GqlHidden";
 
         enum _MappedTypeBody = () {
-            string result = "";
+            // Static imports for fully-qualified references in generated code
+            string result = "static import dunamis.core.expr;\n" ~
+                            "static import dunamis.graphql.type_mapping;\n" ~
+                            "static import dunamis.graphql.schema.udas;\n" ~
+                            "static import dunamis.graphql.entity_cast;\n" ~
+                            "static import dunamis.core.types;\n";
 
             // Per-layer _normalizedSource (stores immediate source type)
             result ~= "@(" ~ _hidden ~ ") package(dunamis.graphql) T _normalizedSource;\n";

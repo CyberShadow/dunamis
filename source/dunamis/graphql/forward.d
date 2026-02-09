@@ -28,10 +28,10 @@ template ForwardFieldCode(SourceType, string fieldName, alias TypeMap) {
     import std.conv : to;
 
     private alias Impl = ForwardFieldImpl!(SourceType, fieldName, TypeMap);
-    private enum string _I = ".imported!q{dunamis.graphql.forward}.ForwardFieldImpl!(SourceType, fieldName, TypeMap)";
+    private enum string _I = "dunamis.graphql.forward.ForwardFieldImpl!(SourceType, fieldName, TypeMap)";
 
     private enum string _paramListStr = () {
-        string result = ".imported!q{dunamis.core.expr}.Expr!(typeof(this)) " ~ Impl.srcParamNames[0];
+        string result = "dunamis.core.expr.Expr!(typeof(this)) " ~ Impl.srcParamNames[0];
         static foreach (i; 1 .. Impl.SrcParams.length) {{
             result ~= ", " ~ _I ~ ".SrcParams[" ~ i.to!string ~ "] " ~ Impl.srcParamNames[i];
             static if (!is(Impl.SrcDefaults[i] == void))
@@ -41,7 +41,7 @@ template ForwardFieldCode(SourceType, string fieldName, alias TypeMap) {
     }();
 
     private enum string _argListStr = () {
-        string result = ".imported!q{dunamis.graphql.entity_cast}.pluginEntityCast!(" ~ _I ~ ".SrcEntity)(" ~ Impl.srcParamNames[0] ~ ")";
+        string result = "dunamis.graphql.entity_cast.pluginEntityCast!(" ~ _I ~ ".SrcEntity)(" ~ Impl.srcParamNames[0] ~ ")";
         static foreach (i; 1 .. Impl.SrcParams.length)
             result ~= ", " ~ Impl.srcParamNames[i];
         return result;
@@ -50,7 +50,7 @@ template ForwardFieldCode(SourceType, string fieldName, alias TypeMap) {
     enum ForwardFieldCode =
         "@(__traits(getAttributes, " ~ _I ~ ".srcFn)) " ~
         "static auto " ~ fieldName ~ "(" ~ _paramListStr ~ ") { " ~
-        "return .imported!q{dunamis.graphql.transform}.wrapEntityResult!(TypeMap)(" ~
+        "return dunamis.graphql.transform.wrapEntityResult!(TypeMap)(" ~
         _I ~ ".srcFn(" ~ _argListStr ~ ")); }";
 }
 
@@ -62,6 +62,6 @@ template ForwardFieldCode(SourceType, string fieldName, alias TypeMap) {
 template ForwardPlainMethodCode(SourceType, string methodName) {
     enum ForwardPlainMethodCode =
         "@(__traits(getAttributes, __traits(getMember, SourceType, \"" ~ methodName ~ "\"))) " ~
-        ".imported!q{std.traits}.ReturnType!(__traits(getMember, SourceType, \"" ~ methodName ~ "\")) " ~
+        "std.traits.ReturnType!(__traits(getMember, SourceType, \"" ~ methodName ~ "\")) " ~
         methodName ~ "() { return (cast(SourceType*) &this)." ~ methodName ~ "(); }";
 }

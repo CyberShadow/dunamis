@@ -117,14 +117,20 @@ template IdentityTypeMap(T) {
 /// Zero-leak: no imports, aliases, or enums are mixed into the target struct.
 /// All metadata is encapsulated in ForwardFieldImpl/ForwardFieldCode (in forward.d).
 mixin template ForwardField(SourceType, string fieldName, alias TypeMap = IdentityTypeMap) {
-    mixin(.imported!q{dunamis.graphql.forward}.ForwardFieldCode!(SourceType, fieldName, TypeMap));
+    static import dunamis.graphql.forward;
+    static import dunamis.core.expr;
+    static import dunamis.graphql.entity_cast;
+    static import dunamis.graphql.transform;
+    mixin(dunamis.graphql.forward.ForwardFieldCode!(SourceType, fieldName, TypeMap));
 }
 
 /// Mixin template to forward a plain method from a source type.
 /// Zero-leak: no imports, aliases, or enums are mixed into the target struct.
 /// Code generation is encapsulated in ForwardPlainMethodCode (in forward.d).
 mixin template ForwardPlainMethod(SourceType, string methodName, alias TypeMap = IdentityTypeMap) {
-    mixin(.imported!q{dunamis.graphql.forward}.ForwardPlainMethodCode!(SourceType, methodName));
+    static import dunamis.graphql.forward;
+    static import std.traits;
+    mixin(dunamis.graphql.forward.ForwardPlainMethodCode!(SourceType, methodName));
 }
 
 /// Mixin template to copy all fields from SourceType.
@@ -175,11 +181,12 @@ mixin template WrapFields(SourceType, alias TypeMap, alias ArrayFieldMixin) {
     import dunamis.core.types : isPlainField;
     import dunamis.graphql.plugin : getFieldMembers, isComputedField, isArrayReturningField,
         ForwardField, ForwardPlainMethod;
+    static import dunamis.graphql.schema.udas;
 
     // 1. Per-layer _normalizedSource (stores immediate source type for entity cast chain)
     //    Only present on entity types (which go through NormalizeFields), not Query/Mutation.
     static if (__traits(hasMember, SourceType, "_normalizedSource")) {
-        @(.imported!q{dunamis.graphql.schema.udas}.GqlHidden)
+        @(dunamis.graphql.schema.udas.GqlHidden)
         package(dunamis.graphql) SourceType _normalizedSource;
     }
 
@@ -233,7 +240,13 @@ mixin template WrapFields(SourceType, alias TypeMap, alias ArrayFieldMixin) {
 /// }
 /// ---
 mixin template NormalizeFields(SourceType, alias TypeMap = IdentityTypeMap) {
-    mixin(.imported!q{dunamis.graphql.normalize}.NormalizeFieldsCode!(SourceType, TypeMap));
+    static import dunamis.graphql.normalize;
+    static import dunamis.core.expr;
+    static import dunamis.graphql.transform;
+    static import dunamis.graphql.schema.udas;
+    static import dunamis.graphql.forward;
+    static import dunamis.graphql.entity_cast;
+    mixin(dunamis.graphql.normalize.NormalizeFieldsCode!(SourceType, TypeMap));
 }
 
 // ============================================================================

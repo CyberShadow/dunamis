@@ -179,12 +179,12 @@ template SortedArrayFieldCode(SourceQuery, string fieldName, alias TypeMap) {
     private alias _ElementType = ArrayFieldElementType!(Impl.srcFn);
 
     // .imported references for generated code
-    private enum string _I = ".imported!q{dunamis.graphql.forward}.ForwardFieldImpl!(SourceQuery, \"" ~ fieldName ~ "\", TypeMap)";
-    private enum string _Expr = ".imported!q{dunamis.core.expr}.Expr";
-    private enum string _entityCast = ".imported!q{dunamis.graphql.entity_cast}.pluginEntityCast";
-    private enum string _sortBy = ".imported!q{dunamis.core.sorting}.sortBy";
-    private enum string _SD = ".imported!q{dunamis.core.sorting}.SortDirection";
-    private enum string _wrap = ".imported!q{dunamis.graphql.transform}.wrapEntityResult";
+    private enum string _I = "dunamis.graphql.forward.ForwardFieldImpl!(SourceQuery, \"" ~ fieldName ~ "\", TypeMap)";
+    private enum string _Expr = "dunamis.core.expr.Expr";
+    private enum string _entityCast = "dunamis.graphql.entity_cast.pluginEntityCast";
+    private enum string _sortBy = "dunamis.core.sorting.sortBy";
+    private enum string _SD = "dunamis.core.sorting.SortDirection";
+    private enum string _wrap = "dunamis.graphql.transform.wrapEntityResult";
 
     // Field-specific names to avoid conflicts when multiple array fields coexist
     private enum string _enumName = "_OrderByFieldEnum_" ~ fieldName;
@@ -292,6 +292,11 @@ template SortedArrayFieldCode(SourceQuery, string fieldName, alias TypeMap) {
 /// Mixin template to create a sorted version of an array-returning field.
 /// Zero-leak: delegates to SortedArrayFieldCode eponymous template.
 mixin template SortedArrayField(SourceQuery, string fieldName, alias TypeMap) {
+    static import dunamis.graphql.forward;
+    static import dunamis.core.expr;
+    static import dunamis.graphql.entity_cast;
+    static import dunamis.core.sorting;
+    static import dunamis.graphql.transform;
     mixin(SortedArrayFieldCode!(SourceQuery, fieldName, TypeMap));
 }
 
