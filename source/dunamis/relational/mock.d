@@ -504,7 +504,7 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
     }
 
     /// Execute UPDATE on in-memory data.
-    override Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input) {
+    override Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input, string[] pkColumns = ["id"]) {
         JSONValue[] updatedRows;
 
         if (table in _tableData) {
@@ -512,8 +512,8 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
             // Find and update matching rows
             foreach (ref row; rows) {
-                auto rowId = row["id"].integer;
-                if (input.ids.canFind(rowId)) {
+                auto rowKey = buildKeyFromRow(table, row);
+                if (input.ids.canFind(rowKey)) {
                     // Update columns
                     foreach (col, val; input.values) {
                         row[col] = val;
@@ -527,12 +527,12 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
         }
 
         auto result = new QueryResult();
-        result.loadFromRows(updatedRows, typeName);
+        result.loadFromRowsComposite(updatedRows, typeName, pkColumns);
         return resolve(result);
     }
 
     /// Execute DELETE on in-memory data.
-    override Promise!int executeDelete(string table, long[] ids) {
+    override Promise!int executeDelete(string table, string[] ids, string[] pkColumns = ["id"]) {
         int deleteCount = 0;
 
         if (table in _tableData) {
@@ -541,8 +541,8 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
             // Filter out deleted rows
             JSONValue[] remaining;
             foreach (row; rows) {
-                auto rowId = row["id"].integer;
-                if (ids.canFind(rowId)) {
+                auto rowKey = buildKeyFromRow(table, row);
+                if (ids.canFind(rowKey)) {
                     deleteCount++;
                 } else {
                     remaining ~= row;

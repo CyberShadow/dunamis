@@ -79,18 +79,42 @@ string generateInsertSQL(string table, InsertInput input) {
 /// )
 /// SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM updated t
 /// ```
-string generateUpdateSQL(string table, UpdateInput input) {
+/// Generate a WHERE clause for PK column(s) matching a set of IDs.
+private string generatePkWhereClause(string[] pkColumns, string[] ids) {
+    import dunamis.core.types : decodeCompositeKey;
+    auto dialect = postgresDialect();
+
+    if (pkColumns.length == 1) {
+        // Single PK: col = ANY(ARRAY['id1','id2'])
+        auto quotedIds = ids.map!(id => dialect.escapeSqlString(id)).join(",");
+        return format("%s = ANY(ARRAY[%s])", pkColumns[0], quotedIds);
+    } else {
+        // Composite PK: (col1 = 'v1' AND col2 = 'v2') OR ...
+        string[] conditions;
+        foreach (id; ids) {
+            auto parts = decodeCompositeKey(id);
+            string[] eqs;
+            foreach (i, col; pkColumns) {
+                eqs ~= format("%s = %s", col, dialect.escapeSqlString(i < parts.length ? parts[i] : ""));
+            }
+            conditions ~= "(" ~ eqs.join(" AND ") ~ ")";
+        }
+        return conditions.join(" OR ");
+    }
+}
+
+string generateUpdateSQL(string table, UpdateInput input, string[] pkColumns = ["id"]) {
     auto columns = input.columns;
-    auto idsArray = "ARRAY[" ~ input.ids.map!(id => id.to!string).join(",") ~ "]";
+    auto whereClause = generatePkWhereClause(pkColumns, input.ids);
 
     if (columns.length == 0) {
         // No columns to update - just return the rows
         return format(
             "SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (" ~
-            "SELECT * FROM %s WHERE id = ANY(%s)" ~
+            "SELECT * FROM %s WHERE %s" ~
             ") t",
             table,
-            idsArray
+            whereClause
         );
     }
 
@@ -103,32 +127,23 @@ string generateUpdateSQL(string table, UpdateInput input) {
 
     return format(
         "WITH updated AS (" ~
-        "UPDATE %s SET %s WHERE id = ANY(%s) RETURNING *" ~
+        "UPDATE %s SET %s WHERE %s RETURNING *" ~
         ") SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM updated t",
         table,
         setClauses.join(", "),
-        idsArray
+        whereClause
     );
 }
 
 /// Generate DELETE SQL returning count of deleted rows.
-/// IDs are embedded directly in the SQL.
-///
-/// Example output:
-/// ```sql
-/// WITH deleted AS (
-///   DELETE FROM users WHERE id = ANY(ARRAY[1,2,3]) RETURNING id
-/// )
-/// SELECT COUNT(*) FROM deleted
-/// ```
-string generateDeleteSQL(string table, long[] ids) {
-    auto idsArray = "ARRAY[" ~ ids.map!(id => id.to!string).join(",") ~ "]";
+string generateDeleteSQL(string table, string[] ids, string[] pkColumns = ["id"]) {
+    auto whereClause = generatePkWhereClause(pkColumns, ids);
     return format(
         "WITH deleted AS (" ~
-        "DELETE FROM %s WHERE id = ANY(%s) RETURNING id" ~
+        "DELETE FROM %s WHERE %s RETURNING *" ~
         ") SELECT COUNT(*)::int FROM deleted",
         table,
-        idsArray
+        whereClause
     );
 }
 
@@ -160,23 +175,23 @@ unittest {
 unittest {
     // Test UPDATE SQL generation with embedded values
     auto input = UpdateInput(
-        [1, 2, 3],
+        ["1", "2", "3"],
         ["first_name": JSONValue("Bob")]
     );
 
     auto sql = generateUpdateSQL("users", input);
     assert(sql.canFind("UPDATE users"));
     assert(sql.canFind("first_name = 'Bob'"));
-    assert(sql.canFind("ARRAY[1,2,3]"));
+    assert(sql.canFind("ARRAY['1','2','3']"));
     assert(sql.canFind("RETURNING *"));
     assert(sql.canFind("json_agg"));
 }
 
 unittest {
     // Test DELETE SQL generation with embedded IDs
-    auto sql = generateDeleteSQL("users", [1, 2, 3]);
+    auto sql = generateDeleteSQL("users", ["1", "2", "3"]);
     assert(sql.canFind("DELETE FROM users"));
-    assert(sql.canFind("ARRAY[1,2,3]"));
+    assert(sql.canFind("ARRAY['1','2','3']"));
     assert(sql.canFind("COUNT(*)"));
 }
 

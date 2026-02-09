@@ -530,15 +530,15 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
     }
 
     /// Execute UPDATE and return updated rows.
-    override Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input) {
-        auto updateSql = generateUpdateSQL(table, input);
+    override Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input, string[] pkColumns = ["id"]) {
+        auto updateSql = generateUpdateSQL(table, input, pkColumns);
         _cachedSQL = updateSql;
 
         // Execute UPDATE
         _db.exec(updateSql);
 
         // Fetch the updated rows
-        auto selectSql = generateSelectUpdatedSQL(table, input.ids);
+        auto selectSql = generateSelectUpdatedSQL(table, input.ids, pkColumns);
         auto result = new QueryResult();
 
         JSONValue[] rows;
@@ -547,15 +547,15 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
         }
 
         if (rows.length > 0) {
-            result.loadFromRows(rows, typeName);
+            result.loadFromRowsComposite(rows, typeName, pkColumns);
         }
 
         return resolve(result);
     }
 
     /// Execute DELETE and return count of deleted rows.
-    override Promise!int executeDelete(string table, long[] ids) {
-        auto deleteSql = generateDeleteSQL(table, ids);
+    override Promise!int executeDelete(string table, string[] ids, string[] pkColumns = ["id"]) {
+        auto deleteSql = generateDeleteSQL(table, ids, pkColumns);
         _cachedSQL = deleteSql;
 
         // Execute DELETE

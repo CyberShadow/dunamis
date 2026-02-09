@@ -101,10 +101,33 @@ string generateSelectByPkSQL(string table, string[] pkColumns, string[] inputCol
     );
 }
 
+/// Generate a WHERE clause for PK column(s) matching a set of IDs.
+private string generatePkWhereClause(string[] pkColumns, string[] ids) {
+    import dunamis.core.types : decodeCompositeKey;
+    auto dialect = mysqlDialect();
+
+    if (pkColumns.length == 1) {
+        // Single PK: col IN ('id1','id2')
+        auto quotedIds = ids.map!(id => dialect.escapeSqlString(id)).join(",");
+        return format("%s IN (%s)", pkColumns[0], quotedIds);
+    } else {
+        // Composite PK: (col1 = 'v1' AND col2 = 'v2') OR ...
+        string[] conditions;
+        foreach (id; ids) {
+            auto parts = decodeCompositeKey(id);
+            string[] eqs;
+            foreach (i, col; pkColumns) {
+                eqs ~= format("%s = %s", col, dialect.escapeSqlString(i < parts.length ? parts[i] : ""));
+            }
+            conditions ~= "(" ~ eqs.join(" AND ") ~ ")";
+        }
+        return conditions.join(" OR ");
+    }
+}
+
 /// Generate UPDATE SQL for MySQL.
-string generateUpdateSQL(string table, UpdateInput input) {
+string generateUpdateSQL(string table, UpdateInput input, string[] pkColumns = ["id"]) {
     auto columns = input.columns;
-    auto idsList = input.ids.map!(id => id.to!string).join(",");
 
     if (columns.length == 0) {
         // No columns to update - nothing to do
@@ -119,40 +142,45 @@ string generateUpdateSQL(string table, UpdateInput input) {
     }
 
     return format(
-        "UPDATE %s SET %s WHERE id IN (%s)",
+        "UPDATE %s SET %s WHERE %s",
         table,
         setClauses.join(", "),
-        idsList
+        generatePkWhereClause(pkColumns, input.ids)
     );
 }
 
 /// Generate SELECT SQL to fetch updated rows as JSON.
-/// Returns JSON with 'id' and the provided columns.
-string generateSelectUpdatedSQL(string table, long[] ids, string[] columns) {
-    auto idsList = ids.map!(id => id.to!string).join(",");
-
-    // Build JSON_OBJECT arguments: 'id', id, 'col1', col1, ...
-    string[] jsonArgs = ["'id'", "id"];
-    foreach (col; columns) {
+/// Returns JSON with PK columns and the provided value columns.
+string generateSelectUpdatedSQL(string table, string[] ids, string[] columns, string[] pkColumns = ["id"]) {
+    // Build JSON_OBJECT arguments from PK columns + value columns
+    string[] jsonArgs;
+    bool[string] seen;
+    foreach (col; pkColumns) {
         jsonArgs ~= format("'%s'", col);
         jsonArgs ~= col;
+        seen[col] = true;
+    }
+    foreach (col; columns) {
+        if (col !in seen) {
+            jsonArgs ~= format("'%s'", col);
+            jsonArgs ~= col;
+        }
     }
 
     return format(
-        "SELECT JSON_OBJECT(%s) AS json_row FROM %s WHERE id IN (%s)",
+        "SELECT JSON_OBJECT(%s) AS json_row FROM %s WHERE %s",
         jsonArgs.join(", "),
         table,
-        idsList
+        generatePkWhereClause(pkColumns, ids)
     );
 }
 
 /// Generate DELETE SQL for MySQL.
-string generateDeleteSQL(string table, long[] ids) {
-    auto idsList = ids.map!(id => id.to!string).join(",");
+string generateDeleteSQL(string table, string[] ids, string[] pkColumns = ["id"]) {
     return format(
-        "DELETE FROM %s WHERE id IN (%s)",
+        "DELETE FROM %s WHERE %s",
         table,
-        idsList
+        generatePkWhereClause(pkColumns, ids)
     );
 }
 
@@ -201,21 +229,21 @@ unittest {
 unittest {
     // Test UPDATE SQL generation
     auto input = UpdateInput(
-        [1, 2, 3],
+        ["1", "2", "3"],
         ["first_name": JSONValue("Bob")]
     );
 
     auto sql = generateUpdateSQL("users", input);
     assert(sql.canFind("UPDATE users"));
     assert(sql.canFind("first_name = 'Bob'"));
-    assert(sql.canFind("IN (1,2,3)"));
+    assert(sql.canFind("IN ('1','2','3')"));
 }
 
 unittest {
     // Test DELETE SQL generation
-    auto sql = generateDeleteSQL("users", [1, 2, 3]);
+    auto sql = generateDeleteSQL("users", ["1", "2", "3"]);
     assert(sql.canFind("DELETE FROM users"));
-    assert(sql.canFind("IN (1,2,3)"));
+    assert(sql.canFind("IN ('1','2','3')"));
 }
 
 unittest {
@@ -229,9 +257,9 @@ unittest {
 
 unittest {
     // Test SELECT after UPDATE SQL generation
-    auto sql = generateSelectUpdatedSQL("users", [1, 2], ["first_name"]);
+    auto sql = generateSelectUpdatedSQL("users", ["1", "2"], ["first_name"]);
     assert(sql.canFind("JSON_OBJECT"));
     assert(sql.canFind("'id', id"));
     assert(sql.canFind("'first_name', first_name"));
-    assert(sql.canFind("IN (1,2)"));
+    assert(sql.canFind("IN ('1','2')"));
 }

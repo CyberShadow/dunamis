@@ -102,6 +102,7 @@ mixin template DemoId(IdType = Int64) {
 /// }
 /// ---
 mixin template CrudMutations(Entity) {
+    import std.conv : to;
     import std.format : format;
     import std.json : JSONValue;
     import dunamis.core.expr : Expr;
@@ -121,7 +122,7 @@ mixin template CrudMutations(Entity) {
     // updateEntity(id: Int64!, input: {...}): Entity
     mixin(format(
         `static auto update%s(Expr!(typeof(this)) parent, Int64 id, JSONValue[string] input) {
-            return update!%s([id.value], input).single();
+            return update!%s([id.value.to!string], input).single();
         }`,
         EntityID!Entity.typeName, Entity.stringof
     ));
@@ -129,7 +130,7 @@ mixin template CrudMutations(Entity) {
     // deleteEntity(id: Int64!): Boolean!
     mixin(format(
         `static auto delete%s(Expr!(typeof(this)) parent, Int64 id) {
-            return delete_!%s([id.value]);
+            return delete_!%s([id.value.to!string]);
         }`,
         EntityID!Entity.typeName, Entity.stringof
     ));
@@ -192,7 +193,7 @@ unittest {
             {"id": 2, "name": "Bob", "email": "bob@test.com"}
         ]`);
 
-        auto updateExpr = update!User([1], [
+        auto updateExpr = update!User(["1"], [
             "name": JSONValue("Alice Updated")
         ]);
 
@@ -213,7 +214,7 @@ unittest {
             {"id": 2, "name": "Bob"}
         ]`);
 
-        auto deleteExpr = delete_!User([1]);
+        auto deleteExpr = delete_!User(["1"]);
 
         auto ctx = new EvalContext();
         auto result = awaitSync(deleteExpr.eval(ctx));

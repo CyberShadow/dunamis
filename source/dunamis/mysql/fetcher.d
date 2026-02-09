@@ -492,8 +492,8 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
     }
 
     /// Execute UPDATE and return updated rows.
-    override Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input) {
-        auto updateSql = generateUpdateSQL(table, input);
+    override Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input, string[] pkColumns = ["id"]) {
+        auto updateSql = generateUpdateSQL(table, input, pkColumns);
         auto columns = input.columns;  // Capture for closure
         auto ids = input.ids;  // Capture for closure
 
@@ -507,16 +507,16 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
         // Execute UPDATE and fetch the updated rows as JSON
         return _conn.query(updateSql).array().then((MySqlConnection.Row[] _) {
             // Fetch the updated rows
-            auto selectSql = generateSelectUpdatedSQL(table, ids, columns);
+            auto selectSql = generateSelectUpdatedSQL(table, ids, columns, pkColumns);
             return _conn.query(selectSql).array();
         }).then((MySqlConnection.Row[] rows) {
-            return parseJsonResult(rows, typeName);
+            return parseJsonResult(rows, typeName, pkColumns);
         });
     }
 
     /// Execute DELETE and return count of deleted rows.
-    override Promise!int executeDelete(string table, long[] ids) {
-        auto deleteSql = generateDeleteSQL(table, ids);
+    override Promise!int executeDelete(string table, string[] ids, string[] pkColumns = ["id"]) {
+        auto deleteSql = generateDeleteSQL(table, ids, pkColumns);
         _cachedSQL = deleteSql;
 
         // Execute DELETE

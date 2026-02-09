@@ -43,7 +43,7 @@ struct InsertInput {
 /// Input for UPDATE operations.
 /// Contains IDs to update and column values to set.
 struct UpdateInput {
-    long[] ids;
+    string[] ids;
     JSONValue[string] values;
 
     /// Get column names in consistent order
@@ -167,9 +167,12 @@ class InsertExpr(Entity) : Expr!Entity {
 /// Expression that executes UPDATE and returns updated entities.
 /// Returns an array of entities (Expr!(Entity[])).
 class UpdateExpr(Entity) : Expr!(Entity[]) {
+    import dunamis.relational.schema.attrs : getPkSqlColumns;
+
     private UpdateInput _input;
     private string _table;
     private string _typeName;
+    private enum string[] _pkColumns = getPkSqlColumns!Entity;
 
     this(UpdateInput input) {
         _input = input;
@@ -202,7 +205,7 @@ class UpdateExpr(Entity) : Expr!(Entity[]) {
         }
 
         // Execute UPDATE via DataFetcher
-        return relCtx.fetcher.executeUpdate(_table, _typeName, _input)
+        return relCtx.fetcher.executeUpdate(_table, _typeName, _input, _pkColumns)
             .then((QueryResult result) {
                 auto refs = result.allRefs();
                 import dunamis.relational.schema : makeEntityFromRef;
@@ -228,11 +231,14 @@ class UpdateExpr(Entity) : Expr!(Entity[]) {
 /// Expression that executes DELETE and returns success.
 /// Returns bool indicating if any rows were deleted.
 class DeleteExpr(Entity) : Expr!bool {
-    private long[] _ids;
+    import dunamis.relational.schema.attrs : getPkSqlColumns;
+
+    private string[] _ids;
     private string _table;
     private string _typeName;
+    private enum string[] _pkColumns = getPkSqlColumns!Entity;
 
-    this(long[] ids) {
+    this(string[] ids) {
         _ids = ids;
         _table = EntityID!Entity.table;
         _typeName = EntityID!Entity.typeName;
@@ -263,13 +269,13 @@ class DeleteExpr(Entity) : Expr!bool {
         }
 
         // Execute DELETE via DataFetcher
-        return relCtx.fetcher.executeDelete(_table, _ids)
+        return relCtx.fetcher.executeDelete(_table, _ids, _pkColumns)
             .then((int count) {
                 return [count > 0];
             });
     }
 
-    @property long[] ids() { return _ids; }
+    @property string[] ids() { return _ids; }
     @property string table() { return _table; }
     @property string typeName() { return _typeName; }
 }
@@ -337,11 +343,11 @@ auto insert(Entity)(JSONValue[string] values) {
 ///
 /// Example:
 /// ---
-/// return update!User([1, 2], [
+/// return update!User(["1", "2"], [
 ///     "first_name": JSONValue("Bob")
 /// ]);
 /// ---
-auto update(Entity)(long[] ids, JSONValue[string] values) {
+auto update(Entity)(string[] ids, JSONValue[string] values) {
     return new UpdateExpr!Entity(UpdateInput(ids, values));
 }
 
@@ -350,9 +356,9 @@ auto update(Entity)(long[] ids, JSONValue[string] values) {
 ///
 /// Example:
 /// ---
-/// return delete_!User([1, 2, 3]);
+/// return delete_!User(["1", "2", "3"]);
 /// ---
-auto delete_(Entity)(long[] ids) {
+auto delete_(Entity)(string[] ids) {
     return new DeleteExpr!Entity(ids);
 }
 
@@ -374,11 +380,11 @@ unittest {
 unittest {
     // Test UpdateInput
     auto input = UpdateInput(
-        [1, 2, 3],
+        ["1", "2", "3"],
         ["first_name": JSONValue("Bob")]
     );
 
-    assert(input.ids == [1, 2, 3]);
+    assert(input.ids == ["1", "2", "3"]);
     assert(input.columns.length == 1);
     assert(input.columns[0] == "first_name");
 }

@@ -266,13 +266,13 @@ abstract class DataFetcher {
 
     /// Execute UPDATE and return updated rows as QueryResult.
     /// Default implementation returns empty result (no-op).
-    Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input) {
+    Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input, string[] pkColumns = ["id"]) {
         return resolve(new QueryResult());
     }
 
     /// Execute DELETE and return count of deleted rows.
     /// Default implementation returns 0 (no-op).
-    Promise!int executeDelete(string table, long[] ids) {
+    Promise!int executeDelete(string table, string[] ids, string[] pkColumns = ["id"]) {
         return resolve(0);
     }
 }

@@ -503,22 +503,22 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
     /// Execute UPDATE and return updated rows.
     /// Values are embedded directly in the SQL (properly escaped).
-    override Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input) {
-        auto sql = generateUpdateSQL(table, input);
+    override Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input, string[] pkColumns = ["id"]) {
+        auto sql = generateUpdateSQL(table, input, pkColumns);
         _cachedSQL = sql;
 
         // No parameters needed - values are embedded in SQL
         return _conn.prepare(sql).then((PreparedStatement stmt) {
             return stmt.query().array();
         }).then((PgSqlConnection.Row[] rows) {
-            return parseUpdateResult(rows, typeName);
+            return parseUpdateResult(rows, typeName, pkColumns);
         });
     }
 
     /// Execute DELETE and return count of deleted rows.
     /// IDs are embedded directly in the SQL.
-    override Promise!int executeDelete(string table, long[] ids) {
-        auto sql = generateDeleteSQL(table, ids);
+    override Promise!int executeDelete(string table, string[] ids, string[] pkColumns = ["id"]) {
+        auto sql = generateDeleteSQL(table, ids, pkColumns);
         _cachedSQL = sql;
 
         // No parameters needed - IDs are embedded in SQL
@@ -548,7 +548,7 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
     }
 
     /// Parse UPDATE result (JSON array).
-    private QueryResult parseUpdateResult(PgSqlConnection.Row[] rows, string typeName) {
+    private QueryResult parseUpdateResult(PgSqlConnection.Row[] rows, string typeName, string[] pkColumns = ["id"]) {
         auto result = new QueryResult();
         if (rows.length == 0) {
             return result;
@@ -559,7 +559,7 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
         // json_agg returns an array
         if (jsonData.type == JSONType.array) {
-            result.loadFromRows(jsonData.array, typeName);
+            result.loadFromRowsComposite(jsonData.array, typeName, pkColumns);
         }
         return result;
     }
