@@ -28,10 +28,17 @@ Object findMapExprFromChain(ExprBase expr, ref JoinHop[] joinPath, out ExprBase 
     ExprBase lastBeforeBelongsToAsAnyRef = null;
     bool inBelongsToChain = false;
 
+    // Save initial expression for non-belongsTo baseInput.
+    // With plugins, the initial expression is an EntityCastExpr that properly converts
+    // plugin-wrapped entity types (e.g., SortedUser → User). Using this instead of the
+    // EveryItemOfExpr (which may be typed for the wrapper) ensures EntityToAnyRefExpr
+    // gets the correct entity type.
+    ExprBase initialExpr = expr;
+
     while (expr !is null) {
         // Check if we've reached EveryItemOfExpr (any instantiation)
         if (auto every = cast(EveryItemOfExprInfo) expr) {
-            baseInput = inBelongsToChain ? lastBeforeBelongsTo : expr;
+            baseInput = inBelongsToChain ? lastBeforeBelongsTo : initialExpr;
             baseInputAsAnyRef = inBelongsToChain ? lastBeforeBelongsToAsAnyRef : null;
             return every.parentMap;
         }
@@ -67,6 +74,11 @@ Object findMapExprFromChain(ExprBase expr, ref JoinHop[] joinPath, out ExprBase 
         // Unwrap nullable expressions - continue through to the nullable input
         if (auto unwrap = cast(UnwrapNullableInfo) expr) {
             expr = unwrap.inputExpr;
+            continue;
+        }
+        // Walk through entity cast expressions (plugin forwarding inserts these)
+        if (auto castInfo = cast(EntityCastInfo) expr) {
+            expr = castInfo.inputExpr;
             continue;
         }
         // Unknown expression type

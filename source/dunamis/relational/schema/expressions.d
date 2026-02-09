@@ -141,74 +141,88 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
         if (node.rootFilter == FilterType.none && node.parent is null) {
             if (auto mapInfo = cast(MapExprInfo) mapExpr) {
                 Object coll = mapInfo.collection;
-                Object originalColl = coll;
 
-                // Unwrap pagination and sorting expressions.
                 import dunamis.core.pagination : LimitInfo, OffsetInfo;
                 import dunamis.core.sorting : SortByInfo;
                 import dunamis.core.filtering : FilterByInfo;
 
-                bool seenSort = false;  // Track if we've seen ORDER BY (outside-in)
-                while (true) {
-                    if (auto limitInfo = cast(LimitInfo) coll) {
-                        if (seenSort) {
-                            break;
+                // Peek through the entire collection chain (read-only) to determine
+                // if this is a root or child collection, BEFORE modifying the tree.
+                Object underlyingColl;
+                {
+                    Object peek = coll;
+                    while (true) {
+                        if (auto l = cast(LimitInfo) peek) { peek = l.limitSource; continue; }
+                        if (auto o = cast(OffsetInfo) peek) { peek = o.offsetSource; continue; }
+                        if (auto s = cast(SortByInfo) peek) { peek = s.sortSource; continue; }
+                        if (auto f = cast(FilterByInfo) peek) { peek = f.filterSource; continue; }
+                        if (auto m = cast(MapExprInfo) peek) {
+                            auto inner = m.collection;
+                            if (inner is peek) break;
+                            peek = inner;
+                            continue;
                         }
-                        node.setLimit(limitInfo.limitValue);
-                        coll = limitInfo.limitSource;
-                    } else if (auto offsetInfo = cast(OffsetInfo) coll) {
-                        if (seenSort) {
-                            break;
-                        }
-                        node.setOffset(offsetInfo.offsetValue);
-                        coll = offsetInfo.offsetSource;
-                    } else if (auto sortByInfo = cast(SortByInfo) coll) {
-                        // Predicate-based SortBy - try to pattern-match for SQL push-down
-                        auto specs = extractSortBySpecs(sortByInfo);
-                        if (specs.length > 0) {
-                            foreach (spec; specs) {
-                                node.addOrderBy(spec);
-                            }
-                            coll = sortByInfo.sortSource;
-                            seenSort = true;
-                        } else {
-                            // Pattern matching failed - can't push down to SQL
-                            break;
-                        }
-                    } else if (auto filterByInfo = cast(FilterByInfo) coll) {
-                        // Predicate-based FilterBy - try to pattern-match for SQL push-down
-                        auto whereSql = extractFilterWhereClause(filterByInfo);
-                        if (!whereSql.isNull) {
-                            node.addWhereClause(whereSql.get);
-                            coll = filterByInfo.filterSource;
-                        } else {
-                            break;
-                        }
-                    } else {
                         break;
                     }
+                    underlyingColl = peek;
                 }
 
-                // If pagination was unwrapped, replace the MapExpr's collection
-                if (coll !is originalColl) {
-                    if (auto mapExprBase = cast(ExprBase) mapExpr) {
-                        if (auto collExpr = cast(ExprBase) coll) {
-                            mapExprBase.replaceDependency(0, collExpr);
+                bool isRootCollection = cast(RootExprInfo) underlyingColl !is null;
+
+                // For root collections: unwrap pagination/sorting/filtering from the
+                // expression tree and push to the QueryNode for SQL-level execution.
+                // For child collections (HasMany): leave wrappers in the expression tree
+                // so they're applied at eval time, since HasManyAccessExpr evaluates naively.
+                if (isRootCollection) {
+                    Object originalColl = coll;
+
+                    bool seenSort = false;
+                    while (true) {
+                        if (auto limitInfo = cast(LimitInfo) coll) {
+                            if (seenSort) break;
+                            node.setLimit(limitInfo.limitValue);
+                            coll = limitInfo.limitSource;
+                        } else if (auto offsetInfo = cast(OffsetInfo) coll) {
+                            if (seenSort) break;
+                            node.setOffset(offsetInfo.offsetValue);
+                            coll = offsetInfo.offsetSource;
+                        } else if (auto sortByInfo = cast(SortByInfo) coll) {
+                            auto specs = extractSortBySpecs(sortByInfo);
+                            if (specs.length > 0) {
+                                foreach (spec; specs) node.addOrderBy(spec);
+                                coll = sortByInfo.sortSource;
+                                seenSort = true;
+                            } else break;
+                        } else if (auto filterByInfo = cast(FilterByInfo) coll) {
+                            auto whereSql = extractFilterWhereClause(filterByInfo);
+                            if (!whereSql.isNull) {
+                                node.addWhereClause(whereSql.get);
+                                coll = filterByInfo.filterSource;
+                            } else break;
+                        } else break;
+                    }
+
+                    // Strip unwrapped wrappers from the tree
+                    if (coll !is originalColl) {
+                        if (auto mapExprBase = cast(ExprBase) mapExpr) {
+                            if (auto collExpr = cast(ExprBase) coll) {
+                                mapExprBase.replaceDependency(0, collExpr);
+                            }
                         }
                     }
                 }
 
-                // Check if collection is a root expression
-                if (auto rootExpr = cast(RootExprInfo) coll) {
+                // Configure the node based on collection type
+                if (auto rootExpr = cast(RootExprInfo) underlyingColl) {
                     if (rootExpr.filterType == FilterType.byIds) {
                         node.setRootFilter(FilterType.byIds, rootExpr.filterRefs);
                     } else if (rootExpr.filterType == FilterType.all) {
                         node.setRootFilter(FilterType.all);
                     }
                 }
-                // Check if collection is a hasMany relationship
-                else if (auto hasManyExpr = cast(HasManyInfo) coll) {
-                    // Child of a hasMany relationship
+                else if (auto hasManyExpr = cast(HasManyInfo) underlyingColl) {
+                    // Child of a hasMany relationship — pagination/sorting stays in the
+                    // expression tree (not pushed to QueryNode)
                     JoinHop[] parentJoinPath;
                     ExprBase parentBaseInput;
                     ExprBase parentBaseInputAsAnyRef;
@@ -217,19 +231,6 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
                         auto parentNode = relCtx.getNode(parentMapExpr);
                         if (parentNode !is null) {
                             node.setParent(parentNode, hasManyExpr.fkColumn, hasManyExpr.parentTypeName);
-
-                            // For HasMany with pagination, use per-parent pagination (window functions)
-                            if (!node.limit_.isNull || !node.offset_.isNull) {
-                                if (!node.limit_.isNull) {
-                                    node.perParentLimit_ = node.limit_;
-                                    node.limit_.nullify();
-                                }
-                                if (!node.offset_.isNull) {
-                                    node.perParentOffset_ = node.offset_;
-                                    node.offset_.nullify();
-                                }
-                                node.useWindowFunction = true;
-                            }
                         }
                     }
                 }
@@ -463,7 +464,19 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
             return evalAs!(AnyRef[])(_prefetch, ctx).then((AnyRef[][] prefetchResults) {
                 auto refs = prefetchResults.length > 0 ? prefetchResults[0] : [];
                 auto entities = refs.map!(r => makeEntityFromRef!Entity(r)).array;
-                return [entities];
+
+                // Populate plain fields (struct instance fields) so plain methods work.
+                // Column data is fetched via CTE, but plain fields need struct population.
+                enum plainFields = getPlainFieldNames!Entity;
+                static if (plainFields.length > 0) {
+                    auto fetcher = EntityID!Entity.db;
+                    if (fetcher !is null && entities.length > 0) {
+                        return populatePlainFields!Entity(fetcher, entities)
+                            .then((Entity[] populated) => [populated]);
+                    }
+                }
+
+                return resolve([entities]);
             });
         }
 

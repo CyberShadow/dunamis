@@ -117,16 +117,16 @@ template PaginatedArrayFieldCode(SourceQuery, string fieldName, alias TypeMap) {
         string result = "";
 
         // _applyPagination helper (template function, invisible to field detection)
-        // Explicit return type needed: limit/offset return LimitExpr/OffsetExpr, not the input type
-        result ~= "private static " ~ _Expr ~ "!(" ~ _ElemType ~ "[]) _applyPagination(T)(T base, " ~ _Nullable ~ "!int _first, " ~ _Nullable ~ "!int _off) {\n";
-        result ~= "    if (_off.isNull && _first.isNull) {\n";
-        result ~= "        return base;\n";
-        result ~= "    } else if (_off.isNull) {\n";
-        result ~= "        return " ~ _limit ~ "(base, cast(size_t) _first.get);\n";
-        result ~= "    } else if (_first.isNull) {\n";
-        result ~= "        return " ~ _offset ~ "(base, cast(size_t) _off.get);\n";
-        result ~= "    } else {\n";
-        result ~= "        return " ~ _limit ~ "(" ~ _offset ~ "(base, cast(size_t) _off.get), cast(size_t) _first.get);\n";
+        // Uses static assert + static if to extract element type E from Expr!(E[]),
+        // matching the pattern used by SortingPlugin's _applySorting.
+        result ~= "private static auto _applyPagination(S)(S base, " ~ _Nullable ~ "!int _first, " ~ _Nullable ~ "!int _off) {\n";
+        result ~= "    alias _E = " ~ _Expr ~ ";\n";
+        result ~= "    static assert(is(S : _E!(E[]), E), \"Expected Expr!(E[])\");\n";
+        result ~= "    static if (is(S : _E!(E[]), E)) {\n";
+        result ~= "        _E!(E[]) result = base;\n";
+        result ~= "        if (!_off.isNull) result = " ~ _offset ~ "(result, cast(size_t) _off.get);\n";
+        result ~= "        if (!_first.isNull) result = " ~ _limit ~ "(result, cast(size_t) _first.get);\n";
+        result ~= "        return result;\n";
         result ~= "    }\n";
         result ~= "}\n\n";
 
@@ -148,10 +148,12 @@ template PaginatedArrayFieldCode(SourceQuery, string fieldName, alias TypeMap) {
         }
 
         // --- Generate method ---
+        // Pagination is applied AFTER wrapEntityResult so limit/offset wrap the
+        // entity-cast MapExpr, keeping it visible to the optimizer unwrapping loop.
         result ~= "@(__traits(getAttributes, " ~ _I ~ ".srcFn)) " ~
                   "static auto " ~ fieldName ~ "(" ~ paramList ~ ") { " ~
-                  "return " ~ _wrap ~ "!(TypeMap)(_applyPagination(" ~
-                  _I ~ ".srcFn(" ~ argList ~ "), first, offset)); }";
+                  "return _applyPagination(" ~ _wrap ~ "!(TypeMap)(" ~
+                  _I ~ ".srcFn(" ~ argList ~ ")), first, offset); }";
 
         return result;
     }();

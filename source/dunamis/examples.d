@@ -1671,3 +1671,103 @@ EOF";
     assert(db.getSQL() == expectedSQL, db.getSQL());
 }
 
+// ============================================================================
+// Plugin + compileQuery SQL Generation Tests
+// ============================================================================
+//
+// These tests verify that compileQuery with plugins (SortingPlugin,
+// PaginationPlugin) generates optimized CTE-based SQL. Before the
+// EntityCastExpr fix, all plugin-wrapped compileQuery paths fell back
+// to naive row-by-row evaluation (no SQL generation at all).
+
+// Test: compileQuery with SortingPlugin generates CTE with ORDER BY
+unittest {
+    import dunamis.graphql : compileQuery;
+    import dunamis.graphql.sorting : SortingPlugin;
+    import dunamis.graphql.schema : Schema;
+
+    createMockDB();
+    auto executor = new Executor();
+
+    alias SortedSchema = SortingPlugin!(Schema!Query);
+
+    auto query = compileQuery!SortedSchema(`{
+        users(orderBy: [{field: firstName, direction: ASC}]) {
+            firstName
+        }
+    }`);
+
+    auto result = awaitSync(executor.execute(query));
+
+    auto users = result["users"].array;
+    assert(users.length == 3);
+    assert(users[0]["firstName"].str == "Alice");
+    assert(users[1]["firstName"].str == "Bob");
+    assert(users[2]["firstName"].str == "Carol");
+
+    // Verify CTE-based SQL was generated (proves optimization is active)
+    auto sql = db.getSQL();
+    assert(sql.length > 0, "Expected CTE SQL to be generated (optimization active)");
+    assert(sql.canFind("ORDER BY"), "Expected ORDER BY in generated SQL: " ~ sql);
+    assert(sql.canFind("first_name"), "Expected first_name column in SQL: " ~ sql);
+}
+
+// Test: compileQuery with PaginationPlugin generates CTE with LIMIT/OFFSET
+unittest {
+    import dunamis.graphql : compileQuery;
+    import dunamis.graphql.pagination : PaginationPlugin;
+    import dunamis.graphql.schema : Schema;
+
+    createMockDB();
+    auto executor = new Executor();
+
+    alias PaginatedSchema = PaginationPlugin!(Schema!Query);
+
+    auto query = compileQuery!PaginatedSchema(`{
+        users(first: 2) {
+            firstName
+        }
+    }`);
+
+    auto result = awaitSync(executor.execute(query));
+
+    auto users = result["users"].array;
+    assert(users.length == 2, "Should have 2 users with first:2");
+
+    // Verify CTE-based SQL has LIMIT
+    auto sql = db.getSQL();
+    assert(sql.length > 0, "Expected CTE SQL to be generated (optimization active)");
+    assert(sql.canFind("LIMIT 2"), "Expected LIMIT 2 in generated SQL: " ~ sql);
+}
+
+// Test: compileQuery with nested HasMany generates multi-layer CTE
+unittest {
+    import dunamis.graphql : compileQuery;
+    import dunamis.graphql.schema : Schema;
+
+    createMockDB();
+    auto executor = new Executor();
+
+    auto query = compileQuery!(Schema!Query)(`{
+        users {
+            firstName
+            posts {
+                title
+            }
+        }
+    }`);
+
+    auto result = awaitSync(executor.execute(query));
+
+    auto users = result["users"].array;
+    assert(users.length == 3);
+    // Alice has 2 posts
+    assert(users[0]["posts"].array.length == 2);
+
+    // Verify multi-layer CTE (parent + child)
+    auto sql = db.getSQL();
+    assert(sql.length > 0, "Expected CTE SQL to be generated");
+    assert(sql.canFind("layer0"), "Expected layer0 (users) in SQL: " ~ sql);
+    assert(sql.canFind("layer1"), "Expected layer1 (posts) in SQL: " ~ sql);
+}
+
