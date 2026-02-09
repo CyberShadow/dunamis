@@ -90,14 +90,23 @@ mixin template DemoId(IdType = Int64) {
 /// Generate CRUD mutations for an entity type.
 /// Creates: create<Entity>, update<Entity>, delete<Entity>
 ///
+/// For automatic CRUD generation via plugin composition, consider using
+/// `CrudMutationPlugin` from `dunamis.graphql.crud` instead:
+/// ---
+/// alias MySchema = CrudMutationPlugin!(Schema!(Query, Mutation));
+/// ---
+///
+/// This mixin is useful when you need explicit control over which entities
+/// get CRUD mutations, or when building custom mutation patterns.
+///
 /// Example:
 /// ---
 /// struct Mutation {
 ///     mixin CrudMutations!User;
 ///     // Generates:
-///     //   createUser(input: CreateUserInput!): User!
-///     //   updateUser(id: ID!, input: UpdateUserInput): User
-///     //   deleteUser(id: ID!): Boolean!
+///     //   createUser(input: JSON!): User!
+///     //   updateUser(id: Int64!, input: JSON!): User!
+///     //   deleteUser(id: Int64!): Boolean!
 /// }
 /// ---
 mixin template CrudMutations(Entity) {

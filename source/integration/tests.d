@@ -233,7 +233,7 @@ void testQueryTaskWithNullableAssignee() {
 void testCreateTaskWithEnumStatus() {
     auto response = graphql(`
         mutation {
-            createTask(input: {title: "New Task", status: "cancelled"}) {
+            createTask(input: {title: "New Task", status: cancelled}) {
                 title
                 status
             }
@@ -250,7 +250,7 @@ void testEnumPersistence() {
     // Create a task with specific status
     auto createResponse = graphql(`
         mutation {
-            createTask(input: {title: "Persisted Task", status: "inProgress"}) {
+            createTask(input: {title: "Persisted Task", status: inProgress}) {
                 id
                 title
                 status

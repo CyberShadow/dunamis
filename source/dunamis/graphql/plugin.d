@@ -158,7 +158,8 @@ mixin template WrapFields(SourceType, alias TypeMap, alias ArrayFieldMixin) {
     // 2. Copy plain fields (struct instance fields, including @PrimaryKey)
     static foreach (member; __traits(allMembers, SourceType)) {
         static if (isPlainField!(SourceType, member)) {
-            mixin("typeof(__traits(getMember, SourceType.init, \"" ~ member ~ "\")) " ~ member ~ ";");
+            mixin("@(__traits(getAttributes, __traits(getMember, SourceType, \"" ~ member ~ "\"))) " ~
+                  "typeof(__traits(getMember, SourceType.init, \"" ~ member ~ "\")) " ~ member ~ ";");
         }
     }
 

@@ -1,6 +1,7 @@
 module dunamis.graphql;
 
 public import dunamis.graphql.compiler;
+public import dunamis.graphql.crud;
 public import dunamis.graphql.filtering;
 public import dunamis.graphql.introspection;
 public import dunamis.graphql.pagination;

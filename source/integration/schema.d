@@ -12,7 +12,7 @@ import std.typecons : Nullable;
 import dunamis.core;
 import dunamis.core.expr : ternary, some, every;
 import dunamis.relational.schema : Table, ForeignKey, BelongsTo, HasMany, Col;
-import dunamis.relational.demo : DemoEntity, DemoId, CrudMutations;
+import dunamis.relational.demo : DemoEntity, DemoId;
 import dunamis.relational.mutation : insert;
 
 import std.stdio : writeln, writefln;
@@ -73,39 +73,39 @@ void seedDatabase() {
     auto charlieId = charlie["data"]["createUserWithAge"]["id"];
     writefln("  Created Charlie age=8 (id=%s)", charlieId);
 
-    // Create posts
-    auto post1 = graphql(`mutation { createPost(input: {title: "Hello World", author_id: ` ~ aliceId.toString() ~ `}) { id } }`);
+    // Create posts (auto-generated CRUD with input objects)
+    auto post1 = graphql(`mutation { createPost(input: {title: "Hello World", authorId: ` ~ aliceId.toString() ~ `}) { id } }`);
     assertNoErrors(post1);
     writeln("  Created post: Hello World");
 
-    auto post2 = graphql(`mutation { createPost(input: {title: "GraphQL Rocks", author_id: ` ~ aliceId.toString() ~ `}) { id } }`);
+    auto post2 = graphql(`mutation { createPost(input: {title: "GraphQL Rocks", authorId: ` ~ aliceId.toString() ~ `}) { id } }`);
     assertNoErrors(post2);
     writeln("  Created post: GraphQL Rocks");
 
-    auto post3 = graphql(`mutation { createPost(input: {title: "D Programming", author_id: ` ~ bobId.toString() ~ `}) { id } }`);
+    auto post3 = graphql(`mutation { createPost(input: {title: "D Programming", authorId: ` ~ bobId.toString() ~ `}) { id } }`);
     assertNoErrors(post3);
     writeln("  Created post: D Programming");
 
     // Create comments (for multi-hop belongsTo testing: comment -> post -> author)
     auto post1Id = post1["data"]["createPost"]["id"];
-    auto comment1 = graphql(`mutation { createComment(input: {body: "Great post!", post_id: ` ~ post1Id.toString() ~ `, author_id: ` ~ bobId.toString() ~ `}) { id } }`);
+    auto comment1 = graphql(`mutation { createComment(input: {body: "Great post!", postId: ` ~ post1Id.toString() ~ `, authorId: ` ~ bobId.toString() ~ `}) { id } }`);
     assertNoErrors(comment1);
     writeln("  Created comment: Great post! (by Bob on Hello World)");
 
-    auto comment2 = graphql(`mutation { createComment(input: {body: "Thanks for sharing", post_id: ` ~ post2["data"]["createPost"]["id"].toString() ~ `, author_id: ` ~ charlieId.toString() ~ `}) { id } }`);
+    auto comment2 = graphql(`mutation { createComment(input: {body: "Thanks for sharing", postId: ` ~ post2["data"]["createPost"]["id"].toString() ~ `, authorId: ` ~ charlieId.toString() ~ `}) { id } }`);
     assertNoErrors(comment2);
     writeln("  Created comment: Thanks for sharing (by Charlie on GraphQL Rocks)");
 
     // Create tasks with different statuses
-    auto task1 = graphql(`mutation { createTask(input: {title: "Write tests", status: "pending", assignee_id: ` ~ aliceId.toString() ~ `}) { id } }`);
+    auto task1 = graphql(`mutation { createTask(input: {title: "Write tests", status: pending, assigneeId: ` ~ aliceId.toString() ~ `}) { id } }`);
     assertNoErrors(task1);
     writeln("  Created task: Write tests (pending)");
 
-    auto task2 = graphql(`mutation { createTask(input: {title: "Review PR", status: "inProgress", assignee_id: ` ~ aliceId.toString() ~ `}) { id } }`);
+    auto task2 = graphql(`mutation { createTask(input: {title: "Review PR", status: inProgress, assigneeId: ` ~ aliceId.toString() ~ `}) { id } }`);
     assertNoErrors(task2);
     writeln("  Created task: Review PR (inProgress)");
 
-    auto task3 = graphql(`mutation { createTask(input: {title: "Deploy app", status: "completed", assignee_id: ` ~ bobId.toString() ~ `}) { id } }`);
+    auto task3 = graphql(`mutation { createTask(input: {title: "Deploy app", status: completed, assigneeId: ` ~ bobId.toString() ~ `}) { id } }`);
     assertNoErrors(task3);
     writeln("  Created task: Deploy app (completed)");
 
@@ -144,10 +144,10 @@ mixin template TestSchema(alias db) {
     import std.json : JSONValue;
     import std.typecons : Nullable;
     import dunamis.core.expr : Expr;
-    import dunamis.graphql : Schema, SortingPlugin, FilterPlugin;
+    import dunamis.graphql : Schema, SortingPlugin, FilterPlugin, CrudMutationPlugin;
     import dunamis.graphql.schema : GqlName;
     import dunamis.relational.schema : Table, ForeignKey, BelongsTo, HasMany, Col, getAll, hasMany;
-    import dunamis.relational.demo : DemoEntity, DemoId, Int64, CrudMutations;
+    import dunamis.relational.demo : DemoEntity, DemoId, Int64;
     import dunamis.relational.mutation : insert;
 
     @DemoEntity!(db, "users")
@@ -306,11 +306,6 @@ mixin template TestSchema(alias db) {
     }
 
     struct Mutation {
-        mixin CrudMutations!User;
-        mixin CrudMutations!Post;
-        mixin CrudMutations!Comment;
-        mixin CrudMutations!Task;
-
         static auto createUserWithName(Expr!Mutation parent, string firstName, string lastName) {
             return insert!User([
                 "first_name": JSONValue(firstName),
@@ -358,6 +353,6 @@ mixin template TestSchema(alias db) {
     }
 
     alias BaseSchema = Schema!(Query, Mutation);
-    // Compose FilterPlugin and SortingPlugin: filter first, then sort
-    alias MySchema = SortingPlugin!(FilterPlugin!BaseSchema);
+    // Compose CrudMutationPlugin, FilterPlugin, and SortingPlugin
+    alias MySchema = SortingPlugin!(FilterPlugin!(CrudMutationPlugin!BaseSchema));
 }
