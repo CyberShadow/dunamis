@@ -67,7 +67,7 @@ interface SqlDialect {
     ///   PostgreSQL: "users.id = ANY($1)" (single PK)
     ///   SQLite/MySQL: "users.id IN ({{IDS}})" (single PK)
     ///   Composite: "(table.col1, table.col2) IN ({{IDS}})" (all dialects)
-    string rootIdFilter(string table, string[] pkColumns = ["id"]);
+    string rootIdFilter(string table, string[] pkColumns);
 
     /// Name of the top-level JSON object constructor function.
     ///   PostgreSQL: "json_build_object"

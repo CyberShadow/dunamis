@@ -113,7 +113,7 @@ template isInternalMember(string name) {
 
 /// Check if a member is a plain field (struct instance field, not a method).
 /// Plain fields are distinguished from computed fields (static methods).
-/// Excludes internal members (nodeId, _*, toString, etc.).
+/// Excludes internal members (_*, toString, etc.).
 template isPlainField(Entity, string fieldName) {
     static if (isInternalMember!fieldName) {
         enum isPlainField = false;
@@ -264,18 +264,18 @@ mixin template SourceContextRegistry() {
 /// Used in EvalContext, DataFetcher internals, and anywhere entity type
 /// doesn't need to be known at compile time.
 struct AnyRef {
-    string nodeId;
+    string id;
 
-    /// Extract the entity type name from nodeId (runtime)
+    /// Extract the entity type name (runtime)
     string typeName() const {
-        auto sep = nodeId.indexOf(':');
-        return sep >= 0 ? nodeId[0 .. sep] : nodeId;
+        auto sep = id.indexOf(':');
+        return sep >= 0 ? id[0 .. sep] : id;
     }
 
     /// Extract the local ID portion (after the colon)
     string localId() const {
-        auto sep = nodeId.indexOf(':');
-        return sep >= 0 ? nodeId[sep + 1 .. $] : "";
+        auto sep = id.indexOf(':');
+        return sep >= 0 ? id[sep + 1 .. $] : "";
     }
 
     /// Check if this ref is for a specific entity type
@@ -285,15 +285,15 @@ struct AnyRef {
 
     /// Check if this is a valid (non-empty) reference
     bool isValid() const {
-        return nodeId.length > 0 && nodeId != "Query:";
+        return id.length > 0 && id != "Query:";
     }
 
     /// For debugging
-    string toString() const { return nodeId; }
+    string toString() const { return id; }
 
     /// Hash for use in associative arrays
     size_t toHash() const nothrow @safe {
-        return hashOf(nodeId);
+        return hashOf(id);
     }
 }
 
@@ -628,15 +628,15 @@ unittest {
     assert(userRef.isValid);
 
     // Test queryRoot
-    assert(queryRoot.nodeId == "Query:");
+    assert(queryRoot.id == "Query:");
     assert(queryRoot.typeName == "Query");
     assert(!queryRoot.isValid);  // Query root is special
 
     // Test makeAnyRef
     auto anyRef = makeAnyRef("User", "42");
-    assert(anyRef.nodeId == "User:42");
+    assert(anyRef.id == "User:42");
     auto compositeRef = makeAnyRef("OrderItem", ["order-1", "prod-2"]);
-    assert(compositeRef.nodeId == "OrderItem:order-1,prod-2");
+    assert(compositeRef.id == "OrderItem:order-1,prod-2");
 
     // Test equality
     assert(AnyRef("User:1") == AnyRef("User:1"));
@@ -712,7 +712,7 @@ unittest {
     static assert(!isPlainMethod!(TestEntity, "nickname"), "nickname is a field, not a method");
 
     // Internal members are excluded
-    static assert(!isPlainMethod!(TestEntity, "nodeId"), "nodeId is internal");
+    static assert(!isPlainMethod!(TestEntity, "id"), "id is not a member of TestEntity");
     static assert(!isPlainMethod!(TestEntity, "toString"), "toString is internal");
 
     // Test getPlainMethodNames

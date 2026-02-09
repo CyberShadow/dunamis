@@ -981,7 +981,7 @@ unittest {
 }
 
 // Test extending an entity type (not Query/Mutation) with a new computed field
-// This exercises EntityCastExpr with actual entities that have nodeId
+// This exercises EntityCastExpr with actual entities that have @PrimaryKey id
 unittest {
     import std.json;
     import ae.utils.promise.await : awaitSync;

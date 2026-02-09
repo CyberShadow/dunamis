@@ -265,7 +265,7 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
                 node.addJoinedColumn(lastAlias.get, hop.fk);
             }
             // Add JOIN and get alias, tracking source for multi-hop
-            lastAlias = node.addJoin(hop.targetTable, hop.targetType, hop.fk, lastAlias, hop.targetPkColumns);
+            lastAlias = node.addJoin(hop.targetTable, hop.targetType, hop.fk, hop.targetPkColumns, lastAlias);
         }
 
         // Track the column needed from the final joined table
@@ -1029,7 +1029,7 @@ unittest {
     }
 
     auto user1 = makeEntity!User(42);
-    assert(entityToRef(user1).nodeId == "User:42");
+    assert(entityToRef(user1).id == "User:42");
     static assert(is(typeof(user1) == User));
 
     // Roundtrip: entity → ref → entity

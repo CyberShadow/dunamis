@@ -47,7 +47,7 @@ JSONValue toJsonValue(T)(T value) {
     } else static if (isFloatingPoint!T) {
         return JSONValue(value);
     } else static if (is(T == AnyRef)) {
-        return JSONValue(value.nodeId);
+        return JSONValue(value.id);
     } else static if (isArray!T && !is(T == string)) {
         JSONValue arr = JSONValue.emptyArray;
         foreach (elem; value) {

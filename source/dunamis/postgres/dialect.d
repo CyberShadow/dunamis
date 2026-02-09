@@ -76,7 +76,7 @@ class PostgresDialect : SqlDialect {
         }
     }
 
-    override string rootIdFilter(string table, string[] pkColumns = ["id"]) {
+    override string rootIdFilter(string table, string[] pkColumns) {
         if (pkColumns.length == 1) {
             return format("%s.%s = ANY($1)", table, pkColumns[0]);
         }

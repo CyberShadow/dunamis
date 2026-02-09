@@ -103,7 +103,7 @@ private string generatePkWhereClause(string[] pkColumns, string[] ids) {
     }
 }
 
-string generateUpdateSQL(string table, UpdateInput input, string[] pkColumns = ["id"]) {
+string generateUpdateSQL(string table, UpdateInput input, string[] pkColumns) {
     auto columns = input.columns;
     auto whereClause = generatePkWhereClause(pkColumns, input.ids);
 
@@ -136,7 +136,7 @@ string generateUpdateSQL(string table, UpdateInput input, string[] pkColumns = [
 }
 
 /// Generate DELETE SQL returning count of deleted rows.
-string generateDeleteSQL(string table, string[] ids, string[] pkColumns = ["id"]) {
+string generateDeleteSQL(string table, string[] ids, string[] pkColumns) {
     auto whereClause = generatePkWhereClause(pkColumns, ids);
     return format(
         "WITH deleted AS (" ~
@@ -179,7 +179,7 @@ unittest {
         ["first_name": JSONValue("Bob")]
     );
 
-    auto sql = generateUpdateSQL("users", input);
+    auto sql = generateUpdateSQL("users", input, ["id"]);
     assert(sql.canFind("UPDATE users"));
     assert(sql.canFind("first_name = 'Bob'"));
     assert(sql.canFind("ARRAY['1','2','3']"));
@@ -189,7 +189,7 @@ unittest {
 
 unittest {
     // Test DELETE SQL generation with embedded IDs
-    auto sql = generateDeleteSQL("users", ["1", "2", "3"]);
+    auto sql = generateDeleteSQL("users", ["1", "2", "3"], ["id"]);
     assert(sql.canFind("DELETE FROM users"));
     assert(sql.canFind("ARRAY['1','2','3']"));
     assert(sql.canFind("COUNT(*)"));

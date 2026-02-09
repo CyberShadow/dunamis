@@ -495,11 +495,11 @@ unittest {
         parseJSON(`{"id": 1, "first_name": "Alice"}`),
         parseJSON(`{"id": 2, "first_name": "Bob"}`)
     ];
-    result.loadFromRows(rows, "User");
+    result.loadFromRows(rows, "User", ["id"]);
     relCtx.storeQueryResult(QueryNodeId(0), result);
 
     // Create mock QueryNode and PrefetchExpr
-    auto node = new QueryNode(QueryNodeId(0), "User", "users");
+    auto node = new QueryNode(QueryNodeId(0), "User", "users", ["id"]);
     auto prefetch = new PrefetchExpr(node);
 
     // Create a mock input that returns the refs via EntityToAnyRefExpr
@@ -528,11 +528,11 @@ unittest {
         parseJSON(`{"id": 2}`),
         parseJSON(`{"id": 3}`)
     ];
-    result.loadFromRows(rows, "User");
+    result.loadFromRows(rows, "User", ["id"]);
     relCtx.storeQueryResult(QueryNodeId(0), result);
 
     // Create mock QueryNode and PrefetchExpr
-    auto node = new QueryNode(QueryNodeId(0), "User", "users");
+    auto node = new QueryNode(QueryNodeId(0), "User", "users", ["id"]);
     auto prefetch = new PrefetchExpr(node);
 
     auto proj = new ProjectRefsExpr(QueryNodeId(0), prefetch);
@@ -567,11 +567,11 @@ unittest {
         parseJSON(`{"id": 1, "author_id": 10}`),
         parseJSON(`{"id": 2, "author_id": 20}`)
     ];
-    result.loadFromRows(rows, "Post");
+    result.loadFromRows(rows, "Post", ["id"]);
     relCtx.storeQueryResult(QueryNodeId(0), result);
 
     // Create mock QueryNode and PrefetchExpr
-    auto node = new QueryNode(QueryNodeId(0), "Post", "posts");
+    auto node = new QueryNode(QueryNodeId(0), "Post", "posts", ["id"]);
     auto prefetch = new PrefetchExpr(node);
 
     // Create a mock input that returns the refs via EntityToAnyRefExpr

@@ -49,7 +49,7 @@ struct SealedArray {
 ///
 /// Usage:
 ///   auto relCtx = evalCtx.getSourceContext!RelationalEvalContext();
-///   auto values = relCtx.getColumnValues!string(nodeId, "name", refs);
+///   auto values = relCtx.getColumnValues!string("name", refs);
 class EvalContext {
     mixin SourceContextRegistry;
 

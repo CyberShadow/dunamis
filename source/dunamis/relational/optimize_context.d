@@ -26,8 +26,8 @@ class RelationalOptimizeContext {
 
     /// Get or create a QueryNode for a MapExpr.
     /// Called by access expressions during optimization.
-    /// pkColumns: SQL column names for the entity's primary key (default ["id"]).
-    QueryNode getOrCreateNode(Object mapExpr, string typeName, string table, string[] pkColumns = ["id"]) {
+    /// pkColumns: SQL column names for the entity's primary key.
+    QueryNode getOrCreateNode(Object mapExpr, string typeName, string table, string[] pkColumns) {
         assert(mapExpr !is null, "mapExpr must not be null for QueryNode lookup");
         auto key = cast(void*) mapExpr;
         if (key in _queryNodes) {
@@ -162,9 +162,9 @@ unittest {
     auto map1 = new Object();
     auto map2 = new Object();
 
-    auto node1 = ctx.getOrCreateNode(map1, "User", "users");
-    auto node2 = ctx.getOrCreateNode(map2, "Post", "posts");
-    auto node1again = ctx.getOrCreateNode(map1, "User", "users");
+    auto node1 = ctx.getOrCreateNode(map1, "User", "users", ["id"]);
+    auto node2 = ctx.getOrCreateNode(map2, "Post", "posts", ["id"]);
+    auto node1again = ctx.getOrCreateNode(map1, "User", "users", ["id"]);
 
     assert(node1.id == QueryNodeId(0));
     assert(node2.id == QueryNodeId(1));
@@ -180,8 +180,8 @@ unittest {
     auto map1 = new Object();
     auto map2 = new Object();
 
-    auto parent = ctx.getOrCreateNode(map1, "User", "users");
-    auto child = ctx.getOrCreateNode(map2, "Post", "posts");
+    auto parent = ctx.getOrCreateNode(map1, "User", "users", ["id"]);
+    auto child = ctx.getOrCreateNode(map2, "Post", "posts", ["id"]);
     child.setParent(parent, "author_id", "User");
 
     auto ordered = ctx.nodesInOrder();

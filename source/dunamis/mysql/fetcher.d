@@ -131,13 +131,13 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
                 auto result = new QueryResult();
 
                 if (node.isRoot) {
-                    result.loadFromRowsComposite(layerRows, node.typeName, node.pkColumns);
+                    result.loadFromRows(layerRows, node.typeName, node.pkColumns);
                     rootResult = result;
                     // Also cache root result so fetchBelongsTo can find FK columns
                     _cachedResults[node.id] = result;
                     _cachedResultsByType[node.typeName] = result;
                 } else {
-                    result.loadFromRowsComposite(layerRows, node.typeName, node.pkColumns,
+                    result.loadFromRows(layerRows, node.typeName, node.pkColumns,
                                                  node.parentFk, node.parentTypeName);
                     // Cache child results for later retrieval (by node ID and type name)
                     _cachedResults[node.id] = result;
@@ -264,7 +264,7 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
         });
     }
 
-    override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns = ["id"]) {
+    override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns) {
         import dunamis.core.types : encodeCompositeKey;
 
         auto sql = "SELECT " ~ pkColumns.join(", ") ~ " FROM " ~ table;
@@ -469,7 +469,7 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
     /// Execute INSERT and return the new row.
     /// MySQL doesn't have RETURNING, so we use LAST_INSERT_ID() or PK values.
-    override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns = ["id"]) {
+    override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns) {
         auto insertSql = generateInsertSQL(table, input);
         _cachedSQL = insertSql;
 
@@ -492,7 +492,7 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
     }
 
     /// Execute UPDATE and return updated rows.
-    override Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input, string[] pkColumns = ["id"]) {
+    override Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input, string[] pkColumns) {
         auto updateSql = generateUpdateSQL(table, input, pkColumns);
         auto columns = input.columns;  // Capture for closure
         auto ids = input.ids;  // Capture for closure
@@ -515,7 +515,7 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
     }
 
     /// Execute DELETE and return count of deleted rows.
-    override Promise!int executeDelete(string table, string[] ids, string[] pkColumns = ["id"]) {
+    override Promise!int executeDelete(string table, string[] ids, string[] pkColumns) {
         auto deleteSql = generateDeleteSQL(table, ids, pkColumns);
         _cachedSQL = deleteSql;
 
@@ -529,7 +529,7 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
     /// Parse JSON result from SELECT query.
     /// Expects rows with a single column containing JSON.
-    private QueryResult parseJsonResult(MySqlConnection.Row[] rows, string typeName, string[] pkColumns = ["id"]) {
+    private QueryResult parseJsonResult(MySqlConnection.Row[] rows, string typeName, string[] pkColumns) {
         auto result = new QueryResult();
         if (rows.length == 0) {
             return result;
@@ -542,7 +542,7 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
             jsonRows ~= parseJSON(jsonStr);
         }
 
-        result.loadFromRowsComposite(jsonRows, typeName, pkColumns);
+        result.loadFromRows(jsonRows, typeName, pkColumns);
         return result;
     }
 }

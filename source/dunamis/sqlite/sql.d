@@ -95,7 +95,7 @@ private string generatePkWhereClause(string table, string[] pkColumns, string[] 
 }
 
 /// Generate UPDATE SQL for SQLite.
-string generateUpdateSQL(string table, UpdateInput input, string[] pkColumns = ["id"]) {
+string generateUpdateSQL(string table, UpdateInput input, string[] pkColumns) {
     auto columns = input.columns;
 
     if (columns.length == 0) {
@@ -123,7 +123,7 @@ string generateUpdateSQL(string table, UpdateInput input, string[] pkColumns = [
 }
 
 /// Generate SELECT SQL to fetch updated rows.
-string generateSelectUpdatedSQL(string table, string[] ids, string[] pkColumns = ["id"]) {
+string generateSelectUpdatedSQL(string table, string[] ids, string[] pkColumns) {
     return format(
         "SELECT * FROM %s WHERE %s",
         table,
@@ -132,7 +132,7 @@ string generateSelectUpdatedSQL(string table, string[] ids, string[] pkColumns =
 }
 
 /// Generate DELETE SQL for SQLite.
-string generateDeleteSQL(string table, string[] ids, string[] pkColumns = ["id"]) {
+string generateDeleteSQL(string table, string[] ids, string[] pkColumns) {
     return format(
         "DELETE FROM %s WHERE %s",
         table,
@@ -188,7 +188,7 @@ unittest {
         ["first_name": JSONValue("Bob")]
     );
 
-    auto sql = generateUpdateSQL("users", input);
+    auto sql = generateUpdateSQL("users", input, ["id"]);
     assert(sql.canFind("UPDATE users"));
     assert(sql.canFind("first_name = 'Bob'"));
     assert(sql.canFind("IN ('1','2','3')"));
@@ -196,7 +196,7 @@ unittest {
 
 unittest {
     // Test DELETE SQL generation
-    auto sql = generateDeleteSQL("users", ["1", "2", "3"]);
+    auto sql = generateDeleteSQL("users", ["1", "2", "3"], ["id"]);
     assert(sql.canFind("DELETE FROM users"));
     assert(sql.canFind("IN ('1','2','3')"));
 }

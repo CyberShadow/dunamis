@@ -220,7 +220,7 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
         return result;
     }
 
-    override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns = ["id"]) {
+    override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns) {
         return resolve(fetchAllIdsStringSync(table));
     }
 
@@ -474,7 +474,7 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
     private long[string] _nextId;  // Auto-increment ID per table
 
     /// Execute INSERT into in-memory data.
-    override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns = ["id"]) {
+    override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns) {
         // Build new row
         auto newRow = JSONValue.emptyObject;
 
@@ -499,12 +499,12 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
         // Return as QueryResult
         auto result = new QueryResult();
-        result.loadFromRowsComposite([newRow], typeName, pkColumns);
+        result.loadFromRows([newRow], typeName, pkColumns);
         return resolve(result);
     }
 
     /// Execute UPDATE on in-memory data.
-    override Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input, string[] pkColumns = ["id"]) {
+    override Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input, string[] pkColumns) {
         JSONValue[] updatedRows;
 
         if (table in _tableData) {
@@ -527,12 +527,12 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
         }
 
         auto result = new QueryResult();
-        result.loadFromRowsComposite(updatedRows, typeName, pkColumns);
+        result.loadFromRows(updatedRows, typeName, pkColumns);
         return resolve(result);
     }
 
     /// Execute DELETE on in-memory data.
-    override Promise!int executeDelete(string table, string[] ids, string[] pkColumns = ["id"]) {
+    override Promise!int executeDelete(string table, string[] ids, string[] pkColumns) {
         int deleteCount = 0;
 
         if (table in _tableData) {
@@ -664,7 +664,7 @@ class DebugSqlDB(DBConfig config = defaultDBConfig) : DataFetcher {
         return _delegate.fetchColumnLong(table, column, refs);
     }
 
-    override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns = ["id"]) {
+    override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns) {
         return _delegate.fetchAllIdsString(table, pkColumns);
     }
 
@@ -700,7 +700,7 @@ unittest {
     auto names = awaitSync(fetcher.fetchColumn!string("users", "first_name", refs));
     assert(names == ["Alice", "Bob"]);
 
-    auto allIds = awaitSync(fetcher.fetchAllIdsString("users"));
+    auto allIds = awaitSync(fetcher.fetchAllIdsString("users", ["id"]));
     assert(allIds == ["1", "2"]);
 }
 

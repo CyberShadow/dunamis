@@ -126,7 +126,7 @@ private string generatePkWhereClause(string[] pkColumns, string[] ids) {
 }
 
 /// Generate UPDATE SQL for MySQL.
-string generateUpdateSQL(string table, UpdateInput input, string[] pkColumns = ["id"]) {
+string generateUpdateSQL(string table, UpdateInput input, string[] pkColumns) {
     auto columns = input.columns;
 
     if (columns.length == 0) {
@@ -151,7 +151,7 @@ string generateUpdateSQL(string table, UpdateInput input, string[] pkColumns = [
 
 /// Generate SELECT SQL to fetch updated rows as JSON.
 /// Returns JSON with PK columns and the provided value columns.
-string generateSelectUpdatedSQL(string table, string[] ids, string[] columns, string[] pkColumns = ["id"]) {
+string generateSelectUpdatedSQL(string table, string[] ids, string[] columns, string[] pkColumns) {
     // Build JSON_OBJECT arguments from PK columns + value columns
     string[] jsonArgs;
     bool[string] seen;
@@ -176,7 +176,7 @@ string generateSelectUpdatedSQL(string table, string[] ids, string[] columns, st
 }
 
 /// Generate DELETE SQL for MySQL.
-string generateDeleteSQL(string table, string[] ids, string[] pkColumns = ["id"]) {
+string generateDeleteSQL(string table, string[] ids, string[] pkColumns) {
     return format(
         "DELETE FROM %s WHERE %s",
         table,
@@ -233,7 +233,7 @@ unittest {
         ["first_name": JSONValue("Bob")]
     );
 
-    auto sql = generateUpdateSQL("users", input);
+    auto sql = generateUpdateSQL("users", input, ["id"]);
     assert(sql.canFind("UPDATE users"));
     assert(sql.canFind("first_name = 'Bob'"));
     assert(sql.canFind("IN ('1','2','3')"));
@@ -241,7 +241,7 @@ unittest {
 
 unittest {
     // Test DELETE SQL generation
-    auto sql = generateDeleteSQL("users", ["1", "2", "3"]);
+    auto sql = generateDeleteSQL("users", ["1", "2", "3"], ["id"]);
     assert(sql.canFind("DELETE FROM users"));
     assert(sql.canFind("IN ('1','2','3')"));
 }
@@ -257,7 +257,7 @@ unittest {
 
 unittest {
     // Test SELECT after UPDATE SQL generation
-    auto sql = generateSelectUpdatedSQL("users", ["1", "2"], ["first_name"]);
+    auto sql = generateSelectUpdatedSQL("users", ["1", "2"], ["first_name"], ["id"]);
     assert(sql.canFind("JSON_OBJECT"));
     assert(sql.canFind("'id', id"));
     assert(sql.canFind("'first_name', first_name"));

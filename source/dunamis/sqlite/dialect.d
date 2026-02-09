@@ -79,7 +79,7 @@ class SQLiteDialect : SqlDialect {
         }
     }
 
-    override string rootIdFilter(string table, string[] pkColumns = ["id"]) {
+    override string rootIdFilter(string table, string[] pkColumns) {
         if (pkColumns.length == 1) {
             return format("%s.%s IN ({{IDS}})", table, pkColumns[0]);
         }

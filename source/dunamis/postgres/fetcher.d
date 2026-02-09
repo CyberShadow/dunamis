@@ -138,13 +138,13 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
                 auto result = new QueryResult();
 
                 if (node.isRoot) {
-                    result.loadFromRowsComposite(layerRows, node.typeName, node.pkColumns);
+                    result.loadFromRows(layerRows, node.typeName, node.pkColumns);
                     rootResult = result;
                     // Also cache root result so fetchBelongsTo can find FK columns
                     _cachedResults[node.id] = result;
                     _cachedResultsByType[node.typeName] = result;
                 } else {
-                    result.loadFromRowsComposite(layerRows, node.typeName, node.pkColumns,
+                    result.loadFromRows(layerRows, node.typeName, node.pkColumns,
                                                  node.parentFk, node.parentTypeName);
                     // Cache child results for later retrieval (by node ID and type name)
                     _cachedResults[node.id] = result;
@@ -275,7 +275,7 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
         });
     }
 
-    override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns = ["id"]) {
+    override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns) {
         import dunamis.core.types : encodeCompositeKey;
 
         auto sql = "SELECT " ~ pkColumns.join(", ") ~ " FROM " ~ table;
@@ -489,7 +489,7 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
     /// Execute INSERT and return the new row.
     /// Values are embedded directly in the SQL (properly escaped).
-    override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns = ["id"]) {
+    override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns) {
         auto sql = generateInsertSQL(table, input);
         _cachedSQL = sql;
 
@@ -503,7 +503,7 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
     /// Execute UPDATE and return updated rows.
     /// Values are embedded directly in the SQL (properly escaped).
-    override Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input, string[] pkColumns = ["id"]) {
+    override Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input, string[] pkColumns) {
         auto sql = generateUpdateSQL(table, input, pkColumns);
         _cachedSQL = sql;
 
@@ -517,7 +517,7 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
     /// Execute DELETE and return count of deleted rows.
     /// IDs are embedded directly in the SQL.
-    override Promise!int executeDelete(string table, string[] ids, string[] pkColumns = ["id"]) {
+    override Promise!int executeDelete(string table, string[] ids, string[] pkColumns) {
         auto sql = generateDeleteSQL(table, ids, pkColumns);
         _cachedSQL = sql;
 
@@ -533,7 +533,7 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
     }
 
     /// Parse INSERT result (single row JSON).
-    private QueryResult parseInsertResult(PgSqlConnection.Row[] rows, string typeName, string[] pkColumns = ["id"]) {
+    private QueryResult parseInsertResult(PgSqlConnection.Row[] rows, string typeName, string[] pkColumns) {
         auto result = new QueryResult();
         if (rows.length == 0) {
             return result;
@@ -542,13 +542,13 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
         auto jsonStr = rows[0].column!string(0);
         auto jsonData = parseJSON(jsonStr);
 
-        // Single row - wrap in array for loadFromRowsComposite
-        result.loadFromRowsComposite([jsonData], typeName, pkColumns);
+        // Single row - wrap in array for loadFromRows
+        result.loadFromRows([jsonData], typeName, pkColumns);
         return result;
     }
 
     /// Parse UPDATE result (JSON array).
-    private QueryResult parseUpdateResult(PgSqlConnection.Row[] rows, string typeName, string[] pkColumns = ["id"]) {
+    private QueryResult parseUpdateResult(PgSqlConnection.Row[] rows, string typeName, string[] pkColumns) {
         auto result = new QueryResult();
         if (rows.length == 0) {
             return result;
@@ -559,7 +559,7 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
         // json_agg returns an array
         if (jsonData.type == JSONType.array) {
-            result.loadFromRowsComposite(jsonData.array, typeName, pkColumns);
+            result.loadFromRows(jsonData.array, typeName, pkColumns);
         }
         return result;
     }

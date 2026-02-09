@@ -948,7 +948,7 @@ unittest {
         override string name() { return "Test"; }
         override string escapeSqlString(string s) { return "'" ~ s ~ "'"; }
         override string jsonToSqlLiteral(JSONValue) { return "NULL"; }
-        override string rootIdFilter(string table, string[] pkColumns = ["id"]) { return table ~ "." ~ pkColumns[0] ~ " = ANY($1)"; }
+        override string rootIdFilter(string table, string[] pkColumns) { return table ~ "." ~ pkColumns[0] ~ " = ANY($1)"; }
         override string jsonObjectFunc() { return "json_build_object"; }
         override string rowJsonFunc() { return ""; }
         override string emptyJsonArray() { return "'[]'::json"; }
@@ -970,7 +970,7 @@ unittest {
     }
 
     // Create mock QueryNode and PrefetchExpr
-    auto node = new QueryNode(QueryNodeId(0), "User", "users");
+    auto node = new QueryNode(QueryNodeId(0), "User", "users", ["id"]);
     auto prefetch = new PrefetchExpr(node);
 
     // Create a mock input
@@ -1018,7 +1018,7 @@ unittest {
         override string name() { return "Test"; }
         override string escapeSqlString(string s) { return "'" ~ s ~ "'"; }
         override string jsonToSqlLiteral(JSONValue) { return "NULL"; }
-        override string rootIdFilter(string table, string[] pkColumns = ["id"]) { return table ~ "." ~ pkColumns[0] ~ " = ANY($1)"; }
+        override string rootIdFilter(string table, string[] pkColumns) { return table ~ "." ~ pkColumns[0] ~ " = ANY($1)"; }
         override string jsonObjectFunc() { return "json_build_object"; }
         override string rowJsonFunc() { return ""; }
         override string emptyJsonArray() { return "'[]'::json"; }
@@ -1041,7 +1041,7 @@ unittest {
         @PrimaryKey string id;
     }
 
-    auto node = new QueryNode(QueryNodeId(0), "User", "users");
+    auto node = new QueryNode(QueryNodeId(0), "User", "users", ["id"]);
     auto prefetch = new PrefetchExpr(node);
     auto item = new EveryItemOfExpr!TestUser();
     auto proj = new ProjectComputedExpr!string(QueryNodeId(0), "computed_0", item, prefetch);

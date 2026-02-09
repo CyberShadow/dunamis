@@ -3,7 +3,7 @@ module dunamis.relational.schema.types;
 import std.traits;
 import std.typecons : Nullable;
 
-import dunamis.core.expr : Expr, ExprResultType, isExpr;
+import dunamis.core.expr : Expr;
 
 // ============================================================================
 // Entity Metadata Extraction
@@ -24,7 +24,7 @@ template EntityID(T) {
 // Entity Construction Helpers
 // ============================================================================
 
-import dunamis.core.types : AnyRef, PrimaryKey, isPlainField;
+import dunamis.core.types : AnyRef, PrimaryKey, getPrimaryKeyFieldNames;
 
 /// Create an entity with its first @PrimaryKey field set from a local ID value.
 /// Convenience for single-key entities (used by GetByIdsExpr and tests).
@@ -97,41 +97,17 @@ bool isValid(T)(T entity) {
 
 /// Foreign key reference to another entity.
 /// Use with Col to define FK columns that reference another entity's primary key.
-struct ForeignKey(Entity, string idField = "id") {
+struct ForeignKey(Entity) {
     /// The referenced entity type
     alias referencedEntity = Entity;
 
-    /// The referenced column name
-    enum referencedColumn = idField;
-
-    /// The underlying storage type.
-    /// For plain fields (@PrimaryKey long id): uses the field type directly.
-    /// For Col-generated methods: extracts T from the Expr!T return type.
-    static if (isPlainField!(Entity, idField)) {
-        alias StorageType = typeof(__traits(getMember, Entity.init, idField));
-    } else {
-        private alias _FieldMethod = __traits(getMember, Entity, idField);
-        private alias _ReturnType = getMethodReturnType!(_FieldMethod, Expr!Entity);
-        static assert(isExpr!_ReturnType,
-            "Field '" ~ idField ~ "' in " ~ Entity.stringof ~ " must return an Expr type");
-        alias StorageType = ExprResultType!_ReturnType;
-    }
-}
-
-/// Helper to get return type of a method, handling both regular and template functions.
-private template getMethodReturnType(alias method, ArgType) {
-    static if (__traits(compiles, ReturnType!method)) {
-        alias getMethodReturnType = ReturnType!method;
-    } else static if (__traits(compiles, ReturnType!(method!()))) {
-        alias getMethodReturnType = ReturnType!(method!());
-    } else {
-        alias getMethodReturnType = typeof(method(ArgType.init));
-    }
+    /// The underlying storage type — derived from the entity's first @PrimaryKey field.
+    alias StorageType = typeof(__traits(getMember, Entity.init, getPrimaryKeyFieldNames!Entity[0]));
 }
 
 /// Check if a type is a ForeignKey
 template isForeignKey(T) {
-    static if (is(T == ForeignKey!(E, col), E, string col)) {
+    static if (is(T == ForeignKey!E, E)) {
         enum isForeignKey = true;
     } else {
         enum isForeignKey = false;
@@ -140,7 +116,7 @@ template isForeignKey(T) {
 
 /// Check if a type is a Nullable ForeignKey
 template isNullableForeignKey(T) {
-    static if (is(T == Nullable!(ForeignKey!(E, col)), E, string col)) {
+    static if (is(T == Nullable!(ForeignKey!E), E)) {
         enum isNullableForeignKey = true;
     } else {
         enum isNullableForeignKey = false;
@@ -154,9 +130,9 @@ template isAnyForeignKey(T) {
 
 /// Get the referenced entity from a ForeignKey type
 template getForeignKeyEntity(T) {
-    static if (is(T == ForeignKey!(E, col), E, string col)) {
+    static if (is(T == ForeignKey!E, E)) {
         alias getForeignKeyEntity = E;
-    } else static if (is(T == Nullable!(ForeignKey!(E, col)), E, string col)) {
+    } else static if (is(T == Nullable!(ForeignKey!E), E)) {
         alias getForeignKeyEntity = E;
     } else {
         static assert(false, "Not a ForeignKey type");
@@ -165,8 +141,8 @@ template getForeignKeyEntity(T) {
 
 /// Get the inner ForeignKey type from a Nullable!(ForeignKey!(...))
 template getInnerForeignKey(T) {
-    static if (is(T == Nullable!(ForeignKey!(E, col)), E, string col)) {
-        alias getInnerForeignKey = ForeignKey!(E, col);
+    static if (is(T == Nullable!(ForeignKey!E), E)) {
+        alias getInnerForeignKey = ForeignKey!E;
     } else {
         static assert(false, "Not a Nullable ForeignKey type");
     }

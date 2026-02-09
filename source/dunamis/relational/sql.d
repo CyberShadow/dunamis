@@ -305,7 +305,7 @@ unittest {
     import dunamis.postgres.dialect : postgresDialect;
 
     // Test SQL generation with LIMIT/OFFSET
-    auto node = new QueryNode(QueryNodeId(0), "User", "users");
+    auto node = new QueryNode(QueryNodeId(0), "User", "users", ["id"]);
     node.addColumn("first_name");
     node.setRootFilter(FilterType.all);
     node.setLimit(10);
@@ -322,7 +322,7 @@ unittest {
     import dunamis.postgres.dialect : postgresDialect;
 
     // Test SQL generation with LIMIT only (no offset)
-    auto node = new QueryNode(QueryNodeId(0), "Post", "posts");
+    auto node = new QueryNode(QueryNodeId(0), "Post", "posts", ["id"]);
     node.addColumn("title");
     node.setRootFilter(FilterType.all);
     node.setLimit(5);
@@ -337,7 +337,7 @@ unittest {
     import dunamis.postgres.dialect : postgresDialect;
 
     // Test SQL generation with OFFSET only (no limit)
-    auto node = new QueryNode(QueryNodeId(0), "Comment", "comments");
+    auto node = new QueryNode(QueryNodeId(0), "Comment", "comments", ["id"]);
     node.addColumn("body");
     node.setRootFilter(FilterType.all);
     node.setOffset(15);
@@ -352,7 +352,7 @@ unittest {
     import dunamis.postgres.dialect : postgresDialect;
 
     // Test that PostgreSQL dialect uses ANY($1) and no row_json
-    auto node = new QueryNode(QueryNodeId(0), "User", "users");
+    auto node = new QueryNode(QueryNodeId(0), "User", "users", ["id"]);
     node.addColumn("first_name");
     node.setRootFilter(FilterType.byIds);
 

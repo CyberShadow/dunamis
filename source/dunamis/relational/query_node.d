@@ -126,7 +126,7 @@ class QueryNode {
     /// Next join alias counter
     private int _nextJoinAlias = 0;
 
-    this(QueryNodeId id, string typeName, string table, string[] pkColumns = ["id"]) {
+    this(QueryNodeId id, string typeName, string table, string[] pkColumns) {
         assert(typeName.length > 0, "QueryNode typeName must not be empty");
         assert(table.length > 0, "QueryNode table must not be empty");
         this.id = id;
@@ -167,8 +167,8 @@ class QueryNode {
     /// sourceAlias: for multi-hop chains, the alias of the previous join (null = root table).
     /// Returns the join alias to use for column access.
     JoinAlias addJoin(string targetTable, string targetType, string fk,
-                      Nullable!JoinAlias sourceAlias = Nullable!JoinAlias.init,
-                      string[] targetPkColumns = ["id"]) {
+                      string[] targetPkColumns,
+                      Nullable!JoinAlias sourceAlias = Nullable!JoinAlias.init) {
         // Check if we already have this join
         foreach (j; joins) {
             if (j.targetTable == targetTable && j.fk == fk && j.sourceAlias == sourceAlias) {
@@ -276,7 +276,7 @@ struct JoinInfo {
 
 unittest {
     // Test QueryNode basics
-    auto node = new QueryNode(QueryNodeId(0), "User", "users");
+    auto node = new QueryNode(QueryNodeId(0), "User", "users", ["id"]);
     assert(node.id == QueryNodeId(0));
     assert(node.typeName == "User");
     assert(node.table == "users");
@@ -292,8 +292,8 @@ unittest {
 
 unittest {
     // Test QueryNode parent-child relationship
-    auto parent = new QueryNode(QueryNodeId(0), "User", "users");
-    auto child = new QueryNode(QueryNodeId(1), "Post", "posts");
+    auto parent = new QueryNode(QueryNodeId(0), "User", "users", ["id"]);
+    auto child = new QueryNode(QueryNodeId(1), "Post", "posts", ["id"]);
     child.setParent(parent, "author_id", "User");
 
     assert(parent.isRoot);
@@ -305,10 +305,10 @@ unittest {
 
 unittest {
     // Test QueryNode JOINs
-    auto node = new QueryNode(QueryNodeId(0), "Post", "posts");
-    auto alias1 = node.addJoin("users", "User", "author_id");
-    auto alias2 = node.addJoin("categories", "Category", "category_id");
-    auto alias3 = node.addJoin("users", "User", "author_id");  // Duplicate
+    auto node = new QueryNode(QueryNodeId(0), "Post", "posts", ["id"]);
+    auto alias1 = node.addJoin("users", "User", "author_id", ["id"]);
+    auto alias2 = node.addJoin("categories", "Category", "category_id", ["id"]);
+    auto alias3 = node.addJoin("users", "User", "author_id", ["id"]);  // Duplicate
 
     assert(alias1 == JoinAlias("j0"));
     assert(alias2 == JoinAlias("j1"));
@@ -318,7 +318,7 @@ unittest {
 
 unittest {
     // Test QueryNode ORDER BY
-    auto node = new QueryNode(QueryNodeId(0), "User", "users");
+    auto node = new QueryNode(QueryNodeId(0), "User", "users", ["id"]);
     assert(node.orderBy_.length == 0);
 
     node.addOrderBy("last_name", SortDirection.ASC);

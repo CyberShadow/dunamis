@@ -239,7 +239,7 @@ abstract class DataFetcher {
     }
 
     /// Fetch all IDs from a table as strings (supports any ID type including composite keys)
-    abstract Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns = ["id"]);
+    abstract Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns);
 
     /// Fetch children for parent refs (hasMany)
     /// Returns AnyRef[][] - one AnyRef[] per parent
@@ -260,19 +260,19 @@ abstract class DataFetcher {
 
     /// Execute INSERT and return the new row as QueryResult.
     /// Default implementation returns empty result (no-op).
-    Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns = ["id"]) {
+    Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns) {
         return resolve(new QueryResult());
     }
 
     /// Execute UPDATE and return updated rows as QueryResult.
     /// Default implementation returns empty result (no-op).
-    Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input, string[] pkColumns = ["id"]) {
+    Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input, string[] pkColumns) {
         return resolve(new QueryResult());
     }
 
     /// Execute DELETE and return count of deleted rows.
     /// Default implementation returns 0 (no-op).
-    Promise!int executeDelete(string table, string[] ids, string[] pkColumns = ["id"]) {
+    Promise!int executeDelete(string table, string[] ids, string[] pkColumns) {
         return resolve(0);
     }
 }
@@ -290,13 +290,13 @@ class QueryResult {
     private {
         string _typeName;
 
-        /// Column data: column name → (nodeId → value)
+        /// Column data: column name → (ref id → value)
         JSONValue[string][string] _columns;
 
         /// All refs in result order
         AnyRef[] _allRefs;
 
-        /// For child layers: groups of child refs by parent nodeId
+        /// For child layers: groups of child refs by parent ref id
         AnyRef[][string] _childRefsByParent;
     }
 
@@ -306,15 +306,8 @@ class QueryResult {
         _allRefs = refs;
     }
 
-    /// Load from row-oriented data (for tests)
-    void loadFromRows(JSONValue[] rows, string typeName, string idColumn = "id",
-                      string parentFk = null, string parentType = null) {
-        // Single-column ID - delegate to composite version
-        loadFromRowsComposite(rows, typeName, [idColumn], parentFk, parentType);
-    }
-
-    /// Load from row-oriented data with composite primary key
-    void loadFromRowsComposite(JSONValue[] rows, string typeName, string[] idColumns,
+    /// Load from row-oriented data (column-oriented storage built from rows)
+    void loadFromRows(JSONValue[] rows, string typeName, string[] idColumns,
                                string parentFk = null, string parentType = null) {
         import dunamis.core.types : encodeCompositeKey;
 
@@ -340,16 +333,16 @@ class QueryResult {
                 keyParts ~= jsonValToString(row[col]);
             }
             string idStr = encodeCompositeKey(keyParts);
-            auto nodeId = typeName ~ ":" ~ idStr;
-            _allRefs ~= AnyRef(nodeId);
+            auto refId = typeName ~ ":" ~ idStr;
+            _allRefs ~= AnyRef(refId);
 
             // If this is a child layer, also index by parent
             if (parentFk !is null && parentType !is null && parentFk in row) {
                 auto parentIdVal = row[parentFk];
                 if (parentIdVal.type != JSONType.null_) {
                     auto parentIdStr = jsonValToString(parentIdVal);
-                    auto parentNodeId = parentType ~ ":" ~ parentIdStr;
-                    _childRefsByParent[parentNodeId] ~= AnyRef(nodeId);
+                    auto parentRefId = parentType ~ ":" ~ parentIdStr;
+                    _childRefsByParent[parentRefId] ~= AnyRef(refId);
                 }
             }
         }
@@ -360,7 +353,7 @@ class QueryResult {
             foreach (colName; rows[0].object.keys) {
                 JSONValue[string] colData;
                 foreach (i, row; rows) {
-                    colData[_allRefs[i].nodeId] = row[colName];
+                    colData[_allRefs[i].id] = row[colName];
                 }
                 _columns[colName] = colData;
             }
@@ -385,8 +378,8 @@ class QueryResult {
                 }
                 // Find parent type from first parent ref
                 string parentType = parentRefs.length > 0 ? parentRefs[0].typeName : "";
-                auto parentNodeId = parentType ~ ":" ~ parentIdStr;
-                _childRefsByParent[parentNodeId] ~= r;
+                auto parentRefId = parentType ~ ":" ~ parentIdStr;
+                _childRefsByParent[parentRefId] ~= r;
             }
         }
     }
@@ -397,7 +390,7 @@ class QueryResult {
             "loadColumn: refs and values length mismatch");
         JSONValue[string] colData;
         foreach (i, r; refs) {
-            colData[r.nodeId] = values[i];
+            colData[r.id] = values[i];
         }
         _columns[column] = colData;
     }
@@ -419,7 +412,7 @@ class QueryResult {
         T[] result;
         result.reserve(refs.length);
         foreach (r; refs) {
-            if (auto valPtr = r.nodeId in colData) {
+            if (auto valPtr = r.id in colData) {
                 result ~= extractValue!T(*valPtr);
             } else {
                 result ~= T.init;
@@ -439,7 +432,7 @@ class QueryResult {
         AnyRef[][] result;
         result.length = parentRefs.length;
         foreach (i, p; parentRefs) {
-            if (auto children = p.nodeId in _childRefsByParent) {
+            if (auto children = p.id in _childRefsByParent) {
                 result[i] = *children;
             } else {
                 result[i] = [];
@@ -466,7 +459,7 @@ class QueryResult {
         JSONValue[] result;
         result.reserve(refs.length);
         foreach (r; refs) {
-            if (auto valPtr = r.nodeId in colData) {
+            if (auto valPtr = r.id in colData) {
                 result ~= *valPtr;
             } else {
                 result ~= JSONValue(null);
@@ -479,7 +472,7 @@ class QueryResult {
     bool hasRef(AnyRef r) {
         // Check if ref is in _allRefs
         foreach (ref_; _allRefs) {
-            if (ref_.nodeId == r.nodeId) return true;
+            if (ref_.id == r.id) return true;
         }
         return false;
     }
@@ -493,10 +486,10 @@ class QueryResult {
         // Build a set for O(1) lookup
         bool[string] refSet;
         foreach (r; _allRefs) {
-            refSet[r.nodeId] = true;
+            refSet[r.id] = true;
         }
         foreach (r; refs) {
-            if (r.nodeId in refSet) return true;
+            if (r.id in refSet) return true;
         }
         return false;
     }
@@ -617,7 +610,7 @@ class RelationalEvalContext {
     }
 
     /// Fetch all IDs for a table as strings, wrapped in AnyRef (delegates to fetcher)
-    Promise!(AnyRef[]) fetchAllIdsString(string table, string typeName, string[] pkColumns = ["id"]) {
+    Promise!(AnyRef[]) fetchAllIdsString(string table, string typeName, string[] pkColumns) {
         if (fetcher !is null) {
             // Cache PK columns for later use by fetchColumn* methods
             fetcher._pkColumnsByTable[table] = pkColumns;
@@ -661,7 +654,7 @@ unittest {
         parseJSON(`{"id": 1, "first_name": "Alice"}`),
         parseJSON(`{"id": 2, "first_name": "Bob"}`)
     ];
-    result.loadFromRows(rows, "User");
+    result.loadFromRows(rows, "User", ["id"]);
 
     auto refs = [AnyRef("User:1"), AnyRef("User:2")];
     auto names = result.getColumn!string("first_name", refs);
@@ -680,7 +673,7 @@ unittest {
         parseJSON(`{"id": 102, "post_id": 1, "body": "Thanks!"}`),
         parseJSON(`{"id": 103, "post_id": 2, "body": "Nice!"}`)
     ];
-    result.loadFromRows(rows, "Comment", "id", "post_id", "Post");
+    result.loadFromRows(rows, "Comment", ["id"], "post_id", "Post");
 
     auto childRefs = result.getChildRefs([AnyRef("Post:1"), AnyRef("Post:2"), AnyRef("Post:3")]);
     assert(childRefs.length == 3);

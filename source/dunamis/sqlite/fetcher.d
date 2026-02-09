@@ -138,13 +138,13 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
                 auto result = new QueryResult();
 
                 if (node.isRoot) {
-                    result.loadFromRowsComposite(layerRows, node.typeName, node.pkColumns);
+                    result.loadFromRows(layerRows, node.typeName, node.pkColumns);
                     rootResult = result;
                     // Also cache root result so fetchBelongsTo can find FK columns
                     _cachedResults[node.id] = result;
                     _cachedResultsByType[node.typeName] = result;
                 } else {
-                    result.loadFromRowsComposite(layerRows, node.typeName, node.pkColumns,
+                    result.loadFromRows(layerRows, node.typeName, node.pkColumns,
                                                  node.parentFk, node.parentTypeName);
                     _cachedResults[node.id] = result;
                     _cachedResultsByType[node.typeName] = result;
@@ -280,7 +280,7 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
         return resolve(refs.map!(r => r.isValid ? values.get(r.localId, 0L) : 0L).array);
     }
 
-    override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns = ["id"]) {
+    override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns) {
         import dunamis.core.types : encodeCompositeKey;
 
         auto sql = format("SELECT %s FROM %s", pkColumns.join(", "), table);
@@ -503,7 +503,7 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
     /// Execute INSERT and return the new row.
     /// SQLite is synchronous, so we return an immediately resolved promise.
-    override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns = ["id"]) {
+    override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns) {
         auto insertSql = generateInsertSQL(table, input);
         _cachedSQL = insertSql;
 
@@ -522,7 +522,7 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
         foreach (cells, columns; _db.query(selectSql)) {
             auto jsonRow = rowToJson(cells, columns);
-            result.loadFromRowsComposite([jsonRow], typeName, pkColumns);
+            result.loadFromRows([jsonRow], typeName, pkColumns);
             break;
         }
 
@@ -530,7 +530,7 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
     }
 
     /// Execute UPDATE and return updated rows.
-    override Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input, string[] pkColumns = ["id"]) {
+    override Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input, string[] pkColumns) {
         auto updateSql = generateUpdateSQL(table, input, pkColumns);
         _cachedSQL = updateSql;
 
@@ -547,14 +547,14 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
         }
 
         if (rows.length > 0) {
-            result.loadFromRowsComposite(rows, typeName, pkColumns);
+            result.loadFromRows(rows, typeName, pkColumns);
         }
 
         return resolve(result);
     }
 
     /// Execute DELETE and return count of deleted rows.
-    override Promise!int executeDelete(string table, string[] ids, string[] pkColumns = ["id"]) {
+    override Promise!int executeDelete(string table, string[] ids, string[] pkColumns) {
         auto deleteSql = generateDeleteSQL(table, ids, pkColumns);
         _cachedSQL = deleteSql;
 
