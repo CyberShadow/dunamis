@@ -474,15 +474,16 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
     private long[string] _nextId;  // Auto-increment ID per table
 
     /// Execute INSERT into in-memory data.
-    override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns) {
+    override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns, bool isAutoIncrement) {
         // Build new row
         auto newRow = JSONValue.emptyObject;
 
-        // Only auto-generate ID for single-column "id" PK when not provided in input
-        if (pkColumns == ["id"] && "id" !in input.values) {
+        // Auto-generate integer ID for auto-increment columns
+        if (isAutoIncrement) {
+            auto pkCol = pkColumns[0];
             auto nextId = _nextId.get(table, 1);
             _nextId[table] = nextId + 1;
-            newRow["id"] = JSONValue(nextId);
+            newRow[pkCol] = JSONValue(nextId);
         }
 
         foreach (col, val; input.values) {

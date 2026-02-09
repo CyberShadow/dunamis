@@ -489,7 +489,7 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
     /// Execute INSERT and return the new row.
     /// Values are embedded directly in the SQL (properly escaped).
-    override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns) {
+    override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns, bool isAutoIncrement) {
         auto sql = generateInsertSQL(table, input);
         _cachedSQL = sql;
 

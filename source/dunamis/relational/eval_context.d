@@ -260,7 +260,7 @@ abstract class DataFetcher {
 
     /// Execute INSERT and return the new row as QueryResult.
     /// Default implementation returns empty result (no-op).
-    Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns) {
+    Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns, bool isAutoIncrement) {
         return resolve(new QueryResult());
     }
 

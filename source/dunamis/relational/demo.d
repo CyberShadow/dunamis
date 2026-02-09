@@ -77,11 +77,11 @@ struct DemoEntity(alias _db, string _tableName, string _typeName = "") {
 /// For full control over primary keys (natural keys, composite keys, etc.),
 /// use explicit `@PrimaryKey` fields instead.
 mixin template DemoId(IdType = Int64) {
-    import dunamis.core.types : PrimaryKey;
+    import dunamis.core.types : PrimaryKey, AutoIncrement;
     import dunamis.relational.schema.attrs : SqlColumn;
 
-    /// Primary key field - identifies this entity instance
-    @PrimaryKey @SqlColumn("id") IdType id;
+    /// Primary key field - auto-increment, identifies this entity instance
+    @PrimaryKey @AutoIncrement @SqlColumn("id") IdType id;
 }
 
 // ============================================================================

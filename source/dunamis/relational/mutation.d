@@ -76,6 +76,7 @@ class InsertExpr(Entity) : Expr!Entity {
     private string _table;
     private string _typeName;
     private enum string[] _pkColumns = getPkSqlColumns!Entity;
+    private enum bool _isAutoIncrement = hasAutoIncrement!Entity;
 
     this(InsertInput input) {
         _input = input;
@@ -114,7 +115,7 @@ class InsertExpr(Entity) : Expr!Entity {
         }
 
         // Execute INSERT via DataFetcher
-        auto promise = relCtx.fetcher.executeInsert(_table, _typeName, _input, _pkColumns)
+        auto promise = relCtx.fetcher.executeInsert(_table, _typeName, _input, _pkColumns, _isAutoIncrement)
             .then((QueryResult result) {
                 // Store result for field access
                 relCtx.storeMutationResult(_typeName, result);

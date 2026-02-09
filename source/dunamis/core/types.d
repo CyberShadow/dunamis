@@ -14,6 +14,12 @@ import std.typecons : Nullable;
 /// Used on plain fields to identify entity instances.
 enum PrimaryKey;
 
+/// Marks a primary key field as auto-increment.
+/// Used alongside @PrimaryKey to indicate the database generates the value.
+/// Affects DDL generation (SERIAL/AUTO_INCREMENT) and INSERT behavior
+/// (use LAST_INSERT_ID/last_insert_rowid instead of explicit PK lookup).
+enum AutoIncrement;
+
 /// Check if a specific member has @PrimaryKey UDA
 template hasPrimaryKeyAttr(T, string member) {
     import std.meta : staticIndexOf;
@@ -22,6 +28,31 @@ template hasPrimaryKeyAttr(T, string member) {
     } else {
         enum hasPrimaryKeyAttr = false;
     }
+}
+
+/// Check if a specific member has @AutoIncrement UDA
+template hasAutoIncrementAttr(T, string member) {
+    import std.meta : staticIndexOf;
+    static if (__traits(compiles, __traits(getAttributes, __traits(getMember, T, member)))) {
+        enum hasAutoIncrementAttr = staticIndexOf!(AutoIncrement, __traits(getAttributes, __traits(getMember, T, member))) >= 0;
+    } else {
+        enum hasAutoIncrementAttr = false;
+    }
+}
+
+/// Check if any @PrimaryKey field in the type also has @AutoIncrement.
+/// Uses T.tupleof to avoid forward reference cycles — see hasPrimaryKey for details.
+template hasAutoIncrement(T) {
+    import std.meta : staticIndexOf;
+    enum hasAutoIncrement = () {
+        static foreach (field; T.tupleof) {
+            static if (staticIndexOf!(PrimaryKey, __traits(getAttributes, field)) >= 0 &&
+                       staticIndexOf!(AutoIncrement, __traits(getAttributes, field)) >= 0) {
+                return true;
+            }
+        }
+        return false;
+    }();
 }
 
 /// Check if any field in the type has @PrimaryKey.

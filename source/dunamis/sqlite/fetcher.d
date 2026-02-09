@@ -503,17 +503,17 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
     /// Execute INSERT and return the new row.
     /// SQLite is synchronous, so we return an immediately resolved promise.
-    override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns) {
+    override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns, bool isAutoIncrement) {
         auto insertSql = generateInsertSQL(table, input);
         _cachedSQL = insertSql;
 
         // Execute INSERT
         _db.exec(insertSql);
 
-        // Fetch the inserted row — use PK values from input for composite keys,
-        // fall back to last_insert_rowid() for auto-increment single PK
+        // Fetch the inserted row — use last_insert_rowid() for auto-increment,
+        // otherwise use PK values from input
         string selectSql;
-        if (pkColumns == ["id"] && "id" !in input.values) {
+        if (isAutoIncrement) {
             selectSql = generateSelectLastInsertSQL(table);
         } else {
             selectSql = generateSelectByPkSQL(table, pkColumns, input);

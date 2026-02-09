@@ -20,6 +20,7 @@ struct ColumnDef {
     string dType;            // D type name for dialect-specific mapping
     bool nullable;
     bool isPrimaryKey;
+    bool isAutoIncrement;
     string foreignKeyTable;  // Empty if not a FK
     string foreignKeyColumn; // Empty if not a FK
 }
@@ -67,7 +68,7 @@ template getColumnDefs(Entity) {
     import dunamis.relational.schema : BelongsToFK, hasBelongsToFK, getBelongsToFK;
     import dunamis.relational.schema : BelongsToParent, hasBelongsToParent, extractBelongsToParent;
     import dunamis.relational.schema : getSqlColumn, isPlainField, getPlainFieldColumnName;
-    import dunamis.core.types : hasPrimaryKeyAttr;
+    import dunamis.core.types : hasPrimaryKeyAttr, hasAutoIncrementAttr, AutoIncrement;
     import dunamis.core.expr : ExprResultType;
 
     enum getColumnDefs = () {
@@ -87,6 +88,7 @@ template getColumnDefs(Entity) {
                         getDTypeName!FieldType,
                         false,   // PK is never nullable
                         true,    // isPrimaryKey
+                        hasAutoIncrementAttr!(Entity, member),
                         "",      // foreignKeyTable
                         ""       // foreignKeyColumn
                     );
@@ -115,6 +117,9 @@ template getColumnDefs(Entity) {
                         enum bool isNullable = is(ColType == Nullable!U, U);
 
                         // Check if FK column
+                        // Check if auto-increment (via @AutoIncrement UDA)
+                        enum bool isAutoInc = hasUDA!(fieldMethod, AutoIncrement);
+
                         static if (hasForeignKeyRef!fieldMethod) {
                             alias FkEntity = extractForeignKeyRef!fieldMethod;
                             columns ~= ColumnDef(
@@ -122,6 +127,7 @@ template getColumnDefs(Entity) {
                                 getDTypeName!ColType,
                                 isPK ? false : isNullable,
                                 isPK,
+                                isAutoInc,
                                 EntityID!FkEntity.table,
                                 "id"  // Default FK column
                             );
@@ -131,6 +137,7 @@ template getColumnDefs(Entity) {
                                 getDTypeName!ColType,
                                 isPK ? false : isNullable,
                                 isPK,
+                                isAutoInc,
                                 "",
                                 ""
                             );
@@ -156,6 +163,7 @@ template getColumnDefs(Entity) {
                         getDTypeName!FieldType,
                         isNullable,
                         false,  // isPrimaryKey
+                        false,  // isAutoIncrement
                         "",     // foreignKeyTable
                         ""      // foreignKeyColumn
                     );
@@ -204,8 +212,8 @@ template generateCreateTable(Dialect, Entity) {
                 sqlType = Dialect.sqlTypeName(col.dType);
             }
 
-            // Handle auto-increment for single-column primary keys
-            if (col.isPrimaryKey && !isCompositePK) {
+            // Handle auto-increment (only for columns with @AutoIncrement UDA)
+            if (col.isAutoIncrement) {
                 sqlType = Dialect.autoIncrementType(sqlType);
             }
 

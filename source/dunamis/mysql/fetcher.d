@@ -469,7 +469,7 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
     /// Execute INSERT and return the new row.
     /// MySQL doesn't have RETURNING, so we use LAST_INSERT_ID() or PK values.
-    override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns) {
+    override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns, bool isAutoIncrement) {
         auto insertSql = generateInsertSQL(table, input);
         _cachedSQL = insertSql;
 
@@ -477,10 +477,9 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
         // Execute INSERT and fetch the inserted row as JSON
         return _conn.query(insertSql).array().then((MySqlConnection.Row[] _) {
-            // For auto-increment single PK, use LAST_INSERT_ID()
-            // For composite/explicit PKs, use PK values from input
+            // Use LAST_INSERT_ID() for auto-increment, otherwise use PK values from input
             string selectSql;
-            if (pkColumns == ["id"] && "id" !in input.values) {
+            if (isAutoIncrement) {
                 selectSql = generateSelectLastInsertSQL(table, columns);
             } else {
                 selectSql = generateSelectByPkSQL(table, pkColumns, columns, input);
