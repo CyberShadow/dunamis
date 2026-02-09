@@ -181,7 +181,7 @@ template SortedArrayFieldCode(SourceQuery, string fieldName, alias TypeMap) {
     // .imported references for generated code
     private enum string _I = ".imported!q{dunamis.graphql.forward}.ForwardFieldImpl!(SourceQuery, \"" ~ fieldName ~ "\", TypeMap)";
     private enum string _Expr = ".imported!q{dunamis.core.expr}.Expr";
-    private enum string _entityCast = ".imported!q{dunamis.core.expr}.entityCast";
+    private enum string _entityCast = ".imported!q{dunamis.graphql.entity_cast}.pluginEntityCast";
     private enum string _sortBy = ".imported!q{dunamis.core.sorting}.sortBy";
     private enum string _SD = ".imported!q{dunamis.core.sorting}.SortDirection";
     private enum string _wrap = ".imported!q{dunamis.graphql.transform}.wrapEntityResult";

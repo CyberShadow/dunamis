@@ -148,8 +148,13 @@ template isPlainField(Entity, string fieldName) {
                 static if (is(typeof(member) == function) || is(typeof(&member) == delegate)) {
                     return false;
                 } else {
+                    // Skip non-public fields (package/private/protected are internal infrastructure)
+                    static if (__traits(compiles, __traits(getVisibility, member))
+                            && __traits(getVisibility, member) != "public") {
+                        return false;
+                    }
                     // It's a field - check if it's actually an instance field (not a type alias, enum, etc.)
-                    static if (__traits(compiles, { auto x = __traits(getMember, Entity.init, fieldName); })) {
+                    else static if (__traits(compiles, { auto x = __traits(getMember, Entity.init, fieldName); })) {
                         return true;
                     } else {
                         return false;

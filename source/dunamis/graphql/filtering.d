@@ -1116,8 +1116,9 @@ mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) 
     import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
     import std.meta : AliasSeq;
     import std.conv : to;
-    import dunamis.core.expr : Expr, ExprResultType, entityCast;
+    import dunamis.core.expr : Expr, ExprResultType;
     import dunamis.core.filtering : FilterByExpr, FilterItemExpr;
+    import dunamis.graphql.entity_cast : pluginEntityCast;
     import dunamis.graphql.transform : wrapEntityResult;
     import std.typecons : Nullable;
 
@@ -1161,7 +1162,7 @@ mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) 
         paramList ~= ", Nullable!_EntityFilter filter = Nullable!_EntityFilter.init";
 
         // Argument list — call original function via __traits in generated code
-        string argList = "entityCast!(_SrcEntity)(" ~ srcParamNames[0] ~ ")";
+        string argList = "pluginEntityCast!(_SrcEntity)(" ~ srcParamNames[0] ~ ")";
         static foreach (i; 1 .. _SrcParams.length) {
             argList ~= ", " ~ srcParamNames[i];
         }

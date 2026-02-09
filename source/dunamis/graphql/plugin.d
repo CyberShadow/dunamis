@@ -148,16 +148,16 @@ mixin template WrapFields(SourceType, alias TypeMap, alias ArrayFieldMixin) {
     import dunamis.graphql.plugin : getFieldMembers, isComputedField, isArrayReturningField,
         ForwardField, ForwardPlainMethod;
 
-    // 1. Copy _normalizedSource (carries original entity data through plugin chain)
+    // 1. Per-layer _normalizedSource (stores immediate source type for entity cast chain)
+    //    Only present on entity types (which go through NormalizeFields), not Query/Mutation.
     static if (__traits(hasMember, SourceType, "_normalizedSource")) {
         @(.imported!q{dunamis.graphql.schema.udas}.GqlHidden)
-        typeof(SourceType._normalizedSource) _normalizedSource;
+        package(dunamis.graphql) SourceType _normalizedSource;
     }
 
     // 2. Copy plain fields (struct instance fields, including @PrimaryKey)
-    //    Skip _normalizedSource — already handled above with @GqlHidden
     static foreach (member; __traits(allMembers, SourceType)) {
-        static if (isPlainField!(SourceType, member) && member != "_normalizedSource") {
+        static if (isPlainField!(SourceType, member)) {
             mixin("typeof(__traits(getMember, SourceType.init, \"" ~ member ~ "\")) " ~ member ~ ";");
         }
     }
@@ -1002,7 +1002,7 @@ unittest {
     alias EntityTypes = FullSchema.AllEntityTypes;
     static foreach (Entity; EntityTypes) {{
         static foreach (member; __traits(allMembers, Entity)) {{
-            static if (member.length > 0 && member[0] == '_' && member != "_normalizedSource") {
+            static if (member.length > 0 && member[0] == '_') {
                 static assert(!isPlainField!(Entity, member),
                     "Leaked _-prefixed plain field '" ~ member ~ "' on " ~ Entity.stringof);
                 static assert(!isPlainMethod!(Entity, member),

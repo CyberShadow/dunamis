@@ -117,13 +117,36 @@ interface EntityCastInfo {
     @property ExprBase inputExpr();
 }
 
+/// Default entity cast: copies matching non-internal instance fields from From to To.
+/// Data-source agnostic — no knowledge of plugin infrastructure.
+To defaultEntityCast(To, From)(From from) {
+    To to;
+    static if (is(From == struct) && is(To == struct)) {
+        static foreach (member; __traits(allMembers, From)) {{
+            static if (member.length > 0 && member[0] != '_' &&
+                       member != "toString" &&
+                       member != "toHash" &&
+                       member != "opEquals" &&
+                       member != "opCmp" &&
+                       member != "opAssign" &&
+                       member != "factory" &&
+                       member != "Monitor" &&
+                       __traits(hasMember, To, member)) {
+                static if (__traits(compiles, __traits(getMember, from, member)) &&
+                           __traits(compiles, __traits(getMember, to, member) = __traits(getMember, from, member))) {
+                    __traits(getMember, to, member) = __traits(getMember, from, member);
+                }
+            }
+        }}
+    }
+    return to;
+}
+
 /// Expression that casts between compatible entity/struct types.
-/// Used by plugin infrastructure to forward fields between schema types.
-///
-/// For entity types (with @PrimaryKey): copies the PK field to construct the target type.
-/// For non-entity types (Query, Mutation): uses default-initialized value.
-///
-class EntityCastExpr(To, From) : Expr!To, EntityCastInfo {
+/// Parameterized on a converter template that handles the actual From → To conversion.
+/// The converter is an uninstantiated template — it's lazily instantiated as
+/// Converter!(To, From) only in eval(), avoiding forward references during type construction.
+class EntityCastExpr(To, From, alias Converter = .defaultEntityCast) : Expr!To, EntityCastInfo {
     private Expr!From _source;
 
     this(Expr!From source) {
@@ -144,48 +167,7 @@ class EntityCastExpr(To, From) : Expr!To, EntityCastInfo {
         return _source.eval(ctx).then((From[] items) {
             To[] result = new To[items.length];
             foreach (i, ref from; items) {
-                static if (is(From == struct) && is(To == struct)) {
-                    // Check if casting back from normalized type to source type
-                    // (e.g., NormalizedUser → User: extract _normalizedSource)
-                    static if (__traits(hasMember, From, "_normalizedSource") &&
-                               is(typeof(From._normalizedSource) == To)) {
-                        result[i] = from._normalizedSource;
-                    } else {
-                        // Struct types (entities, PODs) - copy all matching instance fields
-                        result[i] = To.init;
-                        static foreach (member; __traits(allMembers, From)) {{
-                            static if (member.length > 0 && member[0] != '_' &&
-                                       member != "toString" &&
-                                       member != "toHash" &&
-                                       member != "opEquals" &&
-                                       member != "opCmp" &&
-                                       member != "opAssign" &&
-                                       member != "factory" &&
-                                       member != "Monitor" &&
-                                       __traits(hasMember, To, member)) {
-                                // Check if it's an instance field (not a method/type/etc)
-                                static if (__traits(compiles, __traits(getMember, from, member)) &&
-                                           __traits(compiles, __traits(getMember, result[i], member) = __traits(getMember, from, member))) {
-                                    __traits(getMember, result[i], member) = __traits(getMember, from, member);
-                                }
-                            }
-                        }}
-                    }
-                } else {
-                    // Non-struct types (Query, Mutation) - use default init
-                    result[i] = To.init;
-                }
-                // Carry _normalizedSource through the wrapper chain
-                static if (__traits(hasMember, To, "_normalizedSource")) {
-                    static if (is(typeof(To._normalizedSource) == From)) {
-                        // Direct: From → NormalizedFrom (store original)
-                        result[i]._normalizedSource = from;
-                    } else static if (__traits(hasMember, From, "_normalizedSource") &&
-                                      is(typeof(From._normalizedSource) == typeof(To._normalizedSource))) {
-                        // Transitive: NormalizedFrom → PluginWrapped (copy through chain)
-                        result[i]._normalizedSource = from._normalizedSource;
-                    }
-                }
+                result[i] = Converter!(To, From)(from);
             }
             return result;
         });
@@ -194,7 +176,7 @@ class EntityCastExpr(To, From) : Expr!To, EntityCastInfo {
     override Expr!To optimize(OptimizeContext ctx) {
         auto optimizedSource = _source.optimize(ctx);
         if (optimizedSource !is _source) {
-            return new EntityCastExpr!(To, From)(optimizedSource);
+            return new EntityCastExpr!(To, From, Converter)(optimizedSource);
         }
         return this;
     }
@@ -208,7 +190,7 @@ class EntityCastExpr(To, From) : Expr!To, EntityCastInfo {
 }
 
 /// Cast an expression from one entity/struct type to another compatible type.
-/// Used by plugin infrastructure to forward fields between schema types.
+/// Uses the default converter (generic field copy).
 auto entityCast(To, From)(Expr!From source) {
     return new EntityCastExpr!(To, From)(source);
 }

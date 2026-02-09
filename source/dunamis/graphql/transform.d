@@ -38,7 +38,6 @@ import std.typecons : Nullable;
 
 import dunamis.core.expr : Expr, ExprResultType, isExpr;
 import dunamis.graphql.schema : isObjectType, isInternalMember;
-import dunamis.graphql.plugin : IdentityTypeMap;
 
 // ============================================================================
 // Type Reference Substitution
@@ -144,7 +143,8 @@ template getTransformFieldInfo(Entity) {
 auto wrapEntityResult(alias TypeMap, R)(R result)
     if (isExpr!R)
 {
-    import dunamis.core.expr : ExprResultType, entityCast, map, use, Expr;
+    import dunamis.core.expr : ExprResultType, map, use, Expr;
+    import dunamis.graphql.entity_cast : pluginEntityCast;
 
     alias ResultT = ExprResultType!R;
 
@@ -154,7 +154,7 @@ auto wrapEntityResult(alias TypeMap, R)(R result)
             static if (is(MappedE == E)) {
                 return result;
             } else {
-                return map!((Expr!E e) => entityCast!MappedE(e))(result);
+                return map!((Expr!E e) => pluginEntityCast!MappedE(e))(result);
             }
         } else {
             return result;
@@ -171,7 +171,7 @@ auto wrapEntityResult(alias TypeMap, R)(R result)
         static if (is(MappedT == ResultT)) {
             return result;
         } else {
-            return entityCast!MappedT(result);
+            return pluginEntityCast!MappedT(result);
         }
     } else {
         return result;
@@ -181,45 +181,9 @@ auto wrapEntityResult(alias TypeMap, R)(R result)
 /// Value-level entity cast for Nullable wrapping in wrapEntityResult.
 /// Converts Nullable!From to Nullable!To by copying matching fields.
 Nullable!To nullableEntityCastValue(To, From)(Nullable!From val) {
+    import dunamis.graphql.entity_cast : entityCastValue;
     if (val.isNull) return Nullable!To.init;
     return Nullable!To(entityCastValue!(To, From)(val.get));
-}
-
-/// Value-level entity cast. Copies all matching instance fields from From to To.
-///
-/// Special handling for `_normalizedSource`: if To has a `_normalizedSource` field,
-/// it is populated to carry original entity data through the plugin wrapper chain.
-/// - If `_normalizedSource` type matches From: store From directly (normalization cast)
-/// - If both From and To have `_normalizedSource` of the same type: copy transitively (plugin chain)
-To entityCastValue(To, From)(From from) {
-    To to;
-    static if (is(From == struct) && is(To == struct)) {
-        static foreach (member; __traits(allMembers, From)) {{
-            static if (member.length > 0 && member[0] != '_' &&
-                       member != "toString" && member != "toHash" &&
-                       member != "opEquals" && member != "opCmp" &&
-                       member != "opAssign" && member != "factory" &&
-                       member != "Monitor" &&
-                       __traits(hasMember, To, member)) {
-                static if (__traits(compiles, __traits(getMember, from, member)) &&
-                           __traits(compiles, __traits(getMember, to, member) = __traits(getMember, from, member))) {
-                    __traits(getMember, to, member) = __traits(getMember, from, member);
-                }
-            }
-        }}
-    }
-    // Carry _normalizedSource through the wrapper chain
-    static if (__traits(hasMember, To, "_normalizedSource")) {
-        static if (is(typeof(To._normalizedSource) == From)) {
-            // Direct: From → NormalizedFrom (store original)
-            to._normalizedSource = from;
-        } else static if (__traits(hasMember, From, "_normalizedSource") &&
-                          is(typeof(From._normalizedSource) == typeof(To._normalizedSource))) {
-            // Transitive: NormalizedFrom → PluginWrapped (copy through chain)
-            to._normalizedSource = from._normalizedSource;
-        }
-    }
-    return to;
 }
 
 
@@ -258,6 +222,7 @@ version (unittest) {
 
 // Test ReplaceTypeRefs
 unittest {
+    import dunamis.graphql.plugin : IdentityTypeMap;
     static assert(is(ReplaceTypeRefs!(int, IdentityTypeMap) == int));
     static assert(is(ReplaceTypeRefs!(string, IdentityTypeMap) == string));
     static assert(is(ReplaceTypeRefs!(int[], IdentityTypeMap) == int[]));
@@ -302,7 +267,7 @@ unittest {
 // Test ForwardField with TypeMap (unified - replaces ForwardFieldWithTypeMap)
 unittest {
     import dunamis.graphql.schema : Schema;
-    import dunamis.graphql.plugin : ForwardField;
+    import dunamis.graphql.plugin : ForwardField, IdentityTypeMap;
 
     static struct ForwardedQuery {
         mixin ForwardField!(TestQuery, "authors", IdentityTypeMap);
@@ -326,6 +291,7 @@ unittest {
 
 // Test _normalizedSource in entityCastValue with entities
 unittest {
+    import dunamis.graphql.entity_cast : entityCastValue;
     import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
 
     static MockDB!() db;
@@ -344,14 +310,14 @@ unittest {
         Original _normalizedSource;
     }
 
-    // Plugin wrapper that carries _normalizedSource through chain
+    // Plugin wrapper — per-layer: stores Normalized (not Original)
     @DemoEntity!(db, "originals")
     static struct PluginWrapped {
         mixin DemoId;
-        Original _normalizedSource;
+        Normalized _normalizedSource;
     }
 
-    // Direct: Original → Normalized (stores original in _normalizedSource)
+    // Wrap: Original → Normalized (stores Original in _normalizedSource)
     Original orig;
     orig.name = "Alice";
     orig.age = 30;
@@ -359,14 +325,19 @@ unittest {
     assert(norm._normalizedSource.name == "Alice");
     assert(norm._normalizedSource.age == 30);
 
-    // Transitive: Normalized → PluginWrapped (copies _normalizedSource)
+    // Per-layer wrap: Normalized → PluginWrapped (stores Normalized, not Original)
     auto wrapped = entityCastValue!(PluginWrapped, Normalized)(norm);
-    assert(wrapped._normalizedSource.name == "Alice");
-    assert(wrapped._normalizedSource.age == 30);
+    assert(wrapped._normalizedSource._normalizedSource.name == "Alice");
+    assert(wrapped._normalizedSource._normalizedSource.age == 30);
+
+    // Unwrap: PluginWrapped → Normalized (extracts _normalizedSource)
+    auto unwrapped = entityCastValue!(Normalized, PluginWrapped)(wrapped);
+    assert(unwrapped._normalizedSource.name == "Alice");
 }
 
 // Test _normalizedSource with POD types (no @PrimaryKey)
 unittest {
+    import dunamis.graphql.entity_cast : entityCastValue;
     static struct POD {
         int x;
         string y;

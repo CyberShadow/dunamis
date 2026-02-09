@@ -41,7 +41,7 @@ template ForwardFieldCode(SourceType, string fieldName, alias TypeMap) {
     }();
 
     private enum string _argListStr = () {
-        string result = ".imported!q{dunamis.core.expr}.entityCast!(" ~ _I ~ ".SrcEntity)(" ~ Impl.srcParamNames[0] ~ ")";
+        string result = ".imported!q{dunamis.graphql.entity_cast}.pluginEntityCast!(" ~ _I ~ ".SrcEntity)(" ~ Impl.srcParamNames[0] ~ ")";
         static foreach (i; 1 .. Impl.SrcParams.length)
             result ~= ", " ~ Impl.srcParamNames[i];
         return result;

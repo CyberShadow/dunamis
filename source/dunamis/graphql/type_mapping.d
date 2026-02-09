@@ -150,7 +150,7 @@ template ForwardFieldWithMappingsCode(SourceType, string fieldName, alias TypeMa
     }();
 
     private enum string _argListStr = () {
-        string result = ".imported!q{dunamis.core.expr}.entityCast!(" ~ _I ~ ".SrcEntity)(" ~ Impl.srcParamNames[0] ~ ")";
+        string result = ".imported!q{dunamis.graphql.entity_cast}.pluginEntityCast!(" ~ _I ~ ".SrcEntity)(" ~ Impl.srcParamNames[0] ~ ")";
         static foreach (i; 1 .. Impl.SrcParams.length) {{
             result ~= ", ";
             static if (Impl.isParamMapped!i) {
@@ -240,13 +240,8 @@ template ExternalTypesPlugin(alias S, NewMappings...) if (isSchema!S) {
         enum _MappedTypeBody = () {
             string result = "";
 
-            // _normalizedSource with @GqlHidden
-            static if (__traits(hasMember, T, "_normalizedSource")) {
-                result ~= "@(" ~ _hidden ~ ") typeof(T._normalizedSource) _normalizedSource;\n";
-            } else {
-                // POD type or first wrapper: needs _normalizedSource for normalization
-                result ~= "@(" ~ _hidden ~ ") T _normalizedSource;\n";
-            }
+            // Per-layer _normalizedSource (stores immediate source type)
+            result ~= "@(" ~ _hidden ~ ") package(dunamis.graphql) T _normalizedSource;\n";
 
             // Forward computed fields with value mapping (already zero-leak mixin template)
             static foreach (member; getFieldMembers!T) {
@@ -257,7 +252,7 @@ template ExternalTypesPlugin(alias S, NewMappings...) if (isSchema!S) {
 
             // Plain fields: function literals instead of _nf_read_* helpers
             static foreach (member; __traits(allMembers, T)) {
-                static if (!isInternalMember!member && isPlainField!(T, member) && member != "_normalizedSource") {
+                static if (!isInternalMember!member && isPlainField!(T, member)) {
                     result ~=
                         "@(__traits(getAttributes, __traits(getMember, T, \"" ~ member ~ "\"))) " ~
                         "static auto " ~ member ~ "(" ~ _Expr ~ "!(typeof(this)) _self) { " ~
