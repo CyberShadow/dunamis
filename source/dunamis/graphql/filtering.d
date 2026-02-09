@@ -1121,12 +1121,11 @@ mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) 
     import dunamis.graphql.transform : wrapEntityResult;
     import std.typecons : Nullable;
 
-    // Wrap in a template so it's not detected as a function by getFields
-    private template _srcFn() { alias _srcFn = __traits(getMember, SourceQuery, fieldName); }
-    alias _SrcParams = Parameters!(_srcFn!());
-    alias _SrcDefaults = ParameterDefaults!(_srcFn!());
+    // Type metadata — aliases don't leak as fields/methods (invisible to field discovery)
+    alias _SrcParams = Parameters!(__traits(getMember, SourceQuery, fieldName));
+    alias _SrcDefaults = ParameterDefaults!(__traits(getMember, SourceQuery, fieldName));
     alias _SrcEntity = ExprResultType!(_SrcParams[0]);
-    alias _ElementType = ArrayFieldElementType!(_srcFn!());
+    alias _ElementType = ArrayFieldElementType!(__traits(getMember, SourceQuery, fieldName));
 
     // Generate the entity filter type for this element type
     mixin GenerateEntityFilterType!(_ElementType, __traits(identifier, _ElementType) ~ "Filter");
@@ -1146,9 +1145,10 @@ mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) 
     }
 
     // Build and mix in the method declaration (no intermediate enum values)
-    @(__traits(getAttributes, _srcFn!()))
+    // References SourceQuery/fieldName directly — no _srcFn alias needed
+    @(__traits(getAttributes, __traits(getMember, SourceQuery, fieldName)))
     mixin(() {
-        enum string[] srcParamNames = [ParameterIdentifierTuple!(_srcFn!())];
+        enum string[] srcParamNames = [ParameterIdentifierTuple!(__traits(getMember, SourceQuery, fieldName))];
 
         // Parameter list — reference _SrcParams/_SrcDefaults directly (aliases, not leaked as fields)
         string paramList = "Expr!(typeof(this)) " ~ srcParamNames[0];
@@ -1160,14 +1160,15 @@ mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) 
         }}
         paramList ~= ", Nullable!_EntityFilter filter = Nullable!_EntityFilter.init";
 
-        // Argument list
+        // Argument list — call original function via __traits in generated code
         string argList = "entityCast!(_SrcEntity)(" ~ srcParamNames[0] ~ ")";
         static foreach (i; 1 .. _SrcParams.length) {
             argList ~= ", " ~ srcParamNames[i];
         }
 
         return "static auto " ~ fieldName ~ "(" ~ paramList ~ ") { " ~
-              "return wrapEntityResult!(TypeMap)(_applyFilter(_srcFn!()(" ~ argList ~ "), filter)); }";
+              "return wrapEntityResult!(TypeMap)(_applyFilter(" ~
+              "__traits(getMember, SourceQuery, \"" ~ fieldName ~ "\")(" ~ argList ~ "), filter)); }";
     }());
 }
 
