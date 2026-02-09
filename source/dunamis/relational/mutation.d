@@ -12,7 +12,7 @@ import dunamis.core.expr;
 import dunamis.core.eval;
 import dunamis.core.optimize : OptimizeContext;
 import dunamis.relational.eval_context;
-import dunamis.relational.schema : EntityID;
+import dunamis.relational.schema : EntityID, hasAutoIncrement;
 
 // ============================================================================
 // Mutation Input Types
@@ -140,7 +140,8 @@ class InsertExpr(Entity) : Expr!Entity {
 
     /// Populate plain non-PK fields on entities from a QueryResult.
     private static void _populatePlainFields(ref Entity[] entities, AnyRef[] refs, QueryResult result) {
-        import dunamis.core.types : getPlainFieldNames, hasPrimaryKeyAttr;
+        import dunamis.core.types : getPlainFieldNames;
+        import dunamis.relational.schema.attrs : hasPrimaryKeyAttr;
         import dunamis.relational.schema.attrs : getPlainFieldColumnName;
 
         static foreach (fieldName; getPlainFieldNames!Entity) {{

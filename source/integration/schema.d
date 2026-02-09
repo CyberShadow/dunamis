@@ -278,8 +278,7 @@ mixin template TestSchema(alias db) {
     /// Composite primary key entity: Tag with (category, name) PK
     @DemoEntity!(db, "tags")
     struct Tag {
-        import dunamis.core.types : PrimaryKey;
-        import dunamis.relational.schema.attrs : SqlColumn;
+        import dunamis.relational.schema.attrs : PrimaryKey, SqlColumn;
 
         @PrimaryKey @SqlColumn("category") string category;
         @PrimaryKey @SqlColumn("name") string name;
@@ -290,8 +289,7 @@ mixin template TestSchema(alias db) {
     /// PK is (user_id, badge_name), and user_id is also an FK to User
     @DemoEntity!(db, "user_badges")
     struct UserBadge {
-        import dunamis.core.types : PrimaryKey;
-        import dunamis.relational.schema.attrs : SqlColumn;
+        import dunamis.relational.schema.attrs : PrimaryKey, SqlColumn;
 
         @PrimaryKey @SqlColumn("user_id") long userId;
         @PrimaryKey @SqlColumn("badge_name") string badgeName;

@@ -151,7 +151,7 @@ template getFilterableColumns(Entity) {
 
 /// Check if a type is an entity (has @PrimaryKey field).
 template isEntityType(T) {
-    import dunamis.core.types : hasPrimaryKey;
+    import dunamis.relational.schema.attrs : hasPrimaryKey;
     enum isEntityType = hasPrimaryKey!T;
 }
 

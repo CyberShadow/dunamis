@@ -15,7 +15,7 @@ import dunamis.core.expr;
 import dunamis.core.optimize;
 import dunamis.relational.eval_context;
 import dunamis.relational.query_node;
-import dunamis.relational.schema : BelongsToInfo;
+import dunamis.relational.schema : BelongsToInfo, PrimaryKey;
 
 // ============================================================================
 // Prefetch Expression

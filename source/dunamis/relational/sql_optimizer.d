@@ -965,7 +965,7 @@ unittest {
 
     // Minimal entity for testing
     static struct TestUser {
-        import dunamis.core.types : PrimaryKey;
+        import dunamis.relational.schema.attrs : PrimaryKey;
         @PrimaryKey string id;
     }
 
@@ -1037,7 +1037,7 @@ unittest {
 unittest {
     // Test ProjectComputedExpr
     static struct TestUser {
-        import dunamis.core.types : PrimaryKey;
+        import dunamis.relational.schema.attrs : PrimaryKey;
         @PrimaryKey string id;
     }
 

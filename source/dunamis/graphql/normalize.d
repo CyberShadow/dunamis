@@ -18,7 +18,8 @@ module dunamis.graphql.normalize;
 /// Uses function literals instead of named helpers — no `_nf_read_*` or
 /// `_nf_call_*` symbols leak into the target struct.
 template NormalizeFieldsCode(SourceType, alias TypeMap) {
-    import dunamis.core.types : isPlainField, hasPrimaryKeyAttr;
+    import dunamis.core.types : isPlainField;
+    import dunamis.relational.schema.attrs : hasPrimaryKeyAttr;
     import dunamis.core.discovery : getFieldMembers, isComputedField;
 
     private enum string _use = ".imported!q{dunamis.core.expr}.use";

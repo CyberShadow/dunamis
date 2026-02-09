@@ -241,7 +241,7 @@ template NormalizePlugin(RawQuery, RawMutation) {
     // POD types pass through unchanged — they keep plain fields/methods
     // and remain compatible with ExternalTypesPlugin type mappings.
     template _TypeMap(T) {
-        import dunamis.core.types : hasPrimaryKey;
+        import dunamis.relational.schema.attrs : hasPrimaryKey;
         static if (isTypeInList!(T, _AllTypes) && hasPrimaryKey!T) {
             alias _TypeMap = _NormalizedType!T;
         } else {

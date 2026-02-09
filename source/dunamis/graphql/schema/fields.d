@@ -227,7 +227,8 @@ template getFields(T) {
     import dunamis.core.expr : ExprResultType;
 
     enum getFields = () {
-        import dunamis.core.types : isPlainField, isPlainMethod, hasPrimaryKeyAttr;
+        import dunamis.core.types : isPlainField, isPlainMethod;
+        import dunamis.relational.schema.attrs : hasPrimaryKeyAttr;
 
         FieldInfo[] fields;
 

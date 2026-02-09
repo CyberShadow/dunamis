@@ -24,13 +24,14 @@ template EntityID(T) {
 // Entity Construction Helpers
 // ============================================================================
 
-import dunamis.core.types : AnyRef, PrimaryKey, getPrimaryKeyFieldNames;
+import dunamis.core.types : AnyRef;
+import dunamis.relational.schema.attrs : PrimaryKey, getPrimaryKeyFieldNames;
 
 /// Create an entity with its first @PrimaryKey field set from a local ID value.
 /// Convenience for single-key entities (used by GetByIdsExpr and tests).
 T makeEntity(T, IdType)(IdType localId) {
     import std.conv : to;
-    import dunamis.core.types : getPrimaryKeyFieldNames;
+    import dunamis.relational.schema.attrs : getPrimaryKeyFieldNames;
     T e;
     enum pkField = getPrimaryKeyFieldNames!T[0];
     __traits(getMember, e, pkField) = to!(typeof(__traits(getMember, T.init, pkField)))(localId);
@@ -41,7 +42,8 @@ T makeEntity(T, IdType)(IdType localId) {
 /// Handles CustomScalar types (e.g., Int64) by converting through the base type.
 T makeEntityFromParts(T)(string[] keyParts) {
     import std.conv : to;
-    import dunamis.core.types : isCustomScalar, getPrimaryKeyFieldNames;
+    import dunamis.core.types : isCustomScalar;
+    import dunamis.relational.schema.attrs : getPrimaryKeyFieldNames;
     enum pkFields = getPrimaryKeyFieldNames!T;
     T e;
     static foreach (i, f; pkFields) {{
@@ -64,7 +66,8 @@ T makeEntityFromRef(T)(AnyRef ref_) {
 /// Extract an AnyRef from an entity (reads @PrimaryKey field(s)).
 AnyRef entityToRef(T)(T entity) {
     import std.conv : to;
-    import dunamis.core.types : encodeCompositeKey, getPrimaryKeyFieldNames;
+    import dunamis.core.types : encodeCompositeKey;
+    import dunamis.relational.schema.attrs : getPrimaryKeyFieldNames;
     enum pkFields = getPrimaryKeyFieldNames!T;
     string[] values;
     static foreach (f; pkFields) {
@@ -77,7 +80,7 @@ AnyRef entityToRef(T)(T entity) {
 /// For composite keys, ALL PK fields must be non-default.
 /// Works via UFCS: entity.isValid()
 bool isValid(T)(T entity) {
-    import dunamis.core.types : getPrimaryKeyFieldNames;
+    import dunamis.relational.schema.attrs : getPrimaryKeyFieldNames;
     enum pkFields = getPrimaryKeyFieldNames!T;
     static foreach (f; pkFields) {{
         alias PkType = typeof(__traits(getMember, T.init, f));

@@ -68,7 +68,7 @@ template getColumnDefs(Entity) {
     import dunamis.relational.schema : BelongsToFK, hasBelongsToFK, getBelongsToFK;
     import dunamis.relational.schema : BelongsToParent, hasBelongsToParent, extractBelongsToParent;
     import dunamis.relational.schema : getSqlColumn, isPlainField, getPlainFieldColumnName;
-    import dunamis.core.types : hasPrimaryKeyAttr, hasAutoIncrementAttr, AutoIncrement;
+    import dunamis.relational.schema.attrs : hasPrimaryKeyAttr, hasAutoIncrementAttr, AutoIncrement;
     import dunamis.core.expr : ExprResultType;
 
     enum getColumnDefs = () {

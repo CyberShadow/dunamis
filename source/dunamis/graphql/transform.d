@@ -192,8 +192,7 @@ Nullable!To nullableEntityCastValue(To, From)(Nullable!From val) {
 // ============================================================================
 
 version (unittest) {
-    import dunamis.core.types : PrimaryKey;
-    import dunamis.relational.schema : Entity, Col, HasMany, BelongsTo, ForeignKey, Table;
+    import dunamis.relational.schema : Entity, Col, HasMany, BelongsTo, ForeignKey, Table, PrimaryKey;
     import dunamis.relational.demo : MockDB;
 
     static MockDB!() _testDb;

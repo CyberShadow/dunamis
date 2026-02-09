@@ -178,12 +178,6 @@ interface EveryItemOfExprInfo {
     @property Object parentMap();
 }
 
-/// Check if a type is an entity (has @PrimaryKey field).
-template isEntityType(T) {
-    import dunamis.core.types : hasPrimaryKey;
-    enum isEntityType = hasPrimaryKey!T;
-}
-
 /// Placeholder representing "current item" within a map iteration.
 /// When MapExpr evaluates its body, it passes the flattened collection refs.
 /// EveryItemOfExpr just returns those refs unchanged - it's a pass-through
@@ -517,11 +511,9 @@ auto every(alias pred, Coll)(Coll collection)
 import ae.utils.promise.await : awaitSync;
 import dunamis.core.expr.primitives : FieldAccessExpr;
 
-/// Dummy entity type for tests (with @PrimaryKey field)
+/// Dummy entity type for tests
 private struct TestEntity {
-    import dunamis.core.types : PrimaryKey;
-
-    @PrimaryKey string id;      // Primary key
+    string id;
     string typeName;                // Extra field for test assertions
 }
 
@@ -777,7 +769,7 @@ unittest {
 unittest {
     import std.conv : to;
 
-    // POD struct without @PrimaryKey
+    // POD struct
     static struct Stats {
         int count;
         int total;
