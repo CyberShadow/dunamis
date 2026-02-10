@@ -228,24 +228,26 @@ template getFields(T) {
 
     enum getFields = () {
         import dunamis.core.types : isPlainField, isPlainMethod;
-        import dunamis.relational.schema.attrs : hasPrimaryKeyAttr;
 
         FieldInfo[] fields;
 
-        // Zeroth pass: @PrimaryKey plain fields (so id appears first)
+        // First pass: plain fields (struct instance fields, in declaration order)
+        // Plain fields come first so that ID fields (from DemoId mixin, declared first)
+        // appear at the top of the schema.
         static foreach (member; __traits(allMembers, T)) {{
             static if (!isInternalMember!member) {
-                static if (isPlainField!(T, member) && hasPrimaryKeyAttr!(T, member)) {
-                    enum isHidden0 = hasGqlHidden!(__traits(getMember, T, member));
+                static if (isPlainField!(T, member)) {
+                    enum isHidden2 = hasGqlHidden!(__traits(getMember, T, member));
                     alias FieldType = typeof(__traits(getMember, T.init, member));
-                    enum gqlFieldName0 = member;
-                    enum gqlType0 = graphqlTypeName!FieldType;
+                    // Use D field name directly (GraphQL uses camelCase like D)
+                    enum gqlFieldName = member;
+                    enum gqlType = graphqlTypeName!FieldType;
 
                     fields ~= FieldInfo(
-                        gqlFieldName0,
-                        gqlType0,
+                        gqlFieldName,
+                        gqlType,
                         false,  // isConnection
-                        isHidden0,
+                        isHidden2,
                         "",     // description
                         "",     // deprecation
                         []      // arguments
@@ -254,7 +256,7 @@ template getFields(T) {
             }
         }}
 
-        // First pass: field methods (static functions)
+        // Second pass: field methods (static functions)
         static foreach (member; __traits(allMembers, T)) {{
             static if (!isInternalMember!member) {
                 static if (is(typeof(__traits(getMember, T, member)) == function)) {
@@ -295,29 +297,6 @@ template getFields(T) {
                             "Add @GqlHidden to exclude this method from the schema.");
                     }
                     // @GqlHidden methods that don't conform are silently skipped
-                }
-            }
-        }}
-
-        // Second pass: non-PK plain fields (struct instance fields)
-        static foreach (member; __traits(allMembers, T)) {{
-            static if (!isInternalMember!member) {
-                static if (isPlainField!(T, member) && !hasPrimaryKeyAttr!(T, member)) {
-                    enum isHidden2 = hasGqlHidden!(__traits(getMember, T, member));
-                    alias FieldType = typeof(__traits(getMember, T.init, member));
-                    // Use D field name directly (GraphQL uses camelCase like D)
-                    enum gqlFieldName = member;
-                    enum gqlType = graphqlTypeName!FieldType;
-
-                    fields ~= FieldInfo(
-                        gqlFieldName,
-                        gqlType,
-                        false,  // isConnection
-                        isHidden2,
-                        "",     // description
-                        "",     // deprecation
-                        []      // arguments
-                    );
                 }
             }
         }}
