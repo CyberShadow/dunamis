@@ -27,6 +27,18 @@ class Executor {
     ///   teardown(true) is called after successful evaluation.
     ///   teardown(false) is called if evaluation fails.
     Promise!T execute(E, T = E.ResultType)(E expr, bool optimize = true) {
+        return execute!(E, T)(expr, new EvalContext(), optimize);
+    }
+
+    /// Execute an expression with a pre-configured EvalContext.
+    /// Use this overload to pass request-scoped context values:
+    ///
+    /// ---
+    /// auto ctx = new EvalContext();
+    /// ctx.setRequestContext(AuthCtx("user-1", false));
+    /// auto result = executor.execute(query, ctx);
+    /// ---
+    Promise!T execute(E, T = E.ResultType)(E expr, EvalContext evalCtx, bool optimize = true) {
         E toEval = expr;
 
         if (optimize) {
@@ -44,9 +56,8 @@ class Executor {
 
         if (sources.length == 0) {
             // No data sources — evaluate directly (no setup/teardown needed)
-            auto ctx = new EvalContext();
-            ctx.setValues!AnyRef(null, [queryRoot]);
-            return toEval.eval(ctx).then((results) => results[0]);
+            evalCtx.setValues!AnyRef(null, [queryRoot]);
+            return toEval.eval(evalCtx).then((results) => results[0]);
         }
 
         // Setup all data sources, then evaluate, then teardown
@@ -55,9 +66,8 @@ class Executor {
             setupChain = setupChain.then(() => ds.setup());
 
         return setupChain.then(() {
-            auto ctx = new EvalContext();
-            ctx.setValues!AnyRef(null, [queryRoot]);
-            return toEval.eval(ctx);
+            evalCtx.setValues!AnyRef(null, [queryRoot]);
+            return toEval.eval(evalCtx);
         }).then((T[] results) {
             // Teardown with success
             auto p = resolve();
@@ -172,4 +182,58 @@ unittest {
 
     auto result = awaitSync(executor.execute(query));
     assert(result == [11, 21]);
+}
+
+unittest {
+    // Test executor with request context
+    import dunamis.core.expr.combinators : context;
+
+    static struct RequestCtx {
+        string locale;
+    }
+
+    auto executor = new Executor();
+
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("1"), TestEntity("2")]);
+    auto query = map!(
+        (Expr!TestEntity item) => use(
+            (string id, RequestCtx ctx) => ctx.locale ~ ":" ~ id,
+            use((TestEntity e) => e.id, item),
+            context!RequestCtx(item)
+        )
+    )(collection);
+
+    auto evalCtx = new EvalContext();
+    evalCtx.setRequestContext(RequestCtx("fr"));
+
+    auto result = awaitSync(executor.execute(query, evalCtx));
+    assert(result == ["fr:1", "fr:2"]);
+}
+
+unittest {
+    // Test executor with multiple context types
+    import dunamis.core.expr.combinators : context;
+
+    static struct AuthCtx { string userId; }
+    static struct TenantCtx { string tenantId; }
+
+    auto executor = new Executor();
+
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("a")]);
+    auto query = map!(
+        (Expr!TestEntity item) => use(
+            (string id, AuthCtx auth, TenantCtx tenant) =>
+                auth.userId ~ "/" ~ tenant.tenantId ~ "/" ~ id,
+            use((TestEntity e) => e.id, item),
+            context!AuthCtx(item),
+            context!TenantCtx(item)
+        )
+    )(collection);
+
+    auto evalCtx = new EvalContext();
+    evalCtx.setRequestContext(AuthCtx("user-1"));
+    evalCtx.setRequestContext(TenantCtx("tenant-abc"));
+
+    auto result = awaitSync(executor.execute(query, evalCtx));
+    assert(result == ["user-1/tenant-abc/a"]);
 }

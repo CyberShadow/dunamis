@@ -122,6 +122,11 @@ struct Query {
 // Input Types - Structs used as computed field arguments
 // ============================================================================
 
+/// Example request context for computed fields that need request-scoped data
+struct RequestContext {
+    string locale;
+}
+
 /// Example input type for formatting options
 struct FormatOptions {
     import std.typecons : Nullable;
@@ -171,6 +176,20 @@ struct User {
     static auto formattedName(Expr!User u, FormatOptions options) {
         // For now, just use prefix - full implementation would handle all options
         return options.prefix ~ u.firstName;
+    }
+
+    /// Computed field using request context for localization.
+    /// Reads the RequestContext from EvalContext at eval-time.
+    static auto localizedGreeting(Expr!User u) {
+        return use(
+            (string firstName, RequestContext reqCtx) {
+                if (reqCtx.locale == "fr") return "Bonjour " ~ firstName;
+                if (reqCtx.locale == "es") return "Hola " ~ firstName;
+                return "Hello " ~ firstName;
+            },
+            u.firstName,
+            context!RequestContext(u)
+        );
     }
 
     /// Computed field accessing an unrelated global table.
@@ -931,6 +950,7 @@ type User {
   greeting(prefix: String!, suffix: String = "!"): String!
   """Formatted name with options"""
   formattedName(options: FormatOptions!): String!
+  localizedGreeting: String!
   availability: String!
 }
 
@@ -1874,5 +1894,63 @@ unittest {
     assert(result[0] == "Alice: New Year, Independence Day, Christmas");
     assert(result[1] == "Bob: New Year, Independence Day, Christmas");
     assert(result[2] == "Carol: New Year, Independence Day, Christmas");
+}
+
+// ============================================================================
+// Request Context Tests
+// ============================================================================
+
+// Test: Request context with French locale
+unittest {
+    auto db = createMockDB();
+    auto executor = new Executor();
+
+    auto query = map!(
+        (Expr!User u) => u.localizedGreeting
+    )(getByIds!User([1, 2]));
+
+    auto evalCtx = new EvalContext();
+    evalCtx.setRequestContext(RequestContext("fr"));
+    auto result = awaitSync(executor.execute(query, evalCtx));
+
+    assert(result.length == 2);
+    assert(result[0] == "Bonjour Alice");
+    assert(result[1] == "Bonjour Bob");
+}
+
+// Test: Request context with Spanish locale
+unittest {
+    auto db = createMockDB();
+    auto executor = new Executor();
+
+    auto query = map!(
+        (Expr!User u) => u.localizedGreeting
+    )(getByIds!User([1, 2]));
+
+    auto evalCtx = new EvalContext();
+    evalCtx.setRequestContext(RequestContext("es"));
+    auto result = awaitSync(executor.execute(query, evalCtx));
+
+    assert(result.length == 2);
+    assert(result[0] == "Hola Alice");
+    assert(result[1] == "Hola Bob");
+}
+
+// Test: Request context with default (English) locale
+unittest {
+    auto db = createMockDB();
+    auto executor = new Executor();
+
+    auto query = map!(
+        (Expr!User u) => u.localizedGreeting
+    )(getByIds!User([1, 2]));
+
+    auto evalCtx = new EvalContext();
+    evalCtx.setRequestContext(RequestContext("en"));
+    auto result = awaitSync(executor.execute(query, evalCtx));
+
+    assert(result.length == 2);
+    assert(result[0] == "Hello Alice");
+    assert(result[1] == "Hello Bob");
 }
 

@@ -117,6 +117,38 @@ class EvalContext {
     void clearAllCachedEvals() {
         _exprCache.clear();
     }
+
+    // ========================================================================
+    // Request Context Storage
+    // ========================================================================
+
+    /// Type-keyed storage for request-scoped context values.
+    /// Users can store multiple context types (e.g., AuthCtx, TenantCtx)
+    /// and retrieve them from computed fields via context!T(expr).
+    private void*[TypeInfo] _requestContexts;
+
+    /// Store a request context value. Call once per type before executing a query.
+    /// Only struct types are supported (value semantics, no aliasing issues).
+    void setRequestContext(T)(T value) if (is(T == struct)) {
+        auto p = new T;
+        *p = value;
+        _requestContexts[typeid(T)] = cast(void*) p;
+    }
+
+    /// Retrieve a previously stored request context value.
+    /// Asserts if the context type was not set — this is a programming error.
+    T getRequestContext(T)() if (is(T == struct)) {
+        auto p = typeid(T) in _requestContexts;
+        assert(p !is null,
+            "Request context " ~ T.stringof ~ " not set. " ~
+            "Call evalCtx.setRequestContext(" ~ T.stringof ~ "(...)) before executing the query.");
+        return *(cast(T*) *p);
+    }
+
+    /// Check if a request context type has been set.
+    bool hasRequestContext(T)() if (is(T == struct)) {
+        return (typeid(T) in _requestContexts) !is null;
+    }
 }
 
 // ============================================================================
@@ -164,4 +196,40 @@ unittest {
     // Non-existent key returns empty
     auto vals3 = ctx.getValues!int(new Object());
     assert(vals3.length == 0);
+}
+
+unittest {
+    // Test request context storage with multiple types
+    static struct AuthCtx { string userId; bool isAdmin; }
+    static struct TenantCtx { string tenantId; string locale; }
+
+    auto ctx = new EvalContext();
+
+    // Initially not set
+    assert(!ctx.hasRequestContext!AuthCtx);
+    assert(!ctx.hasRequestContext!TenantCtx);
+
+    // Set and retrieve AuthCtx
+    ctx.setRequestContext(AuthCtx("user-1", true));
+    assert(ctx.hasRequestContext!AuthCtx);
+    auto auth = ctx.getRequestContext!AuthCtx;
+    assert(auth.userId == "user-1");
+    assert(auth.isAdmin == true);
+
+    // Set and retrieve TenantCtx (independent of AuthCtx)
+    ctx.setRequestContext(TenantCtx("tenant-abc", "fr"));
+    assert(ctx.hasRequestContext!TenantCtx);
+    auto tenant = ctx.getRequestContext!TenantCtx;
+    assert(tenant.tenantId == "tenant-abc");
+    assert(tenant.locale == "fr");
+
+    // AuthCtx still available
+    auto authAgain = ctx.getRequestContext!AuthCtx;
+    assert(authAgain.userId == "user-1");
+
+    // Overwrite with new value
+    ctx.setRequestContext(AuthCtx("user-2", false));
+    auto authNew = ctx.getRequestContext!AuthCtx;
+    assert(authNew.userId == "user-2");
+    assert(authNew.isAdmin == false);
 }

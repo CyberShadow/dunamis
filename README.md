@@ -729,6 +729,69 @@ FinalSchema.Query().singleton().holidays()
 
 For most computed fields, raw schema access is appropriate — you want all data from the global table, not a filtered/paginated subset.
 
+### Request Context
+
+Computed fields can access request-scoped data like the authenticated user, tenant ID, or locale. Define a context struct, pass it via `EvalContext`, and read it with `context!T()`:
+
+```d
+// Define request context structs
+struct AuthCtx { string userId; bool isAdmin; }
+struct TenantCtx { string tenantId; string locale; }
+
+@Entity!(db, "users")
+struct User {
+    @PrimaryKey long id;
+    mixin Col!("firstName", string);
+
+    // Computed field using request context
+    static auto localizedGreeting(Expr!User u) {
+        return use(
+            (string firstName, TenantCtx tenant) =>
+                tenant.locale == "fr" ? "Bonjour " ~ firstName : "Hello " ~ firstName,
+            u.firstName,
+            context!TenantCtx(u)
+        );
+    }
+
+    // Multiple context types in one field
+    static auto canEdit(Expr!Post p) {
+        return use(
+            (long authorId, AuthCtx auth) =>
+                authorId.to!string == auth.userId || auth.isAdmin,
+            p.authorId,
+            context!AuthCtx(p)
+        );
+    }
+}
+```
+
+**Passing context at execution time:**
+
+```d
+auto executor = new Executor();
+auto query = compileQuery!Query(`{ users { localizedGreeting } }`);
+
+// Create EvalContext and set request-scoped values
+auto ctx = new EvalContext();
+ctx.setRequestContext(AuthCtx("user-1", false));
+ctx.setRequestContext(TenantCtx("tenant-abc", "fr"));
+
+// Pass EvalContext to execute
+auto result = executor.execute(query, ctx);
+// Returns: {"users": [{"localizedGreeting": "Bonjour Alice"}, ...]}
+
+// Without context (existing API unchanged)
+auto result2 = executor.execute(query);  // Uses new EvalContext() internally
+```
+
+**Key properties:**
+
+- **Structs only** — context values are value types (natural copy semantics)
+- **Multiple types** — call `setRequestContext` once per type; retrieve with `context!T(expr)`
+- **Assert on missing** — forgetting to set a context type produces a clear error message
+- **No SQL pushdown** — context values are runtime data, correctly opaque to the optimizer
+- **No schema impact** — context fields appear in the schema like any computed field, but the context dependency is invisible to introspection
+
 ### Runtime Query Compilation
 
 Use `compileQuery` to compile GraphQL query strings at runtime:
@@ -948,6 +1011,7 @@ Introspection respects `@GqlHidden` (hidden fields are excluded), `@GqlDeprecate
 - Runtime introspection (`__schema`, `__type`, `__typename`)
 - Directives: `@skip(if: Boolean!)` and `@include(if: Boolean!)` for conditional field inclusion
 - Fragments: named fragments (`...FragmentName`), inline fragments (`... on Type { }` and `... { }`), with type condition matching, directive support, and circular reference detection
+- Request context via `context!T(expr)` — computed fields can access request-scoped data (auth, locale, tenant) passed via `EvalContext`
 
 ## Future Directions
 
@@ -956,7 +1020,6 @@ Introspection respects `@GqlHidden` (hidden fields are excluded), `@GqlDeprecate
 - **Polymorphism** - GraphQL union and interface types for heterogeneous collections
 - **Expression deduplication** - Grafast-style peer analysis
 - **Plan caching** - Reuse optimized plans for repeated queries
-- **Request context** - User-accessible request-scoped context for computed fields and `use()` callbacks. The executor already has `EvalContext` with `SourceContextRegistry` for internal plumbing; the missing piece is a user-facing API so computed fields can access request-scoped data like the authenticated user, tenant ID, feature flags, or tracing/logging context. Possible API: `context!MyRequestContext(expr)` returning an `Expr!MyRequestContext` usable inside `use()`
 - **Field override plugin layer** - Runtime mechanism to intercept and override any field resolution, enabling feature flags, A/B testing, gradual rollouts, or per-deployment customization without recompilation
 
 ## Related Work

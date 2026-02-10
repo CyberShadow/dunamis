@@ -200,13 +200,21 @@ void setGraphQLEndpoint(string url) {
 
 /// Execute a GraphQL query/mutation and return the parsed response
 /// Uses the current optimization mode set by runAllTests
-JSONValue graphql(string query, JSONValue variables = JSONValue.emptyObject) {
+JSONValue graphql(string query, JSONValue variables = JSONValue.emptyObject,
+                  string[string] extraHeaders = null) {
     import std.net.curl : HTTP, CurlException;
     import std.exception : enforce;
 
     auto http = HTTP(graphqlEndpoint);
     http.addRequestHeader("Content-Type", "application/json");
     http.addRequestHeader("X-Optimize", currentOptimizeMode ? "true" : "false");
+
+    // Add any extra headers (e.g., X-Locale for request context)
+    if (extraHeaders !is null) {
+        foreach (name, value; extraHeaders) {
+            http.addRequestHeader(name, value);
+        }
+    }
 
     auto requestBody = JSONValue([
         "query": JSONValue(query),

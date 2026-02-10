@@ -18,6 +18,11 @@ import dunamis.relational.mutation : insert;
 import std.stdio : writeln, writefln;
 import integration.test_framework : graphql, assertNoErrors;
 
+/// Request context for testing request-scoped data in computed fields
+struct RequestContext {
+    string locale;
+}
+
 /// Task status enum for testing enum support
 enum TaskStatus {
     pending,
@@ -143,7 +148,7 @@ void seedDatabase() {
 mixin template TestSchema(alias db) {
     import std.json : JSONValue;
     import std.typecons : Nullable;
-    import dunamis.core.expr : Expr;
+    import dunamis.core.expr : Expr, context, use;
     import dunamis.graphql : Schema, SortingPlugin, FilterPlugin, CrudMutationPlugin, ApplyPlugins;
     import dunamis.graphql.schema : GqlName;
     import dunamis.relational.schema : Table, ForeignKey, BelongsTo, HasMany, Col, getAll, hasMany;
@@ -205,6 +210,19 @@ mixin template TestSchema(alias db) {
         static auto allPostsTitled(Expr!User u) {
             import dunamis.core.expr : every;
             return every!((Expr!Post p) => p.title.ne(""))(u.posts);
+        }
+
+        /// Computed field using request context for localization.
+        static auto localizedGreeting(Expr!User u) {
+            return use(
+                (string firstName, .RequestContext reqCtx) {
+                    if (reqCtx.locale == "fr") return "Bonjour " ~ firstName;
+                    if (reqCtx.locale == "es") return "Hola " ~ firstName;
+                    return "Hello " ~ firstName;
+                },
+                u.firstName,
+                context!(.RequestContext)(u)
+            );
         }
 
         /// Test recursive input: returns user's firstName (simplified test)

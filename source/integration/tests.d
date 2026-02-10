@@ -1539,6 +1539,82 @@ void testFilterCaseSensitiveVsInsensitive() {
 }
 
 // ============================================================================
+// Request Context Tests
+// ============================================================================
+
+void testRequestContextGreeting() {
+    // Test that localizedGreeting uses French locale from X-Locale header
+    auto response = graphql(`{
+        users {
+            firstName
+            localizedGreeting
+        }
+    }`, JSONValue.emptyObject, ["X-Locale": "fr"]);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 1, "Expected at least 1 user");
+
+    // Find Alice and check her greeting
+    foreach (user; users) {
+        if (user["firstName"].str == "Alice") {
+            assertTrue(user["localizedGreeting"].str == "Bonjour Alice",
+                "Expected 'Bonjour Alice', got: " ~ user["localizedGreeting"].str);
+            return;
+        }
+    }
+    assertTrue(false, "Alice not found");
+}
+
+void testRequestContextDefaultLocale() {
+    // Test that localizedGreeting uses default English locale (no X-Locale header)
+    auto response = graphql(`{
+        users {
+            firstName
+            localizedGreeting
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 1, "Expected at least 1 user");
+
+    // Find Alice and check her greeting
+    foreach (user; users) {
+        if (user["firstName"].str == "Alice") {
+            assertTrue(user["localizedGreeting"].str == "Hello Alice",
+                "Expected 'Hello Alice', got: " ~ user["localizedGreeting"].str);
+            return;
+        }
+    }
+    assertTrue(false, "Alice not found");
+}
+
+void testRequestContextSpanishLocale() {
+    // Test with Spanish locale
+    auto response = graphql(`{
+        users {
+            firstName
+            localizedGreeting
+        }
+    }`, JSONValue.emptyObject, ["X-Locale": "es"]);
+
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 1, "Expected at least 1 user");
+
+    // Find Alice and check her greeting
+    foreach (user; users) {
+        if (user["firstName"].str == "Alice") {
+            assertTrue(user["localizedGreeting"].str == "Hola Alice",
+                "Expected 'Hola Alice', got: " ~ user["localizedGreeting"].str);
+            return;
+        }
+    }
+    assertTrue(false, "Alice not found");
+}
+
+// ============================================================================
 // Composite Primary Key Tests
 // ============================================================================
 
@@ -1827,6 +1903,11 @@ static this() {
     registerTest("Filter startsWithInsensitive", "tests", &testFilterStartsWithInsensitive);
     registerTest("Filter endsWithInsensitive", "tests", &testFilterEndsWithInsensitive);
     registerTest("Filter case-sensitive vs insensitive", "tests", &testFilterCaseSensitiveVsInsensitive);
+
+    // Request context tests
+    registerTest("Request context greeting (French)", "tests", &testRequestContextGreeting);
+    registerTest("Request context default locale", "tests", &testRequestContextDefaultLocale);
+    registerTest("Request context greeting (Spanish)", "tests", &testRequestContextSpanishLocale);
 
     // Composite primary key tests
     registerTest("Query all tags (composite PK)", "tests", &testQueryAllTags);

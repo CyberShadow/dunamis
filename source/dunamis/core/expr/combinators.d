@@ -170,6 +170,65 @@ auto broadcast(T)(Expr!T source, ExprBase sizeReference) {
 }
 
 // ============================================================================
+// ContextExpr: Request Context Access
+// ============================================================================
+
+/// Expression that reads a request context value from EvalContext and
+/// replicates it across the batch. Used to pass request-scoped data
+/// (e.g., authenticated user, tenant ID, locale) into computed fields.
+///
+/// Example:
+/// ---
+/// static auto greeting(Expr!User u) {
+///     return use(
+///         (string firstName, TenantCtx tenant) =>
+///             tenant.locale == "fr" ? "Bonjour " ~ firstName : "Hello " ~ firstName,
+///         u.firstName,
+///         context!TenantCtx(u)
+///     );
+/// }
+/// ---
+class ContextExpr(T) : Expr!T if (is(T == struct)) {
+    private ExprBase _batchRef;
+
+    this(ExprBase batchRef) {
+        _batchRef = batchRef;
+    }
+
+    override ExprBase[] dependencies() {
+        return [_batchRef];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0) _batchRef = newDep;
+    }
+
+    override Expr!T optimize(OptimizeContext ctx) {
+        return this;  // Context values are runtime data, not optimizable
+    }
+
+    override Promise!(T[]) eval(EvalContext ctx) {
+        auto value = ctx.getRequestContext!T();
+        return _batchRef.evalResultLength(ctx).then((size_t count) {
+            T[] results = new T[count];
+            results[] = value;
+            return results;
+        });
+    }
+}
+
+/// Create a context expression that reads request-scoped data of type T.
+/// The batchRef determines the batch size (typically pass the entity expression).
+///
+/// Example:
+/// ---
+/// auto tenantCtx = context!TenantCtx(u);  // u is Expr!User
+/// ---
+auto context(T)(ExprBase batchRef) if (is(T == struct)) {
+    return new ContextExpr!T(batchRef);
+}
+
+// ============================================================================
 // EffectExpr: Deferred Side Effects
 // ============================================================================
 
@@ -867,4 +926,32 @@ unittest {
     assert(result.length == 1, "Expected 1 group");
     assert(result[0].length == 2, "Expected 2 items in group");
     assert(result[0] == [10, 20], "Expected counts [10, 20], got " ~ result[0].to!string);
+}
+
+// Test ContextExpr with use combinator
+unittest {
+    static struct TenantCtx {
+        string tenantId;
+        string locale;
+    }
+
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("1"), TestEntity("2"), TestEntity("3")]);
+
+    auto query = map!(
+        (Expr!TestEntity item) => use(
+            (string id, TenantCtx tenant) => id ~ ":" ~ tenant.locale,
+            use((TestEntity e) => e.id, item),
+            context!TenantCtx(item)
+        )
+    )(collection);
+
+    auto ctx = new EvalContext();
+    ctx.setValues!AnyRef(null, [queryRoot]);
+    ctx.setRequestContext(TenantCtx("t1", "fr"));
+
+    auto result = awaitSync(query.eval(ctx));
+
+    assert(result.length == 1, "Expected 1 group");
+    assert(result[0] == ["1:fr", "2:fr", "3:fr"],
+        "Expected context value replicated across batch");
 }

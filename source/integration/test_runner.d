@@ -25,11 +25,11 @@ import ae.net.http.responseex : HttpResponseEx;
 import ae.sys.data : Data;
 import ae.sys.dataset : DataVec, joinToGC;
 
-import dunamis.core : Executor;
+import dunamis.core : EvalContext, Executor;
 import dunamis.graphql : compileQuery;
 
 import integration.test_framework : runAllTests;
-import integration.schema : seedDatabase;
+import integration.schema : RequestContext, seedDatabase;
 
 /**
  * Abstract base class for integration test runners.
@@ -68,12 +68,21 @@ abstract class IntegrationTestRunner(alias db, alias Schema) {
                 optimize = (*optHeader != "false");
             }
 
+            // Extract request context from headers
+            string locale = "en";
+            if (auto localeHeader = "X-Locale" in request.headers) {
+                locale = *localeHeader;
+            }
+
             db.reset();
 
             auto compiledQuery = compileQuery!Schema(query, variables);
             auto executor = new Executor();
 
-            executor.execute(compiledQuery, optimize).then((JSONValue result) {
+            auto evalCtx = new EvalContext();
+            evalCtx.setRequestContext(RequestContext(locale));
+
+            executor.execute(compiledQuery, evalCtx, optimize).then((JSONValue result) {
                 auto response = new HttpResponseEx();
                 response.status = HttpStatusCode.OK;
                 response.headers["Content-Type"] = "application/json";
