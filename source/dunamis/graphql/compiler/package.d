@@ -1712,3 +1712,307 @@ unittest {
     assert(items[0]["title"].str == "Thing");
     assert(items[0]["label"].str == "item-label");
 }
+
+// @skip directive tests
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+        mixin Col!("lastName", string);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "first_name": "Alice", "last_name": "Smith"},
+        {"id": 2, "first_name": "Bob", "last_name": "Jones"}
+    ]`);
+
+    auto executor = new Executor();
+
+    // @skip(if: true) — field excluded
+    {
+        auto query = compileQuery!Query(`{ users { firstName @skip(if: true) lastName } }`);
+        auto result = awaitSync(executor.execute(query));
+        auto users = result["users"].array;
+        assert(users.length == 2);
+        assert("firstName" !in users[0], "@skip(if: true) should exclude field");
+        assert(users[0]["lastName"].str == "Smith");
+    }
+
+    // @skip(if: false) — field included
+    {
+        auto query = compileQuery!Query(`{ users { firstName @skip(if: false) lastName } }`);
+        auto result = awaitSync(executor.execute(query));
+        auto users = result["users"].array;
+        assert(users[0]["firstName"].str == "Alice");
+        assert(users[0]["lastName"].str == "Smith");
+    }
+}
+
+// @include directive tests
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+        mixin Col!("lastName", string);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "first_name": "Alice", "last_name": "Smith"}
+    ]`);
+
+    auto executor = new Executor();
+
+    // @include(if: true) — field included
+    {
+        auto query = compileQuery!Query(`{ users { firstName @include(if: true) lastName } }`);
+        auto result = awaitSync(executor.execute(query));
+        auto users = result["users"].array;
+        assert(users[0]["firstName"].str == "Alice");
+        assert(users[0]["lastName"].str == "Smith");
+    }
+
+    // @include(if: false) — field excluded
+    {
+        auto query = compileQuery!Query(`{ users { firstName @include(if: false) lastName } }`);
+        auto result = awaitSync(executor.execute(query));
+        auto users = result["users"].array;
+        assert("firstName" !in users[0], "@include(if: false) should exclude field");
+        assert(users[0]["lastName"].str == "Smith");
+    }
+}
+
+// Directive with variable reference
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+        mixin Col!("lastName", string);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "first_name": "Alice", "last_name": "Smith"}
+    ]`);
+
+    auto executor = new Executor();
+
+    // @include(if: $show) with $show = false
+    {
+        auto variables = JSONValue(["show": JSONValue(false)]);
+        auto query = compileQuery!Query(`
+            query Q($show: Boolean!) {
+                users { firstName @include(if: $show) lastName }
+            }
+        `, variables);
+        auto result = awaitSync(executor.execute(query));
+        auto users = result["users"].array;
+        assert("firstName" !in users[0], "Variable false should exclude field");
+        assert(users[0]["lastName"].str == "Smith");
+    }
+
+    // @skip(if: $s) with $s = true
+    {
+        auto variables = JSONValue(["s": JSONValue(true)]);
+        auto query = compileQuery!Query(`
+            query Q($s: Boolean!) {
+                users { firstName @skip(if: $s) lastName }
+            }
+        `, variables);
+        auto result = awaitSync(executor.execute(query));
+        auto users = result["users"].array;
+        assert("firstName" !in users[0], "Variable true should skip field");
+        assert(users[0]["lastName"].str == "Smith");
+    }
+}
+
+// Both @skip and @include on the same field
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+        mixin Col!("lastName", string);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "first_name": "Alice", "last_name": "Smith"}
+    ]`);
+
+    auto executor = new Executor();
+
+    // @skip(if: true) @include(if: true) — skip wins, field excluded
+    {
+        auto query = compileQuery!Query(`{ users { firstName @skip(if: true) @include(if: true) lastName } }`);
+        auto result = awaitSync(executor.execute(query));
+        auto users = result["users"].array;
+        assert("firstName" !in users[0], "@skip(if:true) should override @include(if:true)");
+        assert(users[0]["lastName"].str == "Smith");
+    }
+
+    // @skip(if: false) @include(if: true) — both say include
+    {
+        auto query = compileQuery!Query(`{ users { firstName @skip(if: false) @include(if: true) lastName } }`);
+        auto result = awaitSync(executor.execute(query));
+        auto users = result["users"].array;
+        assert(users[0]["firstName"].str == "Alice");
+    }
+
+    // @skip(if: false) @include(if: false) — include=false wins
+    {
+        auto query = compileQuery!Query(`{ users { firstName @skip(if: false) @include(if: false) lastName } }`);
+        auto result = awaitSync(executor.execute(query));
+        auto users = result["users"].array;
+        assert("firstName" !in users[0], "@include(if:false) should exclude field");
+    }
+}
+
+// Root-level directive — skip an entire root field
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "posts")
+    static struct Post {
+        mixin DemoId;
+        mixin Col!("title", string);
+    }
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+        mixin Table!(Post, "posts");
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[{"id": 1, "first_name": "Alice"}]`);
+    db.setTableData("posts", `[{"id": 1, "title": "Hello"}]`);
+
+    auto executor = new Executor();
+
+    // Skip the users root field entirely
+    {
+        auto query = compileQuery!Query(`{
+            users @skip(if: true) { firstName }
+            posts { title }
+        }`);
+        auto result = awaitSync(executor.execute(query));
+        assert("users" !in result, "Root field with @skip(if: true) should be excluded");
+        assert(result["posts"].array[0]["title"].str == "Hello");
+    }
+}
+
+// Directive on nested hasMany subfield
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "posts")
+    static struct Post {
+        mixin DemoId;
+        mixin Col!("title", string);
+        mixin Col!("body_", string, "body");
+    }
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+        mixin HasMany!("posts", Post, "author_id");
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[{"id": 1, "first_name": "Alice"}]`);
+    db.setTableData("posts", `[{"id": 1, "author_id": 1, "title": "Hello", "body": "World"}]`);
+
+    auto executor = new Executor();
+
+    // Skip title within posts
+    {
+        auto query = compileQuery!Query(`{
+            users {
+                firstName
+                posts { title @skip(if: true) body_ }
+            }
+        }`);
+        auto result = awaitSync(executor.execute(query));
+        auto users = result["users"].array;
+        assert(users[0]["firstName"].str == "Alice");
+        auto posts = users[0]["posts"].array;
+        assert(posts.length == 1);
+        assert("title" !in posts[0], "Nested field with @skip should be excluded");
+        assert(posts[0]["body_"].str == "World");
+    }
+}

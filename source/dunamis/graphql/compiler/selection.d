@@ -36,12 +36,9 @@ SequentialJsonObjectExpr compileRootMutationSet(Mutation)(SelectionSet ss, JSONV
     foreach (sel; selections) {
         if (sel.ruleSelection != SelectionEnum.Field) continue;
         auto field = sel.field;
+        if (!shouldIncludeField(field.dirs, variables)) continue;
         fieldNames ~= getOutputName(field);
         fieldExprs ~= compileRootField!Mutation(field, variables);
-    }
-
-    if (fieldNames.length == 0) {
-        throw new CompilerException("No fields in mutation selection set");
     }
 
     return new SequentialJsonObjectExpr(fieldNames, fieldExprs);
@@ -180,12 +177,9 @@ DynamicJsonObjectExpr compileRootSelectionSet(Query, alias IntrospectionSource =
     foreach (sel; selections) {
         if (sel.ruleSelection != SelectionEnum.Field) continue;
         auto field = sel.field;
+        if (!shouldIncludeField(field.dirs, variables)) continue;
         fieldNames ~= getOutputName(field);
         fieldExprs ~= compileRootField!(Query, IntrospectionSource)(field, variables);
-    }
-
-    if (fieldNames.length == 0) {
-        throw new CompilerException("No fields in root selection set");
     }
 
     return buildDynamicJsonObject(fieldNames, fieldExprs);
@@ -226,6 +220,7 @@ DynamicJsonObjectExpr compileFieldsToJsonObject(T)(Expr!T ref_, Selection[] sele
     foreach (sel; selections) {
         if (sel.ruleSelection != SelectionEnum.Field) continue;
         auto field = sel.field;
+        if (!shouldIncludeField(field.dirs, variables)) continue;
         auto name = getFieldName(field);
         auto outputName = getOutputName(field);
 

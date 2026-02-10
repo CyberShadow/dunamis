@@ -482,6 +482,7 @@ JSONValue applySelectionSet(JSONValue data, SelectionSet ss, JSONValue variables
     foreach (sel; selections) {
         if (sel.ruleSelection != SelectionEnum.Field) continue;
         auto field = sel.field;
+        if (!shouldIncludeField(field.dirs, variables)) continue;
         auto fieldName = getFieldName(field);
         auto outputName = getOutputName(field);
 
@@ -862,12 +863,12 @@ private JSONValue enumValueJson(string name) {
 // These are used by applySelectionSet and need to be imported from compiler.d.
 // They require package visibility in compiler.d.
 import graphql.ast : Selection, SelectionSet, Selections, SelectionEnum,
-    Field, Arguments, Argument, ArgumentList, Value;
+    Field, Arguments, Argument, ArgumentList, Value, Directives;
 
 package {
     // Forward declarations - these come from compiler.d with package visibility
     import dunamis.graphql.compiler : iterateSelections, getFieldName, getOutputName,
-        findArgumentValue, extractBool;
+        findArgumentValue, extractBool, shouldIncludeField;
 }
 
 // ============================================================================

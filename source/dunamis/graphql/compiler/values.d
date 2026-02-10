@@ -585,6 +585,64 @@ void setInputField(T)(ref T obj, string fieldName, Value val) if (isInputType!T)
 }
 
 // ============================================================================
+// Directive Evaluation (@skip / @include)
+// ============================================================================
+
+/// Check @skip/@include directives to determine if a field should be included.
+/// Returns true if the field should be included, false if it should be skipped.
+///
+/// Follows the GraphQL June 2018 spec:
+///   @skip(if: true)  → exclude
+///   @include(if: false) → exclude
+///   Both present: include only if NOT skipped AND included
+///   Unknown directives are ignored.
+bool shouldIncludeField(Directives dirs, JSONValue variables) {
+    import graphql.ast : ValueOrVariableEnum;
+
+    bool dominated;  // true when at least one @skip/@include was seen
+    bool skip;
+    bool include = true;
+
+    auto d = dirs;
+    while (d !is null) {
+        auto dir = d.dir;
+        d = d.follow;
+        if (dir is null) continue;
+
+        auto name = dir.name.value;
+        if (name != "skip" && name != "include") continue;
+
+        // Extract the required `if` argument (Boolean!)
+        auto lookup = findArgumentValue(dir.arg, "if");
+        if (lookup.isNull) {
+            throw new CompilerException(
+                "Directive @" ~ name ~ " requires an 'if' argument");
+        }
+
+        bool ifValue;
+        if (lookup.isVariable) {
+            if (lookup.variableName !in variables) {
+                throw new CompilerException(
+                    "Variable $" ~ lookup.variableName ~ " not found");
+            }
+            ifValue = extractValueFromJson!bool(variables[lookup.variableName]);
+        } else {
+            ifValue = extractBool(lookup.value);
+        }
+
+        if (name == "skip") {
+            skip = skip || ifValue;
+        } else {
+            include = ifValue;
+        }
+        dominated = true;
+    }
+
+    if (!dominated) return true;
+    return !skip && include;
+}
+
+// ============================================================================
 // CompilerException (needed here for the package(dunamis.graphql) scope)
 // ============================================================================
 
