@@ -1683,7 +1683,7 @@ EOF";
 // Test: compileQuery with SortingPlugin generates CTE with ORDER BY
 unittest {
     import dunamis.graphql : compileQuery;
-    import dunamis.graphql.sorting : SortingPlugin;
+    import dunamis.schema.sorting : SortingPlugin;
     import dunamis.graphql.schema : Schema;
 
     createMockDB();
@@ -1715,7 +1715,7 @@ unittest {
 // Test: compileQuery with PaginationPlugin generates CTE with LIMIT/OFFSET
 unittest {
     import dunamis.graphql : compileQuery;
-    import dunamis.graphql.pagination : PaginationPlugin;
+    import dunamis.schema.pagination : PaginationPlugin;
     import dunamis.graphql.schema : Schema;
 
     createMockDB();

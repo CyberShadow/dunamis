@@ -3,7 +3,7 @@
 /// Satellite module for pluginEntityCast — separated from transform.d to avoid
 /// forward reference errors when loaded via .imported during plugin type construction.
 /// This module must NOT import from plugin.d or any module that transitively imports it.
-module dunamis.graphql.entity_cast;
+module dunamis.schema.entity_cast;
 
 import dunamis.core.expr : Expr;
 

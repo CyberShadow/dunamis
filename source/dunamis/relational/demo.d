@@ -91,7 +91,7 @@ mixin template DemoId(IdType = Int64) {
 /// Creates: create<Entity>, update<Entity>, delete<Entity>
 ///
 /// For automatic CRUD generation via plugin composition, consider using
-/// `CrudMutationPlugin` from `dunamis.graphql.crud` instead:
+/// `CrudMutationPlugin` from `dunamis.schema.crud` instead:
 /// ---
 /// alias MySchema = CrudMutationPlugin!(Schema!(Query, Mutation));
 /// ---

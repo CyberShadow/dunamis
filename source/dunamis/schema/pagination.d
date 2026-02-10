@@ -10,15 +10,15 @@
 ///
 /// // users: [User!]! becomes users(first: Int, offset: Int): [User!]!
 /// ---
-module dunamis.graphql.pagination;
+module dunamis.schema.pagination;
 
 import std.traits : ReturnType, Parameters, ParameterDefaults, ParameterIdentifierTuple;
 import std.typecons : Nullable;
 
 import dunamis.core.expr : Expr, ExprResultType;
 import dunamis.core.pagination : limit, offset, LimitInfo, OffsetInfo;
-import dunamis.graphql.plugin;
-import dunamis.graphql.schema : isSchema;
+import dunamis.schema.plugin;
+// isSchema imported via dunamis.schema.plugin wildcard import above
 
 // ============================================================================
 // PaginationPlugin
@@ -53,8 +53,8 @@ import dunamis.graphql.schema : isSchema;
 /// ---
 template PaginationPlugin(alias S) if (isSchema!S) {
     import std.meta : AliasSeq, staticMap;
-    import dunamis.graphql.schema : getAllObjectTypes, getGraphQLTypeName, GqlName;
-    import dunamis.graphql.transform : isTypeInList;
+    import dunamis.core.discovery : getAllObjectTypes;
+    import dunamis.schema.transform : isTypeInList;
 
     // Get all entity types discovered from the schema
     alias _OriginalQuery = S.Query;
@@ -63,7 +63,7 @@ template PaginationPlugin(alias S) if (isSchema!S) {
     // Generate paginated versions of each entity type.
     template PaginatedEntity(Entity) {
         @(__traits(getAttributes, Entity))
-        @GqlName(getGraphQLTypeName!Entity)
+        @OriginalName(__traits(identifier, Entity))
         struct PaginatedEntity {
             mixin WrapFields!(Entity, EntityTypeMap, PaginatedArrayField);
         }
@@ -98,20 +98,20 @@ template PaginationPlugin(alias S) if (isSchema!S) {
 /// All metadata stays encapsulated — no leaks.
 template PaginatedArrayFieldCode(SourceQuery, string fieldName, alias TypeMap) {
     import std.conv : to;
-    import dunamis.graphql.forward : ForwardFieldImpl;
+    import dunamis.schema.forward : ForwardFieldImpl;
 
     private alias Impl = ForwardFieldImpl!(SourceQuery, fieldName, TypeMap);
 
     // .imported references for generated code
-    private enum string _I = "dunamis.graphql.forward.ForwardFieldImpl!(SourceQuery, \"" ~ fieldName ~ "\", TypeMap)";
+    private enum string _I = "dunamis.schema.forward.ForwardFieldImpl!(SourceQuery, \"" ~ fieldName ~ "\", TypeMap)";
     private enum string _Expr = "dunamis.core.expr.Expr";
-    private enum string _entityCast = "dunamis.graphql.entity_cast.pluginEntityCast";
+    private enum string _entityCast = "dunamis.schema.entity_cast.pluginEntityCast";
     private enum string _Nullable = "std.typecons.Nullable";
     private enum string _limit = "dunamis.core.pagination.limit";
     private enum string _offset = "dunamis.core.pagination.offset";
-    private enum string _wrap = "dunamis.graphql.transform.wrapEntityResult";
+    private enum string _wrap = "dunamis.schema.transform.wrapEntityResult";
     // Element type for explicit return type (needed because limit/offset return different subtypes)
-    private enum string _ElemType = "dunamis.graphql.plugin.ArrayFieldElementType!(" ~ _I ~ ".srcFn)";
+    private enum string _ElemType = "dunamis.schema.plugin.ArrayFieldElementType!(" ~ _I ~ ".srcFn)";
 
     enum PaginatedArrayFieldCode = () {
         string result = "";
@@ -162,13 +162,13 @@ template PaginatedArrayFieldCode(SourceQuery, string fieldName, alias TypeMap) {
 /// Mixin template to create a paginated version of an array-returning field.
 /// Zero-leak: delegates to PaginatedArrayFieldCode eponymous template.
 mixin template PaginatedArrayField(SourceQuery, string fieldName, alias TypeMap) {
-    static import dunamis.graphql.forward;
+    static import dunamis.schema.forward;
     static import dunamis.core.expr;
-    static import dunamis.graphql.entity_cast;
+    static import dunamis.schema.entity_cast;
     static import std.typecons;
     static import dunamis.core.pagination;
-    static import dunamis.graphql.transform;
-    static import dunamis.graphql.plugin;
+    static import dunamis.schema.transform;
+    static import dunamis.schema.plugin;
     mixin(PaginatedArrayFieldCode!(SourceQuery, fieldName, TypeMap));
 }
 

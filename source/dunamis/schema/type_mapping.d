@@ -1,8 +1,8 @@
-module dunamis.graphql.type_mapping;
+module dunamis.schema.type_mapping;
 
 import std.meta : AliasSeq;
 import std.typecons : Nullable;
-import dunamis.graphql.schema : isSchema;
+import dunamis.schema.plugin : isSchema;
 
 // ============================================================================
 // Value Mapping Helpers
@@ -91,7 +91,7 @@ template findLeafMapping(T, Mappings...) {
 template applyMappingsToResult(alias TypeMap, Mappings...) {
     auto applyMappingsToResult(R)(R result) {
         import dunamis.core.expr : ExprResultType, use;
-        import dunamis.graphql.transform : wrapEntityResult;
+        import dunamis.schema.transform : wrapEntityResult;
         import dunamis.core.types : applySerialize;
 
         auto typeMapped = wrapEntityResult!(TypeMap)(result);
@@ -132,8 +132,8 @@ template ForwardFieldWithMappingsCode(SourceType, string fieldName, alias TypeMa
     import std.conv : to;
 
     private alias Impl = ForwardFieldWithMappingsImpl!(SourceType, fieldName, TypeMap, Mappings);
-    private enum string _I = "dunamis.graphql.type_mapping.ForwardFieldWithMappingsImpl!(SourceType, fieldName, TypeMap, Mappings)";
-    private enum string _tm = "dunamis.graphql.type_mapping";
+    private enum string _I = "dunamis.schema.type_mapping.ForwardFieldWithMappingsImpl!(SourceType, fieldName, TypeMap, Mappings)";
+    private enum string _tm = "dunamis.schema.type_mapping";
 
     private enum string _paramListStr = () {
         string result = "dunamis.core.expr.Expr!(typeof(this)) " ~ Impl.srcParamNames[0];
@@ -150,7 +150,7 @@ template ForwardFieldWithMappingsCode(SourceType, string fieldName, alias TypeMa
     }();
 
     private enum string _argListStr = () {
-        string result = "dunamis.graphql.entity_cast.pluginEntityCast!(" ~ _I ~ ".SrcEntity)(" ~ Impl.srcParamNames[0] ~ ")";
+        string result = "dunamis.schema.entity_cast.pluginEntityCast!(" ~ _I ~ ".SrcEntity)(" ~ Impl.srcParamNames[0] ~ ")";
         static foreach (i; 1 .. Impl.SrcParams.length) {{
             result ~= ", ";
             static if (Impl.isParamMapped!i) {
@@ -177,11 +177,11 @@ template ForwardFieldWithMappingsCode(SourceType, string fieldName, alias TypeMa
 /// Forward a computed field with value mapping applied to return type and arguments.
 /// Zero-leak: no imports, aliases, or enums are mixed into the target struct.
 mixin template ForwardFieldWithMappings(SourceType, string fieldName, alias TypeMap, Mappings...) {
-    static import dunamis.graphql.type_mapping;
+    static import dunamis.schema.type_mapping;
     static import dunamis.core.expr;
-    static import dunamis.graphql.entity_cast;
+    static import dunamis.schema.entity_cast;
     static import dunamis.core.types;
-    mixin(dunamis.graphql.type_mapping.ForwardFieldWithMappingsCode!(SourceType, fieldName, TypeMap, Mappings));
+    mixin(dunamis.schema.type_mapping.ForwardFieldWithMappingsCode!(SourceType, fieldName, TypeMap, Mappings));
 }
 
 // ============================================================================
@@ -209,9 +209,10 @@ mixin template ForwardFieldWithMappings(SourceType, string fieldName, alias Type
 template ExternalTypesPlugin(alias S, NewMappings...) if (isSchema!S) {
     import dunamis.core.expr : Expr, use;
     import dunamis.core.types : isPlainField, isPlainMethod;
-    import dunamis.graphql.schema : getAllObjectTypes, getGraphQLTypeName, GqlName, isInternalMember;
-    import dunamis.graphql.transform : isTypeInList;
-    import dunamis.graphql.plugin : getFieldMembers, isComputedField;
+    import dunamis.core.discovery : getAllObjectTypes;
+    import dunamis.core.types : isInternalMember;
+    import dunamis.schema.transform : isTypeInList;
+    import dunamis.schema.plugin : getFieldMembers, isComputedField, OriginalName;
 
     // Discover all object types from the inner schema's Query
     alias _OriginalQuery = S.Query;
@@ -237,20 +238,18 @@ template ExternalTypesPlugin(alias S, NewMappings...) if (isSchema!S) {
     private template _MappedTypeBody(T) {
         private enum string _use = "dunamis.core.expr.use";
         private enum string _Expr = "dunamis.core.expr.Expr";
-        private enum string _apply = "dunamis.graphql.type_mapping.applyMappingsToResult";
-        private enum string _fwd = "dunamis.graphql.type_mapping.ForwardFieldWithMappings";
-        private enum string _hidden = "dunamis.graphql.schema.udas.GqlHidden";
+        private enum string _apply = "dunamis.schema.type_mapping.applyMappingsToResult";
+        private enum string _fwd = "dunamis.schema.type_mapping.ForwardFieldWithMappings";
 
         enum _MappedTypeBody = () {
             // Static imports for fully-qualified references in generated code
             string result = "static import dunamis.core.expr;\n" ~
-                            "static import dunamis.graphql.type_mapping;\n" ~
-                            "static import dunamis.graphql.schema.udas;\n" ~
-                            "static import dunamis.graphql.entity_cast;\n" ~
+                            "static import dunamis.schema.type_mapping;\n" ~
+                            "static import dunamis.schema.entity_cast;\n" ~
                             "static import dunamis.core.types;\n";
 
             // Per-layer _normalizedSource (stores immediate source type)
-            result ~= "@(" ~ _hidden ~ ") package(dunamis.graphql) T _normalizedSource;\n";
+            result ~= "package(dunamis.schema) T _normalizedSource;\n";
 
             // Forward computed fields with value mapping (already zero-leak mixin template)
             static foreach (member; getFieldMembers!T) {
@@ -293,7 +292,7 @@ template ExternalTypesPlugin(alias S, NewMappings...) if (isSchema!S) {
     // For POD types: normalize plain fields/methods + apply value mapping.
     template _MappedType(T) {
         @(__traits(getAttributes, T))
-        @GqlName(getGraphQLTypeName!T)
+        @OriginalName(__traits(identifier, T))
         struct _MappedType {
             mixin(_MappedTypeBody!T);
         }

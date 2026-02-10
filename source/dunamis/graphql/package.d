@@ -1,11 +1,9 @@
 module dunamis.graphql;
 
+// Schema layer (backward-compat re-export)
+public import dunamis.schema;
+
+// GraphQL presentation layer
 public import dunamis.graphql.compiler;
-public import dunamis.graphql.crud;
-public import dunamis.graphql.filtering;
 public import dunamis.graphql.introspection;
-public import dunamis.graphql.pagination;
-public import dunamis.graphql.plugin;
 public import dunamis.graphql.schema;
-public import dunamis.graphql.sorting;
-public import dunamis.graphql.type_mapping;

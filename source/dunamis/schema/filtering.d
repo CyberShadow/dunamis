@@ -10,7 +10,7 @@
 ///
 /// // users: [User!]! becomes users(filter: UserFilter): [User!]!
 /// ---
-module dunamis.graphql.filtering;
+module dunamis.schema.filtering;
 
 import std.traits : ReturnType, Parameters, ParameterDefaults, ParameterIdentifierTuple;
 import std.typecons : Nullable;
@@ -20,8 +20,8 @@ import std.algorithm : canFind;
 
 import dunamis.core.expr : Expr, ExprResultType, ExprBase;
 import dunamis.core.filtering : filterBy, FilterByExpr, FilterItemExpr, FilterByInfo;
-import dunamis.graphql.plugin;
-import dunamis.graphql.schema : isSchema;
+import dunamis.schema.plugin;
+// isSchema imported via dunamis.schema.plugin wildcard import above
 
 // ============================================================================
 // Scalar Filter Input Types (PostGraphile-style)
@@ -1023,6 +1023,16 @@ private Expr!bool buildTypedCondition(ColType)(Expr!ColType colExpr, string op, 
     }
 }
 
+/// Convert a string to a D enum value by matching member names.
+private T _enumFromString(T)(string s) if (is(T == enum)) {
+    import std.traits : EnumMembers;
+    static foreach (member; EnumMembers!T) {
+        if (__traits(identifier, member) == s)
+            return member;
+    }
+    return T.init;
+}
+
 /// Extract a value of type T from JSON.
 T extractJsonValue(T)(JSONValue value) {
     static if (is(T == string)) {
@@ -1039,9 +1049,8 @@ T extractJsonValue(T)(JSONValue value) {
         return value.type == JSONType.true_;
     } else static if (is(T == enum)) {
         // D enum - convert from string using enumFromString
-        import dunamis.graphql.compiler : enumFromString;
         if (value.type == JSONType.string) {
-            return enumFromString!T(value.str);
+            return _enumFromString!T(value.str);
         }
         return T.init;
     } else {
@@ -1066,8 +1075,8 @@ T extractJsonValue(T)(JSONValue value) {
 ///   User.posts(filter: PostFilter): [Post!]!
 template FilterPlugin(alias S) if (isSchema!S) {
     import std.meta : AliasSeq, staticMap;
-    import dunamis.graphql.schema : getAllObjectTypes, getGraphQLTypeName, GqlName;
-    import dunamis.graphql.transform : isTypeInList;
+    import dunamis.core.discovery : getAllObjectTypes;
+    import dunamis.schema.transform : isTypeInList;
 
     // Get all entity types discovered from the schema
     alias _OriginalQuery = S.Query;
@@ -1076,7 +1085,7 @@ template FilterPlugin(alias S) if (isSchema!S) {
     // Generate filtered versions of each entity type
     template FilteredEntity(Entity) {
         @(__traits(getAttributes, Entity))
-        @GqlName(getGraphQLTypeName!Entity)
+        @OriginalName(__traits(identifier, Entity))
         struct FilteredEntity {
             mixin WrapFields!(Entity, EntityTypeMap, FilteredArrayField);
         }
@@ -1118,8 +1127,8 @@ mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) 
     import std.conv : to;
     import dunamis.core.expr : Expr, ExprResultType;
     import dunamis.core.filtering : FilterByExpr, FilterItemExpr;
-    import dunamis.graphql.entity_cast : pluginEntityCast;
-    import dunamis.graphql.transform : wrapEntityResult;
+    import dunamis.schema.entity_cast : pluginEntityCast;
+    import dunamis.schema.transform : wrapEntityResult;
     import std.typecons : Nullable;
 
     // Type metadata — aliases don't leak as fields/methods (invisible to field discovery)

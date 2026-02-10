@@ -10,15 +10,14 @@
 ///
 /// // users: [User!]! becomes users(orderBy: [UserOrderBy!]): [User!]!
 /// ---
-module dunamis.graphql.sorting;
+module dunamis.schema.sorting;
 
 import std.traits : ReturnType, Parameters, ParameterDefaults, ParameterIdentifierTuple;
 import std.typecons : Nullable;
 
 import dunamis.core.expr : Expr, ExprResultType;
 import dunamis.core.sorting : SortDirection;
-import dunamis.graphql.plugin;
-import dunamis.graphql.schema : isSchema, GqlHidden;
+import dunamis.schema.plugin;
 
 // ============================================================================
 // SortingPlugin
@@ -56,8 +55,8 @@ import dunamis.graphql.schema : isSchema, GqlHidden;
 /// ---
 template SortingPlugin(alias S) if (isSchema!S) {
     import std.meta : AliasSeq, staticMap;
-    import dunamis.graphql.schema : getAllObjectTypes, getGraphQLTypeName, GqlName;
-    import dunamis.graphql.transform : isTypeInList;
+    import dunamis.core.discovery : getAllObjectTypes;
+    import dunamis.schema.transform : isTypeInList;
 
     // Get all entity types discovered from the schema
     alias _OriginalQuery = S.Query;
@@ -66,7 +65,7 @@ template SortingPlugin(alias S) if (isSchema!S) {
     // Generate sorted versions of each entity type.
     template SortedEntity(Entity) {
         @(__traits(getAttributes, Entity))
-        @GqlName(getGraphQLTypeName!Entity)
+        @OriginalName(__traits(identifier, Entity))
         struct SortedEntity {
             mixin WrapFields!(Entity, EntityTypeMap, SortedArrayField);
         }
@@ -105,7 +104,6 @@ template SortingPlugin(alias S) if (isSchema!S) {
 /// and it takes no required arguments beyond the entity expression.
 /// Enum fields are temporarily excluded pending native DB enum type support.
 template getSortableFields(Entity) {
-    import dunamis.graphql.schema : hasGqlHidden;
     import std.traits : Parameters;
 
     /// Check if a method can be called with just Expr!Entity (no extra required args).
@@ -139,7 +137,8 @@ template getSortableFields(Entity) {
                     // - not @GqlHidden
                     // - not an enum (temporarily excluded: DB sort order may differ from D)
                     // - result type supports `<` (excludes ForeignKey, Nullable, entities, arrays)
-                    static if (isZeroArgField!method && !hasGqlHidden!method
+                    static if (isZeroArgField!method
+                            && __traits(getVisibility, method) == "public"
                             && !hasEnumReturn!method
                             && is(typeof(ResultT.init < ResultT.init))) {
                         fields ~= member;
@@ -173,18 +172,18 @@ private template hasEnumReturn(alias method) {
 /// and the sorted method. All metadata stays encapsulated — no leaks.
 template SortedArrayFieldCode(SourceQuery, string fieldName, alias TypeMap) {
     import std.conv : to;
-    import dunamis.graphql.forward : ForwardFieldImpl;
+    import dunamis.schema.forward : ForwardFieldImpl;
 
     private alias Impl = ForwardFieldImpl!(SourceQuery, fieldName, TypeMap);
     private alias _ElementType = ArrayFieldElementType!(Impl.srcFn);
 
     // .imported references for generated code
-    private enum string _I = "dunamis.graphql.forward.ForwardFieldImpl!(SourceQuery, \"" ~ fieldName ~ "\", TypeMap)";
+    private enum string _I = "dunamis.schema.forward.ForwardFieldImpl!(SourceQuery, \"" ~ fieldName ~ "\", TypeMap)";
     private enum string _Expr = "dunamis.core.expr.Expr";
-    private enum string _entityCast = "dunamis.graphql.entity_cast.pluginEntityCast";
+    private enum string _entityCast = "dunamis.schema.entity_cast.pluginEntityCast";
     private enum string _sortBy = "dunamis.core.sorting.sortBy";
     private enum string _SD = "dunamis.core.sorting.SortDirection";
-    private enum string _wrap = "dunamis.graphql.transform.wrapEntityResult";
+    private enum string _wrap = "dunamis.schema.transform.wrapEntityResult";
 
     // Field-specific names to avoid conflicts when multiple array fields coexist
     private enum string _enumName = "_OrderByFieldEnum_" ~ fieldName;
@@ -292,11 +291,11 @@ template SortedArrayFieldCode(SourceQuery, string fieldName, alias TypeMap) {
 /// Mixin template to create a sorted version of an array-returning field.
 /// Zero-leak: delegates to SortedArrayFieldCode eponymous template.
 mixin template SortedArrayField(SourceQuery, string fieldName, alias TypeMap) {
-    static import dunamis.graphql.forward;
+    static import dunamis.schema.forward;
     static import dunamis.core.expr;
-    static import dunamis.graphql.entity_cast;
+    static import dunamis.schema.entity_cast;
     static import dunamis.core.sorting;
-    static import dunamis.graphql.transform;
+    static import dunamis.schema.transform;
     mixin(SortedArrayFieldCode!(SourceQuery, fieldName, TypeMap));
 }
 
@@ -361,7 +360,7 @@ unittest {
         mixin Col!("firstName", string);
         mixin Col!("lastName", string);
 
-        @GqlHidden mixin Col!("internalField", string);
+        package mixin Col!("internalField", string);
     }
 
     static struct Query {
@@ -372,9 +371,9 @@ unittest {
     enum sortableFields = getSortableFields!User;
     static assert(sortableFields.length >= 2, "Should have at least firstName, lastName");
 
-    // Verify hidden fields are not included
+    // Verify non-public fields are not included
     import std.algorithm : canFind;
-    static assert(!sortableFields.canFind("internalField"), "Hidden field should not be sortable");
+    static assert(!sortableFields.canFind("internalField"), "Non-public field should not be sortable");
 }
 
 unittest {

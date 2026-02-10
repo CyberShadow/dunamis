@@ -15,9 +15,9 @@
 /// alias BaseSchema = Schema!(Query, Mutation);
 /// alias MySchema = ApplyPlugins!(BaseSchema, CrudMutationPlugin, FilterPlugin, SortingPlugin);
 /// ---
-module dunamis.graphql.crud;
+module dunamis.schema.crud;
 
-import dunamis.graphql.schema : isSchema;
+import dunamis.schema.plugin : isSchema;
 
 // ============================================================================
 // Utilities
@@ -112,20 +112,11 @@ template _inputColumnSqlName(Entity, string member) {
     }();
 }
 
-/// Get the GraphQL field name for a CRUD input field.
-/// Uses @GqlName if present, otherwise falls back to D field name.
+/// Get the field name for a CRUD input field.
+/// Uses the D field name directly — the GraphQL layer resolves presentation
+/// names via @GqlName on the original entity field.
 template _inputFieldGqlName(Entity, string member) {
-    enum _inputFieldGqlName = () {
-        static if (__traits(compiles, __traits(getMember, Entity, member))) {
-            import dunamis.graphql.schema.udas : getGqlName;
-            static if (__traits(compiles, getGqlName!(__traits(getMember, Entity, member), member)))
-                return getGqlName!(__traits(getMember, Entity, member), member);
-            else
-                return member;
-        } else {
-            return member;
-        }
-    }();
+    enum _inputFieldGqlName = member;
 }
 
 // ============================================================================
@@ -151,10 +142,9 @@ mixin template _CrudMethods(OriginalEntity, NormalizedEntity, MutationType) {
     static import std.json;
     static import dunamis.core.expr;
     static import std.traits;
-    static import dunamis.graphql.schema.udas;
     static import std.typecons;
-    static import dunamis.graphql.crud;
-    static import dunamis.graphql.entity_cast;
+    static import dunamis.schema.crud;
+    static import dunamis.schema.entity_cast;
     static import dunamis.relational.mutation;
     mixin(() {
         import dunamis.relational.schema.attrs : getEntityTypeName, getPrimaryKeyFieldNames, hasAutoIncrement;
@@ -178,7 +168,6 @@ mixin template _CrudMethods(OriginalEntity, NormalizedEntity, MutationType) {
             static foreach (_m; __traits(allMembers, OriginalEntity)) {{
                 static if (_isInputColumn!(OriginalEntity, _m)) {
                     enum _sqlCol = _inputColumnSqlName!(OriginalEntity, _m);
-                    enum _gqlName = _inputFieldGqlName!(OriginalEntity, _m);
 
                     // Type expression: ExprResultType for Col methods, typeof for plain fields
                     static if (_isColMethod!(OriginalEntity, _m)) {
@@ -188,27 +177,20 @@ mixin template _CrudMethods(OriginalEntity, NormalizedEntity, MutationType) {
                         enum _typeExpr = "typeof(__traits(getMember, OriginalEntity.init, \"" ~ _m ~ "\"))";
                     }
 
-                    // UDA prefix for @GqlName (only when GraphQL name differs from D name)
-                    static if (_gqlName != _m) {
-                        enum _udaPrefix = "@(dunamis.graphql.schema.udas.GqlName(\"" ~ _gqlName ~ "\")) ";
-                    } else {
-                        enum _udaPrefix = "";
-                    }
-
                     // Create input: direct type
-                    createStructFields ~= "    " ~ _udaPrefix ~ _typeExpr ~ " " ~ _m ~ ";\n";
+                    createStructFields ~= "    " ~ _typeExpr ~ " " ~ _m ~ ";\n";
 
                     // Update input: Nullable-wrapped type
-                    updateStructFields ~= "    " ~ _udaPrefix ~
+                    updateStructFields ~= "    " ~
                         "std.typecons.Nullable!(" ~ _typeExpr ~ ") " ~ _m ~ ";\n";
 
                     // Create body: always set column
                     createBody ~= "    _cols[\"" ~ _sqlCol ~ "\"] = " ~
-                        "dunamis.graphql.crud._fieldToJson(input." ~ _m ~ ");\n";
+                        "dunamis.schema.crud._fieldToJson(input." ~ _m ~ ");\n";
 
                     // Update body: only set column if not null (absent = don't update)
                     updateBody ~= "    if (!input." ~ _m ~ ".isNull) _cols[\"" ~ _sqlCol ~ "\"] = " ~
-                        "dunamis.graphql.crud._fieldToJson(input." ~ _m ~ ".get);\n";
+                        "dunamis.schema.crud._fieldToJson(input." ~ _m ~ ".get);\n";
                 }
             }}
 
@@ -222,7 +204,7 @@ mixin template _CrudMethods(OriginalEntity, NormalizedEntity, MutationType) {
                     "dunamis.core.expr.Expr!(typeof(this)) parent, " ~
                     "Create" ~ typeName ~ "Input input) {\n" ~
                     createBody ~
-                    "    return dunamis.graphql.entity_cast.pluginEntityCast!NormalizedEntity(" ~
+                    "    return dunamis.schema.entity_cast.pluginEntityCast!NormalizedEntity(" ~
                     "dunamis.relational.mutation.insert!OriginalEntity(_cols));\n}\n\n";
             }
 
@@ -233,9 +215,9 @@ mixin template _CrudMethods(OriginalEntity, NormalizedEntity, MutationType) {
                     "typeof(__traits(getMember, OriginalEntity, \"" ~ pkFieldName ~ "\")) id, " ~
                     "Update" ~ typeName ~ "Input input) {\n" ~
                     updateBody ~
-                    "    return dunamis.graphql.entity_cast.pluginEntityCast!NormalizedEntity(" ~
+                    "    return dunamis.schema.entity_cast.pluginEntityCast!NormalizedEntity(" ~
                     "dunamis.relational.mutation.update!OriginalEntity(" ~
-                    "[dunamis.graphql.crud.pkValueToString(id)], _cols).single());\n}\n\n";
+                    "[dunamis.schema.crud.pkValueToString(id)], _cols).single());\n}\n\n";
             }
 
             // delete<Entity>(parent, id) -> delete_!OE([id])
@@ -245,7 +227,7 @@ mixin template _CrudMethods(OriginalEntity, NormalizedEntity, MutationType) {
                     "dunamis.core.expr.Expr!(typeof(this)) parent, " ~
                     "typeof(__traits(getMember, OriginalEntity, \"" ~ pkFieldName ~ "\")) id) { " ~
                     "return dunamis.relational.mutation.delete_!OriginalEntity(" ~
-                    "[dunamis.graphql.crud.pkValueToString(id)]); }\n";
+                    "[dunamis.schema.crud.pkValueToString(id)]); }\n";
             }
 
             return result;
@@ -292,7 +274,7 @@ template _extractNormalizedEntity(alias QueryType, string member) {
 /// - Generates create/update/delete for each entity with single-PK + @AutoIncrement
 /// - Skips CRUD generation if the method name already exists on S.Mutation (user override)
 template CrudMutationPlugin(alias S) if (isSchema!S) {
-    import dunamis.graphql.plugin : WrapFields, IdentityTypeMap, ForwardField;
+    import dunamis.schema.plugin : WrapFields, IdentityTypeMap, ForwardField;
     import dunamis.relational.schema.attrs : hasTableEntity, extractTableEntity;
 
     alias Query = S.Query;
@@ -449,9 +431,9 @@ unittest {
     import dunamis.relational.schema : Col, Table;
     import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
     import dunamis.graphql.schema : Schema, generateSchemaSDL;
-    import dunamis.graphql.plugin : ApplyPlugins;
-    import dunamis.graphql.filtering : FilterPlugin;
-    import dunamis.graphql.sorting : SortingPlugin;
+    import dunamis.schema.plugin : ApplyPlugins;
+    import dunamis.schema.filtering : FilterPlugin;
+    import dunamis.schema.sorting : SortingPlugin;
 
     static MockDB!() db;
 

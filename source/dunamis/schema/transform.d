@@ -31,13 +31,14 @@
 /// // Use ReplaceTypeRefs to transform field return types
 /// alias TransformedReturn = ReplaceTypeRefs!(OriginalReturn, TypeMap);
 /// ```
-module dunamis.graphql.transform;
+module dunamis.schema.transform;
 
 import std.traits : Parameters, ReturnType, isSomeString;
 import std.typecons : Nullable;
 
 import dunamis.core.expr : Expr, ExprResultType, isExpr;
-import dunamis.graphql.schema : isObjectType, isInternalMember;
+import dunamis.core.discovery : isObjectType;
+import dunamis.core.types : isInternalMember;
 
 // ============================================================================
 // Type Reference Substitution
@@ -126,7 +127,7 @@ template getTransformFieldInfo(Entity) {
     }();
 }
 
-// IdentityTypeMap is defined in dunamis.graphql.plugin and re-exported
+// IdentityTypeMap is defined in dunamis.schema.plugin and re-exported
 // via the module-level import above.
 
 // ============================================================================
@@ -144,7 +145,7 @@ auto wrapEntityResult(alias TypeMap, R)(R result)
     if (isExpr!R)
 {
     import dunamis.core.expr : ExprResultType, map, use, Expr;
-    import dunamis.graphql.entity_cast : pluginEntityCast;
+    import dunamis.schema.entity_cast : pluginEntityCast;
 
     alias ResultT = ExprResultType!R;
 
@@ -181,7 +182,7 @@ auto wrapEntityResult(alias TypeMap, R)(R result)
 /// Value-level entity cast for Nullable wrapping in wrapEntityResult.
 /// Converts Nullable!From to Nullable!To by copying matching fields.
 Nullable!To nullableEntityCastValue(To, From)(Nullable!From val) {
-    import dunamis.graphql.entity_cast : entityCastValue;
+    import dunamis.schema.entity_cast : entityCastValue;
     if (val.isNull) return Nullable!To.init;
     return Nullable!To(entityCastValue!(To, From)(val.get));
 }
@@ -221,7 +222,7 @@ version (unittest) {
 
 // Test ReplaceTypeRefs
 unittest {
-    import dunamis.graphql.plugin : IdentityTypeMap;
+    import dunamis.schema.plugin : IdentityTypeMap;
     static assert(is(ReplaceTypeRefs!(int, IdentityTypeMap) == int));
     static assert(is(ReplaceTypeRefs!(string, IdentityTypeMap) == string));
     static assert(is(ReplaceTypeRefs!(int[], IdentityTypeMap) == int[]));
@@ -266,7 +267,7 @@ unittest {
 // Test ForwardField with TypeMap (unified - replaces ForwardFieldWithTypeMap)
 unittest {
     import dunamis.graphql.schema : Schema;
-    import dunamis.graphql.plugin : ForwardField, IdentityTypeMap;
+    import dunamis.schema.plugin : ForwardField, IdentityTypeMap;
 
     static struct ForwardedQuery {
         mixin ForwardField!(TestQuery, "authors", IdentityTypeMap);
@@ -290,7 +291,7 @@ unittest {
 
 // Test _normalizedSource in entityCastValue with entities
 unittest {
-    import dunamis.graphql.entity_cast : entityCastValue;
+    import dunamis.schema.entity_cast : entityCastValue;
     import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
 
     static MockDB!() db;
@@ -336,7 +337,7 @@ unittest {
 
 // Test _normalizedSource with POD types (no @PrimaryKey)
 unittest {
-    import dunamis.graphql.entity_cast : entityCastValue;
+    import dunamis.schema.entity_cast : entityCastValue;
     static struct POD {
         int x;
         string y;

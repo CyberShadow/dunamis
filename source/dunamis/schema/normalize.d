@@ -4,7 +4,7 @@
 /// of a source type (plain fields, plain methods, computed fields) into uniform
 /// static Expr methods. Separated from plugin.d to avoid circular .imported
 /// forward references during NormalizePlugin instantiation.
-module dunamis.graphql.normalize;
+module dunamis.schema.normalize;
 
 /// Eponymous template that builds the complete NormalizeFields mixin string.
 ///
@@ -24,10 +24,10 @@ template NormalizeFieldsCode(SourceType, alias TypeMap) {
 
     private enum string _use = "dunamis.core.expr.use";
     private enum string _Expr = "dunamis.core.expr.Expr";
-    private enum string _wrap = "dunamis.graphql.transform.wrapEntityResult";
+    private enum string _wrap = "dunamis.schema.transform.wrapEntityResult";
 
     enum NormalizeFieldsCode = () {
-        string result = "@(dunamis.graphql.schema.udas.GqlHidden) package(dunamis.graphql) SourceType _normalizedSource;\n";
+        string result = "package(dunamis.schema) SourceType _normalizedSource;\n";
 
         // PK plain fields first (ordering: id before other fields)
         static foreach (member; __traits(allMembers, SourceType)) {
@@ -86,13 +86,13 @@ template NormalizeFieldsCode(SourceType, alias TypeMap) {
     /// mixed in at a site where only SourceType and TypeMap are in scope.
     private template _computedFieldCode(string member) {
         import std.conv : to;
-        import dunamis.graphql.forward : ForwardFieldImpl;
+        import dunamis.schema.forward : ForwardFieldImpl;
 
         alias Impl = ForwardFieldImpl!(SourceType, member, TypeMap);
 
         // _I references the member as a quoted string — safe at any mixin site
         private enum string _I =
-            "dunamis.graphql.forward.ForwardFieldImpl!(SourceType, \"" ~ member ~ "\", TypeMap)";
+            "dunamis.schema.forward.ForwardFieldImpl!(SourceType, \"" ~ member ~ "\", TypeMap)";
 
         private enum string _paramList = () {
             string result = "dunamis.core.expr.Expr!(typeof(this)) " ~ Impl.srcParamNames[0];
@@ -105,7 +105,7 @@ template NormalizeFieldsCode(SourceType, alias TypeMap) {
         }();
 
         private enum string _argList = () {
-            string result = "dunamis.graphql.entity_cast.pluginEntityCast!(" ~ _I ~ ".SrcEntity)(" ~ Impl.srcParamNames[0] ~ ")";
+            string result = "dunamis.schema.entity_cast.pluginEntityCast!(" ~ _I ~ ".SrcEntity)(" ~ Impl.srcParamNames[0] ~ ")";
             static foreach (i; 1 .. Impl.SrcParams.length)
                 result ~= ", " ~ Impl.srcParamNames[i];
             return result;
@@ -114,7 +114,7 @@ template NormalizeFieldsCode(SourceType, alias TypeMap) {
         enum _computedFieldCode =
             "@(__traits(getAttributes, " ~ _I ~ ".srcFn)) " ~
             "static auto " ~ member ~ "(" ~ _paramList ~ ") { " ~
-            "return dunamis.graphql.transform.wrapEntityResult!(TypeMap)(" ~
+            "return dunamis.schema.transform.wrapEntityResult!(TypeMap)(" ~
             _I ~ ".srcFn(" ~ _argList ~ ")); }\n";
     }
 }

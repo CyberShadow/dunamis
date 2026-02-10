@@ -3,7 +3,7 @@
 /// These are regular (non-mixin) templates that compute complete mixin strings.
 /// All internal aliases stay encapsulated — only the eponymous string member is visible.
 /// Separated from plugin.d to avoid circular forward references when used via .imported.
-module dunamis.graphql.forward;
+module dunamis.schema.forward;
 
 // ============================================================================
 // ForwardField
@@ -28,7 +28,7 @@ template ForwardFieldCode(SourceType, string fieldName, alias TypeMap) {
     import std.conv : to;
 
     private alias Impl = ForwardFieldImpl!(SourceType, fieldName, TypeMap);
-    private enum string _I = "dunamis.graphql.forward.ForwardFieldImpl!(SourceType, fieldName, TypeMap)";
+    private enum string _I = "dunamis.schema.forward.ForwardFieldImpl!(SourceType, fieldName, TypeMap)";
 
     private enum string _paramListStr = () {
         string result = "dunamis.core.expr.Expr!(typeof(this)) " ~ Impl.srcParamNames[0];
@@ -41,7 +41,7 @@ template ForwardFieldCode(SourceType, string fieldName, alias TypeMap) {
     }();
 
     private enum string _argListStr = () {
-        string result = "dunamis.graphql.entity_cast.pluginEntityCast!(" ~ _I ~ ".SrcEntity)(" ~ Impl.srcParamNames[0] ~ ")";
+        string result = "dunamis.schema.entity_cast.pluginEntityCast!(" ~ _I ~ ".SrcEntity)(" ~ Impl.srcParamNames[0] ~ ")";
         static foreach (i; 1 .. Impl.SrcParams.length)
             result ~= ", " ~ Impl.srcParamNames[i];
         return result;
@@ -50,7 +50,7 @@ template ForwardFieldCode(SourceType, string fieldName, alias TypeMap) {
     enum ForwardFieldCode =
         "@(__traits(getAttributes, " ~ _I ~ ".srcFn)) " ~
         "static auto " ~ fieldName ~ "(" ~ _paramListStr ~ ") { " ~
-        "return dunamis.graphql.transform.wrapEntityResult!(TypeMap)(" ~
+        "return dunamis.schema.transform.wrapEntityResult!(TypeMap)(" ~
         _I ~ ".srcFn(" ~ _argListStr ~ ")); }";
 }
 

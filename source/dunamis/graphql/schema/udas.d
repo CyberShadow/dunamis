@@ -55,12 +55,18 @@ struct GqlDeprecated {
 /// 2. If absent, use __traits(identifier) for the D type name
 template getGraphQLTypeName(T) {
     enum getGraphQLTypeName = () {
-        // Check for @GqlName UDA on the type
+        // Check for @GqlName UDA on the type (user-applied, presentation layer)
         static if (hasUDA!(T, GqlName)) {
             return getUDAs!(T, GqlName)[0].name;
         } else {
-            // Use D type name
-            return __traits(identifier, T);
+            // Check for @OriginalName UDA (applied by plugin wrappers)
+            import dunamis.schema.plugin : OriginalName;
+            static if (hasUDA!(T, OriginalName)) {
+                return getUDAs!(T, OriginalName)[0].name;
+            } else {
+                // Use D type name
+                return __traits(identifier, T);
+            }
         }
     }();
 }

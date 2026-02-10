@@ -7,20 +7,29 @@
 ///
 /// A plugin is a template that consumes a schema and produces a new schema.
 /// This module provides building blocks for writing plugins.
-module dunamis.graphql.plugin;
+module dunamis.schema.plugin;
 
 import std.traits : Parameters, ReturnType, hasUDA;
 
 import dunamis.core.expr : Expr, ExprResultType, isExpr;
 
-// Re-export commonly needed schema utilities
-public import dunamis.graphql.schema : isSchema, getFields, FieldInfo, isInternalMember;
+// Re-export commonly needed utilities
+public import dunamis.core.types : isInternalMember;
 
 // Re-export field introspection (moved to core/discovery.d to break circular
 // .imported dependencies — LDC reports forward reference errors when satellite
 // modules loaded via .imported!q{...} import back into plugin.d during mixin
 // expansion, because plugin.d is still mid-compilation at that point)
 public import dunamis.core.discovery : getFieldMembers, isComputedField;
+
+// ============================================================================
+// Schema Check
+// ============================================================================
+
+/// Check if a type is a Schema (has Query and Mutation members)
+template isSchema(alias T) {
+    enum isSchema = __traits(hasMember, T, "Query") && __traits(hasMember, T, "Mutation");
+}
 
 // ============================================================================
 // Plugin Composition
@@ -97,6 +106,14 @@ template ArrayFieldElementType(alias fn) {
 }
 
 // ============================================================================
+// Schema-layer UDAs
+// ============================================================================
+
+/// UDA that records the original D type name before plugin wrapping.
+/// Applied by every wrapper template; the first in the UDA list is canonical.
+struct OriginalName { string name; }
+
+// ============================================================================
 // Identity TypeMap
 // ============================================================================
 
@@ -117,20 +134,20 @@ template IdentityTypeMap(T) {
 /// Zero-leak: no imports, aliases, or enums are mixed into the target struct.
 /// All metadata is encapsulated in ForwardFieldImpl/ForwardFieldCode (in forward.d).
 mixin template ForwardField(SourceType, string fieldName, alias TypeMap = IdentityTypeMap) {
-    static import dunamis.graphql.forward;
+    static import dunamis.schema.forward;
     static import dunamis.core.expr;
-    static import dunamis.graphql.entity_cast;
-    static import dunamis.graphql.transform;
-    mixin(dunamis.graphql.forward.ForwardFieldCode!(SourceType, fieldName, TypeMap));
+    static import dunamis.schema.entity_cast;
+    static import dunamis.schema.transform;
+    mixin(dunamis.schema.forward.ForwardFieldCode!(SourceType, fieldName, TypeMap));
 }
 
 /// Mixin template to forward a plain method from a source type.
 /// Zero-leak: no imports, aliases, or enums are mixed into the target struct.
 /// Code generation is encapsulated in ForwardPlainMethodCode (in forward.d).
 mixin template ForwardPlainMethod(SourceType, string methodName, alias TypeMap = IdentityTypeMap) {
-    static import dunamis.graphql.forward;
+    static import dunamis.schema.forward;
     static import std.traits;
-    mixin(dunamis.graphql.forward.ForwardPlainMethodCode!(SourceType, methodName));
+    mixin(dunamis.schema.forward.ForwardPlainMethodCode!(SourceType, methodName));
 }
 
 /// Mixin template to copy all fields from SourceType.
@@ -148,7 +165,7 @@ mixin template ForwardPlainMethod(SourceType, string methodName, alias TypeMap =
 /// }
 /// ---
 mixin template CopyFields(SourceType, alias TypeMap = IdentityTypeMap) {
-    import dunamis.graphql.plugin : getFieldMembers, ForwardField, ForwardPlainMethod, isComputedField;
+    import dunamis.schema.plugin : getFieldMembers, ForwardField, ForwardPlainMethod, isComputedField;
 
     static foreach (member; getFieldMembers!SourceType) {
         static if (isComputedField!(SourceType, member)) {
@@ -179,15 +196,13 @@ mixin template CopyFields(SourceType, alias TypeMap = IdentityTypeMap) {
 /// ---
 mixin template WrapFields(SourceType, alias TypeMap, alias ArrayFieldMixin) {
     import dunamis.core.types : isPlainField;
-    import dunamis.graphql.plugin : getFieldMembers, isComputedField, isArrayReturningField,
+    import dunamis.schema.plugin : getFieldMembers, isComputedField, isArrayReturningField,
         ForwardField, ForwardPlainMethod;
-    static import dunamis.graphql.schema.udas;
 
     // 1. Per-layer _normalizedSource (stores immediate source type for entity cast chain)
     //    Only present on entity types (which go through NormalizeFields), not Query/Mutation.
     static if (__traits(hasMember, SourceType, "_normalizedSource")) {
-        @(dunamis.graphql.schema.udas.GqlHidden)
-        package(dunamis.graphql) SourceType _normalizedSource;
+        package(dunamis.schema) SourceType _normalizedSource;
     }
 
     // 2. Copy plain fields (struct instance fields, including @PrimaryKey)
@@ -240,13 +255,12 @@ mixin template WrapFields(SourceType, alias TypeMap, alias ArrayFieldMixin) {
 /// }
 /// ---
 mixin template NormalizeFields(SourceType, alias TypeMap = IdentityTypeMap) {
-    static import dunamis.graphql.normalize;
+    static import dunamis.schema.normalize;
     static import dunamis.core.expr;
-    static import dunamis.graphql.transform;
-    static import dunamis.graphql.schema.udas;
-    static import dunamis.graphql.forward;
-    static import dunamis.graphql.entity_cast;
-    mixin(dunamis.graphql.normalize.NormalizeFieldsCode!(SourceType, TypeMap));
+    static import dunamis.schema.transform;
+    static import dunamis.schema.forward;
+    static import dunamis.schema.entity_cast;
+    mixin(dunamis.schema.normalize.NormalizeFieldsCode!(SourceType, TypeMap));
 }
 
 // ============================================================================
@@ -264,8 +278,8 @@ mixin template NormalizeFields(SourceType, alias TypeMap = IdentityTypeMap) {
 /// are applied.
 template NormalizePlugin(RawQuery, RawMutation) {
     import std.meta : staticMap;
-    import dunamis.graphql.schema : getAllObjectTypes, getGraphQLTypeName, GqlName;
-    import dunamis.graphql.transform : isTypeInList;
+    import dunamis.core.discovery : getAllObjectTypes;
+    import dunamis.schema.transform : isTypeInList;
 
     // Discover all entity and POD types reachable from the Query root
     alias _AllTypes = getAllObjectTypes!RawQuery;
@@ -273,7 +287,7 @@ template NormalizePlugin(RawQuery, RawMutation) {
     // Create normalized version of each discovered type
     template _NormalizedType(T) {
         @(__traits(getAttributes, T))
-        @GqlName(getGraphQLTypeName!T)
+        @OriginalName(__traits(identifier, T))
         struct _NormalizedType {
             mixin NormalizeFields!(T, _TypeMap);
         }
@@ -1005,8 +1019,8 @@ unittest {
     import std.typecons : Nullable;
     import dunamis.core.types : isPlainField, isPlainMethod;
     import dunamis.graphql.schema : Schema, generateSchemaSDL, getFields, FieldInfo;
-    import dunamis.graphql.filtering : FilterPlugin;
-    import dunamis.graphql.sorting : SortingPlugin;
+    import dunamis.schema.filtering : FilterPlugin;
+    import dunamis.schema.sorting : SortingPlugin;
     import dunamis.relational.schema : Col, Table, ForeignKey, HasMany, BelongsTo;
     import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
 

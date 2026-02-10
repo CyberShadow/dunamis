@@ -6,65 +6,8 @@ public import dunamis.graphql.schema.input_types;
 public import dunamis.graphql.schema.discovery;
 public import dunamis.graphql.schema.generation;
 
-import dunamis.core.expr : Expr;
-
-// ============================================================================
-// Schema Template
-// ============================================================================
-
-/// Schema template bundling Query and optional Mutation types.
-/// This is the primary entry point for schema operations.
-///
-/// Example:
-/// ---
-/// static MyDB db;
-///
-/// struct User {
-///     mixin Entity!(db, "users");
-///     mixin Col!("name", string);
-/// }
-///
-/// struct Query {
-///     mixin Table!(User, "users");  // db derived from User._db
-/// }
-///
-/// struct Mutation {
-///     static Expr!string createUser(Expr!Mutation parent, string name) { ... }
-/// }
-///
-/// // With mutations
-/// alias MySchema = Schema!(Query, Mutation);
-///
-/// // Without mutations (Mutation defaults to empty)
-/// alias MySchema = Schema!(Query);
-///
-/// // Usage
-/// pragma(msg, generateSchemaSDL!MySchema);
-/// auto query = compileQuery!MySchema(`{ users { name } }`);
-/// ---
-template Schema(QueryType, MutationType = void) {
-    import dunamis.graphql.plugin : NormalizePlugin;
-
-    static if (is(MutationType == void)) {
-        struct _EmptyMutation {}
-        alias _RawMutation = _EmptyMutation;
-    } else {
-        alias _RawMutation = MutationType;
-    }
-
-    // Normalize all entity/POD types: plain fields and plain methods
-    // become static Expr methods, so the entire schema uses one field kind.
-    alias _Normalized = NormalizePlugin!(QueryType, _RawMutation);
-
-    alias Query = _Normalized.Query;
-    alias Mutation = _Normalized.Mutation;
-
-}
-
-/// Check if a type is a Schema (has Query and Mutation members)
-template isSchema(alias T) {
-    enum isSchema = __traits(hasMember, T, "Query") && __traits(hasMember, T, "Mutation");
-}
+// Re-export Schema and isSchema from the schema layer for backward compatibility
+public import dunamis.schema : Schema, isSchema;
 
 // ============================================================================
 // Tests
@@ -337,6 +280,7 @@ unittest {
 // Test mutation SDL generation
 unittest {
     import std.algorithm : canFind;
+    import dunamis.core.expr : Expr;
     import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
     import dunamis.relational.schema : Col, Table, getAll;
 
@@ -876,6 +820,8 @@ unittest {
 
 // Test fixpoint entity type discovery with deep POD chain (depth > 4)
 unittest {
+    import dunamis.core.expr : Expr;
+
     // Chain of 7 POD types linked via plain fields:
     // Query -> L0 -> L1 -> L2 -> L3 -> L4 -> L5
     // Old 4-level expansion would miss L4 and L5.
