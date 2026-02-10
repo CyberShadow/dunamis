@@ -114,6 +114,7 @@ struct Query {
     mixin Table!(User, "users");
     mixin Table!(Post, "posts");
     mixin Table!(Comment, "comments");
+    mixin Table!(Holiday, "holidays");
 }
 
 
@@ -170,6 +171,19 @@ struct User {
     static auto formattedName(Expr!User u, FormatOptions options) {
         // For now, just use prefix - full implementation would handle all options
         return options.prefix ~ u.firstName;
+    }
+
+    /// Computed field accessing an unrelated global table.
+    /// Uses singleton() to reach root entry points and broadcast()
+    /// to replicate the global data for each user in the batch.
+    static auto availability(Expr!User u) {
+        return use(
+            (string firstName, Holiday[] allHolidays) {
+                return firstName ~ " has " ~ allHolidays.length.to!string ~ " holidays";
+            },
+            u.firstName,
+            Query().singleton().holidays().broadcast(u)
+        );
     }
 }
 
@@ -267,6 +281,15 @@ struct Comment {
     }
 }
 
+/// Holiday entity - a global reference table with no relationship to users.
+/// Demonstrates cross-collection access from computed fields.
+@Entity!(db, "holidays")
+struct Holiday {
+    mixin DemoId;
+    mixin Col!("name", string);
+    mixin Col!("date", string);
+}
+
 // ============================================================================
 // Expression Tree Tests (Low-Level API)
 // ============================================================================
@@ -300,6 +323,12 @@ private DebugSqlDB!() createMockDB() {
         {"id": 101, "post_id": 1, "body": "Great post!", "author_id": 2},
         {"id": 102, "post_id": 1, "body": "Thanks for sharing!", "author_id": 3},
         {"id": 103, "post_id": 2, "body": "I agree!", "author_id": 1}
+    ]`);
+
+    mock.setTableData("holidays", `[
+        {"id": 1, "name": "New Year", "date": "2026-01-01"},
+        {"id": 2, "name": "Independence Day", "date": "2026-07-04"},
+        {"id": 3, "name": "Christmas", "date": "2026-12-25"}
     ]`);
 
     // Set the module-level static for Query to use
@@ -883,6 +912,7 @@ type Query {
   users: [User!]!
   posts: [Post!]!
   comments: [Comment!]!
+  holidays: [Holiday!]!
 }
 
 type User {
@@ -901,6 +931,7 @@ type User {
   greeting(prefix: String!, suffix: String = "!"): String!
   """Formatted name with options"""
   formattedName(options: FormatOptions!): String!
+  availability: String!
 }
 
 type Post {
@@ -920,6 +951,12 @@ type Comment {
   author: User!
   postAuthorName: String!
   html: String!
+}
+
+type Holiday {
+  id: Int64!
+  name: String!
+  date: String!
 }
 
 input FormatOptions {
@@ -965,8 +1002,8 @@ unittest {
 
     enum queryFields = getFields!Query;
 
-    // Should have: users, posts, comments
-    assert(queryFields.length == 3);
+    // Should have: users, posts, comments, holidays
+    assert(queryFields.length == 4);
 
     bool hasUsers = false;
     foreach (f; queryFields) {
@@ -1017,6 +1054,12 @@ CREATE TABLE comments (
   body TEXT NOT NULL,
   post_id BIGINT NOT NULL,
   author_id BIGINT NOT NULL
+);
+
+CREATE TABLE holidays (
+  id BIGSERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  date TEXT NOT NULL
 );
 
 -- Phase 2: Add foreign key constraints
@@ -1769,5 +1812,67 @@ unittest {
     assert(sql.length > 0, "Expected CTE SQL to be generated");
     assert(sql.canFind("layer0"), "Expected layer0 (users) in SQL: " ~ sql);
     assert(sql.canFind("layer1"), "Expected layer1 (posts) in SQL: " ~ sql);
+}
+
+// ============================================================================
+// Cross-Collection Access Tests
+// ============================================================================
+
+// Test: Computed field accessing an unrelated global table via broadcast()
+unittest {
+    import std.stdio : writeln;
+
+    auto db = createMockDB();
+    auto executor = new Executor();
+
+    // User.availability accesses the holidays table (unrelated to users)
+    // via singleton(Query.init).holidays() + broadcast()
+    auto query = map!(
+        (Expr!User u) => jsonObject(
+            "firstName", u.firstName,
+            "availability", u.availability
+        )
+    )(getByIds!User([1, 2]));
+
+    auto result = awaitSync(executor.execute(query));
+
+    assert(result.length == 2);
+    assert(result[0]["firstName"].str == "Alice");
+    assert(result[0]["availability"].str == "Alice has 3 holidays");
+    assert(result[1]["firstName"].str == "Bob");
+    assert(result[1]["availability"].str == "Bob has 3 holidays");
+
+    debug(sql) {
+        writeln("\n=== Test: Cross-collection access (User.availability) ===");
+        db.printSQL();
+    }
+}
+
+// Test: Direct broadcast() usage — extract data at expression level, then broadcast
+unittest {
+    auto db = createMockDB();
+    auto executor = new Executor();
+
+    // Extract holiday names via UFCS chain, then broadcast to each user
+    auto holidayNames = Query().singleton().holidays()
+        .map!((Expr!Holiday h) => h.name);
+
+    auto query = map!(
+        (Expr!User u) => use(
+            (string userName, string[] allHolidayNames) {
+                import std.array : join;
+                return userName ~ ": " ~ allHolidayNames.join(", ");
+            },
+            u.firstName,
+            holidayNames.broadcast(u)
+        )
+    )(getByIds!User([1, 2, 3]));
+
+    auto result = awaitSync(executor.execute(query));
+
+    assert(result.length == 3);
+    assert(result[0] == "Alice: New Year, Independence Day, Christmas");
+    assert(result[1] == "Bob: New Year, Independence Day, Christmas");
+    assert(result[2] == "Carol: New Year, Independence Day, Christmas");
 }
 

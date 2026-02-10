@@ -654,6 +654,81 @@ The three-state mapping (`Nullable!(Nullable!T)`) supports patch mutation semant
 
 This distinction is semantic (handled in your resolver logic), not schema-level—GraphQL represents both `Nullable!T` and `Nullable!(Nullable!T)` as nullable types.
 
+### Cross-Collection Access
+
+Computed fields can access unrelated tables — tables with no declared relationship to the current entity. Use `singleton()` to reach root entry points, and `broadcast()` to replicate global data across the current batch:
+
+```d
+@Entity!(db, "holidays")
+struct Holiday {
+    @PrimaryKey long id;
+    mixin Col!("name", string);
+    mixin Col!("date", string);
+}
+
+@Entity!(db, "users")
+struct User {
+    @PrimaryKey long id;
+    mixin Col!("firstName", string);
+
+    // Access the holidays table — no relationship needed
+    static auto availability(Expr!User u) {
+        return use(
+            (string firstName, Holiday[] allHolidays) {
+                return firstName ~ " has " ~ allHolidays.length.to!string ~ " holidays";
+            },
+            u.firstName,
+            Query().singleton().holidays().broadcast(u)
+        );
+    }
+}
+```
+
+**How it works:**
+
+1. `Query().singleton()` creates an `Expr!Query` — the same expression type used at the schema root
+2. `.holidays()` calls `Query.holidays(q)` via `opDispatch`, returning the holidays collection
+3. `.broadcast(u)` replicates the single result for each user in the batch, aligning batch dimensions for `use()`
+4. The optimizer handles the holidays expression inside `use()` — it evaluates as a separate query
+
+**Why `broadcast()` is needed:**
+
+The `use()` combinator expects all inputs to have the same batch size. When evaluating users, `u.firstName` produces one result per user (batch size N). But the holidays collection produces one result total (batch size 1). `broadcast()` bridges this gap by replicating the single result N times — analogous to how `constant()` replicates a literal value.
+
+**Extracting data at the expression level:**
+
+To work with specific fields from the global collection, map them before broadcasting:
+
+```d
+static auto availability(Expr!User u) {
+    auto holidayNames = Query().singleton().holidays()
+        .map!((Expr!Holiday h) => h.name);
+
+    return use(
+        (string firstName, string[] names) {
+            return firstName ~ ": " ~ names.join(", ");
+        },
+        u.firstName,
+        holidayNames.broadcast(u)
+    );
+}
+```
+
+**Pre- vs post-processed schema access:**
+
+You can choose which level of schema processing to access:
+
+```d
+// Raw schema — entities as declared, no plugin wrapping
+Query().singleton().holidays()
+
+// Plugin-processed schema — with filtering, sorting, pagination wrappers
+alias FinalSchema = PaginationPlugin!(SortingPlugin!(FilterPlugin!(Schema!(Query, Mutation))));
+FinalSchema.Query().singleton().holidays()
+```
+
+For most computed fields, raw schema access is appropriate — you want all data from the global table, not a filtered/paginated subset.
+
 ### Runtime Query Compilation
 
 Use `compileQuery` to compile GraphQL query strings at runtime:
@@ -831,6 +906,7 @@ Introspection respects `@GqlHidden` (hidden fields are excluded), `@GqlDeprecate
 - Plain methods (instance methods) for D-side computed values on fetched entities
 - POD types (plain D structs) discovered through plain method return types and plain field types
 - Custom `Expr!T` nodes returning POD structs work in map/collection contexts
+- Cross-collection access via `broadcast()` — computed fields can query unrelated global tables
 - `Table` mixin for Query root entry points
 - `ForeignKey!Entity` type for type-safe FK columns
 - `@GqlHidden` UDA to hide fields from GraphQL schema

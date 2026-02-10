@@ -103,6 +103,73 @@ auto use(Fn, Exprs...)(Fn fn, Exprs exprs)
 }
 
 // ============================================================================
+// Broadcast Combinator (cross-collection access)
+// ============================================================================
+
+/// Replicates a single-batch expression result to match another expression's
+/// batch size. Used when a computed field needs data from an unrelated
+/// collection (e.g., a global holidays table accessed from a User field).
+///
+/// Similar to ConstExpr (which replicates a literal value), but for
+/// expression-derived values. The source expression is evaluated once,
+/// and its single result is replicated for each element in the target batch.
+///
+/// Example:
+/// ---
+/// static auto availability(Expr!User u) {
+///     return use(
+///         (string name, Holiday[] allHolidays) => ...,
+///         u.firstName,                                    // batch size N
+///         Query().singleton().holidays().broadcast(u)     // replicated to N
+///     );
+/// }
+/// ---
+class BroadcastExpr(T) : Expr!T {
+    private Expr!T _source;
+    private ExprBase _sizeReference;
+
+    this(Expr!T source, ExprBase sizeReference) {
+        _source = source;
+        _sizeReference = sizeReference;
+    }
+
+    override ExprBase[] dependencies() {
+        return [cast(ExprBase) _source, _sizeReference];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0) _source = cast(Expr!T) newDep;
+        else if (index == 1) _sizeReference = newDep;
+    }
+
+    override Expr!T optimize(OptimizeContext ctx) {
+        _source = _source.optimize(ctx);
+        return this;
+    }
+
+    override Promise!(T[]) eval(EvalContext ctx) {
+        alias ResultTuple = Tuple!(T[], size_t);
+        return all(
+            _source.eval(ctx),
+            _sizeReference.evalResultLength(ctx)
+        ).then((ResultTuple results) {
+            auto sourceResults = results[0];
+            auto targetSize = results[1];
+            assert(sourceResults.length >= 1,
+                "broadcast source must produce at least 1 result");
+            auto value = sourceResults[0];
+            return std.algorithm.map!(_ => value)(iota(targetSize)).array;
+        });
+    }
+}
+
+/// Replicate a single-batch expression to match another expression's batch size.
+/// Use this when a computed field needs data from an unrelated collection.
+auto broadcast(T)(Expr!T source, ExprBase sizeReference) {
+    return new BroadcastExpr!T(source, sizeReference);
+}
+
+// ============================================================================
 // EffectExpr: Deferred Side Effects
 // ============================================================================
 
