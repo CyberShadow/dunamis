@@ -949,10 +949,14 @@ Introspection respects `@GqlHidden` (hidden fields are excluded), `@GqlDeprecate
 
 ## Future Directions
 
+- **Fragments** - Named and inline fragment support (`... on Type`, `...FragmentName`), required for interoperability with standard GraphQL clients (Apollo, Relay)
+- **Directives** - `@skip(if: Boolean!)` and `@include(if: Boolean!)` execution support (already declared in introspection but not yet evaluated)
+- **Query validation** - Separate validation phase for structural rules: fragment cycle detection, unused/undefined variable checks, duplicate operation names, argument validation
+- **Error path tracking** - Track field paths through nested selections for precise error reporting (e.g., `["users", 0, "posts", 2, "title"]`) and partial result support (`{"data": ..., "errors": [...]}`)
 - **Polymorphism** - GraphQL union and interface types for heterogeneous collections
 - **Expression deduplication** - Grafast-style peer analysis
 - **Plan caching** - Reuse optimized plans for repeated queries
-- **Error path tracking** - Track field paths through nested selections for precise error reporting (e.g., `["users", 0, "posts", 2, "title"]`)
+- **Request context** - User-accessible request-scoped context for computed fields and `use()` callbacks. The executor already has `EvalContext` with `SourceContextRegistry` for internal plumbing; the missing piece is a user-facing API so computed fields can access request-scoped data like the authenticated user, tenant ID, feature flags, or tracing/logging context. Possible API: `context!MyRequestContext(expr)` returning an `Expr!MyRequestContext` usable inside `use()`
 - **Field override plugin layer** - Runtime mechanism to intercept and override any field resolution, enabling feature flags, A/B testing, gradual rollouts, or per-deployment customization without recompilation
 
 ## Related Work
