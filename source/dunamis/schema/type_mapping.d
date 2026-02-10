@@ -207,10 +207,7 @@ mixin template ForwardFieldWithMappings(SourceType, string fieldName, alias Type
 /// );
 /// ---
 template ExternalTypesPlugin(alias S, NewMappings...) if (isSchema!S) {
-    import dunamis.core.expr : Expr, use;
-    import dunamis.core.types : isPlainField, isPlainMethod;
     import dunamis.core.discovery : getAllObjectTypes;
-    import dunamis.core.types : isInternalMember;
     import dunamis.schema.transform : isTypeInList;
     import dunamis.schema.plugin : getFieldMembers, isComputedField, OriginalName;
 
@@ -220,11 +217,15 @@ template ExternalTypesPlugin(alias S, NewMappings...) if (isSchema!S) {
 
     // TypeMap: route types to their wrapped versions.
     // - Directly-mapped types (Date→string): identity (serialized at call site)
-    // - Entity/POD types in the schema: wrapped with value mapping
+    // - Normalized types whose source has a mapping: map back to source type
+    //   (EntityCastExpr unwraps _normalizedSource, then mapping serializes it)
+    // - Object types in the schema: wrapped with value mapping
     // - Everything else: identity
     template _TypeMap(T) {
         static if (hasDirectMapping!(T, NewMappings)) {
             alias _TypeMap = T; // Directly mapped → don't wrap, serialize at call site
+        } else static if (_hasSourceMapping!T) {
+            alias _TypeMap = typeof(T._normalizedSource); // Unwrap to source for mapping
         } else static if (isTypeInList!(T, _AllTypes)) {
             alias _TypeMap = _MappedType!T; // Wrap with value mapping
         } else {
@@ -232,13 +233,19 @@ template ExternalTypesPlugin(alias S, NewMappings...) if (isSchema!S) {
         }
     }
 
+    // Check if T is a normalized type whose _normalizedSource has a value mapping.
+    template _hasSourceMapping(T) {
+        static if (__traits(hasMember, T, "_normalizedSource")) {
+            enum _hasSourceMapping = hasDirectMapping!(typeof(T._normalizedSource), NewMappings);
+        } else {
+            enum _hasSourceMapping = false;
+        }
+    }
+
     // Build the body of _MappedType as a code string to avoid symbol leaks.
-    // Eliminates _nf_read_*, _nf_call_* helpers and scoped imports by using
-    // function literals and fully-qualified references.
+    // After NormalizePlugin, all types have only computed fields (static Expr
+    // methods), so we only need to forward those with value mapping applied.
     private template _MappedTypeBody(T) {
-        private enum string _use = "dunamis.core.expr.use";
-        private enum string _Expr = "dunamis.core.expr.Expr";
-        private enum string _apply = "dunamis.schema.type_mapping.applyMappingsToResult";
         private enum string _fwd = "dunamis.schema.type_mapping.ForwardFieldWithMappings";
 
         enum _MappedTypeBody = () {
@@ -251,34 +258,10 @@ template ExternalTypesPlugin(alias S, NewMappings...) if (isSchema!S) {
             // Per-layer _normalizedSource (stores immediate source type)
             result ~= "package(dunamis.schema) T _normalizedSource;\n";
 
-            // Forward computed fields with value mapping (already zero-leak mixin template)
+            // Forward computed fields with value mapping
             static foreach (member; getFieldMembers!T) {
                 static if (isComputedField!(T, member)) {
                     result ~= "mixin " ~ _fwd ~ "!(T, \"" ~ member ~ "\", _TypeMap, NewMappings);\n";
-                }
-            }
-
-            // Plain fields: function literals instead of _nf_read_* helpers
-            static foreach (member; __traits(allMembers, T)) {
-                static if (!isInternalMember!member && isPlainField!(T, member)) {
-                    result ~=
-                        "@(__traits(getAttributes, __traits(getMember, T, \"" ~ member ~ "\"))) " ~
-                        "static auto " ~ member ~ "(" ~ _Expr ~ "!(typeof(this)) _self) { " ~
-                        "return " ~ _apply ~ "!(_TypeMap, NewMappings)(" ~
-                        _use ~ "(function(typeof(this) _n) { return _n._normalizedSource." ~ member ~
-                        "; }, _self)); }\n";
-                }
-            }
-
-            // Plain methods: function literals instead of _nf_call_* helpers
-            static foreach (member; getFieldMembers!T) {
-                static if (!isComputedField!(T, member)) {
-                    result ~=
-                        "@(__traits(getAttributes, __traits(getMember, T, \"" ~ member ~ "\"))) " ~
-                        "static auto " ~ member ~ "(" ~ _Expr ~ "!(typeof(this)) _self) { " ~
-                        "return " ~ _apply ~ "!(_TypeMap, NewMappings)(" ~
-                        _use ~ "(function(typeof(this) _n) { return _n._normalizedSource." ~ member ~
-                        "(); }, _self)); }\n";
                 }
             }
 
@@ -287,9 +270,8 @@ template ExternalTypesPlugin(alias S, NewMappings...) if (isSchema!S) {
     }
 
     // Create wrapped version of each discovered type.
-    // For entity types (with @PrimaryKey): all fields are already static Expr methods
-    //   (from Schema's NormalizePlugin), so just forward with value mapping.
-    // For POD types: normalize plain fields/methods + apply value mapping.
+    // After NormalizePlugin, all types have only static Expr methods.
+    // Just forward with value mapping applied.
     template _MappedType(T) {
         @(__traits(getAttributes, T))
         @OriginalName(__traits(identifier, T))

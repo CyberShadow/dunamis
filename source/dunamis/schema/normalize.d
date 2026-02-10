@@ -9,17 +9,15 @@ module dunamis.schema.normalize;
 /// Eponymous template that builds the complete NormalizeFields mixin string.
 ///
 /// Generates:
-/// - `_normalizedSource` field (carries original entity data through plugin chain)
-/// - Static Expr methods for PK plain fields (ordered first)
+/// - `_normalizedSource` field (carries original data through plugin chain)
+/// - Static Expr methods for plain fields (in declaration order)
 /// - Forwarded computed fields (via _computedFieldCode)
-/// - Static Expr methods for non-PK plain fields
 /// - Static Expr methods for plain methods
 ///
 /// Uses function literals instead of named helpers — no `_nf_read_*` or
 /// `_nf_call_*` symbols leak into the target struct.
 template NormalizeFieldsCode(SourceType, alias TypeMap) {
     import dunamis.core.types : isPlainField;
-    import dunamis.relational.schema.attrs : hasPrimaryKeyAttr;
     import dunamis.core.discovery : getFieldMembers, isComputedField;
 
     private enum string _use = "dunamis.core.expr.use";
@@ -29,9 +27,9 @@ template NormalizeFieldsCode(SourceType, alias TypeMap) {
     enum NormalizeFieldsCode = () {
         string result = "package(dunamis.schema) SourceType _normalizedSource;\n";
 
-        // PK plain fields first (ordering: id before other fields)
+        // Plain fields in natural declaration order
         static foreach (member; __traits(allMembers, SourceType)) {
-            static if (isPlainField!(SourceType, member) && hasPrimaryKeyAttr!(SourceType, member)) {
+            static if (isPlainField!(SourceType, member)) {
                 result ~= _plainFieldCode(member);
             }
         }
@@ -40,13 +38,6 @@ template NormalizeFieldsCode(SourceType, alias TypeMap) {
         static foreach (member; getFieldMembers!SourceType) {
             static if (isComputedField!(SourceType, member)) {
                 result ~= _computedFieldCode!member;
-            }
-        }
-
-        // Non-PK plain fields
-        static foreach (member; __traits(allMembers, SourceType)) {
-            static if (isPlainField!(SourceType, member) && !hasPrimaryKeyAttr!(SourceType, member)) {
-                result ~= _plainFieldCode(member);
             }
         }
 

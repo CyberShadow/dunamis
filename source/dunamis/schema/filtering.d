@@ -149,10 +149,12 @@ template getFilterableColumns(Entity) {
     }();
 }
 
-/// Check if a type is an entity (has @PrimaryKey field).
+/// Check if a type is an object type (has fields/methods, not a scalar).
+/// Used to distinguish entity/POD array elements (get nested ListFilter)
+/// from scalar array elements (get ListFilter!ScalarFilter).
 template isEntityType(T) {
-    import dunamis.relational.schema.attrs : hasPrimaryKey;
-    enum isEntityType = hasPrimaryKey!T;
+    import dunamis.core.discovery : isObjectType;
+    enum isEntityType = isObjectType!T;
 }
 
 /// Check if a member is an array-returning method (returns Expr!(T[]) for any T).

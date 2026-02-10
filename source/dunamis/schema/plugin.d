@@ -267,12 +267,9 @@ mixin template NormalizeFields(SourceType, alias TypeMap = IdentityTypeMap) {
 // Normalize Plugin
 // ============================================================================
 
-/// Internal plugin that normalizes entity types (those with @PrimaryKey) to use
-/// only static Expr methods. Plain fields and plain methods are converted to
-/// computed fields via `use()`, making all field access uniform for entities.
-///
-/// POD types (structs without @PrimaryKey) are left unchanged — they keep their
-/// plain fields/methods and remain compatible with ExternalTypesPlugin.
+/// Internal plugin that normalizes all discovered object types to use only
+/// static Expr methods. Plain fields and plain methods are converted to
+/// computed fields via `use()`, making all field access uniform.
 ///
 /// Used internally by Schema to normalize types before external plugins
 /// are applied.
@@ -293,12 +290,9 @@ template NormalizePlugin(RawQuery, RawMutation) {
         }
     }
 
-    // Map entity types (with @PrimaryKey) to normalized versions.
-    // POD types pass through unchanged — they keep plain fields/methods
-    // and remain compatible with ExternalTypesPlugin type mappings.
+    // Map all discovered object types to their normalized versions.
     template _TypeMap(T) {
-        import dunamis.relational.schema.attrs : hasPrimaryKey;
-        static if (isTypeInList!(T, _AllTypes) && hasPrimaryKey!T) {
+        static if (isTypeInList!(T, _AllTypes)) {
             alias _TypeMap = _NormalizedType!T;
         } else {
             alias _TypeMap = T;
