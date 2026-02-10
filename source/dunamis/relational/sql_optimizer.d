@@ -12,6 +12,7 @@ import ae.utils.promise;
 import dunamis.core.types;
 import dunamis.core.eval;
 import dunamis.core.expr;
+import dunamis.core.filtering : FilterByInfo;
 import dunamis.core.optimize : OptimizeContext, ExprOptimizer;
 import dunamis.relational.eval_context : RelationalEvalContext, QueryResult;
 import dunamis.relational.query_node;
@@ -478,7 +479,7 @@ class SqlOptimizer : ExprOptimizer {
         if (auto colAccess = cast(ColumnAccessInfo) predicate) {
             // Check if the input is the placeholder (or reaches it through the chain)
             if (isPlaceholderAccess(colAccess.inputExpr, itemPlaceholder)) {
-                return Nullable!string(childTable ~ "." ~ colAccess.sqlColumn);
+                return Nullable!string(childTable ~ "." ~ colAccess.column);
             }
         }
 
@@ -901,6 +902,150 @@ class ProjectComputedExpr(T) : Expr!T, ProjectComputedInfo {
     @property string columnAlias() { return _alias; }
 }
 
+
+// ============================================================================
+// Filter WHERE Clause Generation
+// ============================================================================
+
+/// Extract WHERE clause SQL from a FilterByInfo by pattern-matching its predicate.
+Nullable!string extractFilterWhereClause(FilterByInfo filterInfo) {
+    auto predicate = filterInfo.filterPredicate;
+    auto filterItem = filterInfo.filterItem;
+
+    return extractWhereFromExpr(predicate, filterItem);
+}
+
+/// Recursively extract WHERE SQL from an expression tree.
+Nullable!string extractWhereFromExpr(Object expr, Object filterItem) {
+    // Handle binary operators: AND, OR, comparison operators
+    if (auto binOp = cast(BinaryOpInfo) expr) {
+        string op = binOp.operator;
+
+        // Logical operators: AND, OR
+        if (op == "&&" || op == "||") {
+            auto leftSql = extractWhereFromExpr(binOp.left, filterItem);
+            auto rightSql = extractWhereFromExpr(binOp.right, filterItem);
+            if (!leftSql.isNull && !rightSql.isNull) {
+                string sqlOp = (op == "&&") ? "AND" : "OR";
+                return Nullable!string("(" ~ leftSql.get ~ " " ~ sqlOp ~ " " ~ rightSql.get ~ ")");
+            }
+            return Nullable!string.init;
+        }
+
+        // Comparison operators: ==, !=, <, <=, >, >=
+        if (op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=") {
+            // Try to match: column op constant or constant op column
+            auto leftColInfo = extractFilterColumnInfo(binOp.left, filterItem);
+            auto rightColInfo = extractFilterColumnInfo(binOp.right, filterItem);
+            auto leftConst = extractConstant(binOp.left);
+            auto rightConst = extractConstant(binOp.right);
+
+            string column, value;
+            bool isColumnOnLeft = false;
+
+            if (!leftColInfo.isNull && !rightConst.isNull) {
+                column = leftColInfo.get;
+                value = rightConst.get;
+                isColumnOnLeft = true;
+            } else if (!rightColInfo.isNull && !leftConst.isNull) {
+                column = rightColInfo.get;
+                value = leftConst.get;
+                isColumnOnLeft = false;
+            } else {
+                return Nullable!string.init;
+            }
+
+            string sqlOp = translateComparisonOp(op, isColumnOnLeft);
+            return Nullable!string(column ~ " " ~ sqlOp ~ " " ~ value);
+        }
+    }
+
+    // Handle unary NOT operator
+    if (auto unaryOp = cast(UnaryOpInfo) expr) {
+        if (unaryOp.operator == "!") {
+            auto operandSql = extractWhereFromExpr(unaryOp.operand, filterItem);
+            if (!operandSql.isNull) {
+                return Nullable!string("NOT " ~ operandSql.get);
+            }
+        }
+    }
+
+    // Handle constant true/false
+    if (auto constInfo = cast(ConstantInfo) expr) {
+        if (constInfo.valueType == typeid(bool)) {
+            bool val = constInfo.valueAsString == "true";
+            return Nullable!string(val ? "1=1" : "1=0");
+        }
+    }
+
+    // Handle LIKE expressions (contains, startsWith, endsWith)
+    if (auto likeInfo = cast(LikeInfo) expr) {
+        auto colInfo = extractFilterColumnInfo(likeInfo.likeOperand, filterItem);
+        if (!colInfo.isNull) {
+            // Escape single quotes in pattern and wrap in quotes
+            // The pattern already has % and _ escaped as \% and \_ by escapeLikePattern()
+            string escapedPattern = likeInfo.likePattern.replace("'", "''");
+            if (likeInfo.caseInsensitive) {
+                // Case-insensitive: use LOWER() on both sides (works on all databases)
+                return Nullable!string("LOWER(" ~ colInfo.get ~ ") LIKE LOWER('" ~ escapedPattern ~ `') ESCAPE '\'`);
+            } else {
+                return Nullable!string(colInfo.get ~ " LIKE '" ~ escapedPattern ~ `' ESCAPE '\'`);
+            }
+        }
+    }
+
+    return Nullable!string.init;
+}
+
+/// Try to extract column name from an expression that should be a column access on the filter item.
+private Nullable!string extractFilterColumnInfo(Object expr, Object filterItem) {
+    // Check if this is a column access expression
+    auto colAccess = cast(ColumnAccessInfo) expr;
+    if (colAccess is null) return Nullable!string.init;
+
+    // Get the input expression and check if it's the filter item placeholder
+    auto inputExpr = colAccess.inputExpr();
+    if (cast(Object) inputExpr is filterItem) {
+        return Nullable!string(colAccess.column);
+    }
+
+    return Nullable!string.init;
+}
+
+/// Extract SQL literal from a constant expression.
+private Nullable!string extractConstant(Object expr) {
+    auto constInfo = cast(ConstantInfo) expr;
+    if (constInfo is null) return Nullable!string.init;
+
+    return Nullable!string(constantToSqlLiteral(constInfo));
+}
+
+/// Convert comparison operator to SQL, handling operand order.
+string translateComparisonOp(string op, bool columnOnLeft) {
+    if (columnOnLeft) {
+        // column op value - use operator as-is
+        switch (op) {
+            case "==": return "=";
+            case "!=": return "<>";
+            case "<": return "<";
+            case "<=": return "<=";
+            case ">": return ">";
+            case ">=": return ">=";
+            default: return op;
+        }
+    } else {
+        // value op column - reverse operator
+        switch (op) {
+            case "==": return "=";
+            case "!=": return "<>";
+            case "<": return ">";    // value < column → column > value
+            case "<=": return ">=";
+            case ">": return "<";
+            case ">=": return "<=";
+            default: return op;
+        }
+    }
+}
 
 // ============================================================================
 // Tests

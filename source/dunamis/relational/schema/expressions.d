@@ -99,7 +99,7 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
 
     // ColumnAccessInfo implementation
     @property ExprBase inputExpr() { return _input; }
-    @property string sqlColumn() { return _column; }
+    @property string column() { return _column; }
 
     override ExprBase[] dependencies() {
         return [_input];
@@ -130,7 +130,7 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
 
         // Get or create QueryNode for this MapExpr
         auto node = relCtx.getOrCreateNode(mapExpr, EntityID!Entity.typeName, EntityID!Entity.table,
-                                           getPkSqlColumns!Entity);
+                                           getPkColumns!Entity);
 
         // Set the data fetcher on the node (for mutation-returned entities that bypass GetByIdsExpr)
         if (node.dataFetcher is null && EntityID!Entity.db !is null) {
@@ -194,6 +194,7 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
                                 seenSort = true;
                             } else break;
                         } else if (auto filterByInfo = cast(FilterByInfo) coll) {
+                            import dunamis.relational.sql_optimizer : extractFilterWhereClause;
                             auto whereSql = extractFilterWhereClause(filterByInfo);
                             if (!whereSql.isNull) {
                                 node.addWhereClause(whereSql.get);
@@ -311,7 +312,6 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
         });
     }
 
-    @property string column() { return _column; }
     @property ExprBase input() { return _input; }
 }
 
@@ -482,7 +482,7 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
 
         // Fallback: naive path using fetchAllIdsString
         auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-        return relCtx.fetchAllIdsString(EntityID!Entity.table, EntityID!Entity.typeName, getPkSqlColumns!Entity).then((AnyRef[] refs) {
+        return relCtx.fetchAllIdsString(EntityID!Entity.table, EntityID!Entity.typeName, getPkColumns!Entity).then((AnyRef[] refs) {
             auto entities = refs.map!(r => makeEntityFromRef!Entity(r)).array;
 
             enum plainFields = getPlainFieldNames!Entity;
@@ -742,7 +742,7 @@ class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultTyp
     @property string parentTable() { return EntityID!Parent.table; }
     @property string parentTypeName() { return EntityID!Parent.typeName; }
     @property string fkColumn() { return fk; }
-    @property string[] parentPkColumns() { return getPkSqlColumns!Parent; }
+    @property string[] parentPkColumns() { return getPkColumns!Parent; }
 }
 
 // ============================================================================

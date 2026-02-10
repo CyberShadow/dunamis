@@ -70,12 +70,12 @@ struct UpdateInput {
 /// Expression that executes INSERT and returns the new entity.
 /// Returns a single entity (Expr!Entity).
 class InsertExpr(Entity) : Expr!Entity {
-    import dunamis.relational.schema.attrs : getPkSqlColumns;
+    import dunamis.relational.schema.attrs : getPkColumns;
 
     private InsertInput _input;
     private string _table;
     private string _typeName;
-    private enum string[] _pkColumns = getPkSqlColumns!Entity;
+    private enum string[] _pkColumns = getPkColumns!Entity;
     private enum bool _isAutoIncrement = hasAutoIncrement!Entity;
 
     this(InsertInput input) {
@@ -169,12 +169,12 @@ class InsertExpr(Entity) : Expr!Entity {
 /// Expression that executes UPDATE and returns updated entities.
 /// Returns an array of entities (Expr!(Entity[])).
 class UpdateExpr(Entity) : Expr!(Entity[]) {
-    import dunamis.relational.schema.attrs : getPkSqlColumns;
+    import dunamis.relational.schema.attrs : getPkColumns;
 
     private UpdateInput _input;
     private string _table;
     private string _typeName;
-    private enum string[] _pkColumns = getPkSqlColumns!Entity;
+    private enum string[] _pkColumns = getPkColumns!Entity;
 
     this(UpdateInput input) {
         _input = input;
@@ -233,12 +233,12 @@ class UpdateExpr(Entity) : Expr!(Entity[]) {
 /// Expression that executes DELETE and returns success.
 /// Returns bool indicating if any rows were deleted.
 class DeleteExpr(Entity) : Expr!bool {
-    import dunamis.relational.schema.attrs : getPkSqlColumns;
+    import dunamis.relational.schema.attrs : getPkColumns;
 
     private string[] _ids;
     private string _table;
     private string _typeName;
-    private enum string[] _pkColumns = getPkSqlColumns!Entity;
+    private enum string[] _pkColumns = getPkColumns!Entity;
 
     this(string[] ids) {
         _ids = ids;

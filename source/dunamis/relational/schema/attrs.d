@@ -414,10 +414,10 @@ template hasSqlColumn(alias method) {
     enum hasSqlColumn = getSqlColumn!method.length > 0;
 }
 
-/// Get SQL column names for @PrimaryKey fields.
-/// Maps each PK D field name to its SQL column name via @SqlColumn UDA or snake_case.
-template getPkSqlColumns(Entity) {
-    enum getPkSqlColumns = () {
+/// Get column names for @PrimaryKey fields.
+/// Maps each PK D field name to its column name via @SqlColumn UDA or snake_case.
+template getPkColumns(Entity) {
+    enum getPkColumns = () {
         string[] result;
         static foreach (fieldName; getPrimaryKeyFieldNames!Entity) {
             result ~= getPlainFieldColumnName!(Entity, fieldName);

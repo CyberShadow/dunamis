@@ -14,8 +14,8 @@ interface ColumnAccessInfo {
     /// The input expression this column is accessed from
     @property ExprBase inputExpr();
 
-    /// The SQL column name (e.g., "first_name")
-    @property string sqlColumn();
+    /// The column name (e.g., "first_name")
+    @property string column();
 }
 
 /// Interface for belongsTo expressions (for chain walking)
