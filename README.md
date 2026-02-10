@@ -66,33 +66,66 @@ The trade-off: dynamic fetches don't benefit from the batch optimization and may
 
 ## Architecture
 
+### Package Dependencies
+
 ```
-┌─────────────────────────────────────┐
-│           Core Layer                │
-│  - Expr!T expression trees          │
-│  - Data-source agnostic Executor    │
-│  - OptimizeContext / EvalContext    │
-└─────────────────────────────────────┘
-                 │
-                 ▼
-┌─────────────────────────────────────┐
-│        Relational Layer             │
-│  - Entity mixins (Col, BelongsTo)   │
-│  - QueryNode SQL planning           │
-│  - CTE-based query generation       │
-│  - DataFetcher abstraction          │
-└─────────────────────────────────────┘
-                 │
-                 ▼
-┌─────────────────────────────────────┐
-│         GraphQL Layer               │
-│  - Schema SDL generation            │
-│  - SQL DDL generation               │
-│  - Query compilation (runtime)      │
-└─────────────────────────────────────┘
+    ┌──────────┐  ┌──────────┐  ┌──────────┐
+    │ postgres │  │  sqlite  │  │  mysql   │
+    └────┬─────┘  └────┬─────┘  └────┬─────┘
+         │             │             │
+         └─────────────┼─────────────┘
+                       │
+                       ▼
+  ┌─────────┐   ┌──────────────┐  ┌──────────┐
+  │ graphql │   │  relational  │  │  schema  │
+  └────┬────┘   └──────┬───────┘  └─────┬────┘
+       │               │                │
+       └───────────────┼────────────────┘
+                       │
+                       ▼
+                  ┌──────────┐
+                  │   core   │
+                  └──────────┘
 ```
 
+The three middle-tier packages (graphql, schema, relational) depend only on core and are completely isolated from each other. DB-specific packages (postgres, sqlite, mysql) depend on relational for shared SQL generation and query planning.
+
 The Executor is data-source agnostic. Data sources travel with expressions - root expressions (like `getByIds!User`) carry their DataFetcher. The executor walks the expression tree to collect optimizers needed for each data source.
+
+The schema layer defines a typed API that can be consumed by any presentation format. GraphQL is one such format; business logic within the application can also query the schema directly using D's type system (see [Principle 6](#6-schema-independence-from-presentation)).
+
+### Data Flow
+
+```
+                       REQUEST            RESPONSE
+                       ───────            ────────
+                                                                 
+                     HTTP request      HTTP response
+                          │                  ▲
+                  server  │                  │  server
+                          ▼                  │
+                    GraphQL query +    JSON response
+                    JSON variables        string
+                          │                  ▲
+              lex, parse  │                  │  serialize
+                          ▼                  │
+                   AST + JSONValue       JSONValue
+                        trees               tree
+                          │                  ▲
+    compile, deserialize  │                  │  assemble
+    inputs                ▼                  │  result tree
+                      Expr tree          evaluated
+                       (naive)            values
+                          │                  ▲
+                optimize  │                  │  evaluate
+                          ▼                  │
+                     Expr tree           row data
+                 (optimized) + SQL      from fetcher
+                          │                  ▲
+         execute queries  │    ┌──────────┐  │  parse rows
+                          └───▶│ Database │──┘
+                               └──────────┘
+```
 
 ## Core Principles
 
@@ -222,6 +255,8 @@ alias MySchema = PaginationPlugin!(SortingPlugin!(FilterPlugin!(Schema!(Query, M
 
 All types are treated uniformly — Query, Mutation, User, Post are all types with fields. The only distinction for Query/Mutation is that they are singletons (one instance per request), and this difference is encapsulated at the boundary rather than threaded through the plugin system.
 
+Plugins are part of the schema layer, not the presentation layer. They operate on D types and standard visibility — they have no knowledge of GraphQL or any other presentation format (see [Principle 6](#6-schema-independence-from-presentation)).
+
 **Why this design?**
 
 1. **Composability** - Plugins are independent. Adding or removing a plugin doesn't require changes to other plugins. The order of composition determines the order of transformation.
@@ -229,6 +264,38 @@ All types are treated uniformly — Query, Mutation, User, Post are all types wi
 2. **Simplicity** - Each plugin only needs to understand one input (the previous schema's output) and produce one output (the transformed schema). No coordination between plugins.
 
 3. **Extensibility** - New plugins can add arbitrary capabilities (filtering, sorting, pagination, normalization, access control) without modifying existing code. The plugin interface is just: expose `Query`, `Mutation`, and `Config`.
+
+### 6. Schema Independence from Presentation
+
+The schema and plugin system define a **typed API** that is independent of any presentation format. `Schema!(Query, Mutation)` normalizes entity types and applies plugins using only D type structure and visibility — no knowledge of GraphQL or any other protocol.
+
+```d
+// Schema + plugins = typed API (presentation-agnostic)
+alias MySchema = PaginationPlugin!(SortingPlugin!(FilterPlugin!(Schema!(Query, Mutation))));
+
+// GraphQL is ONE way to consume the API
+auto gqlQuery = compileQuery!MySchema(`{ users { firstName } }`);
+
+// Direct D calls are ANOTHER way — no parsing, same optimization
+auto directQuery = map!((Expr!User u) => u.firstName)(MySchema.Query.users());
+
+// Both produce the same expression tree, same SQL, same results
+auto result = executor.execute(directQuery);
+```
+
+Presentation-specific concerns live exclusively in their respective layers:
+
+- `@GqlHidden` hides a field from the GraphQL schema but not from programmatic access
+- `@GqlName` renames a field in GraphQL but the D name is canonical everywhere else
+- `@GqlDescription`, `@GqlDeprecated` add metadata consumed only by GraphQL SDL generation and introspection
+
+**Why this design?**
+
+1. **Multiple consumers** - Business logic within the application can query the graph directly using D's type system, without constructing GraphQL strings. The same schema serves both external API clients (via GraphQL) and internal application code (via direct D calls).
+
+2. **Clean plugin boundaries** - Plugins decide which fields to process based on D visibility (`public`, `package`, etc.), not presentation-layer annotations. A `package`-scoped field is invisible to plugins; a `@GqlHidden` field is visible to plugins but hidden from GraphQL output. These are different concerns with different semantics.
+
+3. **Extensibility** - New presentation layers (REST, gRPC, CLI tools) can be added by writing a new consumer of the schema types, without modifying the schema or any plugins.
 
 ## Example
 
@@ -429,7 +496,7 @@ Nullable!string nickname;  // Populated when entity is fetched
 Plain fields are:
 - Automatically included in DDL generation (column name derived from field name via snake_case, or override with `@SqlColumn`)
 - Populated when the entity is fetched from the database
-- Exposed in the GraphQL schema
+- Exposed in the schema (and in GraphQL, unless marked `@GqlHidden`)
 - Accessible directly (return `T`, not `Expr!T`)
 
 ```d
@@ -490,11 +557,11 @@ struct UserStats {
 | Expressions involving multiple columns | Computed field (SQL optimization) |
 
 Plain methods are:
-- Automatically exposed in the GraphQL schema
+- Automatically exposed in the schema (and in GraphQL, unless marked `@GqlHidden`)
 - Evaluated after entity data is fetched from the database
 - Not optimized into SQL (run in D)
 - Can return POD structs (automatically discovered for schema generation)
-- Support UDAs: `@GqlHidden`, `@GqlName`, `@GqlDescription`, `@GqlDeprecated`
+- Support presentation UDAs: `@GqlHidden`, `@GqlName`, `@GqlDescription`, `@GqlDeprecated`
 
 ### POD Types
 
@@ -537,7 +604,7 @@ type UserStats {
 
 POD types are:
 - Automatically discovered through plain method return types and plain field types
-- Included in GraphQL schema generation (as object types, not input types)
+- Included in schema generation (as object types, not input types)
 - NOT included in DDL generation (they don't represent database tables)
 - Can have their own plain fields and plain methods
 - Can be nested (POD containing POD)
