@@ -58,6 +58,22 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
         _cachedResultsByType.clear();
     }
 
+    /// Begin a transaction.
+    override Promise!void setup() {
+        return _conn.query("BEGIN").array().then((MySqlConnection.Row[] _) { });
+    }
+
+    /// Commit or rollback the transaction.
+    override Promise!void teardown(bool success) {
+        auto sql = success ? "COMMIT" : "ROLLBACK";
+        return _conn.query(sql).array().then((MySqlConnection.Row[] _) { });
+    }
+
+    /// Execute raw SQL for session setup.
+    override Promise!void execute(string sql) {
+        return _conn.query(sql).array().then((MySqlConnection.Row[] _) { });
+    }
+
     /// Get the generated SQL (for debugging)
     @property string sql() { return _cachedSQL; }
 

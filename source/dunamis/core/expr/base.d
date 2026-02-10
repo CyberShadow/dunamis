@@ -40,6 +40,14 @@ abstract class ExprBase {
     ExprOptimizer[] requestedOptimizers() {
         return [];
     }
+
+    /// Get data sources this expression is bound to.
+    /// Override in expressions tied to specific data sources.
+    /// Executor walks the tree and collects these for lifecycle management.
+    import dunamis.core.datasource : DataSource;
+    DataSource[] dataSources() {
+        return [];
+    }
 }
 
 /// Helper to evaluate an ExprBase with a known type.

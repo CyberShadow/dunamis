@@ -66,6 +66,24 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
         _cachedResultsByType.clear();
     }
 
+    /// Begin a transaction.
+    override Promise!void setup() {
+        _db.exec("BEGIN");
+        return resolve();
+    }
+
+    /// Commit or rollback the transaction.
+    override Promise!void teardown(bool success) {
+        _db.exec(success ? "COMMIT" : "ROLLBACK");
+        return resolve();
+    }
+
+    /// Execute raw SQL for session setup.
+    override Promise!void execute(string sql) {
+        _db.exec(sql);
+        return resolve();
+    }
+
     /// Get the generated SQL (for debugging)
     @property string sql() { return _cachedSQL; }
 

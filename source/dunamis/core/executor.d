@@ -3,6 +3,7 @@ module dunamis.core.executor;
 import ae.utils.promise;
 import ae.utils.promise.await : awaitSync;
 
+import dunamis.core.datasource;
 import dunamis.core.eval;
 import dunamis.core.expr;
 import dunamis.core.optimize;
@@ -14,10 +15,17 @@ import dunamis.core.types;
 /// 1. Optimizes the expression tree (unless disabled)
 /// 2. Walks tree to collect data source-specific optimizers
 /// 3. Runs collected optimizers
-/// 4. Evaluates the expression
+/// 4. Calls setup() on all collected data sources
+/// 5. Evaluates the expression
+/// 6. Calls teardown() on all data sources (success=true on success, false on error)
 class Executor {
     /// Execute an expression, optionally with optimization.
     /// Returns a Promise that resolves to the result.
+    ///
+    /// Data source lifecycle:
+    ///   setup() is called on all collected data sources before evaluation.
+    ///   teardown(true) is called after successful evaluation.
+    ///   teardown(false) is called if evaluation fails.
     Promise!T execute(E, T = E.ResultType)(E expr, bool optimize = true) {
         E toEval = expr;
 
@@ -31,9 +39,38 @@ class Executor {
             }
         }
 
-        auto ctx = new EvalContext();
-        ctx.setValues!AnyRef(null, [queryRoot]);  // null key for root level
-        return toEval.eval(ctx).then((results) => results[0]);
+        // Collect data sources for lifecycle management
+        auto sources = collectDataSources(toEval);
+
+        if (sources.length == 0) {
+            // No data sources — evaluate directly (no setup/teardown needed)
+            auto ctx = new EvalContext();
+            ctx.setValues!AnyRef(null, [queryRoot]);
+            return toEval.eval(ctx).then((results) => results[0]);
+        }
+
+        // Setup all data sources, then evaluate, then teardown
+        auto setupChain = resolve();
+        foreach (ds; sources)
+            setupChain = setupChain.then(() => ds.setup());
+
+        return setupChain.then(() {
+            auto ctx = new EvalContext();
+            ctx.setValues!AnyRef(null, [queryRoot]);
+            return toEval.eval(ctx);
+        }).then((T[] results) {
+            // Teardown with success
+            auto p = resolve();
+            foreach (ds; sources)
+                p = p.then(() => ds.teardown(true));
+            return p.then(() => results[0]);
+        }).except((Exception e) {
+            // Teardown with failure
+            auto p = resolve();
+            foreach (ds; sources)
+                p = p.then(() => ds.teardown(false));
+            return p.then(() { throw e; return T.init; });
+        });
     }
 
     /// Walk expression tree and collect optimizers, deduplicated by instance.
@@ -53,6 +90,30 @@ class Executor {
             }
 
             // Recurse into dependencies
+            foreach (dep; expr.dependencies()) {
+                walk(dep);
+            }
+        }
+
+        walk(root);
+        return result;
+    }
+
+    /// Walk expression tree and collect data sources, deduplicated by instance.
+    private DataSource[] collectDataSources(ExprBase root) {
+        DataSource[] result;
+        bool[DataSource] seen;
+
+        void walk(ExprBase expr) {
+            if (expr is null) return;
+
+            foreach (ds; expr.dataSources()) {
+                if (ds !is null && ds !in seen) {
+                    seen[ds] = true;
+                    result ~= ds;
+                }
+            }
+
             foreach (dep; expr.dependencies()) {
                 walk(dep);
             }

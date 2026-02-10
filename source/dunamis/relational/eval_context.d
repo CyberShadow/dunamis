@@ -8,6 +8,7 @@ import std.typecons : Nullable;
 
 import ae.utils.promise;
 
+import dunamis.core.datasource : DataSource;
 import dunamis.core.types;
 import dunamis.core.sorting : OrderBySpec, SortDirection;
 import dunamis.relational.query_node;
@@ -76,7 +77,10 @@ T enumFromDbString(T)(string s) if (is(T == enum)) {
 ///
 /// The individual fetch methods (fetchColumn, fetchChildren, etc.) are used
 /// by the naive (unoptimized) evaluation path and internally by MockDB!().
-abstract class DataFetcher {
+///
+/// Extends DataSource for lifecycle management (setup/teardown).
+/// Override setup() and teardown() to add transaction control and session setup.
+abstract class DataFetcher : DataSource {
     import dunamis.core.optimize : ExprOptimizer;
     import dunamis.core.expr : ExprBase;
 
@@ -109,6 +113,13 @@ abstract class DataFetcher {
     /// Default: true (assumes naive path is supported).
     bool supportsNaivePath() {
         return true;
+    }
+
+    /// Execute raw SQL for session setup (SET LOCAL, SET TRANSACTION, etc.).
+    /// Override in subclasses to execute against the actual database connection.
+    /// Default: no-op.
+    Promise!void execute(string sql) {
+        return resolve();
     }
 
     /// Execute a QueryNode as a single query and return all results.

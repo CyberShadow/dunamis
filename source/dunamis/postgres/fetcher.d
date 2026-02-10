@@ -59,6 +59,28 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
         _cachedResultsByType.clear();
     }
 
+    /// Begin a transaction.
+    override Promise!void setup() {
+        return _conn.prepare("BEGIN").then((PreparedStatement stmt) {
+            return stmt.query().array();
+        }).then((PgSqlConnection.Row[] _) { });
+    }
+
+    /// Commit or rollback the transaction.
+    override Promise!void teardown(bool success) {
+        auto sql = success ? "COMMIT" : "ROLLBACK";
+        return _conn.prepare(sql).then((PreparedStatement stmt) {
+            return stmt.query().array();
+        }).then((PgSqlConnection.Row[] _) { });
+    }
+
+    /// Execute raw SQL for session setup.
+    override Promise!void execute(string sql) {
+        return _conn.prepare(sql).then((PreparedStatement stmt) {
+            return stmt.query().array();
+        }).then((PgSqlConnection.Row[] _) { });
+    }
+
     /// Get the generated SQL (for debugging)
     @property string sql() { return _cachedSQL; }
 

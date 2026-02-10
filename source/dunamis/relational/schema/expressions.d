@@ -322,6 +322,7 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
 /// Root expression that returns specific entities by their IDs.
 class GetByIdsExpr(Entity) : Expr!(Entity[]), RootExprInfo {
     import dunamis.core.optimize : ExprOptimizer;
+    import dunamis.core.datasource : DataSource;
 
     private Entity[] _entities;
 
@@ -348,6 +349,11 @@ class GetByIdsExpr(Entity) : Expr!(Entity[]), RootExprInfo {
             return fetcher.requestedOptimizers();
         }
         return [];
+    }
+
+    override DataSource[] dataSources() {
+        auto fetcher = EntityID!Entity.db;
+        return fetcher !is null ? [fetcher] : [];
     }
 
     override Promise!(Entity[][]) eval(EvalContext ctx) {
@@ -405,6 +411,7 @@ auto getByCompositeIds(Entity, IdType)(IdType[][] keyParts) {
 /// Root expression that fetches all entities of a type.
 class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
     import dunamis.core.optimize : ExprOptimizer, OptimizeContext;
+    import dunamis.core.datasource : DataSource;
 
     private {
         PrefetchExpr _prefetch;  // Set during optimization
@@ -429,6 +436,11 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
             return fetcher.requestedOptimizers();
         }
         return [];
+    }
+
+    override DataSource[] dataSources() {
+        auto fetcher = EntityID!Entity.db;
+        return fetcher !is null ? [fetcher] : [];
     }
 
     override Expr!(Entity[]) optimize(OptimizeContext ctx) {
