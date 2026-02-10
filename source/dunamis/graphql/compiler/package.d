@@ -77,6 +77,9 @@ GraphQLResult compileQuery(alias SchemaOrQuery)(string queryString, JSONValue va
         throw new CompilerException("No operation found in query");
     }
 
+    // Collect fragment definitions
+    auto fragments = collectFragments(doc);
+
     // Determine operation type (default to Query for shorthand syntax)
     bool isMutation = op.ot !is null && op.ot.ruleSelection == OperationTypeEnum.Mutation;
     bool isSubscription = op.ot !is null && op.ot.ruleSelection == OperationTypeEnum.Sub;
@@ -97,14 +100,14 @@ GraphQLResult compileQuery(alias SchemaOrQuery)(string queryString, JSONValue va
     // Compile based on operation type
     if (isMutation) {
         static if (getFields!MutationType.length > 0) {
-            return compileRootMutationSet!MutationType(op.ss, variables);
+            return compileRootMutationSet!MutationType(op.ss, variables, fragments);
         } else {
             throw new CompilerException("Mutation operations require a Schema with Mutation type");
         }
     } else {
         // Query operation - compile using QueryType directly
         // Entity return types are already wrapped by ForwardField (with TypeMap)
-        return compileRootSelectionSet!(QueryType, SchemaOrQuery)(op.ss, variables);
+        return compileRootSelectionSet!(QueryType, SchemaOrQuery)(op.ss, variables, fragments);
     }
 }
 
@@ -2015,4 +2018,536 @@ unittest {
         assert("title" !in posts[0], "Nested field with @skip should be excluded");
         assert(posts[0]["body_"].str == "World");
     }
+}
+
+// ============================================================================
+// Fragment Tests
+// ============================================================================
+
+// Named fragment on entity type
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+        mixin Col!("lastName", string);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "first_name": "Alice", "last_name": "Smith"},
+        {"id": 2, "first_name": "Bob", "last_name": "Jones"}
+    ]`);
+
+    auto query = compileQuery!Query(`
+        query {
+            users { ...UserFields }
+        }
+        fragment UserFields on User {
+            firstName
+            lastName
+        }
+    `);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query));
+
+    auto users = result["users"].array;
+    assert(users.length == 2);
+    assert(users[0]["firstName"].str == "Alice");
+    assert(users[0]["lastName"].str == "Smith");
+    assert(users[1]["firstName"].str == "Bob");
+    assert(users[1]["lastName"].str == "Jones");
+}
+
+// Inline fragment without type condition
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+        mixin Col!("lastName", string);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "first_name": "Alice", "last_name": "Smith"}
+    ]`);
+
+    auto query = compileQuery!Query(`{
+        users {
+            firstName
+            ... {
+                lastName
+            }
+        }
+    }`);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query));
+
+    auto users = result["users"].array;
+    assert(users.length == 1);
+    assert(users[0]["firstName"].str == "Alice");
+    assert(users[0]["lastName"].str == "Smith");
+}
+
+// Inline fragment with matching type condition
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+        mixin Col!("lastName", string);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "first_name": "Alice", "last_name": "Smith"}
+    ]`);
+
+    auto query = compileQuery!Query(`{
+        users {
+            firstName
+            ... on User {
+                lastName
+            }
+        }
+    }`);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query));
+
+    auto users = result["users"].array;
+    assert(users.length == 1);
+    assert(users[0]["firstName"].str == "Alice");
+    assert(users[0]["lastName"].str == "Smith");
+}
+
+// Inline fragment with non-matching type condition (skipped)
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+        mixin Col!("lastName", string);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "first_name": "Alice", "last_name": "Smith"}
+    ]`);
+
+    auto query = compileQuery!Query(`{
+        users {
+            firstName
+            ... on Post {
+                lastName
+            }
+        }
+    }`);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query));
+
+    auto users = result["users"].array;
+    assert(users.length == 1);
+    assert(users[0]["firstName"].str == "Alice");
+    assert("lastName" !in users[0], "Non-matching type condition should skip fields");
+}
+
+// Nested fragments (fragment referencing another fragment)
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+        mixin Col!("lastName", string);
+
+        static auto fullName(Expr!User u) {
+            return firstName(u) ~ " " ~ lastName(u);
+        }
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "first_name": "Alice", "last_name": "Smith"}
+    ]`);
+
+    auto query = compileQuery!Query(`
+        query {
+            users { ...NameFields }
+        }
+        fragment NameFields on User {
+            ...BasicFields
+            fullName
+        }
+        fragment BasicFields on User {
+            firstName
+            lastName
+        }
+    `);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query));
+
+    auto users = result["users"].array;
+    assert(users.length == 1);
+    assert(users[0]["firstName"].str == "Alice");
+    assert(users[0]["lastName"].str == "Smith");
+    assert(users[0]["fullName"].str == "Alice Smith");
+}
+
+// Fragment spread with @skip(if: true) — skipped
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+        mixin Col!("lastName", string);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "first_name": "Alice", "last_name": "Smith"}
+    ]`);
+
+    auto query = compileQuery!Query(`
+        query {
+            users {
+                firstName
+                ...SkippedFields @skip(if: true)
+            }
+        }
+        fragment SkippedFields on User {
+            lastName
+        }
+    `);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query));
+
+    auto users = result["users"].array;
+    assert(users.length == 1);
+    assert(users[0]["firstName"].str == "Alice");
+    assert("lastName" !in users[0], "@skip(if: true) on fragment spread should exclude fields");
+}
+
+// Inline fragment with @include(if: false) — skipped
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+        mixin Col!("lastName", string);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "first_name": "Alice", "last_name": "Smith"}
+    ]`);
+
+    auto query = compileQuery!Query(`{
+        users {
+            firstName
+            ... @include(if: false) {
+                lastName
+            }
+        }
+    }`);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query));
+
+    auto users = result["users"].array;
+    assert(users.length == 1);
+    assert(users[0]["firstName"].str == "Alice");
+    assert("lastName" !in users[0], "@include(if: false) on inline fragment should exclude fields");
+}
+
+// Fragment in nested HasMany selection
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "posts")
+    static struct Post {
+        mixin DemoId;
+        mixin Col!("title", string);
+    }
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+        mixin HasMany!("posts", Post, "author_id");
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "first_name": "Alice"}
+    ]`);
+    db.setTableData("posts", `[
+        {"id": 1, "author_id": 1, "title": "Hello"},
+        {"id": 2, "author_id": 1, "title": "World"}
+    ]`);
+
+    auto query = compileQuery!Query(`
+        query {
+            users {
+                firstName
+                posts { ...PostFields }
+            }
+        }
+        fragment PostFields on Post {
+            title
+        }
+    `);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query));
+
+    auto users = result["users"].array;
+    assert(users.length == 1);
+    assert(users[0]["firstName"].str == "Alice");
+    auto posts = users[0]["posts"].array;
+    assert(posts.length == 2);
+    assert(posts[0]["title"].str == "Hello");
+    assert(posts[1]["title"].str == "World");
+}
+
+// Mixed regular fields and fragments
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+        mixin Col!("lastName", string);
+
+        static auto fullName(Expr!User u) {
+            return firstName(u) ~ " " ~ lastName(u);
+        }
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "first_name": "Alice", "last_name": "Smith"}
+    ]`);
+
+    auto query = compileQuery!Query(`
+        query {
+            users {
+                firstName
+                ...Extra
+                ... on User { fullName }
+            }
+        }
+        fragment Extra on User {
+            lastName
+        }
+    `);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query));
+
+    auto users = result["users"].array;
+    assert(users.length == 1);
+    assert(users[0]["firstName"].str == "Alice");
+    assert(users[0]["lastName"].str == "Smith");
+    assert(users[0]["fullName"].str == "Alice Smith");
+}
+
+// Circular fragment detection (throws)
+unittest {
+    import dunamis.core;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[{"id": 1, "first_name": "Alice"}]`);
+
+    bool caught = false;
+    try {
+        auto query = compileQuery!Query(`
+            query {
+                users { ...A }
+            }
+            fragment A on User { ...B }
+            fragment B on User { ...A }
+        `);
+        auto executor = new Executor();
+        import ae.utils.promise.await : awaitSync;
+        awaitSync(executor.execute(query));
+    } catch (CompilerException e) {
+        caught = true;
+        assert(e.msg == "Circular fragment reference: A",
+            "Expected circular fragment error, got: " ~ e.msg);
+    }
+    assert(caught, "Should throw CompilerException for circular fragments");
+}
+
+// Fragment on root Query type
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core;
+    import dunamis.core.expr : constant;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+
+        static auto serverVersion(Expr!Query parent) {
+            return constant("1.0.0", parent);
+        }
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "first_name": "Alice"}
+    ]`);
+
+    auto query = compileQuery!Query(`
+        query {
+            ...RootFields
+        }
+        fragment RootFields on Query {
+            users { firstName }
+            serverVersion
+        }
+    `);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query));
+
+    assert(result["serverVersion"].str == "1.0.0");
+    auto users = result["users"].array;
+    assert(users.length == 1);
+    assert(users[0]["firstName"].str == "Alice");
 }

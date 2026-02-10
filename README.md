@@ -947,11 +947,11 @@ Introspection respects `@GqlHidden` (hidden fields are excluded), `@GqlDeprecate
   - `first`/`after` cursor-based pagination
 - Runtime introspection (`__schema`, `__type`, `__typename`)
 - Directives: `@skip(if: Boolean!)` and `@include(if: Boolean!)` for conditional field inclusion
+- Fragments: named fragments (`...FragmentName`), inline fragments (`... on Type { }` and `... { }`), with type condition matching, directive support, and circular reference detection
 
 ## Future Directions
 
-- **Fragments** - Named and inline fragment support (`... on Type`, `...FragmentName`), required for interoperability with standard GraphQL clients (Apollo, Relay)
-- **Query validation** - Separate validation phase for structural rules: fragment cycle detection, unused/undefined variable checks, duplicate operation names, argument validation
+- **Query validation** - Separate validation phase for structural rules: unused/undefined variable checks, duplicate operation names, argument validation
 - **Error path tracking** - Track field paths through nested selections for precise error reporting (e.g., `["users", 0, "posts", 2, "title"]`) and partial result support (`{"data": ..., "errors": [...]}`)
 - **Polymorphism** - GraphQL union and interface types for heterogeneous collections
 - **Expression deduplication** - Grafast-style peer analysis

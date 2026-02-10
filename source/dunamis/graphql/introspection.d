@@ -468,7 +468,7 @@ JSONValue[string] buildTypeLookup(alias SchemaOrQuery)() {
 
 /// Apply a GraphQL selection set to an introspection JSON value,
 /// extracting only the requested fields.
-JSONValue applySelectionSet(JSONValue data, SelectionSet ss, JSONValue variables) {
+JSONValue applySelectionSet(JSONValue data, SelectionSet ss, JSONValue variables, FragmentMap fragments = null) {
     import graphql.ast : SelectionEnum;
 
     if (ss is null) return data;
@@ -479,19 +479,16 @@ JSONValue applySelectionSet(JSONValue data, SelectionSet ss, JSONValue variables
 
     JSONValue result = JSONValue.emptyObject;
 
-    foreach (sel; selections) {
-        if (sel.ruleSelection != SelectionEnum.Field) continue;
-        auto field = sel.field;
-        if (!shouldIncludeField(field.dirs, variables)) continue;
+    void processField(Field field) {
         auto fieldName = getFieldName(field);
         auto outputName = getOutputName(field);
 
-        if (fieldName is null) continue;
+        if (fieldName is null) return;
 
         // Check if the field exists in the data
         if (fieldName !in data) {
             result[outputName] = JSONValue(null);
-            continue;
+            return;
         }
 
         auto fieldValue = data[fieldName];
@@ -507,11 +504,11 @@ JSONValue applySelectionSet(JSONValue data, SelectionSet ss, JSONValue variables
                 // Array: apply selection to each element
                 JSONValue[] items;
                 foreach (item; fieldValue.array) {
-                    items ~= applySelectionSet(item, field.ss, variables);
+                    items ~= applySelectionSet(item, field.ss, variables, fragments);
                 }
                 result[outputName] = JSONValue(items);
             } else if (fieldValue.type == JSONType.object) {
-                result[outputName] = applySelectionSet(fieldValue, field.ss, variables);
+                result[outputName] = applySelectionSet(fieldValue, field.ss, variables, fragments);
             } else {
                 result[outputName] = fieldValue;
             }
@@ -519,6 +516,37 @@ JSONValue applySelectionSet(JSONValue data, SelectionSet ss, JSONValue variables
             result[outputName] = fieldValue;
         }
     }
+
+    void processSelections(Selection[] sels, bool[string] expanding = null) {
+        foreach (sel; sels) {
+            if (sel.ruleSelection == SelectionEnum.Field) {
+                auto field = sel.field;
+                if (!shouldIncludeField(field.dirs, variables)) continue;
+                processField(field);
+            } else if (sel.ruleSelection == SelectionEnum.Spread) {
+                auto spread = sel.frag;
+                if (!shouldIncludeField(spread.dirs, variables)) continue;
+                if (fragments is null) continue;
+                auto fragName = spread.name.value;
+                if (expanding !is null && fragName in expanding) continue;
+                auto fragDefPtr = fragName in fragments;
+                if (fragDefPtr is null) continue;
+                auto fragDef = *fragDefPtr;
+                if (expanding is null)
+                    expanding = [fragName: true];
+                else
+                    expanding[fragName] = true;
+                processSelections(iterateSelections(fragDef.ss), expanding);
+                expanding.remove(fragName);
+            } else if (sel.ruleSelection == SelectionEnum.IFrag) {
+                auto ifrag = sel.ifrag;
+                if (!shouldIncludeField(ifrag.dirs, variables)) continue;
+                processSelections(iterateSelections(ifrag.ss), expanding);
+            }
+        }
+    }
+
+    processSelections(selections);
 
     return result;
 }
@@ -863,12 +891,13 @@ private JSONValue enumValueJson(string name) {
 // These are used by applySelectionSet and need to be imported from compiler.d.
 // They require package visibility in compiler.d.
 import graphql.ast : Selection, SelectionSet, Selections, SelectionEnum,
-    Field, Arguments, Argument, ArgumentList, Value, Directives;
+    Field, Arguments, Argument, ArgumentList, Value, Directives,
+    FragmentDefinition, FragmentSpread, InlineFragment;
 
 package {
     // Forward declarations - these come from compiler.d with package visibility
     import dunamis.graphql.compiler : iterateSelections, getFieldName, getOutputName,
-        findArgumentValue, extractBool, shouldIncludeField;
+        findArgumentValue, extractBool, shouldIncludeField, FragmentMap;
 }
 
 // ============================================================================

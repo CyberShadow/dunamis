@@ -19,6 +19,32 @@ import dunamis.graphql.schema : isInputType, isInternalMember;
 
 package(dunamis.graphql):
 
+/// Map from fragment name to its definition
+alias FragmentMap = FragmentDefinition[string];
+
+/// Collect all fragment definitions from a document
+FragmentMap collectFragments(Document doc) @safe {
+    FragmentMap fragments;
+    if (doc is null || doc.defs is null) return fragments;
+    collectFragmentsFromDefs(fragments, doc.defs);
+    return fragments;
+}
+
+private void collectFragmentsFromDefs(ref FragmentMap fragments, Definitions defs) @safe {
+    if (defs is null) return;
+
+    if (defs.def !is null && defs.def.ruleSelection == DefinitionEnum.F) {
+        auto frag = defs.def.frag;
+        if (frag !is null && frag.name.value !is null) {
+            fragments[frag.name.value] = frag;
+        }
+    }
+
+    if (defs.follow !is null) {
+        collectFragmentsFromDefs(fragments, defs.follow);
+    }
+}
+
 /// Find the first operation in the document
 OperationDefinition findOperation(Document doc) @safe {
     if (doc is null || doc.defs is null) return null;

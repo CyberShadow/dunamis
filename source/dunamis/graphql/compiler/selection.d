@@ -23,7 +23,7 @@ import dunamis.graphql.compiler.fields;
 package(dunamis.graphql):
 
 /// Compile the root selection set for mutations (sequential execution)
-SequentialJsonObjectExpr compileRootMutationSet(Mutation)(SelectionSet ss, JSONValue variables) {
+SequentialJsonObjectExpr compileRootMutationSet(Mutation)(SelectionSet ss, JSONValue variables, FragmentMap fragments) {
     auto selections = iterateSelections(ss);
 
     if (selections.length == 0) {
@@ -33,20 +33,17 @@ SequentialJsonObjectExpr compileRootMutationSet(Mutation)(SelectionSet ss, JSONV
     string[] fieldNames;
     ExprBase[] fieldExprs;
 
-    foreach (sel; selections) {
-        if (sel.ruleSelection != SelectionEnum.Field) continue;
-        auto field = sel.field;
-        if (!shouldIncludeField(field.dirs, variables)) continue;
-        fieldNames ~= getOutputName(field);
-        fieldExprs ~= compileRootField!Mutation(field, variables);
-    }
+    processSelections!(getGraphQLTypeName!Mutation)(
+        selections, variables, fragments, fieldNames, fieldExprs,
+        (field) => compileRootField!Mutation(field, variables, fragments)
+    );
 
     return new SequentialJsonObjectExpr(fieldNames, fieldExprs);
 }
 
 /// Compile a single root field (works for both Query and Mutation).
 /// Scans for function members with matching GraphQL name.
-ExprBase compileRootField(Parent, alias IntrospectionSource = Parent)(Field field, JSONValue variables) {
+ExprBase compileRootField(Parent, alias IntrospectionSource = Parent)(Field field, JSONValue variables, FragmentMap fragments) {
     auto fieldName = getFieldName(field);
     auto parentExpr = singleton(Parent.init);
 
@@ -56,14 +53,14 @@ ExprBase compileRootField(Parent, alias IntrospectionSource = Parent)(Field fiel
     }
     if (fieldName == "__schema") {
         auto schemaJson = buildIntrospectionJson!IntrospectionSource();
-        auto result = applySelectionSet(schemaJson, field.ss, variables);
+        auto result = applySelectionSet(schemaJson, field.ss, variables, fragments);
         return wrapAsJsonExpr(singleton(result));
     }
     if (fieldName == "__type") {
         auto typeName = extractTypeNameArg(field.args, variables);
         auto lookup = buildTypeLookup!IntrospectionSource();
         if (auto typeJson = typeName in lookup) {
-            return wrapAsJsonExpr(singleton(applySelectionSet(*typeJson, field.ss, variables)));
+            return wrapAsJsonExpr(singleton(applySelectionSet(*typeJson, field.ss, variables, fragments)));
         }
         return wrapAsJsonExpr(singleton(JSONValue(null)));
     }
@@ -74,7 +71,7 @@ ExprBase compileRootField(Parent, alias IntrospectionSource = Parent)(Field fiel
             static if (is(typeof(memberSym) == function)) {
                 enum gqlName = getGqlName!(memberSym, member);
                 if (fieldName == gqlName) {
-                    return callRootField!(memberSym, Parent)(parentExpr, field.args, field.ss, variables);
+                    return callRootField!(memberSym, Parent)(parentExpr, field.args, field.ss, variables, fragments);
                 }
             }
         }
@@ -86,7 +83,7 @@ ExprBase compileRootField(Parent, alias IntrospectionSource = Parent)(Field fiel
 /// Call a root field function and handle the return type.
 /// Root fields return Expr!T which we may need to descend into with a selection set.
 /// Works for both Query and Mutation fields.
-ExprBase callRootField(alias fn, Parent)(Expr!Parent parent, Arguments args, SelectionSet ss, JSONValue variables) {
+ExprBase callRootField(alias fn, Parent)(Expr!Parent parent, Arguments args, SelectionSet ss, JSONValue variables, FragmentMap fragments) {
     import std.traits : Parameters, ReturnType, ParameterDefaults, ParameterIdentifierTuple;
     import std.typecons : tuple;
     import dunamis.core.expr : Expr, ExprResultType, isExpr;
@@ -117,7 +114,7 @@ ExprBase callRootField(alias fn, Parent)(Expr!Parent parent, Arguments args, Sel
     }
 
     // Handle return type generically
-    return compileFieldResult!(typeof(resultExpr))(resultExpr, ss, variables);
+    return compileFieldResult!(typeof(resultExpr))(resultExpr, ss, variables, fragments);
 }
 
 /// Wrap an expression to convert its result to JSONValue
@@ -160,11 +157,65 @@ auto extractAllArgs(alias fn)(Arguments args, JSONValue variables) {
 }
 
 // ============================================================================
+// Fragment/Selection Processing
+// ============================================================================
+
+/// Process a list of selections, handling Field, FragmentSpread, and InlineFragment.
+/// The processField delegate is called for each Field selection.
+void processSelections(string typeName)(
+    Selection[] selections, JSONValue variables, FragmentMap fragments,
+    ref string[] fieldNames, ref ExprBase[] fieldExprs,
+    ExprBase delegate(Field) processField,
+    bool[string] expanding = null
+) {
+    foreach (sel; selections) {
+        if (sel.ruleSelection == SelectionEnum.Field) {
+            auto field = sel.field;
+            if (!shouldIncludeField(field.dirs, variables)) continue;
+            fieldNames ~= getOutputName(field);
+            fieldExprs ~= processField(field);
+        } else if (sel.ruleSelection == SelectionEnum.Spread) {
+            auto spread = sel.frag;
+            if (!shouldIncludeField(spread.dirs, variables)) continue;
+            auto fragName = spread.name.value;
+            if (expanding !is null && fragName in expanding)
+                throw new CompilerException("Circular fragment reference: " ~ fragName);
+            auto fragDefPtr = fragName in fragments;
+            if (fragDefPtr is null)
+                throw new CompilerException("Unknown fragment: " ~ fragName);
+            auto fragDef = *fragDefPtr;
+            // Check type condition
+            if (fragDef.tc.value !is null && fragDef.tc.value != typeName)
+                continue;
+            if (expanding is null)
+                expanding = [fragName: true];
+            else
+                expanding[fragName] = true;
+            processSelections!typeName(
+                iterateSelections(fragDef.ss), variables, fragments,
+                fieldNames, fieldExprs, processField, expanding
+            );
+            expanding.remove(fragName);
+        } else if (sel.ruleSelection == SelectionEnum.IFrag) {
+            auto ifrag = sel.ifrag;
+            if (!shouldIncludeField(ifrag.dirs, variables)) continue;
+            // Check type condition
+            if (ifrag.tc.value !is null && ifrag.tc.value != typeName)
+                continue;
+            processSelections!typeName(
+                iterateSelections(ifrag.ss), variables, fragments,
+                fieldNames, fieldExprs, processField, expanding
+            );
+        }
+    }
+}
+
+// ============================================================================
 // Root Selection Set Compilation
 // ============================================================================
 
 /// Compile the root selection set (fields from Query type)
-DynamicJsonObjectExpr compileRootSelectionSet(Query, alias IntrospectionSource = Query)(SelectionSet ss, JSONValue variables) {
+DynamicJsonObjectExpr compileRootSelectionSet(Query, alias IntrospectionSource = Query)(SelectionSet ss, JSONValue variables, FragmentMap fragments) {
     auto selections = iterateSelections(ss);
 
     if (selections.length == 0) {
@@ -174,13 +225,10 @@ DynamicJsonObjectExpr compileRootSelectionSet(Query, alias IntrospectionSource =
     string[] fieldNames;
     ExprBase[] fieldExprs;
 
-    foreach (sel; selections) {
-        if (sel.ruleSelection != SelectionEnum.Field) continue;
-        auto field = sel.field;
-        if (!shouldIncludeField(field.dirs, variables)) continue;
-        fieldNames ~= getOutputName(field);
-        fieldExprs ~= compileRootField!(Query, IntrospectionSource)(field, variables);
-    }
+    processSelections!(getGraphQLTypeName!Query)(
+        selections, variables, fragments, fieldNames, fieldExprs,
+        (field) => compileRootField!(Query, IntrospectionSource)(field, variables, fragments)
+    );
 
     return buildDynamicJsonObject(fieldNames, fieldExprs);
 }
@@ -192,41 +240,35 @@ DynamicJsonObjectExpr compileRootSelectionSet(Query, alias IntrospectionSource =
 /// Compile a selection set into a MapExpr with DynamicJsonObjectExpr body.
 /// Returns Expr!(JSONValue[]) which is the result of mapping over the collection.
 /// Note: Explicit return type breaks circular template instantiation.
-MapExpr!(Entity, DynamicJsonObjectExpr) compileMapExpr(Entity, Coll)(Coll collection, SelectionSet ss, JSONValue variables) {
+MapExpr!(Entity, DynamicJsonObjectExpr) compileMapExpr(Entity, Coll)(Coll collection, SelectionSet ss, JSONValue variables, FragmentMap fragments) {
     return map!(
-        (Expr!Entity entity) => compileSelectionSetBody!Entity(entity, ss, variables)
+        (Expr!Entity entity) => compileSelectionSetBody!Entity(entity, ss, variables, fragments)
     )(collection);
 }
 
 /// Compile the body of a selection set (the fields to extract).
 /// Works with any struct type that has field methods.
-DynamicJsonObjectExpr compileSelectionSetBody(T)(Expr!T ref_, SelectionSet ss, JSONValue variables) {
+DynamicJsonObjectExpr compileSelectionSetBody(T)(Expr!T ref_, SelectionSet ss, JSONValue variables, FragmentMap fragments) {
     auto selections = iterateSelections(ss);
     if (selections.length == 0) {
         throw new CompilerException("Empty selection set for " ~ T.stringof);
     }
 
     // Build field name/value pairs for jsonObject
-    return compileFieldsToJsonObject!T(ref_, selections, variables);
+    return compileFieldsToJsonObject!T(ref_, selections, variables, fragments);
 }
 
 /// Compile selected fields into a jsonObject call.
 /// Works with any struct type that has field methods.
-DynamicJsonObjectExpr compileFieldsToJsonObject(T)(Expr!T ref_, Selection[] selections, JSONValue variables) {
+DynamicJsonObjectExpr compileFieldsToJsonObject(T)(Expr!T ref_, Selection[] selections, JSONValue variables, FragmentMap fragments) {
     // Collect field expressions
     ExprBase[] fieldExprs;
     string[] fieldNames;
 
-    foreach (sel; selections) {
-        if (sel.ruleSelection != SelectionEnum.Field) continue;
-        auto field = sel.field;
-        if (!shouldIncludeField(field.dirs, variables)) continue;
-        auto name = getFieldName(field);
-        auto outputName = getOutputName(field);
-
-        fieldNames ~= outputName;
-        fieldExprs ~= compileFieldAccess!T(ref_, field, variables);
-    }
+    processSelections!(getGraphQLTypeName!T)(
+        selections, variables, fragments, fieldNames, fieldExprs,
+        (field) => compileFieldAccess!T(ref_, field, variables, fragments)
+    );
 
     // Build a dynamic JSON object using runtime construction
     return buildDynamicJsonObject(fieldNames, fieldExprs);
@@ -258,7 +300,7 @@ template isFieldMethod(T, alias member) {
 /// Handles scalars, structs (with selection sets), and arrays.
 /// Scalars are wrapped to convert to JSONValue.
 /// Structs/arrays of structs compile selection sets.
-ExprBase compileFieldResult(ResultExpr)(ResultExpr resultExpr, SelectionSet ss, JSONValue variables) {
+ExprBase compileFieldResult(ResultExpr)(ResultExpr resultExpr, SelectionSet ss, JSONValue variables, FragmentMap fragments) {
     import dunamis.core.expr : ExprResultType, UnwrapNullableExpr, finalizeNullableObjectExpr;
 
     alias ResultType = ExprResultType!ResultExpr;
@@ -274,7 +316,7 @@ ExprBase compileFieldResult(ResultExpr)(ResultExpr resultExpr, SelectionSet ss, 
                 throw new CompilerException(
                     "Field returning [" ~ E.stringof ~ "] requires a selection set");
             }
-            return compileMapExpr!E(resultExpr, ss, variables);
+            return compileMapExpr!E(resultExpr, ss, variables, fragments);
         }
     }
     // Nullable structs (entities) - handle null case specially
@@ -287,7 +329,7 @@ ExprBase compileFieldResult(ResultExpr)(ResultExpr resultExpr, SelectionSet ss, 
         // This preserves the chain for optimization (findMapExprFromChain)
         auto unwrapper = new UnwrapNullableExpr!T(resultExpr);
         // Compile selection set using the unwrapper as input
-        auto innerExpr = compileSelectionSetBody!T(unwrapper, ss, variables);
+        auto innerExpr = compileSelectionSetBody!T(unwrapper, ss, variables, fragments);
         // Wrap in nullable handler
         return finalizeNullableObjectExpr!T(resultExpr, unwrapper, innerExpr);
     }
@@ -301,7 +343,7 @@ ExprBase compileFieldResult(ResultExpr)(ResultExpr resultExpr, SelectionSet ss, 
             throw new CompilerException(
                 "Field returning " ~ ResultType.stringof ~ " requires a selection set");
         }
-        return compileSelectionSetBody!ResultType(resultExpr, ss, variables);
+        return compileSelectionSetBody!ResultType(resultExpr, ss, variables, fragments);
     }
     // Scalars (primitives and CustomScalar) - wrap to JSON
     else {
@@ -312,7 +354,7 @@ ExprBase compileFieldResult(ResultExpr)(ResultExpr resultExpr, SelectionSet ss, 
 /// Compile access to a single field.
 /// Finds a method with signature (Expr!T, args...) -> Expr!U and calls it.
 /// Also handles plain fields (struct instance fields marked with plain fields).
-ExprBase compileFieldAccess(T)(Expr!T ref_, Field field, JSONValue variables) {
+ExprBase compileFieldAccess(T)(Expr!T ref_, Field field, JSONValue variables, FragmentMap fragments) {
     auto fieldName = getFieldName(field);
 
     // First, find a field method matching the GraphQL field name
@@ -326,7 +368,7 @@ ExprBase compileFieldAccess(T)(Expr!T ref_, Field field, JSONValue variables) {
 
                     if (fieldName == gqlName) {
                         auto resultExpr = callComputedField!(memberSym, T)(ref_, field.args, variables);
-                        return compileFieldResult!(typeof(resultExpr))(resultExpr, field.ss, variables);
+                        return compileFieldResult!(typeof(resultExpr))(resultExpr, field.ss, variables, fragments);
                     }
                 }
             }
@@ -340,7 +382,7 @@ ExprBase compileFieldAccess(T)(Expr!T ref_, Field field, JSONValue variables) {
                 // Eager field - use D field name directly (GraphQL uses camelCase like D)
                 if (fieldName == member) {
                     auto resultExpr = new FieldAccessExpr!(T, member)(ref_);
-                    return compileFieldResult!(typeof(resultExpr))(resultExpr, field.ss, variables);
+                    return compileFieldResult!(typeof(resultExpr))(resultExpr, field.ss, variables, fragments);
                 }
             }
         }
@@ -355,7 +397,7 @@ ExprBase compileFieldAccess(T)(Expr!T ref_, Field field, JSONValue variables) {
                     enum gqlName = getGqlName!(methodSym, member);
                     if (fieldName == gqlName) {
                         auto resultExpr = new MethodCallExpr!(T, member)(ref_);
-                        return compileFieldResult!(typeof(resultExpr))(resultExpr, field.ss, variables);
+                        return compileFieldResult!(typeof(resultExpr))(resultExpr, field.ss, variables, fragments);
                     }
                 }
             }
