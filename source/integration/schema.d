@@ -225,6 +225,17 @@ mixin template TestSchema(alias db) {
             );
         }
 
+        /// Computed field that always throws (for testing error path tracking)
+        static auto failingField(Expr!User u) {
+            return use(
+                (string firstName) {
+                    throw new Exception("intentional error in failingField");
+                    return "";
+                },
+                u.firstName
+            );
+        }
+
         /// Test recursive input: returns user's firstName (simplified test)
         /// Real impl would apply filter logic
         static auto matchesFilter(Expr!User u, FilterInput filter) {

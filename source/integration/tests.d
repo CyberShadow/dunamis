@@ -1615,6 +1615,62 @@ void testRequestContextSpanishLocale() {
 }
 
 // ============================================================================
+// Error Path Tracking Tests
+// ============================================================================
+
+void testFieldErrorPartialResult() {
+    // Query a mix of good and failing fields — should get partial result
+    auto response = graphql(`{ users { firstName failingField } }`);
+
+    // Should have both data and errors
+    assertPartialResult(response);
+
+    // Data should have users with firstName populated and failingField null
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 2, "Expected at least 2 users");
+    foreach (user; users) {
+        // firstName should be present (non-null)
+        assertTrue(user["firstName"].type != JSONType.null_, "firstName should not be null");
+        // failingField should be null
+        assertTrue(user["failingField"].isNull, "failingField should be null");
+    }
+}
+
+void testFieldErrorPath() {
+    // Verify the error path points to the correct field
+    auto response = graphql(`{ users { firstName failingField } }`);
+
+    assertPartialResult(response);
+    assertErrorPath(response, [JSONValue("users"), JSONValue("failingField")]);
+}
+
+void testNonFailingFieldsUnaffected() {
+    // Verify that non-failing fields return correct data despite a sibling failing
+    auto response = graphql(`{ users { firstName lastName failingField } }`);
+
+    assertPartialResult(response);
+
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length >= 3, "Expected at least 3 users");
+
+    // Verify all users have real data in non-failing fields
+    bool foundAlice = false;
+    foreach (user; users) {
+        // firstName and lastName should be non-null strings
+        assertTrue(user["firstName"].type == JSONType.string, "firstName should be a string");
+        assertTrue(user["lastName"].type == JSONType.string, "lastName should be a string");
+        // failingField should be null
+        assertTrue(user["failingField"].isNull, "failingField should be null");
+
+        if (user["firstName"].str == "Alice") {
+            assertEqual(user["lastName"], JSONValue("Smith"));
+            foundAlice = true;
+        }
+    }
+    assertTrue(foundAlice, "Expected to find Alice in results");
+}
+
+// ============================================================================
 // Composite Primary Key Tests
 // ============================================================================
 
@@ -1908,6 +1964,11 @@ static this() {
     registerTest("Request context greeting (French)", "tests", &testRequestContextGreeting);
     registerTest("Request context default locale", "tests", &testRequestContextDefaultLocale);
     registerTest("Request context greeting (Spanish)", "tests", &testRequestContextSpanishLocale);
+
+    // Error path tracking tests
+    registerTest("Field error returns partial result", "tests", &testFieldErrorPartialResult);
+    registerTest("Field error has correct path", "tests", &testFieldErrorPath);
+    registerTest("Non-failing fields unaffected by failing sibling", "tests", &testNonFailingFieldsUnaffected);
 
     // Composite primary key tests
     registerTest("Query all tags (composite PK)", "tests", &testQueryAllTags);

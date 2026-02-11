@@ -277,6 +277,28 @@ void assertNoErrors(JSONValue response) {
     }
 }
 
+/// Assert that the response has both data and errors (partial result)
+void assertPartialResult(JSONValue response) {
+    assertTrue(("data" in response) !is null, "Response missing 'data' field");
+    assertTrue(("errors" in response) !is null, "Response missing 'errors' field");
+    assertTrue(response["errors"].array.length > 0, "Expected at least one error");
+}
+
+/// Assert that the response errors contain an entry with the given path
+void assertErrorPath(JSONValue response, JSONValue[] expectedPath) {
+    assertTrue(("errors" in response) !is null, "Response has no errors");
+    foreach (err; response["errors"].array) {
+        if (("path" in err) !is null && err["path"] == JSONValue(expectedPath))
+            return;
+    }
+    string msg = "No error found with path " ~ JSONValue(expectedPath).toString();
+    msg ~= "\nActual errors:\n";
+    foreach (err; response["errors"].array) {
+        msg ~= "  " ~ err.toString() ~ "\n";
+    }
+    throw new AssertError(msg);
+}
+
 /// Assert that response.data equals expected
 void assertData(JSONValue response, string expectedDataJson) {
     assertNoErrors(response);

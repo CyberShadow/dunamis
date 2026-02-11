@@ -53,11 +53,13 @@
 - Fragments: named fragments (`...FragmentName`), inline fragments (`... on Type { }` and `... { }`), with type condition matching, directive support, and circular reference detection
 - Request context via `context!T(expr)` — computed fields can access request-scoped data (auth, locale, tenant) passed via `EvalContext`
 - Field overrides with `FieldOverridePlugin` — runtime interception of any field resolution via typed delegates, for feature flags, A/B testing, gradual rollouts, or per-deployment customization
+- Error path tracking — field-level error catching with path tracking through nested selections (e.g., `["users", "fullName"]`) and partial result support (`{"data": ..., "errors": [...]}`)
 
 ## Future Directions
 
 - **Query validation** — Separate validation phase for structural rules: unused/undefined variable checks, duplicate operation names, argument validation
-- **Error path tracking** — Track field paths through nested selections for precise error reporting (e.g., `["users", 0, "posts", 2, "title"]`) and partial result support (`{"data": ..., "errors": [...]}`)
+- **Per-element error tracking** — Track array indices in error paths (e.g., `["users", 0, "fullName"]`) for per-entity error granularity
+- **Null bubbling** — When a non-nullable field errors, propagate null to the nearest nullable parent per the GraphQL spec
 - **Polymorphism** — GraphQL union and interface types for heterogeneous collections
 - **Expression deduplication** — Grafast-style peer analysis
 - **Plan caching** — Reuse optimized plans for repeated queries

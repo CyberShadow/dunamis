@@ -1,5 +1,7 @@
 module dunamis.core.eval;
 
+import std.json : JSONValue;
+
 import dunamis.core.types;
 
 // ============================================================================
@@ -32,6 +34,28 @@ struct SealedArray {
     /// Check if empty (uninitialized).
     bool empty() const {
         return _data.length == 0;
+    }
+}
+
+// ============================================================================
+// GraphQL Error Type
+// ============================================================================
+
+/// A field-level error with message and path for partial result support.
+/// Path elements are field names (strings) and array indices (integers),
+/// following the GraphQL spec error format.
+struct GraphQLError {
+    string message;
+    JSONValue[] path;
+
+    /// Convert to the JSON format expected in GraphQL responses.
+    JSONValue toJson() const {
+        auto result = JSONValue.emptyObject;
+        result["message"] = JSONValue(message);
+        if (path.length > 0) {
+            result["path"] = JSONValue(path.dup);
+        }
+        return result;
     }
 }
 
@@ -149,6 +173,27 @@ class EvalContext {
     bool hasRequestContext(T)() if (is(T == struct)) {
         return (typeid(T) in _requestContexts) !is null;
     }
+
+    // ========================================================================
+    // Field-Level Error Collection
+    // ========================================================================
+
+    private GraphQLError[] _errors;
+
+    /// Record a field-level error with its path.
+    void addError(string message, JSONValue[] path) {
+        _errors ~= GraphQLError(message, path);
+    }
+
+    /// Get all collected errors (for response assembly).
+    @property const(GraphQLError)[] errors() const {
+        return _errors;
+    }
+
+    /// Check if any errors were collected.
+    @property bool hasErrors() const {
+        return _errors.length > 0;
+    }
 }
 
 // ============================================================================
@@ -232,4 +277,36 @@ unittest {
     auto authNew = ctx.getRequestContext!AuthCtx;
     assert(authNew.userId == "user-2");
     assert(authNew.isAdmin == false);
+}
+
+unittest {
+    // Test error collection
+    auto ctx = new EvalContext();
+
+    assert(!ctx.hasErrors);
+    assert(ctx.errors.length == 0);
+
+    // Add errors with paths
+    ctx.addError("field failed", [JSONValue("users"), JSONValue("fullName")]);
+    assert(ctx.hasErrors);
+    assert(ctx.errors.length == 1);
+    assert(ctx.errors[0].message == "field failed");
+    assert(ctx.errors[0].path == [JSONValue("users"), JSONValue("fullName")]);
+
+    // Add another error
+    ctx.addError("another failure", [JSONValue("posts"), JSONValue("title")]);
+    assert(ctx.errors.length == 2);
+
+    // Test toJson
+    auto json = ctx.errors[0].toJson();
+    assert(json["message"].str == "field failed");
+    assert(json["path"].array.length == 2);
+    assert(json["path"][0].str == "users");
+    assert(json["path"][1].str == "fullName");
+
+    // Error with empty path
+    ctx.addError("root error", []);
+    auto rootJson = ctx.errors[2].toJson();
+    assert(rootJson["message"].str == "root error");
+    assert("path" !in rootJson);
 }

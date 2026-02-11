@@ -156,14 +156,18 @@ auto jsonObject(Args...)(Args args)
 ///
 /// This expression evaluates each field and converts results to JSON.
 /// Field expressions can return any type - they're converted via toJsonValue.
+/// Supports field-level error catching: if a field expression fails,
+/// the field is set to null and the error is recorded on the EvalContext.
 class DynamicJsonObjectExpr : Expr!JSONValue {
     private string[] _names;
     private ExprBase[] _exprs;
+    private JSONValue[] _pathPrefix;
 
-    this(string[] names, ExprBase[] exprs) {
+    this(string[] names, ExprBase[] exprs, JSONValue[] pathPrefix = []) {
         assert(names.length == exprs.length, "Names and exprs must have same length");
         _names = names;
         _exprs = exprs;
+        _pathPrefix = pathPrefix;
     }
 
     override ExprBase[] dependencies() {
@@ -185,23 +189,43 @@ class DynamicJsonObjectExpr : Expr!JSONValue {
     }
 
     override Promise!(JSONValue[]) eval(EvalContext ctx) {
-        // Evaluate all field expressions and convert to JSON
-        Promise!(JSONValue[])[] promises;
+        import ae.utils.promise : Result, toResult;
+
+        // Evaluate all field expressions, capturing errors as Results
+        Promise!(Result!(JSONValue[]))[] resultPromises;
         foreach (expr; _exprs) {
-            promises ~= evalToJson(expr, ctx);
+            resultPromises ~= evalToJson(expr, ctx).toResult();
         }
 
         auto names = _names;
+        auto pathPrefix = _pathPrefix;
 
-        return all(promises).then((JSONValue[][] results) {
-            // All field results should have the same length
-            auto count = results.length > 0 ? results[0].length : 0;
+        return all(resultPromises).then((Result!(JSONValue[])[] results) {
+            // Determine batch size from first successful result
+            size_t count = 0;
+            foreach (r; results) {
+                if (r.error is null && r.value[0].length > 0) {
+                    count = r.value[0].length;
+                    break;
+                }
+            }
+            if (count == 0) count = 1; // Fallback for root fields
 
             JSONValue[] jsonResults = new JSONValue[count];
             foreach (idx; 0 .. count) {
                 jsonResults[idx] = JSONValue.emptyObject;
                 foreach (i, name; names) {
-                    jsonResults[idx][name] = results[i][idx];
+                    if (results[i].error is null && idx < results[i].value[0].length) {
+                        jsonResults[idx][name] = results[i].value[0][idx];
+                    } else {
+                        jsonResults[idx][name] = JSONValue(null);
+                        // Record error once per field (at first entity)
+                        if (results[i].error !is null && idx == 0) {
+                            JSONValue[] errorPath = pathPrefix.dup;
+                            errorPath ~= JSONValue(name);
+                            ctx.addError(results[i].error.msg, errorPath);
+                        }
+                    }
                 }
             }
             return jsonResults;
@@ -212,14 +236,18 @@ class DynamicJsonObjectExpr : Expr!JSONValue {
 /// JSON object expression that evaluates fields sequentially (for mutations).
 /// Unlike DynamicJsonObjectExpr which evaluates in parallel, this ensures
 /// each field completes before the next starts - required for mutation semantics.
+/// Supports field-level error catching: if a field expression fails,
+/// the field is set to null and the error is recorded on the EvalContext.
 class SequentialJsonObjectExpr : Expr!JSONValue {
     private string[] _names;
     private ExprBase[] _exprs;
+    private JSONValue[] _pathPrefix;
 
-    this(string[] names, ExprBase[] exprs) {
+    this(string[] names, ExprBase[] exprs, JSONValue[] pathPrefix = []) {
         assert(names.length == exprs.length, "Names and exprs must have same length");
         _names = names;
         _exprs = exprs;
+        _pathPrefix = pathPrefix;
     }
 
     override ExprBase[] dependencies() {
@@ -253,9 +281,17 @@ class SequentialJsonObjectExpr : Expr!JSONValue {
 
         auto fieldName = _names[idx];
         auto fieldExpr = _exprs[idx];
+        auto pathPrefix = _pathPrefix;
 
         return evalToJson(fieldExpr, ctx).then((JSONValue[] fieldVals) {
             result[fieldName] = fieldVals[0];
+            return evalFieldsSequentially(ctx, idx + 1, result);
+        }).except((Exception e) {
+            // Field failed — set to null and record error, continue with next field
+            result[fieldName] = JSONValue(null);
+            JSONValue[] errorPath = pathPrefix.dup;
+            errorPath ~= JSONValue(fieldName);
+            ctx.addError(e.msg, errorPath);
             return evalFieldsSequentially(ctx, idx + 1, result);
         });
     }
@@ -451,4 +487,113 @@ NullableObjectExpr!T finalizeNullableObjectExpr(T)(
     Expr!JSONValue innerExpr
 ) {
     return new NullableObjectExpr!T(nullableInput, innerExpr, unwrapper);
+}
+
+// ============================================================================
+// Tests: Field-level error catching
+// ============================================================================
+
+/// Expression that always fails (for testing error handling)
+private class FailingExpr : Expr!JSONValue {
+    string _message;
+
+    this(string message) {
+        _message = message;
+    }
+
+    override ExprBase[] dependencies() { return []; }
+    override void replaceDependency(size_t index, ExprBase newDep) {}
+
+    override Promise!(JSONValue[]) eval(EvalContext ctx) {
+        auto p = new Promise!(JSONValue[]);
+        p.reject(new Exception(_message));
+        return p;
+    }
+}
+
+/// Expression that returns fixed values (for testing)
+private class FixedJsonExpr : Expr!JSONValue {
+    JSONValue[] _values;
+    this(JSONValue[] values) { _values = values; }
+    override ExprBase[] dependencies() { return []; }
+    override void replaceDependency(size_t index, ExprBase newDep) {}
+    override Promise!(JSONValue[]) eval(EvalContext ctx) {
+        return resolve(_values);
+    }
+}
+
+unittest {
+    import ae.utils.promise.await : awaitSync;
+
+    // Test DynamicJsonObjectExpr: one field fails, others succeed
+    auto ctx = new EvalContext();
+    auto goodField = new FixedJsonExpr([JSONValue("Alice"), JSONValue("Bob")]);
+    auto badField = new FailingExpr("field failed");
+
+    auto expr = new DynamicJsonObjectExpr(
+        ["name", "broken"],
+        [cast(ExprBase) goodField, cast(ExprBase) badField],
+        [JSONValue("users")],
+    );
+
+    auto result = awaitSync(expr.eval(ctx));
+
+    // Should have 2 results (batch size from successful field)
+    assert(result.length == 2);
+    assert(result[0]["name"].str == "Alice");
+    assert(result[0]["broken"].isNull);
+    assert(result[1]["name"].str == "Bob");
+    assert(result[1]["broken"].isNull);
+
+    // Error should be recorded
+    assert(ctx.hasErrors);
+    assert(ctx.errors.length == 1);
+    assert(ctx.errors[0].message == "field failed");
+    assert(ctx.errors[0].path == [JSONValue("users"), JSONValue("broken")]);
+}
+
+unittest {
+    import ae.utils.promise.await : awaitSync;
+
+    // Test DynamicJsonObjectExpr: all fields succeed, no errors
+    auto ctx = new EvalContext();
+    auto field1 = new FixedJsonExpr([JSONValue("a")]);
+    auto field2 = new FixedJsonExpr([JSONValue(42)]);
+
+    auto expr = new DynamicJsonObjectExpr(
+        ["x", "y"],
+        [cast(ExprBase) field1, cast(ExprBase) field2],
+    );
+
+    auto result = awaitSync(expr.eval(ctx));
+    assert(result.length == 1);
+    assert(result[0]["x"].str == "a");
+    assert(result[0]["y"].integer == 42);
+    assert(!ctx.hasErrors);
+}
+
+unittest {
+    import ae.utils.promise.await : awaitSync;
+
+    // Test SequentialJsonObjectExpr: one field fails, others succeed
+    auto ctx = new EvalContext();
+    auto goodField = new FixedJsonExpr([JSONValue("ok")]);
+    auto badField = new FailingExpr("mutation failed");
+    auto goodField2 = new FixedJsonExpr([JSONValue(true)]);
+
+    auto expr = new SequentialJsonObjectExpr(
+        ["first", "broken", "third"],
+        [cast(ExprBase) goodField, cast(ExprBase) badField, cast(ExprBase) goodField2],
+        [JSONValue("mutation")],
+    );
+
+    auto result = awaitSync(expr.eval(ctx));
+
+    // Should have 1 result (mutations produce single object)
+    assert(result.length == 1);
+    assert(result[0]["first"].str == "ok");
+    assert(result[0]["broken"].isNull);
+    assert(result[0]["third"].type == JSONType.true_); // Subsequent fields still execute
+    assert(ctx.hasErrors);
+    assert(ctx.errors[0].path == [JSONValue("mutation"), JSONValue("broken")]);
 }

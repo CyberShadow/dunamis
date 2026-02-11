@@ -86,7 +86,21 @@ abstract class IntegrationTestRunner(alias db, alias Schema) {
                 auto response = new HttpResponseEx();
                 response.status = HttpStatusCode.OK;
                 response.headers["Content-Type"] = "application/json";
-                auto responseJson = JSONValue(["data": result]);
+
+                JSONValue responseJson;
+                if (evalCtx.hasErrors) {
+                    // Partial success: include both data and errors
+                    responseJson = JSONValue.emptyObject;
+                    responseJson["data"] = result;
+                    JSONValue[] errorArr;
+                    foreach (err; evalCtx.errors) {
+                        errorArr ~= err.toJson();
+                    }
+                    responseJson["errors"] = JSONValue(errorArr);
+                } else {
+                    responseJson = JSONValue(["data": result]);
+                }
+
                 response.data = DataVec(Data(cast(immutable(ubyte)[]) responseJson.toString()));
                 conn.sendResponse(response);
             }).except((Exception e) {

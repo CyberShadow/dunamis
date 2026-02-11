@@ -756,3 +756,30 @@ auto result = executor.execute(query, ctx);
 - **Schema-preserving** — GraphQL SDL is unchanged; overrides only affect runtime behavior
 - **Composable** — works with all other plugins (filtering, sorting, pagination) applied before it
 - **Optional** — without `FieldOverrideConfig` in EvalContext, all fields pass through unchanged with zero overhead
+
+## Error Handling
+
+Field-level errors produce partial results instead of failing the entire request. When a field expression throws during evaluation, the field is set to `null` and the error is recorded with its path in the response:
+
+```json
+{
+  "data": {
+    "users": [
+      {"firstName": "Alice", "riskyField": null},
+      {"firstName": "Bob", "riskyField": null}
+    ]
+  },
+  "errors": [
+    {"message": "computation failed", "path": ["users", "riskyField"]}
+  ]
+}
+```
+
+Errors are collected on `EvalContext` during evaluation. The server includes both `data` and `errors` in the response when errors are present (HTTP status 200, per the GraphQL spec). Errors from query compilation or data source failures still produce full error responses with no data.
+
+**Key properties:**
+
+- **Field-level granularity** — each field in a selection set is independently error-caught; one field's failure doesn't affect siblings
+- **Path tracking** — error paths trace through nested selections (e.g., `["users", "posts", "title"]`)
+- **Transparent** — no changes needed to entity definitions or computed fields; error catching is automatic
+- **Sequential mutations** — mutation fields also catch errors independently and continue to the next field
