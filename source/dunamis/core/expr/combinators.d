@@ -103,6 +103,84 @@ auto use(Fn, Exprs...)(Fn fn, Exprs exprs)
 }
 
 // ============================================================================
+// TryUse Combinator (per-element error catching)
+// ============================================================================
+
+/// Like UseExpr, but catches exceptions per-element and wraps results
+/// in GqlResult. Successful elements get GqlResult.ok(value), failed
+/// elements get GqlResult.err(exception.msg).
+///
+/// This allows expressions that may throw for individual elements to
+/// produce partial results instead of failing the entire batch.
+class TryUseExpr(Fn, Exprs...) : Expr!(GqlResult!(ReturnType!Fn))
+    if (Exprs.length >= 1 && allSatisfy!(isExpr, Exprs))
+{
+    alias R = ReturnType!Fn;
+    alias InputTypes = staticMap!(ExprResultType, Exprs);
+    alias EvaluatedArrays = Tuple!(staticMap!(toArray, InputTypes));
+
+    private ExprBase[Exprs.length] _inputs;
+    private Fn _fn;
+
+    this(Exprs inputs, Fn fn) {
+        static foreach (i; 0 .. Exprs.length) {
+            _inputs[i] = inputs[i];
+        }
+        _fn = fn;
+    }
+
+    override ExprBase[] dependencies() {
+        return _inputs[];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index < _inputs.length)
+            _inputs[index] = newDep;
+    }
+
+    override Expr!(GqlResult!R) optimize(OptimizeContext ctx) {
+        static foreach (i; 0 .. Exprs.length) {
+            _inputs[i] = (cast(Expr!(InputTypes[i])) _inputs[i]).optimize(ctx);
+        }
+        return this;
+    }
+
+    override Promise!(GqlResult!R[]) eval(EvalContext ctx) {
+        auto fn = _fn;
+
+        alias PromiseTypes = staticMap!(toPromiseArray, InputTypes);
+        Tuple!PromiseTypes promises;
+        static foreach (i; 0 .. Exprs.length) {
+            promises[i] = evalAs!(InputTypes[i])(_inputs[i], ctx);
+        }
+
+        return all(promises.expand).then((EvaluatedArrays results) {
+            GqlResult!R[] result = new GqlResult!R[results[0].length];
+            foreach (idx; 0 .. results[0].length) {
+                Tuple!InputTypes args;
+                static foreach (i; 0 .. Exprs.length) {
+                    args[i] = results[i][idx];
+                }
+                try {
+                    result[idx] = GqlResult!R.ok(fn(args.expand));
+                } catch (Exception e) {
+                    result[idx] = GqlResult!R.err(e.msg);
+                }
+            }
+            return result;
+        });
+    }
+}
+
+/// Like `use`, but catches exceptions per-element and wraps results in GqlResult.
+/// Successful elements get GqlResult.ok(value), failed elements get GqlResult.err(msg).
+auto tryUse(Fn, Exprs...)(Fn fn, Exprs exprs)
+    if (Exprs.length >= 1 && allSatisfy!(isExpr, Exprs))
+{
+    return new TryUseExpr!(Fn, Exprs)(exprs, fn);
+}
+
+// ============================================================================
 // Broadcast Combinator (cross-collection access)
 // ============================================================================
 
@@ -954,4 +1032,30 @@ unittest {
     assert(result.length == 1, "Expected 1 group");
     assert(result[0] == ["1:fr", "2:fr", "3:fr"],
         "Expected context value replicated across batch");
+}
+
+unittest {
+    // Test tryUse - catches per-element exceptions and wraps in GqlResult
+    import std.conv : to, ConvException;
+
+    auto collection = new MockCollectionExpr!TestEntity([
+        TestEntity("10"), TestEntity("bad"), TestEntity("5"),
+    ]);
+
+    auto query = map!(
+        (Expr!TestEntity item) => tryUse(
+            (string id) => id.to!int * 2,  // throws ConvException for "bad"
+            use((TestEntity e) => e.id, item),
+        )
+    )(collection);
+
+    auto ctx = new EvalContext();
+    ctx.setValues!AnyRef(null, [queryRoot]);
+    auto result = awaitSync(query.eval(ctx));
+
+    assert(result.length == 1);
+    assert(result[0].length == 3);
+    assert(!result[0][0].isError && result[0][0].value == 20);
+    assert(result[0][1].isError);  // "bad" can't be converted to int
+    assert(!result[0][2].isError && result[0][2].value == 10);
 }

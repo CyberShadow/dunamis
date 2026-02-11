@@ -34,6 +34,13 @@ JSONValue toJsonValue(T)(T value) {
         } else {
             return toJsonValue(value.get);
         }
+    } else static if (isGqlResult!T) {
+        // GqlResult — error becomes null, ok becomes converted value
+        if (value.isError) {
+            return JSONValue(null);
+        } else {
+            return toJsonValue(value.value);
+        }
     } else static if (is(T == enum)) {
         // D enum - convert to string using member name
         import std.conv : to;
@@ -302,6 +309,95 @@ Promise!(JSONValue[]) evalToJson(ExprBase expr, EvalContext ctx) {
     import std.algorithm : stdMap = map;
     import std.array : array;
 
+    // GqlResult types — per-element error handling
+    // Errors are recorded with empty path as fallback; use MaterializeGqlResultExpr for proper paths.
+    if (auto e = cast(Expr!(GqlResult!string)) expr) {
+        return e.eval(ctx).then((GqlResult!string[] vals) {
+            JSONValue[] result = new JSONValue[vals.length];
+            foreach (i, v; vals) {
+                if (v.isError) {
+                    result[i] = JSONValue(null);
+                    ctx.addError(v.error, []);
+                } else {
+                    result[i] = JSONValue(v.value);
+                }
+            }
+            return result;
+        });
+    }
+    if (auto e = cast(Expr!(GqlResult!long)) expr) {
+        return e.eval(ctx).then((GqlResult!long[] vals) {
+            JSONValue[] result = new JSONValue[vals.length];
+            foreach (i, v; vals) {
+                if (v.isError) {
+                    result[i] = JSONValue(null);
+                    ctx.addError(v.error, []);
+                } else {
+                    result[i] = JSONValue(v.value);
+                }
+            }
+            return result;
+        });
+    }
+    if (auto e = cast(Expr!(GqlResult!double)) expr) {
+        return e.eval(ctx).then((GqlResult!double[] vals) {
+            JSONValue[] result = new JSONValue[vals.length];
+            foreach (i, v; vals) {
+                if (v.isError) {
+                    result[i] = JSONValue(null);
+                    ctx.addError(v.error, []);
+                } else {
+                    result[i] = JSONValue(v.value);
+                }
+            }
+            return result;
+        });
+    }
+    if (auto e = cast(Expr!(GqlResult!bool)) expr) {
+        return e.eval(ctx).then((GqlResult!bool[] vals) {
+            JSONValue[] result = new JSONValue[vals.length];
+            foreach (i, v; vals) {
+                if (v.isError) {
+                    result[i] = JSONValue(null);
+                    ctx.addError(v.error, []);
+                } else {
+                    result[i] = JSONValue(v.value);
+                }
+            }
+            return result;
+        });
+    }
+
+    // Nullable types
+    if (auto e = cast(Expr!(Nullable!string)) expr) {
+        return e.eval(ctx).then((Nullable!string[] vals) {
+            JSONValue[] result = new JSONValue[vals.length];
+            foreach (i, v; vals) result[i] = toJsonValue(v);
+            return result;
+        });
+    }
+    if (auto e = cast(Expr!(Nullable!long)) expr) {
+        return e.eval(ctx).then((Nullable!long[] vals) {
+            JSONValue[] result = new JSONValue[vals.length];
+            foreach (i, v; vals) result[i] = toJsonValue(v);
+            return result;
+        });
+    }
+    if (auto e = cast(Expr!(Nullable!double)) expr) {
+        return e.eval(ctx).then((Nullable!double[] vals) {
+            JSONValue[] result = new JSONValue[vals.length];
+            foreach (i, v; vals) result[i] = toJsonValue(v);
+            return result;
+        });
+    }
+    if (auto e = cast(Expr!(Nullable!bool)) expr) {
+        return e.eval(ctx).then((Nullable!bool[] vals) {
+            JSONValue[] result = new JSONValue[vals.length];
+            foreach (i, v; vals) result[i] = toJsonValue(v);
+            return result;
+        });
+    }
+
     // Try common types and convert to JSON
     if (auto e = cast(Expr!string) expr) {
         return e.eval(ctx).then((string[] vals) {
@@ -344,6 +440,64 @@ Promise!(JSONValue[]) evalToJson(ExprBase expr, EvalContext ctx) {
 
     // Fallback - return null values
     return resolve(cast(JSONValue[]) null);
+}
+
+// ============================================================================
+// GqlResult Materialization
+// ============================================================================
+
+/// Transform expression that converts GqlResult!T to Nullable!T,
+/// recording per-element errors in the EvalContext.
+///
+/// This is where error "bubbling" materializes into concrete null values.
+/// Each error element becomes Nullable.null with the error recorded at the
+/// given path. Success elements become Nullable(value).
+///
+/// Use `materializeResult()` to create instances.
+class MaterializeGqlResultExpr(T) : Expr!(Nullable!T) {
+    private ExprBase _input;  // Expr!(GqlResult!T)
+    private JSONValue[] _errorPath;
+
+    this(Expr!(GqlResult!T) input, JSONValue[] errorPath = []) {
+        _input = input;
+        _errorPath = errorPath;
+    }
+
+    override ExprBase[] dependencies() {
+        return [_input];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0) _input = newDep;
+    }
+
+    override Expr!(Nullable!T) optimize(OptimizeContext ctx) {
+        _input = optimizeExpr(_input, ctx);
+        return this;
+    }
+
+    override Promise!(Nullable!T[]) eval(EvalContext ctx) {
+        auto errorPath = _errorPath;
+
+        return evalAs!(GqlResult!T)(_input, ctx).then((GqlResult!T[] vals) {
+            Nullable!T[] result = new Nullable!T[vals.length];
+            foreach (i, v; vals) {
+                if (v.isError) {
+                    result[i] = Nullable!T.init;
+                    ctx.addError(v.error, errorPath);
+                } else {
+                    result[i] = Nullable!T(v.value);
+                }
+            }
+            return result;
+        });
+    }
+}
+
+/// Convert a GqlResult expression to a Nullable expression,
+/// recording errors in the EvalContext at the given path.
+auto materializeResult(T)(Expr!(GqlResult!T) input, JSONValue[] errorPath = []) {
+    return new MaterializeGqlResultExpr!T(input, errorPath);
 }
 
 // ============================================================================
@@ -596,4 +750,102 @@ unittest {
     assert(result[0]["third"].type == JSONType.true_); // Subsequent fields still execute
     assert(ctx.hasErrors);
     assert(ctx.errors[0].path == [JSONValue("mutation"), JSONValue("broken")]);
+}
+
+// ============================================================================
+// Tests: GqlResult and MaterializeGqlResultExpr
+// ============================================================================
+
+/// Expression that returns fixed GqlResult values (for testing)
+private class FixedGqlResultExpr(T) : Expr!(GqlResult!T) {
+    GqlResult!T[] _values;
+    this(GqlResult!T[] values) { _values = values; }
+    override ExprBase[] dependencies() { return []; }
+    override void replaceDependency(size_t index, ExprBase newDep) {}
+    override Promise!(GqlResult!T[]) eval(EvalContext ctx) {
+        return resolve(_values);
+    }
+}
+
+unittest {
+    import ae.utils.promise.await : awaitSync;
+
+    // Test MaterializeGqlResultExpr: mixed ok/error elements
+    auto ctx = new EvalContext();
+    auto input = new FixedGqlResultExpr!string([
+        GqlResult!string.ok("Alice"),
+        GqlResult!string.err("name missing"),
+        GqlResult!string.ok("Charlie"),
+    ]);
+
+    auto expr = materializeResult!string(input, [JSONValue("users"), JSONValue("name")]);
+    auto result = awaitSync(expr.eval(ctx));
+
+    // Check materialized values
+    assert(result.length == 3);
+    assert(!result[0].isNull && result[0].get == "Alice");
+    assert(result[1].isNull);  // Error → null
+    assert(!result[2].isNull && result[2].get == "Charlie");
+
+    // Check errors recorded
+    assert(ctx.hasErrors);
+    assert(ctx.errors.length == 1);
+    assert(ctx.errors[0].message == "name missing");
+    assert(ctx.errors[0].path == [JSONValue("users"), JSONValue("name")]);
+}
+
+unittest {
+    import ae.utils.promise.await : awaitSync;
+
+    // Test evalToJson with GqlResult — errors recorded with empty path
+    auto ctx = new EvalContext();
+    auto input = new FixedGqlResultExpr!string([
+        GqlResult!string.ok("hello"),
+        GqlResult!string.err("bad value"),
+    ]);
+
+    auto result = awaitSync(evalToJson(input, ctx));
+
+    assert(result.length == 2);
+    assert(result[0].str == "hello");
+    assert(result[1].isNull);
+    assert(ctx.hasErrors);
+    assert(ctx.errors[0].message == "bad value");
+    assert(ctx.errors[0].path == []);  // No path for unmaterialized GqlResult
+}
+
+unittest {
+    import ae.utils.promise.await : awaitSync;
+
+    // Test MaterializeGqlResultExpr through DynamicJsonObjectExpr
+    auto ctx = new EvalContext();
+
+    // One field is a materialized GqlResult, the other is a plain field
+    auto gqlField = new FixedGqlResultExpr!string([
+        GqlResult!string.ok("valid"),
+        GqlResult!string.err("invalid name"),
+    ]);
+    auto materialized = materializeResult!string(gqlField,
+        [JSONValue("users"), JSONValue("name")]);
+    auto plainField = new FixedJsonExpr([JSONValue(1), JSONValue(2)]);
+
+    auto expr = new DynamicJsonObjectExpr(
+        ["name", "id"],
+        [cast(ExprBase) materialized, cast(ExprBase) plainField],
+        [JSONValue("users")],
+    );
+
+    auto result = awaitSync(expr.eval(ctx));
+
+    assert(result.length == 2);
+    // First element: name is "valid", id is 1
+    assert(result[0]["id"].integer == 1);
+    // Second element: name is null (error materialized), id is 2
+    assert(result[1]["id"].integer == 2);
+
+    // Error should be recorded from materialization (with specific path)
+    assert(ctx.hasErrors);
+    assert(ctx.errors.length == 1);
+    assert(ctx.errors[0].message == "invalid name");
+    assert(ctx.errors[0].path == [JSONValue("users"), JSONValue("name")]);
 }

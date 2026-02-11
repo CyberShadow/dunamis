@@ -381,6 +381,17 @@ package(dunamis.core) template toArray(T) {
 /// Optimize an ExprBase by dispatching to common result types.
 ExprBase optimizeExpr(ExprBase expr, OptimizeContext ctx) {
     import std.json : JSONValue;
+    import dunamis.core.types : GqlResult;
+    // Try GqlResult types
+    if (auto e = cast(Expr!(GqlResult!string)) expr) return e.optimize(ctx);
+    if (auto e = cast(Expr!(GqlResult!long)) expr) return e.optimize(ctx);
+    if (auto e = cast(Expr!(GqlResult!double)) expr) return e.optimize(ctx);
+    if (auto e = cast(Expr!(GqlResult!bool)) expr) return e.optimize(ctx);
+    // Try Nullable types
+    if (auto e = cast(Expr!(Nullable!string)) expr) return e.optimize(ctx);
+    if (auto e = cast(Expr!(Nullable!long)) expr) return e.optimize(ctx);
+    if (auto e = cast(Expr!(Nullable!double)) expr) return e.optimize(ctx);
+    if (auto e = cast(Expr!(Nullable!bool)) expr) return e.optimize(ctx);
     // Try common types
     if (auto e = cast(Expr!string) expr) return e.optimize(ctx);
     if (auto e = cast(Expr!long) expr) return e.optimize(ctx);

@@ -1646,28 +1646,25 @@ void testFieldErrorPath() {
 
 void testNonFailingFieldsUnaffected() {
     // Verify that non-failing fields return correct data despite a sibling failing
-    auto response = graphql(`{ users { firstName lastName failingField } }`);
+    auto response = graphql(`{ users(orderBy: [{field: firstName, direction: ASC}]) { firstName lastName failingField } }`);
 
     assertPartialResult(response);
 
     auto users = response["data"]["users"].array;
     assertTrue(users.length >= 3, "Expected at least 3 users");
 
-    // Verify all users have real data in non-failing fields
-    bool foundAlice = false;
-    foreach (user; users) {
-        // firstName and lastName should be non-null strings
-        assertTrue(user["firstName"].type == JSONType.string, "firstName should be a string");
-        assertTrue(user["lastName"].type == JSONType.string, "lastName should be a string");
-        // failingField should be null
-        assertTrue(user["failingField"].isNull, "failingField should be null");
+    // Verify actual data is correct (sorted by firstName)
+    assertEqual(users[0]["firstName"], JSONValue("Alice"));
+    assertEqual(users[0]["lastName"], JSONValue("Smith"));
+    assertEqual(users[1]["firstName"], JSONValue("Bob"));
+    assertEqual(users[1]["lastName"], JSONValue("Jones"));
+    assertEqual(users[2]["firstName"], JSONValue("Charlie"));
+    assertEqual(users[2]["lastName"], JSONValue("Brown"));
 
-        if (user["firstName"].str == "Alice") {
-            assertEqual(user["lastName"], JSONValue("Smith"));
-            foundAlice = true;
-        }
+    // All failingField values should be null
+    foreach (user; users) {
+        assertTrue(user["failingField"].isNull, "failingField should be null");
     }
-    assertTrue(foundAlice, "Expected to find Alice in results");
 }
 
 // ============================================================================

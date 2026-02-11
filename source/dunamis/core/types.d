@@ -543,6 +543,174 @@ unittest {
 }
 
 // ============================================================================
+// GqlResult - Per-Element Error Tracking
+// ============================================================================
+
+/// A per-element result type for expressions that can fail independently
+/// for each element in a batch.
+///
+/// GqlResult flows through the expression tree via D's operator overloading.
+/// Errors propagate automatically: if any operand is an error, the result
+/// is an error (first error wins, left-to-right).
+///
+/// Use `materializeResult()` to convert `Expr!(GqlResult!T)` to `Expr!(Nullable!T)`,
+/// recording errors in the EvalContext.
+///
+/// Example:
+/// ---
+/// static auto riskyField(Expr!User u) {
+///     return use(
+///         (string name) => name.length > 0
+///             ? GqlResult!string.ok(name)
+///             : GqlResult!string.err("empty name"),
+///         u.firstName,
+///     );
+/// }
+/// ---
+struct GqlResult(T) {
+    T value;
+    string error;  // null = success
+
+    @property bool isError() const { return error !is null; }
+
+    static GqlResult!T ok(T val) { return GqlResult!T(val, null); }
+    static GqlResult!T err(string msg) { return GqlResult!T(T.init, msg); }
+
+    /// GqlResult!T op GqlResult!R → GqlResult!(T op R)
+    auto opBinary(string op, R)(GqlResult!R rhs)
+        if (is(typeof(mixin("T.init " ~ op ~ " R.init"))))
+    {
+        alias RT = typeof(mixin("T.init " ~ op ~ " R.init"));
+        if (this.isError) return GqlResult!RT(RT.init, this.error);
+        if (rhs.isError) return GqlResult!RT(RT.init, rhs.error);
+        return GqlResult!RT(mixin("this.value " ~ op ~ " rhs.value"), null);
+    }
+
+    /// GqlResult!T op R → GqlResult!(T op R)
+    auto opBinary(string op, R)(R rhs)
+        if (!is(R == GqlResult!U, U) && is(typeof(mixin("T.init " ~ op ~ " R.init"))))
+    {
+        alias RT = typeof(mixin("T.init " ~ op ~ " R.init"));
+        if (this.isError) return GqlResult!RT(RT.init, this.error);
+        return GqlResult!RT(mixin("this.value " ~ op ~ " rhs"), null);
+    }
+
+    /// R op GqlResult!T → GqlResult!(R op T)
+    auto opBinaryRight(string op, L)(L lhs)
+        if (!is(L == GqlResult!U, U) && is(typeof(mixin("L.init " ~ op ~ " T.init"))))
+    {
+        alias RT = typeof(mixin("L.init " ~ op ~ " T.init"));
+        if (this.isError) return GqlResult!RT(RT.init, this.error);
+        return GqlResult!RT(mixin("lhs " ~ op ~ " this.value"), null);
+    }
+
+    /// Unary: op GqlResult!T → GqlResult!(op T)
+    auto opUnary(string op)()
+        if (is(typeof(mixin(op ~ "T.init"))))
+    {
+        alias RT = typeof(mixin(op ~ "T.init"));
+        if (this.isError) return GqlResult!RT(RT.init, this.error);
+        return GqlResult!RT(mixin(op ~ "this.value"), null);
+    }
+}
+
+/// Check if a type is a GqlResult.
+template isGqlResult(T) {
+    enum isGqlResult = is(T == GqlResult!U, U);
+}
+
+unittest {
+    // Test GqlResult constructors
+    auto ok = GqlResult!string.ok("hello");
+    assert(!ok.isError);
+    assert(ok.value == "hello");
+
+    auto err = GqlResult!string.err("bad");
+    assert(err.isError);
+    assert(err.error == "bad");
+
+    // Test isGqlResult
+    static assert(isGqlResult!(GqlResult!string));
+    static assert(isGqlResult!(GqlResult!long));
+    static assert(!isGqlResult!string);
+    static assert(!isGqlResult!int);
+}
+
+unittest {
+    // Test binary: GqlResult ~ GqlResult
+    auto a = GqlResult!string.ok("hello");
+    auto b = GqlResult!string.ok(" world");
+    auto c = a ~ b;
+    assert(!c.isError);
+    assert(c.value == "hello world");
+
+    // Error propagation: left error wins
+    auto e1 = GqlResult!string.err("err1");
+    auto e2 = GqlResult!string.err("err2");
+    assert((e1 ~ b).isError && (e1 ~ b).error == "err1");
+    assert((a ~ e2).isError && (a ~ e2).error == "err2");
+    assert((e1 ~ e2).isError && (e1 ~ e2).error == "err1");
+
+    // Test binary: GqlResult op plain
+    auto d = a ~ " world";
+    assert(!d.isError && d.value == "hello world");
+    assert((e1 ~ " world").isError && (e1 ~ " world").error == "err1");
+
+    // Test binary: plain op GqlResult
+    auto f = "hello " ~ b;
+    assert(!f.isError && f.value == "hello  world");
+    assert(("hello " ~ e2).isError);
+}
+
+unittest {
+    // Test arithmetic operators
+    auto a = GqlResult!long.ok(10);
+    auto b = GqlResult!long.ok(3);
+
+    auto sum = a + b;
+    assert(!sum.isError && sum.value == 13);
+
+    auto diff = a - b;
+    assert(!diff.isError && diff.value == 7);
+
+    auto prod = a * b;
+    assert(!prod.isError && prod.value == 30);
+
+    // GqlResult op literal
+    auto plus5 = a + 5;
+    assert(!plus5.isError && plus5.value == 15);
+
+    // literal op GqlResult
+    auto from100 = 100 - a;
+    assert(!from100.isError && from100.value == 90);
+
+    // Error propagation through arithmetic
+    auto err = GqlResult!long.err("bad");
+    assert((err + b).isError);
+    assert((a + err).isError);
+    assert((err + 5).isError);
+    assert((5 + err).isError);
+}
+
+unittest {
+    // Test unary operators
+    auto pos = GqlResult!long.ok(42);
+    auto neg = -pos;
+    assert(!neg.isError && neg.value == -42);
+
+    auto err = GqlResult!long.err("bad");
+    auto negErr = -err;
+    assert(negErr.isError && negErr.error == "bad");
+
+    // Chained operations with error propagation
+    auto a = GqlResult!string.ok("hello");
+    auto b = GqlResult!string.err("fail");
+    auto c = GqlResult!string.ok("!");
+    auto result = (a ~ " ") ~ (b ~ c);
+    assert(result.isError && result.error == "fail");
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

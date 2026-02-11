@@ -783,3 +783,47 @@ Errors are collected on `EvalContext` during evaluation. The server includes bot
 - **Path tracking** — error paths trace through nested selections (e.g., `["users", "posts", "title"]`)
 - **Transparent** — no changes needed to entity definitions or computed fields; error catching is automatic
 - **Sequential mutations** — mutation fields also catch errors independently and continue to the next field
+
+### Per-Element Errors with GqlResult
+
+For computed fields that can fail independently per element in a batch, use `GqlResult!T`:
+
+```d
+static auto riskyField(Expr!User u) {
+    return use(
+        (string name) => name.length > 0
+            ? GqlResult!string.ok(name)
+            : GqlResult!string.err("empty name"),
+        u.firstName,
+    );
+}
+```
+
+`GqlResult!T` propagates errors through D operators automatically — if any operand is an error, the result is an error:
+
+```d
+// If riskyField errors, the concatenation result is also an error
+static auto decorated(Expr!User u) {
+    return u.riskyField ~ "!";  // Expr!(GqlResult!string) ~ string → Expr!(GqlResult!string)
+}
+```
+
+Use `tryUse` to automatically catch exceptions per-element and wrap them in `GqlResult`:
+
+```d
+static auto parsed(Expr!User u) {
+    return tryUse(
+        (string s) => s.to!int,  // throws for unparseable strings
+        u.rawValue,
+    );
+    // Returns Expr!(GqlResult!int) — failed elements get GqlResult.err(exception.msg)
+}
+```
+
+To convert `GqlResult!T` errors into null values with error recording, use `materializeResult()`:
+
+```d
+auto expr = materializeResult!string(someGqlResultExpr,
+    [JSONValue("users"), JSONValue("name")]);
+// Produces Expr!(Nullable!string) — errors become null + recorded in EvalContext
+```
