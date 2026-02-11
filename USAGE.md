@@ -689,3 +689,70 @@ auto result2 = executor.execute(query);  // Uses new EvalContext() internally
 - **Assert on missing** — forgetting to set a context type produces a clear error message
 - **No SQL pushdown** — context values are runtime data, correctly opaque to the optimizer
 - **No schema impact** — context fields appear in the schema like any computed field, but the context dependency is invisible to introspection
+
+## Field Overrides
+
+`FieldOverridePlugin` enables runtime field overrides without recompilation — useful for feature flags, A/B testing, gradual rollouts, or per-deployment customization. Override delegates receive the batch of default values and can transform or replace them.
+
+**Setup:**
+
+```d
+// 1. Apply plugin (typically last, after Filter/Sort/Pagination)
+alias FinalSchema = ApplyPlugins!(Schema!(Query, Mutation),
+    FilterPlugin, SortingPlugin, PaginationPlugin,
+    FieldOverridePlugin,
+);
+
+// 2. Register overrides (once per deployment/config change)
+auto overrides = new FieldOverrides();
+
+// Type-safe: validates field exists and return type matches at compile time
+overrides.set!(User, "greeting")(
+    delegate string[](string[] defaults, EvalContext ctx) {
+        return defaults.map!(d => d ~ " (beta)").array;
+    }
+);
+
+// String-based: for Query/Mutation fields or dynamic registration
+overrides.set!string("Query", "version_",
+    delegate string[](string[] defaults, EvalContext ctx) => ["2.0"]
+);
+```
+
+**Per-request execution:**
+
+```d
+auto query = compileQuery!FinalSchema(`{ users { greeting } }`);
+
+auto ctx = new EvalContext();
+ctx.setRequestContext(FieldOverrideConfig(overrides));
+auto result = executor.execute(query, ctx);
+```
+
+**Feature flag pattern** — combine with request context:
+
+```d
+struct FeatureFlags { bool betaGreeting; }
+
+overrides.set!(User, "greeting")(
+    delegate string[](string[] defaults, EvalContext ctx) {
+        if (ctx.getRequestContext!FeatureFlags().betaGreeting)
+            return defaults.map!(d => d ~ " [BETA]").array;
+        return defaults;
+    }
+);
+
+// Per request: set both contexts
+auto ctx = new EvalContext();
+ctx.setRequestContext(FeatureFlags(true));
+ctx.setRequestContext(FieldOverrideConfig(overrides));
+auto result = executor.execute(query, ctx);
+```
+
+**Key properties:**
+
+- **Typed delegates** — overrides receive `T[]` (batch of default values) and return `T[]`, matching the field's actual return type
+- **Transparent to optimizer** — `OverrideExpr` is invisible to SQL optimization; columns, JOINs, and CTEs work as if no overrides exist
+- **Schema-preserving** — GraphQL SDL is unchanged; overrides only affect runtime behavior
+- **Composable** — works with all other plugins (filtering, sorting, pagination) applied before it
+- **Optional** — without `FieldOverrideConfig` in EvalContext, all fields pass through unchanged with zero overhead

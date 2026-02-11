@@ -162,6 +162,13 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
                             peek = inner;
                             continue;
                         }
+                        // Walk through transparent wrappers (e.g., OverrideExpr)
+                        if (auto castInfo = cast(EntityCastInfo) peek) {
+                            auto inner = castInfo.inputExpr;
+                            if (inner is null || inner is peek) break;
+                            peek = inner;
+                            continue;
+                        }
                         break;
                     }
                     underlyingColl = peek;

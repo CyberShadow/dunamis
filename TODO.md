@@ -52,6 +52,7 @@
 - Directives: `@skip(if: Boolean!)` and `@include(if: Boolean!)` for conditional field inclusion
 - Fragments: named fragments (`...FragmentName`), inline fragments (`... on Type { }` and `... { }`), with type condition matching, directive support, and circular reference detection
 - Request context via `context!T(expr)` — computed fields can access request-scoped data (auth, locale, tenant) passed via `EvalContext`
+- Field overrides with `FieldOverridePlugin` — runtime interception of any field resolution via typed delegates, for feature flags, A/B testing, gradual rollouts, or per-deployment customization
 
 ## Future Directions
 
@@ -60,5 +61,4 @@
 - **Polymorphism** — GraphQL union and interface types for heterogeneous collections
 - **Expression deduplication** — Grafast-style peer analysis
 - **Plan caching** — Reuse optimized plans for repeated queries
-- **Field override plugin layer** — Runtime mechanism to intercept and override any field resolution, enabling feature flags, A/B testing, gradual rollouts, or per-deployment customization without recompilation
 - **Subscriptions** — Real-time data push via GraphQL subscriptions, with event source abstraction (database triggers, message queues, application events) and transport support (WebSocket, SSE)

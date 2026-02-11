@@ -6,6 +6,7 @@ public import dunamis.schema.sorting;
 public import dunamis.schema.pagination;
 public import dunamis.schema.crud;
 public import dunamis.schema.type_mapping;
+public import dunamis.schema.overrides;
 
 // Schema template bundling Query and optional Mutation types.
 // Normalizes entity types so all fields use uniform static Expr methods.
