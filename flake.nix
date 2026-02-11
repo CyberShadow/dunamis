@@ -11,11 +11,21 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
 
+        # Only include D sources and dub config — exclude .md, docs, etc.
+        dubSrc = pkgs.lib.cleanSourceWith {
+          src = self;
+          filter = path: type:
+            let baseName = baseNameOf path; in
+            type == "directory" ||
+            pkgs.lib.hasSuffix ".d" baseName ||
+            baseName == "dub.sdl";
+        };
+
         # Build the postgres integration test executable
         postgresTestBin = pkgs.buildDubPackage {
           pname = "dunamis-postgres-test";
           version = "0.0.1";
-          src = self;
+          src = dubSrc;
           dubLock = ./dub-lock.json;
           dubBuildType = "ci";
           dubBuildFlags = [ "--config=postgres-integration" ];
@@ -32,7 +42,7 @@
         sqliteTestBin = pkgs.buildDubPackage {
           pname = "dunamis-sqlite-test";
           version = "0.0.1";
-          src = self;
+          src = dubSrc;
           dubLock = ./dub-lock.json;
           dubBuildType = "ci";
           dubBuildFlags = [ "--config=sqlite-integration" ];
@@ -50,7 +60,7 @@
         mysqlTestBin = pkgs.buildDubPackage {
           pname = "dunamis-mysql-test";
           version = "0.0.1";
-          src = self;
+          src = dubSrc;
           dubLock = ./dub-lock.json;
           dubBuildType = "ci";
           dubBuildFlags = [ "--config=mysql-integration" ];
@@ -68,7 +78,7 @@
           unit-tests = pkgs.buildDubPackage {
             pname = "dunamis-unit-tests";
             version = "0.0.1";
-            src = self;
+            src = dubSrc;
 
             dubLock = ./dub-lock.json;
 
