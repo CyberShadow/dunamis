@@ -1,0 +1,64 @@
+## Current Status
+
+**Working:**
+- Expression tree with batched evaluation (`Expr!T`)
+- `use()` combinator for per-element computation
+- Operator overloading (`~`, `==`, etc.)
+- Entity definition mixins (`Entity`, `Col`, `BelongsTo`, `HasMany`)
+- Plain fields (struct instance fields) as alternative to `Col` mixins for eager fetching
+- Plain methods (instance methods) for D-side computed values on fetched entities
+- POD types (plain D structs) discovered through plain method return types and plain field types
+- Custom `Expr!T` nodes returning POD structs work in map/collection contexts
+- Cross-collection access via `broadcast()` — computed fields can query unrelated global tables
+- `Table` mixin for Query root entry points
+- `ForeignKey!Entity` type for type-safe FK columns
+- `@GqlHidden` UDA to hide fields from GraphQL schema
+- `@GqlName` UDA to override GraphQL field names (for D keyword conflicts)
+- `@GqlDescription` UDA to add field descriptions (rendered as doc comments in SDL)
+- `@GqlDeprecated` UDA to mark fields as deprecated (rendered with `@deprecated` directive)
+- QueryNode-based SQL planning
+- JOINs for belongsTo relationships
+- Child queries (CTEs) for hasMany relationships
+- Computed fields with SQL push-down (dialect-aware: `||` for PostgreSQL/SQLite, `CONCAT()` for MySQL)
+- Computed fields in GraphQL schema (static functions taking `Expr!Entity`)
+- Field arguments for computed fields (with defaults, introspected from D function signatures)
+- Input types auto-generated from struct arguments (with `Nullable!(Nullable!T)` for three-state fields)
+- Data-source agnostic Executor
+- MockDB for testing (in-memory data)
+- DebugSqlDB for SQL inspection (wraps another fetcher, prints generated SQL)
+- PostgresDB using `ae.net.db.psql`
+- SQLiteDB using `ae.sys.sqlite3`
+- MySQLDB using `ae.net.db.mysql`
+- GraphQL schema generation (`generateSchemaSDL!Query`)
+- SQL DDL generation (`generateDDL!Query`)
+- GraphQL query compilation (`compileQuery`) with:
+  - Multiple root fields
+  - Field arguments (scalars and input objects)
+  - Variables (scalars and input objects)
+- Mutations with `CrudMutations` mixin (INSERT/UPDATE/DELETE)
+- `Schema!(Query, Mutation)` template for bundling query and mutation types
+- Filtering with `FilterPlugin`:
+  - Auto-generated filter types for each entity
+  - String operators: `equalTo`, `contains`, `startsWith`, `endsWith` (and case-insensitive variants)
+  - Numeric operators: `lessThan`, `greaterThan`, `equalTo`, `in`, etc.
+  - Logical combinators: `and`, `or`, `not`
+  - Relationship filters: `some`, `every`, `none`
+- Sorting with `SortingPlugin`:
+  - `orderBy` argument with `asc`/`desc` direction
+  - Nested sorting for HasMany relationships
+- Pagination with `PaginationPlugin`:
+  - `first`/`after` cursor-based pagination
+- Runtime introspection (`__schema`, `__type`, `__typename`)
+- Directives: `@skip(if: Boolean!)` and `@include(if: Boolean!)` for conditional field inclusion
+- Fragments: named fragments (`...FragmentName`), inline fragments (`... on Type { }` and `... { }`), with type condition matching, directive support, and circular reference detection
+- Request context via `context!T(expr)` — computed fields can access request-scoped data (auth, locale, tenant) passed via `EvalContext`
+
+## Future Directions
+
+- **Query validation** — Separate validation phase for structural rules: unused/undefined variable checks, duplicate operation names, argument validation
+- **Error path tracking** — Track field paths through nested selections for precise error reporting (e.g., `["users", 0, "posts", 2, "title"]`) and partial result support (`{"data": ..., "errors": [...]}`)
+- **Polymorphism** — GraphQL union and interface types for heterogeneous collections
+- **Expression deduplication** — Grafast-style peer analysis
+- **Plan caching** — Reuse optimized plans for repeated queries
+- **Field override plugin layer** — Runtime mechanism to intercept and override any field resolution, enabling feature flags, A/B testing, gradual rollouts, or per-deployment customization without recompilation
+- **Subscriptions** — Real-time data push via GraphQL subscriptions, with event source abstraction (database triggers, message queues, application events) and transport support (WebSocket, SSE)
