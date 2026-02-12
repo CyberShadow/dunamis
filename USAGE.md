@@ -820,7 +820,44 @@ static auto parsed(Expr!User u) {
 }
 ```
 
-To convert `GqlResult!T` errors into null values with error recording, use `materializeResult()`:
+#### Auto-Materialization in GraphQL
+
+The GraphQL compiler automatically detects fields returning `GqlResult!T` and inserts
+`materializeResult()` with proper error paths and array index sources. No manual wiring
+is needed — just return `GqlResult!T` from your computed field:
+
+```d
+@Entity!(db, "users")
+struct User {
+    mixin DemoId;
+    mixin Col!("firstName", string);
+
+    static auto validatedName(Expr!User u) {
+        return tryUse(
+            (string name) {
+                if (name.length == 0) throw new Exception("empty name");
+                return name;
+            },
+            u.firstName
+        );
+        // Returns Expr!(GqlResult!string)
+        // GraphQL schema shows: validatedName: String!  (inner type's nullability)
+        // Errors get paths like ["users", 0, "validatedName"]
+    }
+}
+```
+
+`GqlResult!T` uses the inner type's nullability in the GraphQL schema:
+- `GqlResult!string` → `String!` (non-null, same as plain `string`)
+- `GqlResult!(Nullable!string)` → `String` (nullable)
+
+When a non-null `GqlResult` field errors, null bubbling applies: the error is recorded,
+the field becomes null, and the entire parent object becomes null (per the GraphQL spec).
+Use `GqlResult!(Nullable!T)` if you want errors to stay at the field level without bubbling.
+
+#### Manual Materialization
+
+For non-GraphQL usage (direct D expression trees), you can call `materializeResult()` explicitly:
 
 ```d
 auto expr = materializeResult!string(someGqlResultExpr,
@@ -828,10 +865,8 @@ auto expr = materializeResult!string(someGqlResultExpr,
 // Produces Expr!(Nullable!string) — errors become null + recorded in EvalContext
 ```
 
-#### Array Index Tracking
-
-When `materializeResult()` is used inside a `map!()` expression, `map!` automatically
-links the index source so error paths include the element's array index:
+When used inside a `map!()` expression, `map!` automatically links the index source
+so error paths include the element's array index:
 
 ```d
 auto query = map!((Expr!User u) {

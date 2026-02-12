@@ -192,6 +192,20 @@ struct User {
         );
     }
 
+    /// Computed field using tryUse — validates firstName per-element,
+    /// producing GqlResult!string (errors become null with path tracking).
+    static auto validatedName(Expr!User u) {
+        return tryUse(
+            (string firstName) {
+                import std.string : indexOf;
+                if (firstName.indexOf("o") != -1)
+                    throw new Exception("Name contains 'o'");
+                return firstName;
+            },
+            u.firstName
+        );
+    }
+
     /// Computed field accessing an unrelated global table.
     /// Uses singleton() to reach root entry points and broadcast()
     /// to replicate the global data for each user in the batch.
@@ -951,6 +965,7 @@ type User {
   """Formatted name with options"""
   formattedName(options: FormatOptions!): String!
   localizedGreeting: String!
+  validatedName: String!
   availability: String!
 }
 
@@ -1952,5 +1967,48 @@ unittest {
     assert(result.length == 2);
     assert(result[0] == "Hello Alice");
     assert(result[1] == "Hello Bob");
+}
+
+// Test: GqlResult auto-materialization in GraphQL compiler
+// Fields returning GqlResult!T are automatically materialized to Nullable!T,
+// with errors recorded in the response.
+unittest {
+    import dunamis.graphql : compileQuery;
+
+    createMockDB();
+    auto executor = new Executor();
+
+    // validatedName uses tryUse: "Bob" and "Carol" contain 'o' so they error.
+    // Since validatedName is String! (non-null), the error causes null bubbling:
+    // the entire parent user object becomes null.
+    auto query = compileQuery!Query(`{
+        users {
+            firstName
+            validatedName
+        }
+    }`);
+
+    auto evalCtx = new EvalContext();
+    auto result = awaitSync(executor.execute(query, evalCtx));
+
+    auto users = result["users"].array;
+    assert(users.length == 3);
+
+    // Alice: no 'o' in name, succeeds — full object returned
+    assert(users[0]["firstName"].str == "Alice");
+    assert(users[0]["validatedName"].str == "Alice");
+
+    // Bob: 'o' in name, error → entire user object is null (null bubbling)
+    assert(users[1].isNull, "Bob should be null due to non-null field error");
+
+    // Carol: 'o' in name, error → entire user object is null (null bubbling)
+    assert(users[2].isNull, "Carol should be null due to non-null field error");
+
+    // Errors should have been recorded with paths
+    assert(evalCtx.hasErrors);
+    auto errors = evalCtx.errors;
+    assert(errors.length == 2);
+    assert(errors[0].message == "Name contains 'o'");
+    assert(errors[1].message == "Name contains 'o'");
 }
 

@@ -169,12 +169,14 @@ class DynamicJsonObjectExpr : Expr!JSONValue {
     private string[] _names;
     private ExprBase[] _exprs;
     private JSONValue[] _pathPrefix;
+    private bool[] _nonNullFields;
 
-    this(string[] names, ExprBase[] exprs, JSONValue[] pathPrefix = []) {
+    this(string[] names, ExprBase[] exprs, JSONValue[] pathPrefix = [], bool[] nonNullFields = []) {
         assert(names.length == exprs.length, "Names and exprs must have same length");
         _names = names;
         _exprs = exprs;
         _pathPrefix = pathPrefix;
+        _nonNullFields = nonNullFields;
     }
 
     override ExprBase[] dependencies() {
@@ -206,6 +208,7 @@ class DynamicJsonObjectExpr : Expr!JSONValue {
 
         auto names = _names;
         auto pathPrefix = _pathPrefix;
+        auto nonNullFields = _nonNullFields;
 
         return all(resultPromises).then((Result!(JSONValue[])[] results) {
             // Determine batch size from first successful result
@@ -221,9 +224,14 @@ class DynamicJsonObjectExpr : Expr!JSONValue {
             JSONValue[] jsonResults = new JSONValue[count];
             foreach (idx; 0 .. count) {
                 jsonResults[idx] = JSONValue.emptyObject;
+                bool hasNonNullViolation = false;
                 foreach (i, name; names) {
                     if (results[i].error is null && idx < results[i].value[0].length) {
-                        jsonResults[idx][name] = results[i].value[0][idx];
+                        auto val = results[i].value[0][idx];
+                        jsonResults[idx][name] = val;
+                        // Check non-null violation: field is non-null but value is null
+                        if (i < nonNullFields.length && nonNullFields[i] && val.isNull)
+                            hasNonNullViolation = true;
                     } else {
                         jsonResults[idx][name] = JSONValue(null);
                         // Record error once per field (at first entity)
@@ -232,8 +240,14 @@ class DynamicJsonObjectExpr : Expr!JSONValue {
                             errorPath ~= JSONValue(name);
                             ctx.addError(results[i].error.msg, errorPath);
                         }
+                        // Non-null field failed → violation
+                        if (i < nonNullFields.length && nonNullFields[i])
+                            hasNonNullViolation = true;
                     }
                 }
+                // Null bubbling: if any non-null field is null, the entire object becomes null
+                if (hasNonNullViolation)
+                    jsonResults[idx] = JSONValue(null);
             }
             return jsonResults;
         });

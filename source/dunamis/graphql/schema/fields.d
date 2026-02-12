@@ -8,7 +8,7 @@ import std.meta;
 import std.traits;
 import std.typecons : Nullable;
 
-import dunamis.core.types : isCustomScalar;
+import dunamis.core.types : isCustomScalar, isGqlResult, GqlResult;
 import dunamis.core.expr : Expr, ExprResultType, isExpr;
 import dunamis.graphql.schema.udas;
 
@@ -26,6 +26,9 @@ template graphqlTypeName(T) {
     static if (is(T == Nullable!U, U)) {
         // Nullable types - no "!" suffix
         enum graphqlTypeName = graphqlBaseTypeName!U;
+    } else static if (isGqlResult!T) {
+        // GqlResult — use inner type's nullability (GqlResult is an internal error wrapper)
+        enum graphqlTypeName = graphqlTypeName!(typeof(T.init.value));
     } else static if (is(T == U*, U)) {
         // Pointer types - nullable (no "!" suffix)
         enum graphqlTypeName = graphqlBaseTypeName!U;
@@ -67,6 +70,9 @@ template graphqlBaseTypeName(T) {
     } else static if (is(T == Nullable!U, U)) {
         // Unwrap Nullable
         enum graphqlBaseTypeName = graphqlBaseTypeName!U;
+    } else static if (isGqlResult!T) {
+        // Unwrap GqlResult
+        enum graphqlBaseTypeName = graphqlBaseTypeName!(typeof(T.init.value));
     } else static if (is(T == U*, U)) {
         // Pointer - treat as nullable reference (enables recursive types)
         enum graphqlBaseTypeName = graphqlBaseTypeName!U;

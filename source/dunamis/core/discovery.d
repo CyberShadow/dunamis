@@ -12,7 +12,7 @@ import std.traits;
 import std.typecons : Nullable;
 
 import dunamis.core.expr : Expr, ExprResultType, isExpr;
-import dunamis.core.types : isCustomScalar, isInternalMember, isPlainField, isPlainMethod;
+import dunamis.core.types : isCustomScalar, isInternalMember, isPlainField, isPlainMethod, isGqlResult;
 
 // ============================================================================
 // Field Introspection
@@ -73,6 +73,10 @@ template isObjectType(T) {
         }
         // Exclude custom scalars
         else static if (isCustomScalar!T) {
+            enum isObjectType = false;
+        }
+        // Exclude GqlResult (error wrapper, not a domain type)
+        else static if (isGqlResult!T) {
             enum isObjectType = false;
         }
         // Check if it has at least one valid field method, plain field, or plain method
@@ -185,6 +189,9 @@ template extractObjectFromType(T) {
     } else static if (is(T == Nullable!U, U)) {
         // Nullable - unwrap
         alias extractObjectFromType = extractObjectFromType!U;
+    } else static if (isGqlResult!T) {
+        // GqlResult - unwrap to inner type
+        alias extractObjectFromType = extractObjectFromType!(typeof(T.init.value));
     } else static if (isObjectType!T) {
         // Object type (struct with valid field methods)
         alias extractObjectFromType = T;

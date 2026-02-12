@@ -10,7 +10,7 @@ import graphql.ast;
 import dunamis.core.expr : ExprBase, ExprResultType, Expr, isExpr, singleton,
     DynamicJsonObjectExpr, SequentialJsonObjectExpr, MapExpr, FieldAccessExpr, MethodCallExpr,
     use, toJsonValue, map, constant;
-import dunamis.core.types : isCustomScalar, isPlainField, isPlainMethod;
+import dunamis.core.types : isCustomScalar, isPlainField, isPlainMethod, isGqlResult, GqlResult;
 import dunamis.graphql.introspection;
 import dunamis.graphql.schema;
 import dunamis.graphql.compiler.values;
@@ -274,13 +274,83 @@ DynamicJsonObjectExpr compileFieldsToJsonObject(T)(Expr!T ref_, Selection[] sele
         (field) => compileFieldAccess!T(ref_, field, variables, fragments, pathPrefix)
     );
 
+    // Determine non-null flags for null bubbling
+    bool[] nonNullFlags = resolveNonNullFlags!T(fieldNames);
+
     // Build a dynamic JSON object using runtime construction
-    return buildDynamicJsonObject(fieldNames, fieldExprs, pathPrefix);
+    return buildDynamicJsonObject(fieldNames, fieldExprs, pathPrefix, nonNullFlags);
+}
+
+/// Determine which fields are non-nullable based on compile-time D type info.
+/// Uses the D return type directly (avoiding graphqlTypeName which may fail for
+/// internal types like ForeignKey).
+bool[] resolveNonNullFlags(T)(string[] fieldNames) {
+    import std.traits : ReturnType;
+
+    bool[] flags = new bool[fieldNames.length];
+    foreach (i, name; fieldNames) {
+        if (name == "__typename") {
+            flags[i] = true; // __typename is always String!
+            continue;
+        }
+        // Match field name against compile-time members (skip non-public)
+        static foreach (member; __traits(allMembers, T)) {{
+            static if (!isInternalMember!member) {
+                static if (is(typeof(__traits(getMember, T, member)) == function) &&
+                           __traits(getVisibility, __traits(getMember, T, member)) == "public") {
+                    alias memberSym = __traits(getMember, T, member);
+                    // Computed fields (static methods taking Expr!T)
+                    static if (isFieldMethod!(T, memberSym)) {
+                        static if (!hasGqlHidden!memberSym) {
+                            enum gqlName = getGqlName!(memberSym, member);
+                            if (name == gqlName) {
+                                alias ResultT = ExprResultType!(ReturnType!(typeof(memberSym)));
+                                flags[i] = isNonNullResultType!ResultT;
+                            }
+                        }
+                    }
+                    // Plain methods
+                    else static if (isPlainMethod!(T, member)) {
+                        static if (!hasGqlHidden!memberSym) {
+                            enum gqlName = getGqlName!(memberSym, member);
+                            if (name == gqlName) {
+                                alias RetType = ReturnType!(typeof(memberSym));
+                                flags[i] = isNonNullResultType!RetType;
+                            }
+                        }
+                    }
+                }
+                // Plain fields
+                else static if (isPlainField!(T, member)) {
+                    if (name == member) {
+                        alias FieldType = typeof(__traits(getMember, T.init, member));
+                        flags[i] = isNonNullResultType!FieldType;
+                    }
+                }
+            }
+        }}
+    }
+    return flags;
+}
+
+/// Check if a D type maps to a non-nullable GraphQL type.
+/// Nullable!T and pointer types are nullable; GqlResult!T uses inner type's nullability.
+private template isNonNullResultType(T) {
+    import std.typecons : Nullable;
+    static if (is(T == Nullable!U, U)) {
+        enum isNonNullResultType = false;
+    } else static if (is(T == U*, U)) {
+        enum isNonNullResultType = false;
+    } else static if (isGqlResult!T) {
+        enum isNonNullResultType = isNonNullResultType!(typeof(T.init.value));
+    } else {
+        enum isNonNullResultType = true;
+    }
 }
 
 /// Build a JSON object from runtime field names and expressions
-DynamicJsonObjectExpr buildDynamicJsonObject(string[] names, ExprBase[] exprs, JSONValue[] pathPrefix = []) {
-    return new DynamicJsonObjectExpr(names, exprs, pathPrefix);
+DynamicJsonObjectExpr buildDynamicJsonObject(string[] names, ExprBase[] exprs, JSONValue[] pathPrefix = [], bool[] nonNullFields = []) {
+    return new DynamicJsonObjectExpr(names, exprs, pathPrefix, nonNullFields);
 }
 
 /// Check if a member is a field method for type T.
@@ -311,8 +381,8 @@ ExprBase compileFieldResult(ResultExpr)(ResultExpr resultExpr, SelectionSet ss, 
 
     // Arrays need element type inspection
     static if (is(ResultType == E[], E)) {
-        static if (isCustomScalar!E || !is(E == struct)) {
-            // Array of scalars (custom or primitive) - wrap to JSON
+        static if (isCustomScalar!E || !is(E == struct) || isGqlResult!E) {
+            // Array of scalars (custom or primitive) or GqlResult elements - wrap to JSON
             return wrapAsJsonExpr(resultExpr);
         } else {
             // Array of structs - requires selection set
@@ -322,6 +392,13 @@ ExprBase compileFieldResult(ResultExpr)(ResultExpr resultExpr, SelectionSet ss, 
             }
             return compileMapExpr!E(resultExpr, ss, variables, fragments, pathPrefix);
         }
+    }
+    // GqlResult types — materialize errors to Nullable and recurse
+    else static if (isGqlResult!ResultType) {
+        import dunamis.core.expr.json : materializeResult;
+        alias Inner = typeof(ResultType.init.value);
+        auto materialized = materializeResult!Inner(resultExpr, pathPrefix);
+        return compileFieldResult!(typeof(materialized))(materialized, ss, variables, fragments, pathPrefix);
     }
     // Nullable structs (entities) - handle null case specially
     else static if (is(ResultType == Nullable!T, T) && is(T == struct) && !isCustomScalar!T) {
