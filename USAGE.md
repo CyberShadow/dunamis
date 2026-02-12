@@ -827,3 +827,17 @@ auto expr = materializeResult!string(someGqlResultExpr,
     [JSONValue("users"), JSONValue("name")]);
 // Produces Expr!(Nullable!string) — errors become null + recorded in EvalContext
 ```
+
+#### Array Index Tracking
+
+When `materializeResult()` is used inside a `map!()` expression, `map!` automatically
+links the index source so error paths include the element's array index:
+
+```d
+auto query = map!((Expr!User u) {
+    auto result = tryUse((string name) => name.toUpper, u.firstName);
+    return materializeResult!string(result,
+        [JSONValue("users"), JSONValue("name")]);
+})(users);
+// If element 2 fails, error path is ["users", 2, "name"] (not ["users", "name"])
+```

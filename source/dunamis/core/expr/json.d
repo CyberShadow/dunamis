@@ -453,14 +453,26 @@ Promise!(JSONValue[]) evalToJson(ExprBase expr, EvalContext ctx) {
 /// Each error element becomes Nullable.null with the error recorded at the
 /// given path. Success elements become Nullable(value).
 ///
+/// When an index source is set (via `setIndexSource`), the element's local
+/// index within its parent collection is included in the error path.
+/// For example, path `["users", "name"]` becomes `["users", 0, "name"]`.
+///
 /// Use `materializeResult()` to create instances.
-class MaterializeGqlResultExpr(T) : Expr!(Nullable!T) {
+class MaterializeGqlResultExpr(T) : Expr!(Nullable!T), IndexSourceConsumer {
     private ExprBase _input;  // Expr!(GqlResult!T)
     private JSONValue[] _errorPath;
+    private IndexLevel[] _indexSources;  // Outermost first
 
     this(Expr!(GqlResult!T) input, JSONValue[] errorPath = []) {
         _input = input;
         _errorPath = errorPath;
+    }
+
+    /// Add an index source level. Called automatically by `map!`.
+    /// Outer levels call this after inner levels, so prepend to maintain
+    /// outermost-first order.
+    void addIndexSource(IndexLevel level) {
+        _indexSources = [level] ~ _indexSources;
     }
 
     override ExprBase[] dependencies() {
@@ -478,13 +490,23 @@ class MaterializeGqlResultExpr(T) : Expr!(Nullable!T) {
 
     override Promise!(Nullable!T[]) eval(EvalContext ctx) {
         auto errorPath = _errorPath;
+        auto indexSources = _indexSources;
 
         return evalAs!(GqlResult!T)(_input, ctx).then((GqlResult!T[] vals) {
+            // Collect index arrays from each nesting level
+            size_t[][] allLocalIndices;
+            size_t[][] allGroupIndices;
+            foreach (level; indexSources) {
+                allLocalIndices ~= ctx.getValues!size_t(level.localKey);
+                allGroupIndices ~= ctx.getValues!size_t(level.groupKey);
+            }
+
             Nullable!T[] result = new Nullable!T[vals.length];
             foreach (i, v; vals) {
                 if (v.isError) {
                     result[i] = Nullable!T.init;
-                    ctx.addError(v.error, errorPath);
+                    ctx.addError(v.error,
+                        buildIndexedPath(errorPath, i, allLocalIndices, allGroupIndices));
                 } else {
                     result[i] = Nullable!T(v.value);
                 }
@@ -498,6 +520,46 @@ class MaterializeGqlResultExpr(T) : Expr!(Nullable!T) {
 /// recording errors in the EvalContext at the given path.
 auto materializeResult(T)(Expr!(GqlResult!T) input, JSONValue[] errorPath = []) {
     return new MaterializeGqlResultExpr!T(input, errorPath);
+}
+
+/// Build an error path with array indices interleaved at each nesting level.
+///
+/// Given basePath ["users", "posts", "title"] and index sources for 2 levels,
+/// produces ["users", userIdx, "posts", postIdx, "title"].
+///
+/// Chains from innermost to outermost: inner group indices map to positions
+/// in the next outer batch, where outer local indices give the outer index.
+private JSONValue[] buildIndexedPath(JSONValue[] basePath, size_t elementIdx,
+    size_t[][] allLocalIndices, size_t[][] allGroupIndices)
+{
+    if (allLocalIndices.length == 0 || basePath.length == 0) {
+        return basePath;
+    }
+
+    size_t numLevels = allLocalIndices.length;
+    size_t[] levelIndices = new size_t[numLevels];
+
+    // Chain from innermost to outermost to resolve each level's local index.
+    // Index sources are ordered outermost first, so level $-1 is innermost.
+    size_t batchIdx = elementIdx;
+    for (size_t lvl = numLevels; lvl > 0; lvl--) {
+        size_t level = lvl - 1;
+        if (batchIdx < allLocalIndices[level].length)
+            levelIndices[level] = allLocalIndices[level][batchIdx];
+        // Use group indices to find position in the next outer level's batch
+        if (level > 0 && batchIdx < allGroupIndices[level].length)
+            batchIdx = allGroupIndices[level][batchIdx];
+    }
+
+    // Interleave: ["a", idx0, "b", idx1, ..., "field"]
+    size_t numInserts = numLevels < basePath.length ? numLevels : basePath.length - 1;
+    JSONValue[] result;
+    foreach (j; 0 .. basePath.length) {
+        result ~= basePath[j];
+        if (j < numInserts)
+            result ~= JSONValue(cast(long) levelIndices[j]);
+    }
+    return result;
 }
 
 // ============================================================================
@@ -644,8 +706,19 @@ NullableObjectExpr!T finalizeNullableObjectExpr(T)(
 }
 
 // ============================================================================
-// Tests: Field-level error catching
+// Tests: helpers and field-level error catching
 // ============================================================================
+
+/// Expression that returns fixed values of any type (for testing)
+private class FixedExpr(T) : Expr!T {
+    T[] _values;
+    this(T[] values) { _values = values; }
+    override ExprBase[] dependencies() { return []; }
+    override void replaceDependency(size_t index, ExprBase newDep) {}
+    override Promise!(T[]) eval(EvalContext ctx) {
+        return resolve(_values);
+    }
+}
 
 /// Expression that always fails (for testing error handling)
 private class FailingExpr : Expr!JSONValue {
@@ -848,4 +921,116 @@ unittest {
     assert(ctx.errors.length == 1);
     assert(ctx.errors[0].message == "invalid name");
     assert(ctx.errors[0].path == [JSONValue("users"), JSONValue("name")]);
+}
+
+unittest {
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core.expr.combinators : map;
+
+    // Test MaterializeGqlResultExpr with index source from MapExpr.
+    // Verifies error paths include element array indices.
+    static struct TestEntity { int id; }
+    auto ctx = new EvalContext();
+
+    // Create a collection: parent 0 has 3 entities, parent 1 has 2
+    auto collection = new FixedExpr!(TestEntity[])([
+        [TestEntity(1), TestEntity(2), TestEntity(3)],
+        [TestEntity(4), TestEntity(5)],
+    ]);
+
+    // Build a map expression where the body materializes a GqlResult.
+    // map! auto-links the MaterializeGqlResultExpr to the MapExpr's index key.
+    auto mapExpr = map!((Expr!TestEntity entity) {
+        auto gqlField = new FixedGqlResultExpr!string([
+            GqlResult!string.ok("ok-1"),
+            GqlResult!string.err("bad at index 1"),
+            GqlResult!string.ok("ok-3"),
+            GqlResult!string.ok("ok-4"),
+            GqlResult!string.err("bad at index 1 again"),
+        ]);
+        return materializeResult!string(gqlField,
+            [JSONValue("users"), JSONValue("name")]);
+    })(collection);
+
+    // No manual linking needed — map! auto-links index sources
+    auto result = awaitSync(mapExpr.eval(ctx));
+
+    // Should have 2 groups (one per parent)
+    assert(result.length == 2);
+    assert(result[0].length == 3);  // Parent 0: 3 entities
+    assert(result[1].length == 2);  // Parent 1: 2 entities
+
+    // Check values: ok elements are non-null, error elements are null
+    assert(!result[0][0].isNull);   // ok-1
+    assert(result[0][1].isNull);    // error at index 1
+    assert(!result[0][2].isNull);   // ok-3
+    assert(!result[1][0].isNull);   // ok-4
+    assert(result[1][1].isNull);    // error at index 1
+
+    // Check errors include array indices in paths
+    assert(ctx.errors.length == 2);
+    // First error: entity at local index 1 within parent 0
+    assert(ctx.errors[0].message == "bad at index 1");
+    assert(ctx.errors[0].path == [JSONValue("users"), JSONValue(1), JSONValue("name")]);
+    // Second error: entity at local index 1 within parent 1
+    assert(ctx.errors[1].message == "bad at index 1 again");
+    assert(ctx.errors[1].path == [JSONValue("users"), JSONValue(1), JSONValue("name")]);
+}
+
+unittest {
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core.expr.combinators : map;
+
+    // Test nested MapExpr: indices at every nesting level.
+    // Structure: 2 users, user0 has 2 posts, user1 has 1 post = 3 posts total.
+    // Error on post at (user=0, post=1) — path should be ["users", 0, "posts", 1, "title"].
+    static struct User { int id; }
+    static struct Post { int id; }
+    auto ctx = new EvalContext();
+
+    // One group of 2 users
+    auto users = new FixedExpr!(User[])([[User(1), User(2)]]);
+
+    auto outerMap = map!((Expr!User user) {
+        // User0 has 2 posts, User1 has 1 post
+        auto posts = new FixedExpr!(Post[])([
+            [Post(10), Post(11)],
+            [Post(20)],
+        ]);
+
+        return map!((Expr!Post post) {
+            auto gqlField = new FixedGqlResultExpr!string([
+                GqlResult!string.ok("title-10"),
+                GqlResult!string.err("bad title"),  // post 11, user0 index 1
+                GqlResult!string.ok("title-20"),
+            ]);
+            return materializeResult!string(gqlField,
+                [JSONValue("users"), JSONValue("posts"), JSONValue("title")]);
+        })(posts);
+    })(users);
+
+    auto result = awaitSync(outerMap.eval(ctx));
+
+    // Outer: 1 group of 2 users → result has 1 element (array of user results)
+    assert(result.length == 1);
+    auto userResults = result[0];
+    assert(userResults.length == 2);
+
+    // User 0: 2 posts
+    assert(userResults[0].length == 2);
+    assert(!userResults[0][0].isNull);  // title-10
+    assert(userResults[0][1].isNull);   // error
+
+    // User 1: 1 post
+    assert(userResults[1].length == 1);
+    assert(!userResults[1][0].isNull);  // title-20
+
+    // Error path should include BOTH user and post indices
+    assert(ctx.errors.length == 1);
+    assert(ctx.errors[0].message == "bad title");
+    assert(ctx.errors[0].path == [
+        JSONValue("users"), JSONValue(0),     // user index 0
+        JSONValue("posts"), JSONValue(1),     // post index 1
+        JSONValue("title"),
+    ]);
 }

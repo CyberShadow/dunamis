@@ -420,6 +420,10 @@ interface MapExprInfo {
     /// Optimizer can cast this to data-source-specific interfaces
     /// (e.g., HasManyInfo, RootExprInfo) to extract metadata.
     Object collection();
+
+    /// Get the body expression (type-erased).
+    /// Used by linkIndexSources to traverse into nested MapExprs.
+    ExprBase bodyExpr();
 }
 
 /// Iteration over a collection. This IS the layer boundary.
@@ -435,12 +439,24 @@ class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
     private ExprBase _collection;        // what we're iterating over (type-erased)
     EveryItemOfExpr!Entity _item;        // mutable placeholder for "current item"
     private ExprBase _body;              // expression built using _item (type-erased)
+    private Object _indexKey;            // key for local element index storage
+    private Object _groupIndexKey;       // key for group (parent) index storage
 
     this(Expr!(Entity[]) collection, EveryItemOfExpr!Entity item, Body body_) {
         _collection = collection;
         _item = item;
         _body = body_;  // Implicit upcast to ExprBase
+        _indexKey = new Object();
+        _groupIndexKey = new Object();
     }
+
+    /// Key used to look up element indices from EvalContext.
+    /// Each element gets its local index within its parent's collection.
+    @property Object indexKey() { return _indexKey; }
+
+    /// Key used to look up group indices from EvalContext.
+    /// Each element maps to its parent group's position in the outer batch.
+    @property Object groupIndexKey() { return _groupIndexKey; }
 
     override ExprBase[] dependencies() {
         return [_collection, _body];
@@ -467,16 +483,22 @@ class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
         // Capture for use in closures
         auto bodyExpr = _body;
         auto self = this;  // Key for refs map
+        auto indexKey = _indexKey;
+        auto groupIndexKey = _groupIndexKey;
 
         // 1. Evaluate collection for each parent ref
         return evalAs!(Entity[])(_collection, ctx).then((Entity[][] collectionResults) {
             // 2. Flatten for batch evaluation
             Entity[] flatEntities;
             size_t[] lengths;
-            foreach (group; collectionResults) {
+            size_t[] localIndices;
+            size_t[] groupIndices;
+            foreach (groupIdx, group; collectionResults) {
                 lengths ~= group.length;
-                foreach (e; group) {
+                foreach (j, e; group) {
                     flatEntities ~= e;
+                    localIndices ~= j;
+                    groupIndices ~= groupIdx;
                 }
             }
 
@@ -488,9 +510,13 @@ class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
             // 3. Store values for EveryItemOfExpr to retrieve
             ctx.setValues!Entity(self, flatEntities);
 
-            // 4. Evaluate body with ALL refs at once
+            // 4. Store indices for error path tracking (separate keys)
+            ctx.setValues!size_t(indexKey, localIndices);
+            ctx.setValues!size_t(groupIndexKey, groupIndices);
+
+            // 5. Evaluate body with ALL refs at once
             return evalAs!R(bodyExpr, ctx).then((R[] flatResults) {
-                // 5. Regroup to match input structure
+                // 6. Regroup to match input structure
                 R[][] result;
                 size_t offset = 0;
                 foreach (len; lengths) {
@@ -504,6 +530,7 @@ class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
 
     // MapExprInfo implementation
     Object collection() { return _collection; }
+    ExprBase bodyExpr() { return _body; }
 }
 
 /// Extract the Entity type from an Expr!(Entity[]) type
@@ -533,7 +560,30 @@ auto map(alias fn, Coll)(Coll collection)
     // 4. Link placeholder back to MapExpr
     item._parentMap = mapExpr;
 
+    // 5. Auto-link index sources for error path tracking
+    linkIndexSources(body_, IndexLevel(mapExpr.indexKey, mapExpr.groupIndexKey));
+
     return mapExpr;
+}
+
+/// Walk the expression tree and link any IndexSourceConsumer to the given
+/// index level. Traverses into nested MapExpr bodies (but not their
+/// collections) so that outer map indices reach inner consumers.
+private void linkIndexSources(ExprBase root, IndexLevel level) {
+    if (auto consumer = cast(IndexSourceConsumer) root) {
+        consumer.addIndexSource(level);
+    }
+    foreach (dep; root.dependencies()) {
+        if (auto mapInfo = cast(MapExprInfo) dep) {
+            // For nested MapExprs, only traverse the body (not the collection)
+            // to avoid interfering with the collection's own index sources
+            auto body_ = mapInfo.bodyExpr();
+            if (body_ !is null)
+                linkIndexSources(body_, level);
+        } else {
+            linkIndexSources(dep, level);
+        }
+    }
 }
 
 // ============================================================================

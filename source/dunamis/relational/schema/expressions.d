@@ -525,6 +525,7 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
 
     // MapExprInfo implementation (for QueryNode creation)
     Object collection() { return this; }
+    ExprBase bodyExpr() { return null; }
 }
 
 /// Factory function to create GetAllExpr

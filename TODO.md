@@ -54,12 +54,12 @@
 - Request context via `context!T(expr)` — computed fields can access request-scoped data (auth, locale, tenant) passed via `EvalContext`
 - Field overrides with `FieldOverridePlugin` — runtime interception of any field resolution via typed delegates, for feature flags, A/B testing, gradual rollouts, or per-deployment customization
 - Error path tracking — field-level error catching with path tracking through nested selections (e.g., `["users", "fullName"]`) and partial result support (`{"data": ..., "errors": [...]}`)
-- `GqlResult!T` — per-element result type for expressions that can independently succeed or fail per batch element, with error propagation through D operators, `materializeResult()` transform to convert errors to nullable values, and `tryUse()` combinator for automatic exception-to-GqlResult wrapping
+- `GqlResult!T` — per-element result type for expressions that can independently succeed or fail per batch element, with error propagation through D operators, `materializeResult()` transform to convert errors to nullable values, `tryUse()` combinator for automatic exception-to-GqlResult wrapping, and array index tracking in error paths (e.g., `["users", 0, "name"]`) via MapExpr's per-element index storage
 
 ## Future Directions
 
 - **Query validation** — Separate validation phase for structural rules: unused/undefined variable checks, duplicate operation names, argument validation
-- **Per-element error tracking** — Track array indices in error paths (e.g., `["users", 0, "fullName"]`) for per-entity error granularity; auto-detect `GqlResult` fields in the GraphQL compiler and insert materialization with proper paths
+- **Auto-materialization in GraphQL compiler** — Auto-detect `GqlResult` fields in the GraphQL compiler and insert `materializeResult()` with proper paths and index sources
 - **Null bubbling** — When a non-nullable field errors, propagate null to the nearest nullable parent per the GraphQL spec
 - **Polymorphism** — GraphQL union and interface types for heterogeneous collections
 - **Expression deduplication** — Grafast-style peer analysis

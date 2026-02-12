@@ -50,6 +50,22 @@ abstract class ExprBase {
     }
 }
 
+/// A nesting level's index keys for error path tracking.
+/// Each MapExpr level provides local indices (position within parent's
+/// collection) and group indices (which parent group each element belongs to).
+struct IndexLevel {
+    Object localKey;   /// ctx.getValues!size_t(localKey) → local index within parent
+    Object groupKey;   /// ctx.getValues!size_t(groupKey) → which parent group
+}
+
+/// Interface for expressions that track element indices in error paths.
+/// Implemented by expressions that record per-element errors (e.g.,
+/// MaterializeGqlResultExpr). The `map!` function auto-links any
+/// IndexSourceConsumer in its body to the MapExpr's index level.
+interface IndexSourceConsumer {
+    void addIndexSource(IndexLevel level);
+}
+
 /// Helper to evaluate an ExprBase with a known type.
 /// Returns a Promise that resolves to T[].
 /// Asserts if the runtime type doesn't match.
