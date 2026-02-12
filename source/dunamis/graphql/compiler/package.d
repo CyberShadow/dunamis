@@ -3,6 +3,7 @@ module dunamis.graphql.compiler;
 public import dunamis.graphql.compiler.values;
 public import dunamis.graphql.compiler.fields;
 public import dunamis.graphql.compiler.selection;
+public import dunamis.graphql.compiler.validation;
 
 import std.json;
 
@@ -79,6 +80,12 @@ GraphQLResult compileQuery(alias SchemaOrQuery)(string queryString, JSONValue va
 
     // Collect fragment definitions
     auto fragments = collectFragments(doc);
+
+    // Validation phase — collect all errors before compilation
+    auto validationErrors = validateQuery!SchemaOrQuery(doc, op, fragments);
+    if (validationErrors.length > 0) {
+        throw new ValidationException(validationErrors);
+    }
 
     // Determine operation type (default to Query for shorthand syntax)
     bool isMutation = op.ot !is null && op.ot.ruleSelection == OperationTypeEnum.Mutation;

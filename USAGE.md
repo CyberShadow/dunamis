@@ -757,6 +757,38 @@ auto result = executor.execute(query, ctx);
 - **Composable** — works with all other plugins (filtering, sorting, pagination) applied before it
 - **Optional** — without `FieldOverrideConfig` in EvalContext, all fields pass through unchanged with zero overhead
 
+## Query Validation
+
+`compileQuery` runs a validation phase before compilation that checks all structural rules and reports **all** errors at once (not just the first one). If validation fails, a `ValidationException` is thrown carrying the full error list with source locations.
+
+```d
+try {
+    auto query = compileQuery!MySchema(`{ users { nonExistent } }`);
+} catch (ValidationException e) {
+    // e.errors contains all validation errors
+    foreach (err; e.errors) {
+        writeln(err.message);       // "Unknown field 'nonExistent' on type User"
+        writeln(err.line, ":", err.column);  // source location
+        writeln(err.toJson());      // {"message": "...", "locations": [{"line": ..., "column": ...}]}
+    }
+}
+```
+
+`ValidationException` extends `CompilerException`, so existing `catch (CompilerException)` blocks continue to work.
+
+**Checks performed:**
+
+- **Duplicate operation names** — multiple operations with the same name
+- **Duplicate fragment names** — multiple fragments with the same name
+- **Undefined variables** — `$var` used in query but not declared in operation signature
+- **Unused variables** — `$var` declared but never referenced (including in fragments and directives)
+- **Unknown fields** — field not found on the target type (Query, Mutation, or entity)
+- **Unknown arguments** — argument not accepted by the computed field
+- **Missing required arguments** — non-optional, non-nullable argument not provided
+- **Duplicate arguments** — same argument name provided twice
+- **Selection set on scalar** — `{ subfields }` on a field that returns a scalar type
+- **Missing selection set on object** — no `{ subfields }` on a field that returns an object or array of objects
+
 ## Error Handling
 
 Field-level errors produce partial results instead of failing the entire request. When a field expression throws during evaluation, the field is set to `null` and the error is recorded with its path in the response:

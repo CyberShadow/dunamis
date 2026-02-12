@@ -56,10 +56,9 @@
 - Error path tracking — field-level error catching with path tracking through nested selections (e.g., `["users", "fullName"]`) and partial result support (`{"data": ..., "errors": [...]}`)
 - `GqlResult!T` — per-element result type for expressions that can independently succeed or fail per batch element, with error propagation through D operators, `materializeResult()` transform to convert errors to nullable values, `tryUse()` combinator for automatic exception-to-GqlResult wrapping, and array index tracking in error paths (e.g., `["users", 0, "name"]`) via MapExpr's per-element index storage
 - Auto-materialization and null bubbling — fields returning `GqlResult!T` are automatically materialized to `Nullable!T` with proper error paths and array index sources; `GqlResult!T` uses inner type's nullability in the schema (`GqlResult!string` → `String!`); non-null fields that error trigger null bubbling (parent object becomes null per the GraphQL spec)
+- Query validation — separate validation phase that runs before compilation and collects ALL errors at once: duplicate operation/fragment names, undefined/unused variables, unknown fields, unknown/missing/duplicate arguments, selection set presence checks (scalar vs object). Throws `ValidationException` (extends `CompilerException`) with full error list and source locations
 
 ## Future Directions
-
-- **Query validation** — Separate validation phase for structural rules: unused/undefined variable checks, duplicate operation names, argument validation
 - **Polymorphism** — GraphQL union and interface types for heterogeneous collections
 - **Expression deduplication** — Grafast-style peer analysis
 - **Plan caching** — Reuse optimized plans for repeated queries
