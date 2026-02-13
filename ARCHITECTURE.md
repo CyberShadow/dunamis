@@ -283,3 +283,66 @@ Presentation-specific concerns live exclusively in their respective layers:
 2. **Clean plugin boundaries** — Plugins decide which fields to process based on D visibility (`public`, `package`, etc.), not presentation-layer annotations. A `package`-scoped field is invisible to plugins; a `@GqlHidden` field is visible to plugins but hidden from GraphQL output. These are different concerns with different semantics.
 
 3. **Extensibility** — New presentation layers (REST, gRPC, CLI tools) can be added by writing a new consumer of the schema types, without modifying the schema or any plugins.
+
+### 8. Namespace Isolation
+
+User-defined types (`struct User`, `struct Post`) should contain only declarations meaningful to the user. Library internals must not pollute the user's namespace with auto-generated symbols that could clash with user-declared fields.
+
+**Mechanisms** (in order of preference):
+
+1. **UDAs for metadata** — Carry metadata on existing declarations without adding new names. UDAs from `dunamis.core` or `dunamis.relational` are fully qualified and cannot clash with user-defined UDAs.
+
+   ```d
+   @Entity!(db, "users")           // UDA on the struct — no members added
+   struct User {
+       @PrimaryKey long id;        // UDA on the field — no extra members
+       mixin Col!("email", string); // Generates one method `email` + @SqlColumn UDA
+   }
+   ```
+
+2. **Package visibility for internal state** — When library infrastructure must store runtime state in a struct field (data that can't be expressed as a UDA), use `package` visibility to hide it from all external consumers:
+
+   ```d
+   package(dunamis.schema) SourceType _normalizedSource;
+   ```
+
+   This field is invisible to `isPlainField`, `getSchemaFields`, and all schema discovery, but accessible to the plugin infrastructure within the `dunamis.schema` package.
+
+3. **Code templates over mixin templates** — Generate method bodies as strings (code templates) rather than using mixin templates. String-based code generation produces only the intended symbols; mixin templates leak their local aliases, enums, and helper functions into the host struct's `__traits(allMembers)`.
+
+   ```d
+   // Preferred: code template (zero leak)
+   template SortedArrayFieldCode(...) {
+       enum SortedArrayFieldCode = "static auto fieldName(...) { ... }";
+   }
+   mixin template SortedArrayField(...) {
+       mixin(SortedArrayFieldCode!(...));  // Only fieldName appears in allMembers
+   }
+
+   // Avoid: direct mixin template (leaks helpers)
+   mixin template BadField(...) {
+       alias _Internal = ...;                // Leaks into __traits(allMembers)
+       private static auto _helper() { ... } // Also leaks
+       static auto fieldName(...) { ... }
+   }
+   ```
+
+4. **Visibility checks over naming conventions** — Use `__traits(getVisibility)` to filter internal members, not name-based heuristics like `member[0] != '_'`. Visibility is a language-level guarantee; naming conventions can be violated by user code that legitimately uses `_`-prefixed field names.
+
+**What user-facing mixins inject:**
+
+Each mixin produces exactly one user-visible symbol (the field name the user chose) with all metadata expressed as UDAs:
+
+| Mixin | Injected symbol | UDAs |
+|---|---|---|
+| `Col!("name", T)` | `name` (static method) | `@SqlColumn`, `@ForeignKeyRef` |
+| `HasMany!("posts", Post, "fk")` | `posts` (static method) | `@HasManyFK`, `@HasManyChild` |
+| `BelongsTo!("author", "fkField")` | `author` (static method) | `@BelongsToFK`, `@BelongsToParent` |
+| `Table!(Entity, "users")` | `users` (static method) | `@TableEntity` |
+| `DemoId` | `id` (field) | `@PrimaryKey`, `@AutoIncrement`, `@SqlColumn` |
+
+**What the plugin chain adds internally:**
+
+Plugin wrappers add `_normalizedSource` (package-scoped, invisible to schema discovery) and may generate private helper methods or types prefixed with `_`. These are filtered out by the Schema Protocol (`getSchemaFields`) and by `isPlainField`/`isPlainMethod`, so they never appear in the GraphQL schema or affect user-visible type structure.
+
+**Known limitation:** `FilteredArrayField` in the filtering plugin uses a mixin template (not a code template) due to an LDC compiler limitation with eager alias resolution. It leaks internal aliases (`_SrcParams`, `_ElementType`, etc.) and a private `_applyFilter` method into `__traits(allMembers)`. These are benign — they are not schema fields — but they are visible to compile-time introspection. If LDC resolves the eager evaluation issue in the future, this can be converted to a code template.

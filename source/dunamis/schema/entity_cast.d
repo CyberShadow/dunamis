@@ -17,17 +17,21 @@ To entityCastValue(To, From)(From from) {
                    is(typeof(From._normalizedSource) == To)) {
             return from._normalizedSource;
         } else {
-            // Copy matching non-internal instance fields
+            import dunamis.core.types : isInternalMember;
+
+            // Copy matching public instance fields.
+            // Uses visibility checks instead of name conventions (see Principle 8 in ARCHITECTURE.md).
+            // Cannot use isPlainField here because entityCastValue runs during plugin type
+            // construction when forward references may not yet be resolved.
             static foreach (member; __traits(allMembers, From)) {{
-                static if (member.length > 0 && member[0] != '_' &&
-                           member != "toString" && member != "toHash" &&
-                           member != "opEquals" && member != "opCmp" &&
-                           member != "opAssign" && member != "factory" &&
-                           member != "Monitor" &&
-                           __traits(hasMember, To, member)) {
-                    static if (__traits(compiles, __traits(getMember, from, member)) &&
-                               __traits(compiles, __traits(getMember, to, member) = __traits(getMember, from, member))) {
-                        __traits(getMember, to, member) = __traits(getMember, from, member);
+                static if (!isInternalMember!member && __traits(hasMember, To, member)) {
+                    // Skip non-public fields (e.g., package-scoped _normalizedSource)
+                    static if (__traits(compiles, __traits(getVisibility, __traits(getMember, From, member))) &&
+                               __traits(getVisibility, __traits(getMember, From, member)) == "public") {
+                        static if (__traits(compiles, __traits(getMember, from, member)) &&
+                                   __traits(compiles, __traits(getMember, to, member) = __traits(getMember, from, member))) {
+                            __traits(getMember, to, member) = __traits(getMember, from, member);
+                        }
                     }
                 }
             }}
