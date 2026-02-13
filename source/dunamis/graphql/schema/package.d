@@ -81,11 +81,11 @@ unittest {
     }
 }
 
-// Test @GqlHidden with actual Col mixin
+// Test @GqlHidden with Schema-normalized types
 unittest {
     import std.algorithm : canFind;
     import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
-    import dunamis.relational.schema : Col;
+    import dunamis.relational.schema : Col, Table;
 
     static MockDB!() db;
 
@@ -98,35 +98,25 @@ unittest {
         mixin Col!("passwordHash", string);
     }
 
-    // Check that getFields detects hidden field
-    enum fields = getFields!User;
-    static assert(fields.length == 3);
-
-    // Find the passwordHash field and verify it's hidden
-    bool foundPasswordHash = false;
-    foreach (f; fields) {
-        if (f.name == "passwordHash") {
-            foundPasswordHash = true;
-            assert(f.hidden, "passwordHash should be hidden");
-        }
-        if (f.name == "name") {
-            assert(!f.hidden, "name should not be hidden");
-        }
+    static struct MyQuery {
+        mixin Table!(User, "users");
     }
-    assert(foundPasswordHash, "passwordHash field should exist");
 
-    // Verify SDL doesn't include hidden field
-    enum sdl = generateObjectTypeSDL!User(getGraphQLTypeName!User);
+    // Use Schema to normalize types (converts all fields to computed)
+    alias S = Schema!(MyQuery);
+    enum sdl = generateSchemaSDL!S;
+
+    // SDL should include name but NOT passwordHash
     assert(sdl.canFind("name:"), "SDL should include name field");
     assert(!sdl.canFind("passwordHash"), "SDL should NOT include passwordHash field");
 }
 
-// Test that plain fields (struct instance fields) are detected by getFields
+// Test that plain fields are normalized to computed fields and appear in SDL
 unittest {
     import std.algorithm : canFind;
     import std.typecons : Nullable;
     import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
-    import dunamis.relational.schema : Col;
+    import dunamis.relational.schema : Col, Table;
 
     static MockDB!() db;
 
@@ -135,43 +125,30 @@ unittest {
         mixin DemoId;
         mixin Col!("name", string);  // Column field
 
-        // Plain fields (struct instance fields)
+        // Plain fields (struct instance fields) — normalized to computed fields
         string nickname;
         Nullable!string bio;
     }
 
-    enum fields = getFields!Person;
-
-    // Should have: id (from DemoEntity), name (Col), nickname, bio
-    static assert(fields.length == 4, "Expected 4 fields (id, name, nickname, bio)");
-
-    // Check each field
-    bool foundNickname = false;
-    bool foundBio = false;
-    foreach (f; fields) {
-        if (f.name == "nickname") {
-            foundNickname = true;
-            assert(f.graphqlType == "String!", "nickname should be String! type");
-        }
-        if (f.name == "bio") {
-            foundBio = true;
-            assert(f.graphqlType == "String", "bio should be nullable String type");
-        }
+    static struct MyQuery {
+        mixin Table!(Person, "persons");
     }
-    assert(foundNickname, "nickname plain field should be detected");
-    assert(foundBio, "bio plain field should be detected");
 
-    // Verify SDL includes plain fields
-    enum sdl = generateObjectTypeSDL!Person(getGraphQLTypeName!Person);
-    assert(sdl.canFind("nickname:"), "SDL should include nickname field");
-    assert(sdl.canFind("bio:"), "SDL should include bio field");
+    // Use Schema to normalize types
+    alias S = Schema!(MyQuery);
+    enum sdl = generateSchemaSDL!S;
+
+    // Verify SDL includes all fields (including originally-plain fields)
+    assert(sdl.canFind("nickname: String!"), "SDL should include nickname field: " ~ sdl);
+    assert(sdl.canFind("bio: String"), "SDL should include bio field: " ~ sdl);
+    assert(sdl.canFind("name: String!"), "SDL should include name field: " ~ sdl);
 }
 
 // Test @GqlDescription and @GqlDeprecated UDAs
 unittest {
     import std.algorithm : canFind;
     import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
-    import dunamis.relational.schema : Col;
+    import dunamis.relational.schema : Col, Table;
 
     static MockDB!() db;
 
@@ -189,34 +166,13 @@ unittest {
         mixin Col!("plain", string);  // No annotations
     }
 
-    // Check that getFields extracts description and deprecation
-    enum fields = getFields!Article;
-
-    bool foundTitle = false;
-    bool foundBody = false;
-    bool foundPlain = false;
-
-    foreach (f; fields) {
-        if (f.name == "title") {
-            foundTitle = true;
-            assert(f.description == "The article title", "title should have description");
-            assert(f.deprecation == "", "title should not be deprecated");
-        }
-        if (f.name == "body") {
-            foundBody = true;
-            assert(f.description == "Main content", "body should have description");
-            assert(f.deprecation == "Use content instead", "body should be deprecated");
-        }
-        if (f.name == "plain") {
-            foundPlain = true;
-            assert(f.description == "", "plain should have no description");
-            assert(f.deprecation == "", "plain should not be deprecated");
-        }
+    static struct MyQuery {
+        mixin Table!(Article, "articles");
     }
-    assert(foundTitle && foundBody && foundPlain, "All fields should exist");
 
-    // Verify SDL output
-    enum sdl = generateObjectTypeSDL!Article(getGraphQLTypeName!Article);
+    // Use Schema to normalize types
+    alias S = Schema!(MyQuery);
+    enum sdl = generateSchemaSDL!S;
 
     // Should have description as doc string
     assert(sdl.canFind(`"""The article title"""`), "SDL should include title description");
@@ -434,8 +390,8 @@ unittest {
     static assert(!isGraphQLEnum!string);
     static assert(!isGraphQLEnum!int);
 
-    // Test SDL generation
-    enum sdl = generateSchemaSDL!MyQuery;
+    // Test SDL generation with Schema normalization
+    enum sdl = generateSchemaSDL!(Schema!(MyQuery));
 
     // Should contain enum definition
     static assert(sdl.canFind("enum Status"), "SDL should contain enum Status: " ~ sdl);
@@ -480,7 +436,7 @@ unittest {
         mixin Table!(User, "users");
     }
 
-    enum sdl = generateSchemaSDL!Query;
+    enum sdl = generateSchemaSDL!(Schema!(Query));
 
     // Both input types should be discovered
     static assert(sdl.canFind("input Outer"), "SDL should contain input Outer: " ~ sdl);
@@ -517,7 +473,7 @@ unittest {
         mixin Table!(User, "users");
     }
 
-    enum sdl = generateSchemaSDL!Query;
+    enum sdl = generateSchemaSDL!(Schema!(Query));
 
     // FilterInput should appear in SDL
     static assert(sdl.canFind("input FilterInput"), "SDL should contain input FilterInput: " ~ sdl);
@@ -552,7 +508,7 @@ unittest {
         mixin Table!(User, "users");
     }
 
-    enum sdl = generateSchemaSDL!Query;
+    enum sdl = generateSchemaSDL!(Schema!(Query));
 
     // NodeInput should appear in SDL
     static assert(sdl.canFind("input NodeInput"), "SDL should contain input NodeInput: " ~ sdl);
@@ -598,7 +554,7 @@ unittest {
         mixin Table!(User, "users");
     }
 
-    enum sdl = generateSchemaSDL!Query;
+    enum sdl = generateSchemaSDL!(Schema!(Query));
 
     // All three types should be discovered
     static assert(sdl.canFind("input TypeA"), "SDL should contain input TypeA: " ~ sdl);
@@ -611,9 +567,10 @@ unittest {
         "TypeB.c should be nullable: " ~ sdl);
 }
 
-// Test POD type with only plain fields is recognized as object type
+// Test POD type with only plain fields is recognized and normalized
 unittest {
     import std.algorithm : canFind;
+    import dunamis.core.expr : Expr;
 
     // POD struct with only plain fields (no computed fields)
     static struct Range {
@@ -624,26 +581,23 @@ unittest {
     // Range should be recognized as an object type (has plain fields)
     static assert(isObjectType!Range, "Range should be an object type (has plain fields)");
 
-    // Range fields should be discoverable
-    enum rangeFields = getFields!Range;
-    static assert(rangeFields.length == 2, "Range should have 2 fields (start, end)");
+    // After normalization through Schema, Range's fields become computed
+    static struct MyQuery {
+        static Expr!(Range[]) ranges(Expr!MyQuery self) { assert(false); }
+    }
+    alias S = Schema!(MyQuery);
+    enum sdl = generateSchemaSDL!S;
 
-    // Verify field names using CTFE
-    enum foundStartEnd = () {
-        bool foundStart = false;
-        bool foundEnd = false;
-        foreach (f; rangeFields) {
-            if (f.name == "start") foundStart = true;
-            if (f.name == "end") foundEnd = true;
-        }
-        return foundStart && foundEnd;
-    }();
-    static assert(foundStartEnd, "Range should have start and end fields");
+    // SDL should include Range type with both fields
+    assert(sdl.canFind("type Range"), "SDL should contain type Range: " ~ sdl);
+    assert(sdl.canFind("start: Int!"), "Range should have start field: " ~ sdl);
+    assert(sdl.canFind("end: Int!"), "Range should have end field: " ~ sdl);
 }
 
-// Test POD type with plain methods is recognized as object type
+// Test POD type with plain methods is recognized and normalized
 unittest {
     import std.algorithm : canFind;
+    import dunamis.core.expr : Expr;
 
     // POD struct with plain fields and plain methods
     static struct Stats {
@@ -656,9 +610,18 @@ unittest {
     // Stats should be recognized as an object type (has plain fields and methods)
     static assert(isObjectType!Stats, "Stats should be an object type (has plain fields and methods)");
 
-    // Stats fields should include plain method
-    enum statsFields = getFields!Stats;
-    static assert(statsFields.length == 3, "Stats should have 3 fields (count, total, average)");
+    // After normalization through Schema, all fields become computed
+    static struct MyQuery {
+        static Expr!(Stats[]) stats(Expr!MyQuery self) { assert(false); }
+    }
+    alias S = Schema!(MyQuery);
+    enum sdl = generateSchemaSDL!S;
+
+    // SDL should include Stats type with all fields
+    assert(sdl.canFind("type Stats"), "SDL should contain type Stats: " ~ sdl);
+    assert(sdl.canFind("count: Int!"), "Stats should have count field: " ~ sdl);
+    assert(sdl.canFind("total: Int!"), "Stats should have total field: " ~ sdl);
+    assert(sdl.canFind("average: Int!"), "Stats should have average method: " ~ sdl);
 }
 
 // Test POD type discovery through plain method return type
@@ -686,7 +649,7 @@ unittest {
         UserStats stats() => UserStats(1, 2);
     }
 
-    static struct Query {
+    static struct MyQuery {
         mixin Table!(User, "users");
     }
 
@@ -698,8 +661,9 @@ unittest {
     static assert(staticContains!(UserStats, relatedTypes),
         "UserStats should be discovered from User via plain method return type");
 
-    // SDL should include UserStats type
-    enum sdl = generateSchemaSDL!Query;
+    // After normalization, SDL should include UserStats type
+    alias S = Schema!(MyQuery);
+    enum sdl = generateSchemaSDL!S;
     static assert(sdl.canFind("type UserStats"), "SDL should contain type UserStats: " ~ sdl);
     static assert(sdl.canFind("postCount: Int!"), "UserStats should have postCount field: " ~ sdl);
     static assert(sdl.canFind("totalActivity: Int!"), "UserStats should have totalActivity method: " ~ sdl);
@@ -710,6 +674,7 @@ unittest {
 // Runtime evaluation of nested POD types from SQL is not supported by the relational layer.
 unittest {
     import std.algorithm : canFind;
+    import dunamis.core.expr : Expr;
 
     // POD struct used as plain field type
     static struct Coordinates {
@@ -734,9 +699,16 @@ unittest {
     static assert(staticContains!(Coordinates, relatedTypes),
         "Coordinates should be discovered from Location via plain field type");
 
-    // Verify Location fields are discovered
-    enum locationFields = getFields!Location;
-    static assert(locationFields.length == 2, "Location should have 2 fields (name, coords)");
+    // After normalization, Location's fields are computed and appear in SDL
+    static struct MyQuery {
+        static Expr!(Location[]) locations(Expr!MyQuery self) { assert(false); }
+    }
+    alias S = Schema!(MyQuery);
+    enum sdl = generateSchemaSDL!S;
+
+    assert(sdl.canFind("type Location"), "SDL should contain type Location: " ~ sdl);
+    assert(sdl.canFind("name: String!"), "Location should have name field: " ~ sdl);
+    assert(sdl.canFind("coords: Coordinates!"), "Location should have coords field: " ~ sdl);
 }
 
 // Test nested POD type discovery (schema-only test)
@@ -767,6 +739,7 @@ unittest {
 unittest {
     import std.algorithm : canFind;
     import std.typecons : Nullable;
+    import dunamis.core.expr : Expr;
 
     // POD struct
     static struct Badge {
@@ -788,9 +761,16 @@ unittest {
     static assert(staticContains!(Badge, relatedTypes),
         "Badge should be discovered from Profile via Nullable plain field type");
 
-    // Verify fields
-    enum profileFields = getFields!Profile;
-    static assert(profileFields.length == 2, "Profile should have 2 fields (username, badge)");
+    // After normalization, Profile's fields appear in SDL
+    static struct MyQuery {
+        static Expr!(Profile[]) profiles(Expr!MyQuery self) { assert(false); }
+    }
+    alias S = Schema!(MyQuery);
+    enum sdl = generateSchemaSDL!S;
+
+    assert(sdl.canFind("type Profile"), "SDL should contain type Profile: " ~ sdl);
+    assert(sdl.canFind("username: String!"), "Profile should have username field: " ~ sdl);
+    assert(sdl.canFind("badge: Badge"), "Profile should have nullable badge field: " ~ sdl);
 }
 
 // Test array of POD type discovery (schema-only test)

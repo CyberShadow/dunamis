@@ -54,6 +54,54 @@ template isComputedField(T, string member) {
 }
 
 // ============================================================================
+// Schema Protocol
+// ============================================================================
+//
+// The Schema Protocol is the canonical interface between the GraphQL
+// compiler and schema types. Instead of using ad-hoc __traits(allMembers)
+// loops, all consumers (compiler, validator, SDL generator, introspection)
+// use these templates to discover and interact with type fields.
+//
+// Precondition: Types must be normalized (via NormalizePlugin or Schema!()).
+// After normalization, all fields are computed fields — static methods that
+// take Expr!T as first parameter and return an Expr type.
+//
+// Templates:
+//   getSchemaFields!T      — enumerate all field member names
+//   fieldResultType!(T, m) — get the D result type of a field
+//
+
+/// Get all schema field member names for a normalized type T.
+/// Returns only computed fields: static methods (Expr!T, args...) → Expr!U.
+///
+/// This is the single source of truth for "what fields does this type expose?"
+/// All compiler, validator, SDL, and introspection code should use this
+/// instead of raw __traits(allMembers) loops.
+template getSchemaFields(T) {
+    enum string[] getSchemaFields = _buildSchemaFields!T();
+}
+
+private string[] _buildSchemaFields(T)() {
+    string[] result;
+    static foreach (member; __traits(allMembers, T)) {
+        static if (!isInternalMember!member &&
+                   isValidFieldMethodForType!(T, member) &&
+                   __traits(getVisibility, __traits(getMember, T, member)) == "public") {
+            result ~= member;
+        }
+    }
+    return result;
+}
+
+/// Get the D result type of a schema field (unwraps Expr!U → U).
+///
+/// For a computed field `fn: (Expr!T, args...) → Expr!U`, returns `U`.
+template fieldResultType(T, string member) {
+    alias fn = __traits(getMember, T, member);
+    alias fieldResultType = ExprResultType!(ReturnType!(typeof(fn)));
+}
+
+// ============================================================================
 // Object Type Detection
 // ============================================================================
 
@@ -391,4 +439,77 @@ private template expandObjectFixpoint(PrevTypes...) {
         alias expandObjectFixpoint = PrevTypes;
     else
         alias expandObjectFixpoint = expandObjectFixpoint!(AliasSeq!(PrevTypes, NewOnly));
+}
+
+// ============================================================================
+// Schema Protocol — Unit Tests
+// ============================================================================
+
+unittest {
+    import dunamis.core.expr : Expr;
+
+    // Test entity with computed fields only (post-normalization shape)
+    static struct User {
+        static Expr!string firstName(Expr!User u) { assert(false); }
+        static Expr!string lastName(Expr!User u) { assert(false); }
+        static Expr!long age(Expr!User u) { assert(false); }
+    }
+
+    // getSchemaFields returns all computed field names
+    enum fields = getSchemaFields!User;
+    static assert(fields.length == 3);
+    static assert(fields[0] == "firstName");
+    static assert(fields[1] == "lastName");
+    static assert(fields[2] == "age");
+
+    // fieldResultType unwraps Expr!T → T
+    static assert(is(fieldResultType!(User, "firstName") == string));
+    static assert(is(fieldResultType!(User, "age") == long));
+
+    // isObjectType still works
+    static assert(isObjectType!User);
+}
+
+unittest {
+    import dunamis.core.expr : Expr;
+
+    // Internal members and non-field methods are excluded
+    static struct Widget {
+        static Expr!string name(Expr!Widget w) { assert(false); }
+
+        // Not a field method (wrong first param)
+        static int helper() { return 0; }
+
+        // toString is an internal member
+        string toString() const { return ""; }
+    }
+
+    enum fields = getSchemaFields!Widget;
+    static assert(fields.length == 1);
+    static assert(fields[0] == "name");
+}
+
+unittest {
+    import dunamis.core.expr : Expr;
+
+    // Empty struct has no schema fields
+    static struct Empty {}
+
+    enum fields = getSchemaFields!Empty;
+    static assert(fields.length == 0);
+    static assert(!isObjectType!Empty);
+}
+
+unittest {
+    import dunamis.core.expr : Expr;
+    import std.typecons : Nullable;
+
+    // Test fieldResultType with array and nullable return types
+    static struct Post {
+        static Expr!(string[]) tags(Expr!Post p) { assert(false); }
+        static Expr!(Nullable!string) bio(Expr!Post p) { assert(false); }
+    }
+
+    static assert(is(fieldResultType!(Post, "tags") == string[]));
+    static assert(is(fieldResultType!(Post, "bio") == Nullable!string));
 }

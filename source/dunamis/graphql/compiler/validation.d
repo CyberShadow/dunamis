@@ -10,9 +10,9 @@ import std.typecons : Nullable;
 import graphql.ast;
 import graphql.tokenmodule : Token;
 
-import dunamis.core.types : isCustomScalar, isPlainField, isPlainMethod, isGqlResult;
+import dunamis.core.types : isCustomScalar, isGqlResult;
 import dunamis.core.expr : ExprResultType, Expr, isExpr;
-import dunamis.core.discovery : isObjectType, extractObjectFromType;
+import dunamis.core.discovery : isObjectType, extractObjectFromType, getSchemaFields;
 import dunamis.graphql.schema;
 import dunamis.graphql.compiler.values;
 
@@ -63,11 +63,17 @@ class ValidationException : CompilerException {
 
 /// Validate a parsed GraphQL document against a schema.
 /// Returns an empty array if valid, or a list of ValidationErrors.
-ValidationError[] validateQuery(alias SchemaOrQuery)(
+///
+/// Requires a Schema type (guarantees normalization). See Schema Protocol
+/// in core/discovery.d.
+ValidationError[] validateQuery(alias SchemaType)(
     Document doc,
     OperationDefinition op,
     FragmentMap fragments
-) {
+) if (isSchema!SchemaType) {
+    alias QueryType = SchemaType.Query;
+    alias MutationType = SchemaType.Mutation;
+
     ValidationError[] errors;
 
     // 1. AST-only checks (pure runtime)
@@ -76,14 +82,6 @@ ValidationError[] validateQuery(alias SchemaOrQuery)(
     errors ~= validateVariables(op, fragments);
 
     // 2. Type-aware checks (templated on schema types)
-    static if (isSchema!SchemaOrQuery) {
-        alias QueryType = SchemaOrQuery.Query;
-        alias MutationType = SchemaOrQuery.Mutation;
-    } else {
-        alias QueryType = SchemaOrQuery;
-        struct MutationType {}
-    }
-
     bool isMutation = op.ot !is null && op.ot.ruleSelection == OperationTypeEnum.Mutation;
 
     if (op.ss !is null) {
@@ -397,18 +395,14 @@ private ValidationError[] validateRootField(Parent)(Field field, FragmentMap fra
     }
 
     // Check against computed field methods on the Query/Mutation type
-    static foreach (member; __traits(allMembers, Parent)) {{
-        static if (!isInternalMember!member) {
-            alias memberSym = __traits(getMember, Parent, member);
-            static if (is(typeof(memberSym) == function)) {
-                enum gqlName = getGqlName!(memberSym, member);
-                if (fieldName == gqlName) {
-                    ValidationError[] errors;
-                    errors ~= validateFieldArguments!(memberSym)(field);
-                    errors ~= validateFieldResult!(ReturnType!(typeof(memberSym)))(field, fragments, visited);
-                    return errors;
-                }
-            }
+    static foreach (member; getSchemaFields!Parent) {{
+        alias memberSym = __traits(getMember, Parent, member);
+        enum gqlName = getGqlName!(memberSym, member);
+        if (fieldName == gqlName) {
+            ValidationError[] errors;
+            errors ~= validateFieldArguments!(memberSym)(field);
+            errors ~= validateFieldResult!(ReturnType!(typeof(memberSym)))(field, fragments, visited);
+            return errors;
         }
     }}
 
@@ -452,58 +446,24 @@ private ValidationError[] validateSelectionSet(T)(SelectionSet ss, FragmentMap f
 }
 
 /// Validate a single field access against type T.
-/// Mirrors the triple-pass logic in selection.d compileFieldAccess.
+/// Uses the Schema Protocol to discover computed fields.
 private ValidationError[] validateFieldAccess(T)(Field field, FragmentMap fragments, bool[string] visited) {
-    import dunamis.graphql.compiler.selection : isFieldMethod;
-
     auto fieldName = getFieldName(field);
     if (fieldName is null) return [];
 
     // __typename is always valid, no selection set allowed
     if (fieldName == "__typename") return [];
 
-    // Pass 1: Computed field methods (static methods taking Expr!T)
-    static foreach (member; __traits(allMembers, T)) {{
-        static if (!isInternalMember!member) {
-            alias memberSym = __traits(getMember, T, member);
-            static if (isFieldMethod!(T, memberSym)) {
-                static if (!hasGqlHidden!memberSym) {
-                    enum gqlName = getGqlName!(memberSym, member);
-                    if (fieldName == gqlName) {
-                        ValidationError[] errors;
-                        errors ~= validateFieldArguments!(memberSym)(field);
-                        errors ~= validateFieldResult!(ReturnType!(typeof(memberSym)))(field, fragments, visited);
-                        return errors;
-                    }
-                }
-            }
-        }
-    }}
-
-    // Pass 2: Plain fields (struct instance fields)
-    static foreach (member; __traits(allMembers, T)) {{
-        static if (!isInternalMember!member) {
-            static if (isPlainField!(T, member)) {
-                if (fieldName == member) {
-                    alias FieldType = typeof(__traits(getMember, T.init, member));
-                    return validateFieldResultType!FieldType(field, fragments, visited);
-                }
-            }
-        }
-    }}
-
-    // Pass 3: Plain methods (instance methods returning non-Expr types)
-    static foreach (member; __traits(allMembers, T)) {{
-        static if (!isInternalMember!member) {
-            static if (isPlainMethod!(T, member)) {
-                alias methodSym = __traits(getMember, T, member);
-                static if (!hasGqlHidden!methodSym) {
-                    enum gqlName = getGqlName!(methodSym, member);
-                    if (fieldName == gqlName) {
-                        alias RetType = ReturnType!(typeof(methodSym));
-                        return validateFieldResultType!RetType(field, fragments, visited);
-                    }
-                }
+    // Match field against computed fields from the schema protocol
+    static foreach (member; getSchemaFields!T) {{
+        alias memberSym = __traits(getMember, T, member);
+        static if (!hasGqlHidden!memberSym) {
+            enum gqlName = getGqlName!(memberSym, member);
+            if (fieldName == gqlName) {
+                ValidationError[] errors;
+                errors ~= validateFieldArguments!(memberSym)(field);
+                errors ~= validateFieldResult!(ReturnType!(typeof(memberSym)))(field, fragments, visited);
+                return errors;
             }
         }
     }}
@@ -897,7 +857,7 @@ unittest {
     auto op = findOperation(doc);
     auto fragments = collectFragments(doc);
 
-    auto errors = validateQuery!Query(doc, op, fragments);
+    auto errors = validateQuery!(Schema!(Query))(doc, op, fragments);
     assert(errors.length == 1, "Expected 1 error for unknown field, got " ~ errors.length.to!string);
     assert(errors[0].message.canFind("Unknown field") && errors[0].message.canFind("nonExistent"),
         "Error message should mention unknown field: " ~ errors[0].message);
@@ -933,7 +893,7 @@ unittest {
     auto op = findOperation(doc);
     auto fragments = collectFragments(doc);
 
-    auto errors = validateQuery!Query(doc, op, fragments);
+    auto errors = validateQuery!(Schema!(Query))(doc, op, fragments);
     assert(errors.length == 1, "Expected 1 error for unknown argument, got " ~ errors.length.to!string);
     assert(errors[0].message.canFind("Unknown argument") && errors[0].message.canFind("badArg"),
         "Error message should mention unknown argument: " ~ errors[0].message);
@@ -969,7 +929,7 @@ unittest {
     auto op = findOperation(doc);
     auto fragments = collectFragments(doc);
 
-    auto errors = validateQuery!Query(doc, op, fragments);
+    auto errors = validateQuery!(Schema!(Query))(doc, op, fragments);
     assert(errors.length == 1, "Expected 1 error for missing required argument, got " ~ errors.length.to!string);
     assert(errors[0].message.canFind("Missing required argument") && errors[0].message.canFind("prefix"),
         "Error message should mention missing argument: " ~ errors[0].message);
@@ -1005,7 +965,7 @@ unittest {
     auto op = findOperation(doc);
     auto fragments = collectFragments(doc);
 
-    auto errors = validateQuery!Query(doc, op, fragments);
+    auto errors = validateQuery!(Schema!(Query))(doc, op, fragments);
     assert(errors.length >= 1, "Expected at least 1 error for duplicate argument");
     bool foundDuplicate = false;
     foreach (err; errors) {
@@ -1040,7 +1000,7 @@ unittest {
     auto op = findOperation(doc);
     auto fragments = collectFragments(doc);
 
-    auto errors = validateQuery!Query(doc, op, fragments);
+    auto errors = validateQuery!(Schema!(Query))(doc, op, fragments);
     assert(errors.length >= 1, "Expected at least 1 error for selection set on scalar");
     bool foundError = false;
     foreach (err; errors) {
@@ -1082,7 +1042,7 @@ unittest {
     auto op = findOperation(doc);
     auto fragments = collectFragments(doc);
 
-    auto errors = validateQuery!Query(doc, op, fragments);
+    auto errors = validateQuery!(Schema!(Query))(doc, op, fragments);
     assert(errors.length >= 1, "Expected at least 1 error for missing selection set");
     bool foundError = false;
     foreach (err; errors) {
@@ -1118,7 +1078,7 @@ unittest {
     auto op = findOperation(doc);
     auto fragments = collectFragments(doc);
 
-    auto errors = validateQuery!Query(doc, op, fragments);
+    auto errors = validateQuery!(Schema!(Query))(doc, op, fragments);
     assert(errors.length == 0, "Expected no errors for valid query, got " ~ errors.length.to!string);
 }
 
@@ -1149,7 +1109,7 @@ unittest {
     auto op = findOperation(doc);
     auto fragments = collectFragments(doc);
 
-    auto errors = validateQuery!Query(doc, op, fragments);
+    auto errors = validateQuery!(Schema!(Query))(doc, op, fragments);
     assert(errors.length >= 2, "Expected at least 2 errors, got " ~ errors.length.to!string);
 }
 
@@ -1196,7 +1156,7 @@ unittest {
     auto op = findOperation(doc);
     auto fragments = collectFragments(doc);
 
-    auto errors = validateQuery!Query(doc, op, fragments);
+    auto errors = validateQuery!(Schema!(Query))(doc, op, fragments);
     assert(errors.length == 0, "Expected no errors when optional args omitted, got " ~ errors.length.to!string);
 }
 
@@ -1230,7 +1190,7 @@ unittest {
     auto op = findOperation(doc);
     auto fragments = collectFragments(doc);
 
-    auto errors = validateQuery!Query(doc, op, fragments);
+    auto errors = validateQuery!(Schema!(Query))(doc, op, fragments);
     assert(errors.length == 1, "Expected 1 error for unknown arg on no-arg field, got " ~ errors.length.to!string);
     assert(errors[0].message.canFind("Unknown argument"));
 }

@@ -354,7 +354,7 @@ unittest {
     }
 
     // Without mapping: Date appears as an object/input type
-    enum sdlWithout = generateSchemaSDL!Query;
+    enum sdlWithout = generateSchemaSDL!(Schema!(Query));
     static assert(sdlWithout.canFind("type Date"), "Date is a POD object type without mapping");
     static assert(sdlWithout.canFind("startDate: Date!"));
 

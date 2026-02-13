@@ -29,7 +29,7 @@
 - PostgresDB using `ae.net.db.psql`
 - SQLiteDB using `ae.sys.sqlite3`
 - MySQLDB using `ae.net.db.mysql`
-- GraphQL schema generation (`generateSchemaSDL!Query`)
+- GraphQL schema generation (`generateSchemaSDL!(Schema!Query)`)
 - SQL DDL generation (`generateDDL!Query`)
 - GraphQL query compilation (`compileQuery`) with:
   - Multiple root fields

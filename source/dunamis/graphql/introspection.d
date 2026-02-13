@@ -8,7 +8,7 @@ import std.meta;
 import std.traits;
 import std.typecons : Nullable;
 
-import dunamis.core.types : isCustomScalar, isPlainField, isPlainMethod;
+import dunamis.core.types : isCustomScalar;
 import dunamis.core.expr : Expr, ExprResultType, isExpr;
 import dunamis.graphql.schema;
 
@@ -136,88 +136,35 @@ struct RuntimeFieldInfo {
 }
 
 /// Extract runtime field information from any type.
-/// Mirrors the three-pass pattern from getFields!T but produces JSONValue type refs.
+/// Uses the Schema Protocol to discover computed fields.
 template getRuntimeFields(T) {
     enum getRuntimeFields = buildRuntimeFields!T();
 }
 
 private RuntimeFieldInfo[] buildRuntimeFields(T)() {
+    import dunamis.core.discovery : getSchemaFields;
+
     RuntimeFieldInfo[] fields;
 
-    // First pass: computed fields (static methods taking Expr!T)
-    static foreach (member; __traits(allMembers, T)) {{
-        static if (!isInternalMember!member) {
-            static if (is(typeof(__traits(getMember, T, member)) == function)) {
-                alias fn = __traits(getMember, T, member);
+    // All fields are computed fields after normalization
+    static foreach (member; getSchemaFields!T) {{
+        alias fn = __traits(getMember, T, member);
 
-                enum isHidden = hasGqlHidden!fn;
-                enum gqlFieldName = getGqlName!(fn, member);
-                enum description = getGqlDescription!fn;
-                enum deprecation = getGqlDeprecated!fn;
+        enum isHidden = hasGqlHidden!fn;
+        enum gqlFieldName = getGqlName!(fn, member);
+        enum description = getGqlDescription!fn;
+        enum deprecation = getGqlDeprecated!fn;
+        enum typeJson = computedFieldTypeRefJson!fn();
+        enum args = computedFieldRuntimeArgs!fn();
 
-                static if (isValidFieldMethod!(T, fn)) {
-                    // Compute return type JSON
-                    enum typeJson = computedFieldTypeRefJson!fn();
-
-                    // Compute argument info
-                    enum args = computedFieldRuntimeArgs!fn();
-
-                    fields ~= RuntimeFieldInfo(
-                        gqlFieldName,
-                        typeJson,
-                        isHidden,
-                        description,
-                        deprecation,
-                        args
-                    );
-                }
-            }
-        }
-    }}
-
-    // Second pass: plain fields (struct instance fields)
-    static foreach (member; __traits(allMembers, T)) {{
-        static if (!isInternalMember!member) {
-            static if (isPlainField!(T, member)) {
-                alias FieldType = typeof(__traits(getMember, T.init, member));
-                enum typeJson = typeRefJson!FieldType;
-
-                fields ~= RuntimeFieldInfo(
-                    member,
-                    typeJson,
-                    false,  // not hidden
-                    "",     // no description
-                    "",     // no deprecation
-                    []      // no args
-                );
-            }
-        }
-    }}
-
-    // Third pass: plain methods (instance methods returning non-Expr types)
-    static foreach (member; __traits(allMembers, T)) {{
-        static if (!isInternalMember!member) {
-            static if (isPlainMethod!(T, member)) {
-                alias MethodType = typeof(__traits(getMember, T, member));
-                alias RetType = ReturnType!MethodType;
-
-                alias methodSym = __traits(getMember, T, member);
-                enum isHidden = hasGqlHidden!methodSym;
-                enum gqlFieldName = getGqlName!(methodSym, member);
-                enum description = getGqlDescription!methodSym;
-                enum deprecation = getGqlDeprecated!methodSym;
-                enum typeJson = typeRefJson!RetType;
-
-                fields ~= RuntimeFieldInfo(
-                    gqlFieldName,
-                    typeJson,
-                    isHidden,
-                    description,
-                    deprecation,
-                    []  // no args for plain methods
-                );
-            }
-        }
+        fields ~= RuntimeFieldInfo(
+            gqlFieldName,
+            typeJson,
+            isHidden,
+            description,
+            deprecation,
+            args
+        );
     }}
 
     return fields;

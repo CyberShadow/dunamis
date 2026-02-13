@@ -8,9 +8,10 @@ import std.typecons : Nullable;
 import graphql.ast;
 
 import dunamis.core.expr : ExprBase, ExprResultType, Expr, isExpr, singleton,
-    DynamicJsonObjectExpr, SequentialJsonObjectExpr, MapExpr, FieldAccessExpr, MethodCallExpr,
+    DynamicJsonObjectExpr, SequentialJsonObjectExpr, MapExpr,
     use, toJsonValue, map, constant;
-import dunamis.core.types : isCustomScalar, isPlainField, isPlainMethod, isGqlResult, GqlResult;
+import dunamis.core.types : isCustomScalar, isGqlResult, GqlResult;
+import dunamis.core.discovery : getSchemaFields, fieldResultType;
 import dunamis.graphql.introspection;
 import dunamis.graphql.schema;
 import dunamis.graphql.compiler.values;
@@ -69,15 +70,11 @@ ExprBase compileRootField(Parent, alias IntrospectionSource = Parent)(Field fiel
     auto outputName = getOutputName(field);
     JSONValue[] nestedPath = [JSONValue(outputName)];
 
-    static foreach (member; __traits(allMembers, Parent)) {{
-        static if (!isInternalMember!member) {
-            alias memberSym = __traits(getMember, Parent, member);
-            static if (is(typeof(memberSym) == function)) {
-                enum gqlName = getGqlName!(memberSym, member);
-                if (fieldName == gqlName) {
-                    return callRootField!(memberSym, Parent)(parentExpr, field.args, field.ss, variables, fragments, nestedPath);
-                }
-            }
+    static foreach (member; getSchemaFields!Parent) {{
+        alias memberSym = __traits(getMember, Parent, member);
+        enum gqlName = getGqlName!(memberSym, member);
+        if (fieldName == gqlName) {
+            return callRootField!(memberSym, Parent)(parentExpr, field.args, field.ss, variables, fragments, nestedPath);
         }
     }}
 
@@ -285,47 +282,18 @@ DynamicJsonObjectExpr compileFieldsToJsonObject(T)(Expr!T ref_, Selection[] sele
 /// Uses the D return type directly (avoiding graphqlTypeName which may fail for
 /// internal types like ForeignKey).
 bool[] resolveNonNullFlags(T)(string[] fieldNames) {
-    import std.traits : ReturnType;
-
     bool[] flags = new bool[fieldNames.length];
     foreach (i, name; fieldNames) {
         if (name == "__typename") {
             flags[i] = true; // __typename is always String!
             continue;
         }
-        // Match field name against compile-time members (skip non-public)
-        static foreach (member; __traits(allMembers, T)) {{
-            static if (!isInternalMember!member) {
-                static if (is(typeof(__traits(getMember, T, member)) == function) &&
-                           __traits(getVisibility, __traits(getMember, T, member)) == "public") {
-                    alias memberSym = __traits(getMember, T, member);
-                    // Computed fields (static methods taking Expr!T)
-                    static if (isFieldMethod!(T, memberSym)) {
-                        static if (!hasGqlHidden!memberSym) {
-                            enum gqlName = getGqlName!(memberSym, member);
-                            if (name == gqlName) {
-                                alias ResultT = ExprResultType!(ReturnType!(typeof(memberSym)));
-                                flags[i] = isNonNullResultType!ResultT;
-                            }
-                        }
-                    }
-                    // Plain methods
-                    else static if (isPlainMethod!(T, member)) {
-                        static if (!hasGqlHidden!memberSym) {
-                            enum gqlName = getGqlName!(memberSym, member);
-                            if (name == gqlName) {
-                                alias RetType = ReturnType!(typeof(memberSym));
-                                flags[i] = isNonNullResultType!RetType;
-                            }
-                        }
-                    }
-                }
-                // Plain fields
-                else static if (isPlainField!(T, member)) {
-                    if (name == member) {
-                        alias FieldType = typeof(__traits(getMember, T.init, member));
-                        flags[i] = isNonNullResultType!FieldType;
-                    }
+        static foreach (member; getSchemaFields!T) {{
+            alias memberSym = __traits(getMember, T, member);
+            static if (!hasGqlHidden!memberSym) {
+                enum gqlName = getGqlName!(memberSym, member);
+                if (name == gqlName) {
+                    flags[i] = isNonNullResultType!(fieldResultType!(T, member));
                 }
             }
         }}
@@ -351,23 +319,6 @@ private template isNonNullResultType(T) {
 /// Build a JSON object from runtime field names and expressions
 DynamicJsonObjectExpr buildDynamicJsonObject(string[] names, ExprBase[] exprs, JSONValue[] pathPrefix = [], bool[] nonNullFields = []) {
     return new DynamicJsonObjectExpr(names, exprs, pathPrefix, nonNullFields);
-}
-
-/// Check if a member is a field method for type T.
-/// A field method takes Expr!T as first parameter and returns an Expr.
-template isFieldMethod(T, alias member) {
-    import std.traits : Parameters, ReturnType;
-    static if (is(typeof(member) == function)) {
-        alias Params = Parameters!member;
-        alias Return = ReturnType!member;
-        static if (Params.length >= 1 && is(Params[0] == Expr!T) && isExpr!Return) {
-            enum isFieldMethod = true;
-        } else {
-            enum isFieldMethod = false;
-        }
-    } else {
-        enum isFieldMethod = false;
-    }
 }
 
 /// Compile the result of a field method based on its return type.
@@ -433,8 +384,7 @@ ExprBase compileFieldResult(ResultExpr)(ResultExpr resultExpr, SelectionSet ss, 
 }
 
 /// Compile access to a single field.
-/// Finds a method with signature (Expr!T, args...) -> Expr!U and calls it.
-/// Also handles plain fields (struct instance fields marked with plain fields).
+/// Finds a computed field method with signature (Expr!T, args...) -> Expr!U and calls it.
 ExprBase compileFieldAccess(T)(Expr!T ref_, Field field, JSONValue variables, FragmentMap fragments, JSONValue[] pathPrefix = []) {
     auto fieldName = getFieldName(field);
 
@@ -443,49 +393,14 @@ ExprBase compileFieldAccess(T)(Expr!T ref_, Field field, JSONValue variables, Fr
     JSONValue[] nestedPath = pathPrefix.dup;
     nestedPath ~= JSONValue(outputName);
 
-    // First, find a field method matching the GraphQL field name
-    static foreach (member; __traits(allMembers, T)) {{
-        static if (!isInternalMember!member) {
-            alias memberSym = __traits(getMember, T, member);
-            static if (isFieldMethod!(T, memberSym)) {
-                // Check for @GqlHidden
-                static if (!hasGqlHidden!memberSym) {
-                    enum gqlName = getGqlName!(memberSym, member);
-
-                    if (fieldName == gqlName) {
-                        auto resultExpr = callComputedField!(memberSym, T)(ref_, field.args, variables);
-                        return compileFieldResult!(typeof(resultExpr))(resultExpr, field.ss, variables, fragments, nestedPath);
-                    }
-                }
-            }
-        }
-    }}
-
-    // Second, check for plain fields (struct instance fields)
-    static foreach (member; __traits(allMembers, T)) {{
-        static if (!isInternalMember!member) {
-            static if (isPlainField!(T, member)) {
-                // Eager field - use D field name directly (GraphQL uses camelCase like D)
-                if (fieldName == member) {
-                    auto resultExpr = new FieldAccessExpr!(T, member)(ref_);
-                    return compileFieldResult!(typeof(resultExpr))(resultExpr, field.ss, variables, fragments, nestedPath);
-                }
-            }
-        }
-    }}
-
-    // Third, check for plain methods (instance methods returning non-Expr types)
-    static foreach (member; __traits(allMembers, T)) {{
-        static if (!isInternalMember!member) {
-            static if (isPlainMethod!(T, member)) {
-                alias methodSym = __traits(getMember, T, member);
-                static if (!hasGqlHidden!methodSym) {
-                    enum gqlName = getGqlName!(methodSym, member);
-                    if (fieldName == gqlName) {
-                        auto resultExpr = new MethodCallExpr!(T, member)(ref_);
-                        return compileFieldResult!(typeof(resultExpr))(resultExpr, field.ss, variables, fragments, nestedPath);
-                    }
-                }
+    // Match field against computed fields from the schema protocol
+    static foreach (member; getSchemaFields!T) {{
+        alias memberSym = __traits(getMember, T, member);
+        static if (!hasGqlHidden!memberSym) {
+            enum gqlName = getGqlName!(memberSym, member);
+            if (fieldName == gqlName) {
+                auto resultExpr = callComputedField!(memberSym, T)(ref_, field.args, variables);
+                return compileFieldResult!(typeof(resultExpr))(resultExpr, field.ss, variables, fragments, nestedPath);
             }
         }
     }}

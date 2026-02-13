@@ -24,49 +24,37 @@ alias GraphQLResult = Expr!JSONValue;
 
 /// Compiles a GraphQL query string into an executable Expr tree.
 ///
-/// The compiler uses compile-time reflection on the Query type to look up
-/// fields and generate the appropriate expressions. The result is an Expr
-/// tree that can be executed by the Executor.
+/// The compiler operates on normalized schema types where all fields are
+/// computed fields (static methods taking Expr!T). This guarantees a uniform
+/// field representation — see the Schema Protocol in core/discovery.d.
 ///
-/// Accepts either a Schema type (created with Schema!(Query, Mutation)) or a raw Query type.
-/// The Query type should have Table mixins that reference entities bound to a data source.
+/// Requires a Schema type created with Schema!(Query) or Schema!(Query, Mutation).
+/// The Schema template applies NormalizePlugin, which converts plain fields
+/// and methods into the canonical computed field form.
 ///
 /// Example:
 /// ---
-/// static MyDB myDB;
-///
-/// struct User {
-///     mixin Entity!(myDB, "users");
-///     mixin Col!("firstName", string);
-/// }
-///
-/// struct Query {
-///     mixin Table!(User, "users");  // db derived from User._db
-/// }
-///
-/// // Using raw Query type
-/// auto query = compileQuery!Query(`{ users { firstName } }`);
-///
-/// // Using Schema type
 /// alias MySchema = Schema!(Query);
 /// auto query = compileQuery!MySchema(`{ users { firstName } }`);
+///
+/// // With plugins:
+/// alias MySchema = ApplyPlugins!(Schema!(Query, Mutation),
+///     FilterPlugin, SortingPlugin, PaginationPlugin);
+/// auto query = compileQuery!MySchema(`{ users(first: 10) { firstName } }`);
 /// ---
-GraphQLResult compileQuery(alias SchemaOrQuery)(string queryString) {
-    return compileQuery!SchemaOrQuery(queryString, JSONValue.emptyObject);
+GraphQLResult compileQuery(alias SchemaType)(string queryString)
+    if (isSchema!SchemaType)
+{
+    return compileQuery!SchemaType(queryString, JSONValue.emptyObject);
 }
 
 /// Compiles a GraphQL query string with variables into an executable Expr tree.
-///
-/// Example:
-/// ---
-/// auto variables = JSONValue(["format": JSONValue(["prefix": "Mr. "])]);
-/// auto query = compileQuery!Query(`
-///     query GetUsers($format: NameFormat!) {
-///         users { formattedName(format: $format) }
-///     }
-/// `, variables);
-/// ---
-GraphQLResult compileQuery(alias SchemaOrQuery)(string queryString, JSONValue variables) {
+GraphQLResult compileQuery(alias SchemaType)(string queryString, JSONValue variables)
+    if (isSchema!SchemaType)
+{
+    alias QueryType = SchemaType.Query;
+    alias MutationType = SchemaType.Mutation;
+
     // Parse the GraphQL query
     auto lexer = Lexer(queryString);
     auto parser = Parser(lexer);
@@ -82,7 +70,7 @@ GraphQLResult compileQuery(alias SchemaOrQuery)(string queryString, JSONValue va
     auto fragments = collectFragments(doc);
 
     // Validation phase — collect all errors before compilation
-    auto validationErrors = validateQuery!SchemaOrQuery(doc, op, fragments);
+    auto validationErrors = validateQuery!SchemaType(doc, op, fragments);
     if (validationErrors.length > 0) {
         throw new ValidationException(validationErrors);
     }
@@ -95,15 +83,6 @@ GraphQLResult compileQuery(alias SchemaOrQuery)(string queryString, JSONValue va
         throw new CompilerException("Subscriptions are not supported");
     }
 
-    // Extract types from Schema if needed
-    static if (isSchema!SchemaOrQuery) {
-        alias QueryType = SchemaOrQuery.Query;
-        alias MutationType = SchemaOrQuery.Mutation;
-    } else {
-        alias QueryType = SchemaOrQuery;
-        struct MutationType {}
-    }
-
     // Compile based on operation type
     if (isMutation) {
         static if (getFields!MutationType.length > 0) {
@@ -112,10 +91,19 @@ GraphQLResult compileQuery(alias SchemaOrQuery)(string queryString, JSONValue va
             throw new CompilerException("Mutation operations require a Schema with Mutation type");
         }
     } else {
-        // Query operation - compile using QueryType directly
-        // Entity return types are already wrapped by ForwardField (with TypeMap)
-        return compileRootSelectionSet!(QueryType, SchemaOrQuery)(op.ss, variables, fragments);
+        return compileRootSelectionSet!(QueryType, SchemaType)(op.ss, variables, fragments);
     }
+}
+
+/// Convenience helper for unit tests: wraps a raw Query type in Schema
+/// to satisfy the normalization requirement without extra boilerplate.
+package(dunamis.graphql) GraphQLResult compileTestQuery(Query)(string queryString) {
+    return compileQuery!(Schema!(Query))(queryString);
+}
+
+/// ditto
+package(dunamis.graphql) GraphQLResult compileTestQuery(Query)(string queryString, JSONValue variables) {
+    return compileQuery!(Schema!(Query))(queryString, variables);
 }
 
 // ============================================================================
@@ -157,7 +145,7 @@ unittest {
     ]`);
 
     // Compile a simple query - no db parameter needed
-    auto query = compileQuery!Query(`{ users { firstName, lastName } }`);
+    auto query = compileTestQuery!Query(`{ users { firstName, lastName } }`);
 
     // Execute
     auto executor = new Executor();
@@ -203,7 +191,7 @@ unittest {
         {"id": 1, "first_name": "Alice", "last_name": "Smith"}
     ]`);
 
-    auto query = compileQuery!Query(`{ users { fullName } }`);
+    auto query = compileTestQuery!Query(`{ users { fullName } }`);
 
     auto executor = new Executor();
     auto result = awaitSync(executor.execute(query));
@@ -252,7 +240,7 @@ unittest {
         {"id": 3, "author_id": 2, "title": "Test"}
     ]`);
 
-    auto query = compileQuery!Query(`{ users { firstName, posts { title } } }`);
+    auto query = compileTestQuery!Query(`{ users { firstName, posts { title } } }`);
 
     auto executor = new Executor();
     auto result = awaitSync(executor.execute(query));
@@ -310,7 +298,7 @@ unittest {
     ]`);
 
     // Test with required argument
-    auto query1 = compileQuery!Query(`{ users { greeting(prefix: "Hello") } }`);
+    auto query1 = compileTestQuery!Query(`{ users { greeting(prefix: "Hello") } }`);
     auto executor = new Executor();
     auto result1 = awaitSync(executor.execute(query1));
 
@@ -320,7 +308,7 @@ unittest {
     assert(users1[1]["greeting"].str == "Hello Bob");
 
     // Test with optional argument using default
-    auto query2 = compileQuery!Query(`{ users { greetingWithSuffix(prefix: "Hi") } }`);
+    auto query2 = compileTestQuery!Query(`{ users { greetingWithSuffix(prefix: "Hi") } }`);
     auto result2 = awaitSync(executor.execute(query2));
 
     auto users2 = result2["users"].array;
@@ -329,7 +317,7 @@ unittest {
     assert(users2[1]["greetingWithSuffix"].str == "Hi Bob!");
 
     // Test with optional argument overridden
-    auto query3 = compileQuery!Query(`{ users { greetingWithSuffix(prefix: "Hey", suffix: "?") } }`);
+    auto query3 = compileTestQuery!Query(`{ users { greetingWithSuffix(prefix: "Hey", suffix: "?") } }`);
     auto result3 = awaitSync(executor.execute(query3));
 
     auto users3 = result3["users"].array;
@@ -378,7 +366,7 @@ unittest {
     ]`);
 
     // Query with multiple root fields
-    auto query = compileQuery!Query(`{
+    auto query = compileTestQuery!Query(`{
         users { firstName }
         posts { title }
     }`);
@@ -441,7 +429,7 @@ unittest {
     ]`);
 
     // Query with input object argument
-    auto query = compileQuery!Query(`{
+    auto query = compileTestQuery!Query(`{
         users {
             formattedName(format: {prefix: "Mr. ", suffix: "!"})
         }
@@ -502,7 +490,7 @@ unittest {
     ]`);
 
     // Query with nested input object
-    auto query = compileQuery!Query(`{
+    auto query = compileTestQuery!Query(`{
         users {
             styledName(style: {
                 separator: " - ",
@@ -557,7 +545,7 @@ unittest {
         "greetSuffix": JSONValue("?")
     ]);
 
-    auto query = compileQuery!Query(`
+    auto query = compileTestQuery!Query(`
         query GetUsers($greetPrefix: String!, $greetSuffix: String) {
             users {
                 greeting(prefix: $greetPrefix, suffix: $greetSuffix)
@@ -619,7 +607,7 @@ unittest {
         ])
     ]);
 
-    auto query = compileQuery!Query(`
+    auto query = compileTestQuery!Query(`
         query GetUsers($fmt: NameFormat!) {
             users {
                 formattedName(format: $fmt)
@@ -1325,7 +1313,7 @@ unittest {
     ]`);
 
     // Query tasks with enum field
-    auto query = compileQuery!Query(`{
+    auto query = compileTestQuery!Query(`{
         tasks {
             title
             status
@@ -1381,7 +1369,7 @@ unittest {
     db.setTableData("users", `[{"id": 1, "name": "Alice"}]`);
 
     // Test null pointer input
-    auto query1 = compileQuery!Query(`{
+    auto query1 = compileTestQuery!Query(`{
         users {
             traverseList(head: null)
         }
@@ -1393,7 +1381,7 @@ unittest {
     assert(users1[0]["traverseList"].str == "Alice");
 
     // Test pointer with value (single node)
-    auto query2 = compileQuery!Query(`{
+    auto query2 = compileTestQuery!Query(`{
         users {
             traverseList(head: {value: "first", next: null})
         }
@@ -1404,7 +1392,7 @@ unittest {
     assert(users2[0]["traverseList"].str == "Alice");
 
     // Test pointer with nested value (linked list)
-    auto query3 = compileQuery!Query(`{
+    auto query3 = compileTestQuery!Query(`{
         users {
             traverseList(head: {value: "first", next: {value: "second", next: null}})
         }
@@ -1459,7 +1447,7 @@ unittest {
         ])
     ]);
 
-    auto query = compileQuery!Query(`
+    auto query = compileTestQuery!Query(`
         query TestPointer($node: NodeInput) {
             users {
                 traverseList(head: $node)
@@ -1509,7 +1497,7 @@ unittest {
     db.setTableData("users", `[{"id": 1, "name": "Alice"}]`);
 
     // Test with nested array recursion
-    auto query = compileQuery!Query(`{
+    auto query = compileTestQuery!Query(`{
         users {
             matchFilter(filter: {
                 field: "name",
@@ -1557,14 +1545,14 @@ unittest {
 
     // __typename on root Query
     {
-        auto query = compileQuery!Query(`{ __typename }`);
+        auto query = compileTestQuery!Query(`{ __typename }`);
         auto result = awaitSync(executor.execute(query));
         assert(result["__typename"].str == "Query");
     }
 
     // __typename on entity
     {
-        auto query = compileQuery!Query(`{ users { __typename firstName } }`);
+        auto query = compileTestQuery!Query(`{ users { __typename firstName } }`);
         auto result = awaitSync(executor.execute(query));
         auto users = result["users"].array;
         assert(users.length == 1);
@@ -1599,14 +1587,14 @@ unittest {
 
     // Basic __schema query
     {
-        auto query = compileQuery!Query(`{ __schema { queryType { name } } }`);
+        auto query = compileTestQuery!Query(`{ __schema { queryType { name } } }`);
         auto result = awaitSync(executor.execute(query));
         assert(result["__schema"]["queryType"]["name"].str == "Query");
     }
 
     // __schema with types
     {
-        auto query = compileQuery!Query(`{ __schema { types { name kind } } }`);
+        auto query = compileTestQuery!Query(`{ __schema { types { name kind } } }`);
         auto result = awaitSync(executor.execute(query));
         auto types = result["__schema"]["types"].array;
         bool foundUser = false;
@@ -1653,7 +1641,7 @@ unittest {
 
     // __type lookup for existing type
     {
-        auto query = compileQuery!Query(`{ __type(name: "User") { name kind } }`);
+        auto query = compileTestQuery!Query(`{ __type(name: "User") { name kind } }`);
         auto result = awaitSync(executor.execute(query));
         assert(result["__type"]["name"].str == "User");
         assert(result["__type"]["kind"].str == "OBJECT");
@@ -1661,14 +1649,14 @@ unittest {
 
     // __type lookup for non-existent type
     {
-        auto query = compileQuery!Query(`{ __type(name: "NonExistent") { name } }`);
+        auto query = compileTestQuery!Query(`{ __type(name: "NonExistent") { name } }`);
         auto result = awaitSync(executor.execute(query));
         assert(result["__type"].isNull);
     }
 
     // __type with fields
     {
-        auto query = compileQuery!Query(`{ __type(name: "User") { name fields { name type { kind name } } } }`);
+        auto query = compileTestQuery!Query(`{ __type(name: "User") { name fields { name type { kind name } } } }`);
         auto result = awaitSync(executor.execute(query));
         assert(result["__type"]["name"].str == "User");
         auto fields = result["__type"]["fields"].array;
@@ -1754,7 +1742,7 @@ unittest {
 
     // @skip(if: true) — field excluded
     {
-        auto query = compileQuery!Query(`{ users { firstName @skip(if: true) lastName } }`);
+        auto query = compileTestQuery!Query(`{ users { firstName @skip(if: true) lastName } }`);
         auto result = awaitSync(executor.execute(query));
         auto users = result["users"].array;
         assert(users.length == 2);
@@ -1764,7 +1752,7 @@ unittest {
 
     // @skip(if: false) — field included
     {
-        auto query = compileQuery!Query(`{ users { firstName @skip(if: false) lastName } }`);
+        auto query = compileTestQuery!Query(`{ users { firstName @skip(if: false) lastName } }`);
         auto result = awaitSync(executor.execute(query));
         auto users = result["users"].array;
         assert(users[0]["firstName"].str == "Alice");
@@ -1802,7 +1790,7 @@ unittest {
 
     // @include(if: true) — field included
     {
-        auto query = compileQuery!Query(`{ users { firstName @include(if: true) lastName } }`);
+        auto query = compileTestQuery!Query(`{ users { firstName @include(if: true) lastName } }`);
         auto result = awaitSync(executor.execute(query));
         auto users = result["users"].array;
         assert(users[0]["firstName"].str == "Alice");
@@ -1811,7 +1799,7 @@ unittest {
 
     // @include(if: false) — field excluded
     {
-        auto query = compileQuery!Query(`{ users { firstName @include(if: false) lastName } }`);
+        auto query = compileTestQuery!Query(`{ users { firstName @include(if: false) lastName } }`);
         auto result = awaitSync(executor.execute(query));
         auto users = result["users"].array;
         assert("firstName" !in users[0], "@include(if: false) should exclude field");
@@ -1850,7 +1838,7 @@ unittest {
     // @include(if: $show) with $show = false
     {
         auto variables = JSONValue(["show": JSONValue(false)]);
-        auto query = compileQuery!Query(`
+        auto query = compileTestQuery!Query(`
             query Q($show: Boolean!) {
                 users { firstName @include(if: $show) lastName }
             }
@@ -1864,7 +1852,7 @@ unittest {
     // @skip(if: $s) with $s = true
     {
         auto variables = JSONValue(["s": JSONValue(true)]);
-        auto query = compileQuery!Query(`
+        auto query = compileTestQuery!Query(`
             query Q($s: Boolean!) {
                 users { firstName @skip(if: $s) lastName }
             }
@@ -1906,7 +1894,7 @@ unittest {
 
     // @skip(if: true) @include(if: true) — skip wins, field excluded
     {
-        auto query = compileQuery!Query(`{ users { firstName @skip(if: true) @include(if: true) lastName } }`);
+        auto query = compileTestQuery!Query(`{ users { firstName @skip(if: true) @include(if: true) lastName } }`);
         auto result = awaitSync(executor.execute(query));
         auto users = result["users"].array;
         assert("firstName" !in users[0], "@skip(if:true) should override @include(if:true)");
@@ -1915,7 +1903,7 @@ unittest {
 
     // @skip(if: false) @include(if: true) — both say include
     {
-        auto query = compileQuery!Query(`{ users { firstName @skip(if: false) @include(if: true) lastName } }`);
+        auto query = compileTestQuery!Query(`{ users { firstName @skip(if: false) @include(if: true) lastName } }`);
         auto result = awaitSync(executor.execute(query));
         auto users = result["users"].array;
         assert(users[0]["firstName"].str == "Alice");
@@ -1923,7 +1911,7 @@ unittest {
 
     // @skip(if: false) @include(if: false) — include=false wins
     {
-        auto query = compileQuery!Query(`{ users { firstName @skip(if: false) @include(if: false) lastName } }`);
+        auto query = compileTestQuery!Query(`{ users { firstName @skip(if: false) @include(if: false) lastName } }`);
         auto result = awaitSync(executor.execute(query));
         auto users = result["users"].array;
         assert("firstName" !in users[0], "@include(if:false) should exclude field");
@@ -1965,7 +1953,7 @@ unittest {
 
     // Skip the users root field entirely
     {
-        auto query = compileQuery!Query(`{
+        auto query = compileTestQuery!Query(`{
             users @skip(if: true) { firstName }
             posts { title }
         }`);
@@ -2011,7 +1999,7 @@ unittest {
 
     // Skip title within posts
     {
-        auto query = compileQuery!Query(`{
+        auto query = compileTestQuery!Query(`{
             users {
                 firstName
                 posts { title @skip(if: true) body_ }
@@ -2058,7 +2046,7 @@ unittest {
         {"id": 2, "first_name": "Bob", "last_name": "Jones"}
     ]`);
 
-    auto query = compileQuery!Query(`
+    auto query = compileTestQuery!Query(`
         query {
             users { ...UserFields }
         }
@@ -2105,7 +2093,7 @@ unittest {
         {"id": 1, "first_name": "Alice", "last_name": "Smith"}
     ]`);
 
-    auto query = compileQuery!Query(`{
+    auto query = compileTestQuery!Query(`{
         users {
             firstName
             ... {
@@ -2149,7 +2137,7 @@ unittest {
         {"id": 1, "first_name": "Alice", "last_name": "Smith"}
     ]`);
 
-    auto query = compileQuery!Query(`{
+    auto query = compileTestQuery!Query(`{
         users {
             firstName
             ... on User {
@@ -2193,7 +2181,7 @@ unittest {
         {"id": 1, "first_name": "Alice", "last_name": "Smith"}
     ]`);
 
-    auto query = compileQuery!Query(`{
+    auto query = compileTestQuery!Query(`{
         users {
             firstName
             ... on Post {
@@ -2241,7 +2229,7 @@ unittest {
         {"id": 1, "first_name": "Alice", "last_name": "Smith"}
     ]`);
 
-    auto query = compileQuery!Query(`
+    auto query = compileTestQuery!Query(`
         query {
             users { ...NameFields }
         }
@@ -2291,7 +2279,7 @@ unittest {
         {"id": 1, "first_name": "Alice", "last_name": "Smith"}
     ]`);
 
-    auto query = compileQuery!Query(`
+    auto query = compileTestQuery!Query(`
         query {
             users {
                 firstName
@@ -2338,7 +2326,7 @@ unittest {
         {"id": 1, "first_name": "Alice", "last_name": "Smith"}
     ]`);
 
-    auto query = compileQuery!Query(`{
+    auto query = compileTestQuery!Query(`{
         users {
             firstName
             ... @include(if: false) {
@@ -2392,7 +2380,7 @@ unittest {
         {"id": 2, "author_id": 1, "title": "World"}
     ]`);
 
-    auto query = compileQuery!Query(`
+    auto query = compileTestQuery!Query(`
         query {
             users {
                 firstName
@@ -2446,7 +2434,7 @@ unittest {
         {"id": 1, "first_name": "Alice", "last_name": "Smith"}
     ]`);
 
-    auto query = compileQuery!Query(`
+    auto query = compileTestQuery!Query(`
         query {
             users {
                 firstName
@@ -2492,7 +2480,7 @@ unittest {
 
     bool caught = false;
     try {
-        auto query = compileQuery!Query(`
+        auto query = compileTestQuery!Query(`
             query {
                 users { ...A }
             }
@@ -2540,7 +2528,7 @@ unittest {
         {"id": 1, "first_name": "Alice"}
     ]`);
 
-    auto query = compileQuery!Query(`
+    auto query = compileTestQuery!Query(`
         query {
             ...RootFields
         }

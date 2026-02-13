@@ -161,7 +161,30 @@ Users can also define plain fields and plain methods as a convenience for data t
 
 3. **Compile-time validation** — Return types are checked at compile time. If `fullName` returns `Expr!int` but you try to concatenate it with a string, the compiler catches it immediately. Traditional resolver-based systems return `Json` and defer type errors to runtime.
 
-### 3. Data Source Binding via Static Alias
+### 3. Schema Protocol
+
+After normalization (`Schema!()` or `NormalizePlugin`), all fields are computed fields — static methods taking `Expr!T` as first parameter and returning an `Expr` type. The **Schema Protocol** is the compile-time interface that all post-normalization consumers use to discover and interact with schema types.
+
+Instead of ad-hoc `__traits(allMembers)` loops, consumers use two templates from `core/discovery.d`:
+
+```d
+// Enumerate all public computed field names on a normalized type
+getSchemaFields!T        // → enum string[] (e.g., ["id", "firstName", "posts"])
+
+// Get the D result type of a field (unwraps Expr!U → U)
+fieldResultType!(T, "firstName")  // → string
+```
+
+All code that needs to iterate over a type's fields uses this protocol:
+
+- **GraphQL compiler** (`selection.d`) — `compileFieldAccess`, `compileRootField`, `resolveNonNullFlags`
+- **Query validator** (`validation.d`) — `validateFieldAccess`, `validateRootField`
+- **SDL generator** (`fields.d`) — `getFields!T`
+- **Introspection** (`introspection.d`) — `getRuntimeFields!T`
+
+**Precondition**: Types must have been through normalization. `compileQuery` enforces this via `static assert(isSchema!SchemaType)`. Raw entity types (pre-normalization) may have plain fields and plain methods that the protocol does not see — use `isPlainField`/`isPlainMethod` for pre-normalization code like `NormalizePlugin`.
+
+### 4. Data Source Binding via Static Alias
 
 Entity types bind to their data source through a compile-time alias to a static/module-level variable:
 
@@ -190,7 +213,7 @@ struct User {
 
 3. **Type-safe query generation** — The binding is checked at compile time. If you reference a non-existent data source or mismatched types, compilation fails.
 
-### 4. Extensible Optimizer via Pattern Matching
+### 5. Extensible Optimizer via Pattern Matching
 
 The optimizer uses interface-based pattern matching to recognize and transform expression types:
 
@@ -207,7 +230,7 @@ To list all pattern-matching interfaces in the codebase:
 grep -rn 'interface.*Info' source/dunamis/ --include='*.d' | grep -v unittest
 ```
 
-### 5. Plugins as Composable Type Transformers
+### 6. Plugins as Composable Type Transformers
 
 A plugin is a compile-time function from Schema to Schema. Each plugin takes the output of the previous one, transforms its types, and produces a new schema. Plugins compose by chaining:
 
@@ -219,7 +242,7 @@ alias MySchema = ApplyPlugins!(Schema!(Query, Mutation), FilterPlugin, SortingPl
 
 All types are treated uniformly — Query, Mutation, User, Post are all types with fields. The only distinction for Query/Mutation is that they are singletons (one instance per request), and this difference is encapsulated at the boundary rather than threaded through the plugin system.
 
-Plugins are part of the schema layer, not the presentation layer. They operate on D types and standard visibility — they have no knowledge of GraphQL or any other presentation format (see [Principle 6](#6-schema-independence-from-presentation)).
+Plugins are part of the schema layer, not the presentation layer. They operate on D types and standard visibility — they have no knowledge of GraphQL or any other presentation format (see [Principle 7](#7-schema-independence-from-presentation)).
 
 **Why this design?**
 
@@ -229,7 +252,7 @@ Plugins are part of the schema layer, not the presentation layer. They operate o
 
 3. **Extensibility** — New plugins can add arbitrary capabilities (filtering, sorting, pagination, normalization, access control) without modifying existing code. The plugin interface is just: expose `Query`, `Mutation`, and `Config`.
 
-### 6. Schema Independence from Presentation
+### 7. Schema Independence from Presentation
 
 The schema and plugin system define a **typed API** that is independent of any presentation format. `Schema!(Query, Mutation)` normalizes entity types and applies plugins using only D type structure and visibility — no knowledge of GraphQL or any other protocol.
 

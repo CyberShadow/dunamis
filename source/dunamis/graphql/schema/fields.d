@@ -233,107 +233,30 @@ template getFields(T) {
     import dunamis.core.expr : ExprResultType;
 
     enum getFields = () {
-        import dunamis.core.types : isPlainField, isPlainMethod;
+        import dunamis.core.discovery : getSchemaFields;
 
         FieldInfo[] fields;
 
-        // First pass: plain fields (struct instance fields, in declaration order)
-        // Plain fields come first so that ID fields (from DemoId mixin, declared first)
-        // appear at the top of the schema.
-        static foreach (member; __traits(allMembers, T)) {{
-            static if (!isInternalMember!member) {
-                static if (isPlainField!(T, member)) {
-                    enum isHidden2 = hasGqlHidden!(__traits(getMember, T, member));
-                    alias FieldType = typeof(__traits(getMember, T.init, member));
-                    // Use D field name directly (GraphQL uses camelCase like D)
-                    enum gqlFieldName = member;
-                    enum gqlType = graphqlTypeName!FieldType;
+        // All fields are computed fields after normalization
+        static foreach (member; getSchemaFields!T) {{
+            alias fn = __traits(getMember, T, member);
 
-                    fields ~= FieldInfo(
-                        gqlFieldName,
-                        gqlType,
-                        false,  // isConnection
-                        isHidden2,
-                        "",     // description
-                        "",     // deprecation
-                        []      // arguments
-                    );
-                }
-            }
-        }}
+            enum isHidden = hasGqlHidden!fn;
+            enum gqlFieldName = getGqlName!(fn, member);
+            enum description = getGqlDescription!fn;
+            enum deprecation = getGqlDeprecated!fn;
+            enum gqlType = computedFieldReturnType!fn;
+            enum arguments = getComputedFieldArguments!fn;
 
-        // Second pass: field methods (static functions)
-        static foreach (member; __traits(allMembers, T)) {{
-            static if (!isInternalMember!member) {
-                static if (is(typeof(__traits(getMember, T, member)) == function)) {
-                    alias fn = __traits(getMember, T, member);
-
-                    // Get common UDAs
-                    enum isHidden = hasGqlHidden!fn;
-                    enum gqlFieldName = getGqlName!(fn, member);
-                    enum description = getGqlDescription!fn;
-                    enum deprecation = getGqlDeprecated!fn;
-
-                    static if (isValidFieldMethod!(T, fn)) {
-                        // Field method: computed field, relationship, or table entry point
-                        enum gqlType = computedFieldReturnType!fn;
-                        enum arguments = getComputedFieldArguments!fn;
-
-                        fields ~= FieldInfo(
-                            gqlFieldName,
-                            gqlType,
-                            false,
-                            isHidden,
-                            description,
-                            deprecation,
-                            arguments
-                        );
-                    }
-                    // Skip plain methods here - they're handled in the third pass
-                    else static if (isPlainMethod!(T, member)) {
-                        // Handled in third pass
-                    }
-                    else static if (!isHidden) {
-                        // Static method that doesn't conform and isn't hidden - compile error
-                        static assert(false,
-                            "Method '" ~ member ~ "' in " ~ T.stringof ~
-                            " is not a valid GraphQL field. " ~
-                            "Valid fields must take Expr!" ~ T.stringof ~ " as first parameter " ~
-                            "and return an Expr type. " ~
-                            "Add @GqlHidden to exclude this method from the schema.");
-                    }
-                    // @GqlHidden methods that don't conform are silently skipped
-                }
-            }
-        }}
-
-        // Third pass: plain methods (instance methods returning non-Expr types)
-        static foreach (member; __traits(allMembers, T)) {{
-            static if (!isInternalMember!member) {
-                static if (isPlainMethod!(T, member)) {
-                    import std.traits : ReturnType;
-                    alias MethodType = typeof(__traits(getMember, T, member));
-                    alias RetType = ReturnType!MethodType;
-
-                    // Get UDAs from the method
-                    alias methodSym = __traits(getMember, T, member);
-                    enum isHidden = hasGqlHidden!methodSym;
-                    enum gqlFieldName = getGqlName!(methodSym, member);
-                    enum description = getGqlDescription!methodSym;
-                    enum deprecation = getGqlDeprecated!methodSym;
-                    enum gqlType = graphqlTypeName!RetType;
-
-                    fields ~= FieldInfo(
-                        gqlFieldName,
-                        gqlType,
-                        false,  // isConnection
-                        isHidden,
-                        description,
-                        deprecation,
-                        []      // arguments (no arguments for plain methods yet)
-                    );
-                }
-            }
+            fields ~= FieldInfo(
+                gqlFieldName,
+                gqlType,
+                false,
+                isHidden,
+                description,
+                deprecation,
+                arguments
+            );
         }}
 
         return fields;

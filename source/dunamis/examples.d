@@ -623,12 +623,12 @@ EOF";
 // Test: Basic query with scalar fields
 unittest {
     import std.stdio : writeln;
-    import dunamis.graphql : compileQuery;
+    import dunamis.graphql : compileQuery, Schema;
 
     createMockDB();  // Sets up the static db
     auto executor = new Executor();
 
-    auto query = compileQuery!Query(`{
+    auto query = compileQuery!(Schema!Query)(`{
         users {
             firstName
             lastName
@@ -668,12 +668,12 @@ EOF";
 // Test: Query with computed field (fullName)
 unittest {
     import std.stdio : writeln;
-    import dunamis.graphql : compileQuery;
+    import dunamis.graphql : compileQuery, Schema;
 
     createMockDB();
     auto executor = new Executor();
 
-    auto query = compileQuery!Query(`{
+    auto query = compileQuery!(Schema!Query)(`{
         users {
             fullName
             posts {
@@ -722,12 +722,12 @@ EOF";
 // Test: 3-level nesting (users -> posts -> comments)
 unittest {
     import std.stdio : writeln;
-    import dunamis.graphql : compileQuery;
+    import dunamis.graphql : compileQuery, Schema;
 
     createMockDB();
     auto executor = new Executor();
 
-    auto query = compileQuery!Query(`{
+    auto query = compileQuery!(Schema!Query)(`{
         users {
             fullName
             posts {
@@ -788,13 +788,13 @@ EOF";
 // Test: Computed field with arguments
 unittest {
     import std.stdio : writeln;
-    import dunamis.graphql : compileQuery;
+    import dunamis.graphql : compileQuery, Schema;
 
     createMockDB();
     auto executor = new Executor();
 
     // User.greeting takes (prefix: String!, suffix: String = "!")
-    auto query = compileQuery!Query(`{
+    auto query = compileQuery!(Schema!Query)(`{
         users {
             firstName
             greeting(prefix: "Hello")
@@ -926,8 +926,8 @@ unittest {
     import std.stdio : writeln;
     import dunamis.graphql;
 
-    // Generate complete schema SDL - automatically discovers all types from Query
-    enum schema = generateSchemaSDL!Query;
+    // Generate complete schema SDL - Schema normalizes all types first
+    enum schema = generateSchemaSDL!(Schema!Query);
 
     debug(graphql) {
         writeln("\n=== Generated GraphQL Schema ===");
@@ -1643,12 +1643,12 @@ EOF";
 
 // Test multi-hop belongsTo via compileQuery (comment.post.author - 2 JOINs)
 unittest {
-    import dunamis.graphql : compileQuery;
+    import dunamis.graphql : compileQuery, Schema;
 
     createMockDB();  // Sets up the static db
     auto executor = new Executor();
 
-    auto query = compileQuery!Query(`{
+    auto query = compileQuery!(Schema!Query)(`{
         comments {
             body
             postAuthorName
@@ -1667,12 +1667,12 @@ unittest {
 
 // Test multi-hop belongsTo via nested GraphQL sub-selection (comment.post.author)
 unittest {
-    import dunamis.graphql : compileQuery;
+    import dunamis.graphql : compileQuery, Schema;
 
     createMockDB();
     auto executor = new Executor();
 
-    auto query = compileQuery!Query(`{
+    auto query = compileQuery!(Schema!Query)(`{
         comments {
             body
             post {
@@ -1760,7 +1760,7 @@ EOF";
 
 // Test: compileQuery with SortingPlugin generates CTE with ORDER BY
 unittest {
-    import dunamis.graphql : compileQuery;
+    import dunamis.graphql : compileQuery, Schema;
     import dunamis.schema.sorting : SortingPlugin;
     import dunamis.graphql.schema : Schema;
 
@@ -1792,7 +1792,7 @@ unittest {
 
 // Test: compileQuery with PaginationPlugin generates CTE with LIMIT/OFFSET
 unittest {
-    import dunamis.graphql : compileQuery;
+    import dunamis.graphql : compileQuery, Schema;
     import dunamis.schema.pagination : PaginationPlugin;
     import dunamis.graphql.schema : Schema;
 
@@ -1820,7 +1820,7 @@ unittest {
 
 // Test: compileQuery with nested HasMany generates multi-layer CTE
 unittest {
-    import dunamis.graphql : compileQuery;
+    import dunamis.graphql : compileQuery, Schema;
     import dunamis.graphql.schema : Schema;
 
     createMockDB();
@@ -1973,7 +1973,7 @@ unittest {
 // Fields returning GqlResult!T are automatically materialized to Nullable!T,
 // with errors recorded in the response.
 unittest {
-    import dunamis.graphql : compileQuery;
+    import dunamis.graphql : compileQuery, Schema;
 
     createMockDB();
     auto executor = new Executor();
@@ -1981,7 +1981,7 @@ unittest {
     // validatedName uses tryUse: "Bob" and "Carol" contain 'o' so they error.
     // Since validatedName is String! (non-null), the error causes null bubbling:
     // the entire parent user object becomes null.
-    auto query = compileQuery!Query(`{
+    auto query = compileQuery!(Schema!Query)(`{
         users {
             firstName
             validatedName

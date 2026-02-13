@@ -381,7 +381,7 @@ Generate GraphQL schema and SQL DDL at compile time:
 
 ```d
 // Generate GraphQL schema from D types
-pragma(msg, generateSchemaSDL!Query);
+pragma(msg, generateSchemaSDL!(Schema!Query));
 // Output:
 // type Query {
 //   users: [User!]!
