@@ -297,31 +297,28 @@ struct ListFilter(ChildFilter) {
     ChildFilter* none;
 }
 
-/// Generate a shallow entity filter type (columns only, no HasMany relationships).
-/// Used for child entity filters in ListFilter to avoid circular type references.
-mixin template GenerateShallowFilterType(Entity, string filterTypeName) {
-    import std.meta : AliasSeq;
+/// Module-level shallow filter type generation.
+/// Encapsulates helper templates so they don't leak into host structs.
+/// Produces a filter struct with only scalar column fields (no nested entity arrays),
+/// used for child entity filters in ListFilter to avoid circular type references.
+template _ShallowFilterFor(Entity) {
     import std.typecons : Nullable;
     import std.traits : ReturnType;
 
-    // Helper to get column return type for a given member name
     template _ColTypeFor(string member) {
         alias _colMethod = __traits(getMember, Entity, member);
         alias _ColTypeFor = ReturnType!_colMethod.ResultType;
     }
 
-    // Generate type aliases for enum column types
     static foreach (member; getFilterableColumns!Entity) {
         static if (is(_ColTypeFor!member == enum)) {
             mixin("alias _EnumType_" ~ member ~ " = _ColTypeFor!\"" ~ member ~ "\";");
         }
     }
 
-    // Build and mix in the shallow filter struct (no intermediate enum)
     mixin(() {
         string result = "struct _ShallowFilter {\n";
 
-        // Add a field for each filterable column
         static foreach (member; getFilterableColumns!Entity) {{
             alias ColType = _ColTypeFor!member;
 
@@ -340,73 +337,55 @@ mixin template GenerateShallowFilterType(Entity, string filterTypeName) {
             }
         }}
 
-        // Add logical combinators
         result ~= "    typeof(this)[] and;\n";
         result ~= "    typeof(this)[] or;\n";
         result ~= "    typeof(this)* not;\n";
 
         result ~= "}\n";
-        result ~= "alias " ~ filterTypeName ~ " = _ShallowFilter;\n";
 
         return result;
     }());
 }
 
-/// Generate an entity filter type at compile time.
-/// Creates a struct with fields for each filterable column, array fields
-/// (with some/every/none operators), and/or/not combinators.
+/// Module-level entity filter type generation.
+/// Encapsulates helper templates so they don't leak into host structs.
+/// Generates a full filter struct with scalar column fields, entity array fields
+/// (via _ShallowFilterFor), scalar array fields, and logical combinators.
 ///
-/// Example output for User:
+/// Example: _FilterTypesFor!User._EntityFilter produces:
 /// ```
 /// struct _EntityFilter {
 ///     Nullable!StringFilter firstName;
 ///     Nullable!IntFilter age;
-///     Nullable!EnumFilter!Role role;  // For enum columns
-///     Nullable!(ListFilter!_PostsFilter) posts;  // Entity array with some/every/none
-///     Nullable!(ListFilter!StringFilter) tags;   // Scalar array with some/every/none
+///     Nullable!EnumFilter!Role role;
+///     Nullable!(ListFilter!(_ShallowFilterFor!Post._ShallowFilter)) posts;
+///     Nullable!(ListFilter!StringFilter) tags;
 ///     typeof(this)[] and;
 ///     typeof(this)[] or;
 ///     typeof(this)* not;
 /// }
 /// ```
-mixin template GenerateEntityFilterType(Entity, string filterTypeName) {
-    import std.meta : AliasSeq;
+template _FilterTypesFor(Entity) {
     import std.typecons : Nullable;
     import std.traits : ReturnType;
 
-    // Helper to get column return type for a given member name
     template _ColTypeFor(string member) {
         alias _colMethod = __traits(getMember, Entity, member);
         alias _ColTypeFor = ReturnType!_colMethod.ResultType;
     }
 
-    // Helper to get array element type for a given member name
-    template _ArrayElemTypeFor(string member) {
-        alias _ArrayElemTypeFor = getArrayElementType!(Entity, member);
-    }
-
-    // Generate type aliases for enum column types to preserve scope
-    // Using column name as suffix since it's unique within the entity
     static foreach (member; getFilterableColumns!Entity) {
         static if (is(_ColTypeFor!member == enum)) {
             mixin("alias _EnumType_" ~ member ~ " = _ColTypeFor!\"" ~ member ~ "\";");
         }
     }
 
-    // Generate shallow filter types for each entity array child
-    // (only for entity arrays, not scalar arrays)
-    static foreach (member; getEntityArrayFields!Entity) {
-        mixin GenerateShallowFilterType!(getArrayElementType!(Entity, member), "_" ~ member ~ "ChildFilter");
-    }
-
-    // Build and mix in the filter struct definition (no intermediate enum)
     mixin(() {
         string result = "";
 
-        // Main filter struct
         result ~= "struct _EntityFilter {\n";
 
-        // Add a field for each filterable column
+        // Filterable column fields
         static foreach (member; getFilterableColumns!Entity) {{
             alias ColType = _ColTypeFor!member;
 
@@ -425,26 +404,23 @@ mixin template GenerateEntityFilterType(Entity, string filterTypeName) {
             }
         }}
 
-        // Add a field for each entity array with ListFilter wrapper
+        // Entity array fields — reference shallow filter via module-level template
         static foreach (member; getEntityArrayFields!Entity) {
-            result ~= "    Nullable!(ListFilter!(_" ~ member ~ "ChildFilter)) " ~ member ~ ";\n";
+            result ~= "    Nullable!(ListFilter!(_ShallowFilterFor!(getArrayElementType!(Entity, \"" ~ member ~ "\"))._ShallowFilter)) " ~ member ~ ";\n";
         }
 
-        // Add a field for each scalar array with ListFilter!ScalarFilter
+        // Scalar array fields
         static foreach (member; getScalarArrayFields!Entity) {{
-            alias ElemType = _ArrayElemTypeFor!member;
+            alias ElemType = getArrayElementType!(Entity, member);
             result ~= "    Nullable!(ListFilter!" ~ scalarFilterTypeName!ElemType ~ ") " ~ member ~ ";\n";
         }}
 
-        // Add logical combinators (self-referential)
+        // Logical combinators (self-referential)
         result ~= "    typeof(this)[] and;\n";
         result ~= "    typeof(this)[] or;\n";
         result ~= "    typeof(this)* not;\n";
 
         result ~= "}\n";
-
-        // Create alias to the desired name
-        result ~= "alias " ~ filterTypeName ~ " = _EntityFilter;\n";
 
         return result;
     }());
@@ -1122,10 +1098,19 @@ template FilterPlugin(alias S) if (isSchema!S) {
 // ============================================================================
 
 /// Mixin template to create a filtered version of an array-returning field.
-/// Uses type aliases instead of stringof to preserve type scope across plugin composition.
+///
+/// Uses module-level _FilterTypesFor and _ShallowFilterFor templates for filter
+/// type generation, so the filter struct and its helper templates (_ColTypeFor,
+/// _EnumType_*, _ShallowFilter) stay encapsulated and don't leak into the host
+/// struct. The mixin template itself still leaks a few type aliases (_SrcParams,
+/// _SrcDefaults, _SrcEntity, _ElementType, _FilterType) and a private method
+/// (_applyFilter), but these are harmless — filtered out by getSchemaFields.
+///
+/// Note: Cannot use the code template pattern (like SortedArrayFieldCode) because
+/// LDC eagerly resolves `alias TypeMap` when forwarded from a mixin template to a
+/// regular template, causing circular forward references during struct construction.
 mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) {
     import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
-    import std.meta : AliasSeq;
     import std.conv : to;
     import dunamis.core.expr : Expr, ExprResultType;
     import dunamis.core.filtering : FilterByExpr, FilterItemExpr;
@@ -1133,22 +1118,19 @@ mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) 
     import dunamis.schema.transform : wrapEntityResult;
     import std.typecons : Nullable;
 
-    // Type metadata — aliases don't leak as fields/methods (invisible to field discovery)
     alias _SrcParams = Parameters!(__traits(getMember, SourceQuery, fieldName));
     alias _SrcDefaults = ParameterDefaults!(__traits(getMember, SourceQuery, fieldName));
     alias _SrcEntity = ExprResultType!(_SrcParams[0]);
     alias _ElementType = ArrayFieldElementType!(__traits(getMember, SourceQuery, fieldName));
 
-    // Generate the entity filter type for this element type
-    mixin GenerateEntityFilterType!(_ElementType, __traits(identifier, _ElementType) ~ "Filter");
+    // Filter type from module-level template — doesn't leak _ColTypeFor,
+    // _EnumType_*, _EntityFilter, _ShallowFilter, or _*ChildFilter into the host struct.
+    alias _FilterType = _FilterTypesFor!_ElementType._EntityFilter;
 
-    // Apply filter using typed filter struct
-    private static Expr!(_ElementType[]) _applyFilter(T)(T base, Nullable!_EntityFilter filter) {
-        if (filter.isNull) {
+    private static Expr!(_ElementType[]) _applyFilter(T)(T base, Nullable!_FilterType filter) {
+        if (filter.isNull)
             return base;
-        }
 
-        // Build filter predicate from typed struct
         auto item = new FilterItemExpr!_ElementType();
         auto predicate = buildFilterPredicateFromStruct!_ElementType(item, filter.get);
         auto filterExpr = new FilterByExpr!_ElementType(base, item, predicate);
@@ -1156,13 +1138,10 @@ mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) 
         return filterExpr;
     }
 
-    // Build and mix in the method declaration (no intermediate enum values)
-    // References SourceQuery/fieldName directly — no _srcFn alias needed
     @(__traits(getAttributes, __traits(getMember, SourceQuery, fieldName)))
     mixin(() {
         enum string[] srcParamNames = [ParameterIdentifierTuple!(__traits(getMember, SourceQuery, fieldName))];
 
-        // Parameter list — reference _SrcParams/_SrcDefaults directly (aliases, not leaked as fields)
         string paramList = "Expr!(typeof(this)) " ~ srcParamNames[0];
         static foreach (i; 1 .. _SrcParams.length) {{
             paramList ~= ", _SrcParams[" ~ i.to!string ~ "] " ~ srcParamNames[i];
@@ -1170,9 +1149,8 @@ mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) 
                 paramList ~= " = _SrcDefaults[" ~ i.to!string ~ "]";
             }
         }}
-        paramList ~= ", Nullable!_EntityFilter filter = Nullable!_EntityFilter.init";
+        paramList ~= ", Nullable!_FilterType filter = Nullable!_FilterType.init";
 
-        // Argument list — call original function via __traits in generated code
         string argList = "pluginEntityCast!(_SrcEntity)(" ~ srcParamNames[0] ~ ")";
         static foreach (i; 1 .. _SrcParams.length) {
             argList ~= ", " ~ srcParamNames[i];
