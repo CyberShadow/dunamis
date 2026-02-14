@@ -89,8 +89,13 @@ template PaginationPlugin(alias S) if (isSchema!S) {
         mixin WrapFields!(S.Mutation, EntityTypeMap, PaginatedArrayField);
     }
 
+    struct PaginatedSubscription {
+        mixin WrapFields!(S.Subscription, EntityTypeMap, PaginatedArrayField);
+    }
+
     alias Query = PaginatedQuery;
     alias Mutation = PaginatedMutation;
+    alias Subscription = PaginatedSubscription;
 }
 
 /// Eponymous code template for PaginatedArrayField.

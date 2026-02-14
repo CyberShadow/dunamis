@@ -91,8 +91,13 @@ template SortingPlugin(alias S) if (isSchema!S) {
         mixin WrapFields!(S.Mutation, EntityTypeMap, SortedArrayField);
     }
 
+    struct SortedSubscription {
+        mixin WrapFields!(S.Subscription, EntityTypeMap, SortedArrayField);
+    }
+
     alias Query = SortedQuery;
     alias Mutation = SortedMutation;
+    alias Subscription = SortedSubscription;
 }
 
 // ============================================================================

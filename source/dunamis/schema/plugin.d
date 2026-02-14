@@ -311,7 +311,7 @@ mixin template NormalizeFields(SourceType, alias TypeMap = IdentityTypeMap) {
 ///
 /// Used internally by Schema to normalize types before external plugins
 /// are applied.
-template NormalizePlugin(RawQuery, RawMutation) {
+template NormalizePlugin(RawQuery, RawMutation, RawSubscription = void) {
     import std.meta : staticMap;
     import dunamis.core.discovery : getAllObjectTypes;
     import dunamis.schema.transform : isTypeInList;
@@ -345,6 +345,15 @@ template NormalizePlugin(RawQuery, RawMutation) {
     // Wrap Mutation: forward all fields with type remapping
     struct Mutation {
         mixin WrapFields!(RawMutation, _TypeMap, ForwardField);
+    }
+
+    // Wrap Subscription: forward all fields with type remapping
+    static if (is(RawSubscription == void)) {
+        struct Subscription {}
+    } else {
+        struct Subscription {
+            mixin WrapFields!(RawSubscription, _TypeMap, ForwardField);
+        }
     }
 }
 

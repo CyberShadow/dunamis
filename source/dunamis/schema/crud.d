@@ -278,6 +278,7 @@ template CrudMutationPlugin(alias S) if (isSchema!S) {
     import dunamis.relational.schema.attrs : hasTableEntity, extractTableEntity;
 
     alias Query = S.Query;
+    alias Subscription = S.Subscription;
 
     struct CrudMutation {
         // Forward all existing mutation fields from the source schema

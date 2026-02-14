@@ -1089,8 +1089,13 @@ template FilterPlugin(alias S) if (isSchema!S) {
         mixin WrapFields!(S.Mutation, EntityTypeMap, FilteredArrayField);
     }
 
+    struct FilteredSubscription {
+        mixin WrapFields!(S.Subscription, EntityTypeMap, FilteredArrayField);
+    }
+
     alias Query = FilteredQuery;
     alias Mutation = FilteredMutation;
+    alias Subscription = FilteredSubscription;
 }
 
 // ============================================================================

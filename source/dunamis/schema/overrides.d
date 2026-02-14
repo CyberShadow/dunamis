@@ -308,8 +308,13 @@ template FieldOverridePlugin(alias S) if (isSchema!S) {
         mixin OverridableFields!(S.Mutation, EntityTypeMap, "Mutation");
     }
 
+    struct OverridableSubscription {
+        mixin OverridableFields!(S.Subscription, EntityTypeMap, "Subscription");
+    }
+
     alias Query = OverridableQuery;
     alias Mutation = OverridableMutation;
+    alias Subscription = OverridableSubscription;
 }
 
 // ============================================================================
