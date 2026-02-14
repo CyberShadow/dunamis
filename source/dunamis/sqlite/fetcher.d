@@ -12,6 +12,7 @@ import ae.utils.promise : Promise, resolve;
 import dunamis.core.types : AnyRef, makeAnyRef;
 import dunamis.core.optimize : ExprOptimizer;
 import dunamis.core.expr : ExprBase;
+import dunamis.core.datasource : DataSource, DataSession;
 import dunamis.relational.eval_context;
 import std.format : format;
 import dunamis.relational.query_node;
@@ -20,16 +21,13 @@ import dunamis.sqlite.dialect : sqliteDialect;
 import dunamis.relational.sql : toSQL;
 import dunamis.sqlite.sql;
 
-/// SQLite data fetcher using ae.sys.sqlite3.
-/// Executes SQL generated from QueryNodes against a SQLite database.
-///
-/// Note: SQLite operations are synchronous, so promises are resolved immediately.
-///
-/// Parameterized by DBConfig for compile-time feature configuration.
-class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
-    /// Configuration accessible at compile time
-    enum configuration = config;
+// ============================================================================
+// SQLite Session (Per-Request)
+// ============================================================================
 
+/// Per-request session for SQLite.
+/// Holds cached results and per-query state for a single evaluation.
+class SQLiteSession : RelationalSession {
     private SQLite _db;
     private SqlOptimizer _sqlOptimizer;
     private QueryNode[] _executedNodes;
@@ -37,37 +35,14 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
     private QueryResult[QueryNodeId] _cachedResults;
     private QueryResult[string] _cachedResultsByType;
 
-    this(SQLite db) {
+    this(SQLite db, SqlOptimizer sqlOptimizer) {
         _db = db;
-        _sqlOptimizer = new SqlOptimizer(sqliteDialect());
-    }
-
-    this(string filename) {
-        _db = new SQLite(filename);
-        _sqlOptimizer = new SqlOptimizer(sqliteDialect());
-    }
-
-    /// Return the SqlOptimizer to enable SQL push-down
-    override ExprOptimizer[] requestedOptimizers() {
-        return [_sqlOptimizer];
-    }
-
-    /// Get original expression for fallback evaluation (not used - real DB evaluates SQL)
-    override ExprBase getOriginalExpr(string alias_) {
-        return null;
-    }
-
-    /// Reset for next query
-    void reset() {
-        _executedNodes = [];
-        _cachedSQL = "";
-        _sqlOptimizer = new SqlOptimizer(sqliteDialect());
-        _cachedResults.clear();
-        _cachedResultsByType.clear();
+        _sqlOptimizer = sqlOptimizer;
     }
 
     /// Begin a transaction.
     override Promise!void setup() {
+        super.setup();
         _db.exec("BEGIN");
         return resolve();
     }
@@ -82,6 +57,11 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
     override Promise!void execute(string sql) {
         _db.exec(sql);
         return resolve();
+    }
+
+    /// Get original expression for fallback evaluation (not used - real DB evaluates SQL)
+    override ExprBase getOriginalExpr(string alias_) {
+        return null;
     }
 
     /// Get the generated SQL (for debugging)
@@ -606,6 +586,42 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataFetcher {
             }
         }
         return obj;
+    }
+}
+
+// ============================================================================
+// SQLite Data Source (Singleton Factory)
+// ============================================================================
+
+/// SQLite data source using ae.sys.sqlite3.
+/// Holds the database handle and creates per-request sessions.
+///
+/// Parameterized by DBConfig for compile-time feature configuration.
+class SQLiteDB(DBConfig config = defaultDBConfig) : DataSource {
+    /// Configuration accessible at compile time
+    enum configuration = config;
+
+    private SQLite _db;
+    private SqlOptimizer _sqlOptimizer;
+
+    this(SQLite db) {
+        _db = db;
+        _sqlOptimizer = new SqlOptimizer(sqliteDialect());
+    }
+
+    this(string filename) {
+        _db = new SQLite(filename);
+        _sqlOptimizer = new SqlOptimizer(sqliteDialect());
+    }
+
+    /// Return the SqlOptimizer to enable SQL push-down
+    override ExprOptimizer[] requestedOptimizers() {
+        return [_sqlOptimizer];
+    }
+
+    /// Create a fresh per-request session.
+    override DataSession createSession() {
+        return new SQLiteSession(_db, _sqlOptimizer);
     }
 }
 

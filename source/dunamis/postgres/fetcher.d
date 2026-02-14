@@ -14,60 +14,48 @@ alias PreparedStatement = PgSqlConnection.PreparedStatement;
 import dunamis.core.types : AnyRef, makeAnyRef;
 import dunamis.core.optimize : ExprOptimizer;
 import dunamis.core.expr : ExprBase;
+import dunamis.core.datasource : DataSource, DataSession;
 import dunamis.relational.eval_context;
 import dunamis.relational.query_node;
 import dunamis.relational.sql_optimizer;
 import dunamis.postgres.dialect : postgresDialect;
 import dunamis.relational.sql : toSQL;
 
-/// PostgreSQL data fetcher using ae.net.db.psql.
-/// Executes SQL generated from QueryNodes against a PostgreSQL database.
-///
-/// Parameterized by DBConfig for compile-time feature configuration.
-class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
-    /// Configuration accessible at compile time
-    enum configuration = config;
+// ============================================================================
+// PostgreSQL Session (Per-Request)
+// ============================================================================
 
+/// Per-request session for PostgreSQL.
+/// Holds cached results and per-query state for a single evaluation.
+class PostgresSession : RelationalSession {
     private PgSqlConnection _conn;
+    private Promise!PgSqlConnection delegate() _connFactory;
     private SqlOptimizer _sqlOptimizer;
     private QueryNode[] _executedNodes;
     private string _cachedSQL;
-    private QueryResult[QueryNodeId] _cachedResults;  // Store child results from CTE query (by node ID)
-    private QueryResult[string] _cachedResultsByType;  // Also index by type name for fetchChildren
+    private QueryResult[QueryNodeId] _cachedResults;
+    private QueryResult[string] _cachedResultsByType;
 
-    this(PgSqlConnection conn) {
-        _conn = conn;
-        _sqlOptimizer = new SqlOptimizer(postgresDialect());
+    /// Create with a connection factory. The factory is called in setup().
+    this(Promise!PgSqlConnection delegate() connFactory, SqlOptimizer sqlOptimizer) {
+        _connFactory = connFactory;
+        _sqlOptimizer = sqlOptimizer;
     }
 
-    /// Return the SqlOptimizer to enable SQL push-down
-    override ExprOptimizer[] requestedOptimizers() {
-        return [_sqlOptimizer];
-    }
-
-    /// Get original expression for fallback evaluation (not used - real DB evaluates SQL)
-    override ExprBase getOriginalExpr(string alias_) {
-        return null;
-    }
-
-    /// Reset for next query
-    void reset() {
-        _executedNodes = [];
-        _cachedSQL = "";
-        _sqlOptimizer = new SqlOptimizer(postgresDialect());
-        _cachedResults.clear();
-        _cachedResultsByType.clear();
-    }
-
-    /// Begin a transaction.
+    /// Acquire connection and begin a transaction.
     override Promise!void setup() {
-        return _conn.prepare("BEGIN").then((PreparedStatement stmt) {
+        super.setup();
+        return _connFactory().then((PgSqlConnection conn) {
+            _conn = conn;
+            return _conn.prepare("BEGIN");
+        }).then((PreparedStatement stmt) {
             return stmt.query().array();
         }).then((PgSqlConnection.Row[] _) { });
     }
 
     /// Commit or rollback the transaction.
     override Promise!void teardown(bool success) {
+        if (_conn is null) return resolve();  // setup failed
         auto sql = success ? "COMMIT" : "ROLLBACK";
         return _conn.prepare(sql).then((PreparedStatement stmt) {
             return stmt.query().array();
@@ -79,6 +67,11 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
         return _conn.prepare(sql).then((PreparedStatement stmt) {
             return stmt.query().array();
         }).then((PgSqlConnection.Row[] _) { });
+    }
+
+    /// Get original expression for fallback evaluation (not used - real DB evaluates SQL)
+    override ExprBase getOriginalExpr(string alias_) {
+        return null;
     }
 
     /// Get the generated SQL (for debugging)
@@ -587,22 +580,60 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataFetcher {
     }
 }
 
+// ============================================================================
+// PostgreSQL Data Source (Singleton Factory)
+// ============================================================================
+
+/// PostgreSQL data source using ae.net.db.psql.
+/// Holds a connection factory and creates per-request sessions.
+/// Each session acquires its own connection from the factory.
+///
+/// Parameterized by DBConfig for compile-time feature configuration.
+class PostgresDB(DBConfig config = defaultDBConfig) : DataSource {
+    /// Configuration accessible at compile time
+    enum configuration = config;
+
+    private Promise!PgSqlConnection delegate() _connFactory;
+    private SqlOptimizer _sqlOptimizer;
+
+    /// Create with a connection factory. Each session will call the factory
+    /// to acquire its own connection.
+    this(Promise!PgSqlConnection delegate() connFactory) {
+        _connFactory = connFactory;
+        _sqlOptimizer = new SqlOptimizer(postgresDialect());
+    }
+
+    /// Create with a shared connection (wrapped as factory).
+    /// Only safe when requests are processed serially (e.g., single-threaded tests).
+    this(PgSqlConnection conn) {
+        this(() => resolve(conn));
+    }
+
+    /// Return the SqlOptimizer to enable SQL push-down
+    override ExprOptimizer[] requestedOptimizers() {
+        return [_sqlOptimizer];
+    }
+
+    /// Create a fresh per-request session.
+    override DataSession createSession() {
+        return new PostgresSession(_connFactory, _sqlOptimizer);
+    }
+}
+
 /// Create a PostgresDB instance from connection parameters.
-Promise!(PostgresDB!config) createPostgresDB(DBConfig config = defaultDBConfig)(
+/// Each session will create its own connection using these parameters.
+PostgresDB!config createPostgresDB(DBConfig config = defaultDBConfig)(
     string host, ushort port, string database, string user, string password
 ) {
     import dunamis.postgres.connection : connect;
 
-    return connect(host, port, database, user, password).then((conn) {
-        return new PostgresDB!config(conn);
-    });
+    return new PostgresDB!config(() => connect(host, port, database, user, password));
 }
 
 /// Create a PostgresDB instance from a connection string.
-Promise!(PostgresDB!config) createPostgresDBFromUri(DBConfig config = defaultDBConfig)(string uri) {
+/// Each session will create its own connection using this URI.
+PostgresDB!config createPostgresDBFromUri(DBConfig config = defaultDBConfig)(string uri) {
     import dunamis.postgres.connection : connectFromUri;
 
-    return connectFromUri(uri).then((conn) {
-        return new PostgresDB!config(conn);
-    });
+    return new PostgresDB!config(() => connectFromUri(uri));
 }

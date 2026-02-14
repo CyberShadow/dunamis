@@ -8,6 +8,7 @@ import std.typecons : Nullable;
 
 import ae.utils.promise;
 
+import dunamis.core.datasource : DataSource, DataSession;
 import dunamis.core.types;
 import dunamis.core.sorting : OrderBySpec, SortDirection;
 import dunamis.relational.eval_context;
@@ -15,18 +16,18 @@ import dunamis.relational.mutation : InsertInput, UpdateInput;
 import dunamis.relational.query_node;
 
 // ============================================================================
-// Mock Data Fetcher for Testing
+// Mock Session — Holds Data and Executes Queries In-Memory
 // ============================================================================
 
-/// Mock data fetcher for unit tests.
-/// Parameterized by DBConfig for compile-time feature configuration.
-class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
-    /// Configuration accessible at compile time
-    enum configuration = config;
-
+/// In-memory session for unit tests.
+/// Holds table data and executes queries by filtering in-memory JSON rows.
+/// Created by MockDB and shared across all sessions (MockDB is stateless
+/// per-request — all data lives here).
+class MockDBImpl : RelationalSession {
     private {
         JSONValue[string] _tableData;  // table -> array of rows
         string[][string] _primaryKeys;  // table -> list of PK column names (default: ["id"])
+        long[string] _nextId;  // Auto-increment ID per table
     }
 
     /// Set the primary key columns for a table (for composite keys)
@@ -51,12 +52,12 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
 
     /// Execute a QueryNode by filtering in-memory data
     override Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult) {
-        // MockDB!() resolves immediately (sync execution wrapped in promise)
+        // MockDB resolves immediately (sync execution wrapped in promise)
         return resolve(executeQueryNodeSync(node, parentResult));
     }
 
     /// Synchronous implementation of executeQueryNode
-    private QueryResult executeQueryNodeSync(QueryNode node, QueryResult parentResult) {
+    package QueryResult executeQueryNodeSync(QueryNode node, QueryResult parentResult) {
         auto result = new QueryResult();
         AnyRef[] refs;
 
@@ -350,10 +351,6 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
             }
             return cast(int)val.integer;
         } else static if (is(T == bool)) {
-            // Handle different representations of boolean in SQL results:
-            // - JSON boolean (true/false)
-            // - Integer (0/1) - common in SQLite
-            // - String ("true"/"false", "t"/"f", "1"/"0") - common in PostgreSQL
             if (val.type == JSONType.true_ || val.type == JSONType.false_) {
                 return val.boolean;
             } else if (val.type == JSONType.integer) {
@@ -471,8 +468,6 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
     // Mutation methods (INSERT/UPDATE/DELETE)
     // =========================================================================
 
-    private long[string] _nextId;  // Auto-increment ID per table
-
     /// Execute INSERT into in-memory data.
     override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns, bool isAutoIncrement) {
         // Build new row
@@ -557,24 +552,77 @@ class MockDB(DBConfig config = defaultDBConfig) : DataFetcher {
     }
 }
 
+// ============================================================================
+// Mock Data Fetcher for Testing (Factory)
+// ============================================================================
+
+/// Mock data fetcher factory for unit tests.
+/// Holds in-memory table data and creates sessions for query execution.
+/// Parameterized by DBConfig for compile-time feature configuration.
+class MockDB(DBConfig config = defaultDBConfig) : DataSource {
+    /// Configuration accessible at compile time
+    enum configuration = config;
+
+    private MockDBImpl _impl;
+
+    this() {
+        _impl = new MockDBImpl();
+    }
+
+    /// Create a session — returns the shared in-memory implementation.
+    /// MockDB doesn't need per-request isolation since it's for testing.
+    override DataSession createSession() {
+        return _impl;
+    }
+
+    /// Get the session for direct access (convenience for tests)
+    @property MockDBImpl session() { return _impl; }
+
+    // =========================================================================
+    // Public API (delegates to implementation)
+    // =========================================================================
+
+    /// Set the primary key columns for a table (for composite keys)
+    void setPrimaryKey(string table, string[] columns...) {
+        _impl.setPrimaryKey(table, columns);
+    }
+
+    /// Get the primary key columns for a table (defaults to ["id"])
+    string[] getPrimaryKey(string table) {
+        return _impl.getPrimaryKey(table);
+    }
+
+    /// Set data for a table
+    void setTableData(string table, JSONValue[] rows) {
+        _impl.setTableData(table, rows);
+    }
+
+    /// Set data from JSON string
+    void setTableData(string table, string jsonStr) {
+        _impl.setTableData(table, jsonStr);
+    }
+
+    /// Synchronous fetchAllIdsString (convenience for tests)
+    string[] fetchAllIdsStringSync(string table) {
+        return _impl.fetchAllIdsStringSync(table);
+    }
+}
+
 
 // ============================================================================
 // Debug SQL Fetcher - Prints SQL, Delegates to Mock
 // ============================================================================
 
-/// A DataFetcher wrapper that prints the SQL it would execute.
-/// Useful for debugging and understanding what queries are generated.
+/// A DataSource wrapper that captures SQL generation for debugging.
 /// Wraps another fetcher (typically MockDB) for actual data.
 ///
 /// Call printSQL() after query execution to see the combined CTE query.
 ///
 /// This fetcher uses CapturingSqlOptimizer to enable SQL push-down while
-/// still being able to evaluate computed columns. The optimizer captures
-/// original D expressions before replacing them with ProjectComputedExpr,
-/// and this fetcher evaluates those expressions to populate computed columns.
+/// still being able to evaluate computed columns.
 ///
 /// Parameterized by DBConfig for compile-time feature configuration.
-class DebugSqlDB(DBConfig config = defaultDBConfig) : DataFetcher {
+class DebugSqlDB(DBConfig config = defaultDBConfig) : DataSource {
     import std.stdio : writeln;
     import dunamis.relational.sql_optimizer : SqlOptimizer, CapturingSqlOptimizer;
     import dunamis.relational.sql_dialect : SqlDialect;
@@ -584,13 +632,13 @@ class DebugSqlDB(DBConfig config = defaultDBConfig) : DataFetcher {
     /// Configuration accessible at compile time
     enum configuration = config;
 
-    private DataFetcher _delegate;
+    private DataSource _delegate;
     private QueryNode[] _executedNodes;
     private string _cachedSQL;  // Cached to avoid duplicate debug output
     private CapturingSqlOptimizer _sqlOptimizer;
     private SqlDialect _dialect;
 
-    this(DataFetcher delegate_, SqlDialect dialect) {
+    this(DataSource delegate_, SqlDialect dialect) {
         _delegate = delegate_;
         _dialect = dialect;
         _sqlOptimizer = new CapturingSqlOptimizer(dialect);
@@ -606,20 +654,12 @@ class DebugSqlDB(DBConfig config = defaultDBConfig) : DataFetcher {
         return _sqlOptimizer;
     }
 
-    /// Get original expression for fallback evaluation
-    override ExprBase getOriginalExpr(string alias_) {
-        return _sqlOptimizer.getOriginalExpr(alias_);
-    }
-
     /// Get all executed nodes (for generating combined SQL)
     @property QueryNode[] executedNodes() {
         return _executedNodes;
     }
 
     /// Get the combined SQL for all executed nodes as a string.
-    /// Caches the result to avoid regenerating (and re-printing in debug mode).
-    /// Includes computed columns from SQL push-down optimization.
-    /// Requires a toSQL function to be provided at construction time.
     string getSQL() {
         if (_cachedSQL.length == 0 && _executedNodes.length > 0) {
             import dunamis.relational.sql : toSQL;
@@ -629,12 +669,8 @@ class DebugSqlDB(DBConfig config = defaultDBConfig) : DataFetcher {
     }
 
     /// Print the combined SQL for all executed nodes.
-    /// Note: When running with -debug=sql, toSQL() already prints the SQL,
-    /// so this only prints if SQL hasn't been generated yet.
     void printSQL() {
         debug(sql) {
-            // In debug mode, toSQL() prints automatically.
-            // Just trigger generation if not already done.
             getSQL();
         } else {
             auto sql = getSQL();
@@ -651,34 +687,61 @@ class DebugSqlDB(DBConfig config = defaultDBConfig) : DataFetcher {
         _sqlOptimizer = new CapturingSqlOptimizer(_dialect);
     }
 
-    override Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult) {
-        _executedNodes ~= node;
-        return _delegate.executeQueryNode(node, parentResult);
+    /// Create a session that wraps the delegate's session.
+    override DataSession createSession() {
+        auto innerSession = cast(RelationalSession) _delegate.createSession();
+        return new DebugSqlSession(innerSession, &_executedNodes, _sqlOptimizer);
+    }
+}
+
+/// Per-request session for DebugSqlDB.
+/// Wraps the delegate's session and intercepts executeQueryNode to collect nodes.
+private class DebugSqlSession : RelationalSession {
+    import dunamis.core.expr : ExprBase;
+    import dunamis.relational.sql_optimizer : CapturingSqlOptimizer;
+
+    private RelationalSession _inner;
+    private QueryNode[]* _executedNodes;  // Pointer to factory's list
+    private CapturingSqlOptimizer _sqlOptimizer;
+
+    this(RelationalSession inner, QueryNode[]* executedNodes, CapturingSqlOptimizer sqlOptimizer) {
+        _inner = inner;
+        _executedNodes = executedNodes;
+        _sqlOptimizer = sqlOptimizer;
     }
 
-    // Delegate all other methods to wrapped fetcher
+    override ExprBase getOriginalExpr(string alias_) {
+        return _sqlOptimizer.getOriginalExpr(alias_);
+    }
+
+    override Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult) {
+        *_executedNodes ~= node;
+        return _inner.executeQueryNode(node, parentResult);
+    }
+
+    // Delegate all other methods to wrapped session
     override Promise!(string[]) fetchColumnString(string table, string column, AnyRef[] refs) {
-        return _delegate.fetchColumnString(table, column, refs);
+        return _inner.fetchColumnString(table, column, refs);
     }
 
     override Promise!(long[]) fetchColumnLong(string table, string column, AnyRef[] refs) {
-        return _delegate.fetchColumnLong(table, column, refs);
+        return _inner.fetchColumnLong(table, column, refs);
     }
 
     override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns) {
-        return _delegate.fetchAllIdsString(table, pkColumns);
+        return _inner.fetchAllIdsString(table, pkColumns);
     }
 
     override Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs) {
-        return _delegate.fetchChildren(childTable, childType, fk, parentRefs);
+        return _inner.fetchChildren(childTable, childType, fk, parentRefs);
     }
 
     override Promise!(AnyRef[]) fetchBelongsTo(string childTable, string fk, string parentType, AnyRef[] childRefs) {
-        return _delegate.fetchBelongsTo(childTable, fk, parentType, childRefs);
+        return _inner.fetchBelongsTo(childTable, fk, parentType, childRefs);
     }
 
     override Promise!(JSONValue[]) fetchColumnJson(string table, string column, AnyRef[] refs) {
-        return _delegate.fetchColumnJson(table, column, refs);
+        return _inner.fetchColumnJson(table, column, refs);
     }
 }
 
@@ -690,34 +753,34 @@ class DebugSqlDB(DBConfig config = defaultDBConfig) : DataFetcher {
 unittest {
     import ae.utils.promise.await : awaitSync;
 
-    // Test MockDB!()
-    auto fetcher = new MockDB!()();
-    fetcher.setTableData("users", `[
+    // Test MockDB
+    auto db = new MockDB!()();
+    db.setTableData("users", `[
         {"id": 1, "first_name": "Alice"},
         {"id": 2, "first_name": "Bob"}
     ]`);
 
     auto refs = [AnyRef("User:1"), AnyRef("User:2")];
-    auto names = awaitSync(fetcher.fetchColumn!string("users", "first_name", refs));
+    auto names = awaitSync(db.session.fetchColumn!string("users", "first_name", refs));
     assert(names == ["Alice", "Bob"]);
 
-    auto allIds = awaitSync(fetcher.fetchAllIdsString("users", ["id"]));
+    auto allIds = awaitSync(db.session.fetchAllIdsString("users", ["id"]));
     assert(allIds == ["1", "2"]);
 }
 
 unittest {
     import ae.utils.promise.await : awaitSync;
 
-    // Test MockDB!() hasMany
-    auto fetcher = new MockDB!()();
-    fetcher.setTableData("posts", `[
+    // Test MockDB hasMany
+    auto db = new MockDB!()();
+    db.setTableData("posts", `[
         {"id": 1, "author_id": 1, "title": "Hello"},
         {"id": 2, "author_id": 1, "title": "World"},
         {"id": 3, "author_id": 2, "title": "D Lang"}
     ]`);
 
     auto parentRefs = [AnyRef("User:1"), AnyRef("User:2")];
-    auto children = awaitSync(fetcher.fetchChildren("posts", "Post", "author_id", parentRefs));
+    auto children = awaitSync(db.session.fetchChildren("posts", "Post", "author_id", parentRefs));
     assert(children.length == 2);
     assert(children[0].length == 2);  // User:1 has 2 posts
     assert(children[1].length == 1);  // User:2 has 1 post
@@ -726,15 +789,15 @@ unittest {
 unittest {
     import ae.utils.promise.await : awaitSync;
 
-    // Test MockDB!() belongsTo
-    auto fetcher = new MockDB!()();
-    fetcher.setTableData("posts", `[
+    // Test MockDB belongsTo
+    auto db = new MockDB!()();
+    db.setTableData("posts", `[
         {"id": 1, "author_id": 10, "title": "Hello"},
         {"id": 2, "author_id": 20, "title": "World"}
     ]`);
 
     auto childRefs = [AnyRef("Post:1"), AnyRef("Post:2")];
-    auto parents = awaitSync(fetcher.fetchBelongsTo("posts", "author_id", "User", childRefs));
+    auto parents = awaitSync(db.session.fetchBelongsTo("posts", "author_id", "User", childRefs));
     assert(parents == [AnyRef("User:10"), AnyRef("User:20")]);
 }
 
@@ -742,8 +805,8 @@ unittest {
     import ae.utils.promise.await : awaitSync;
 
     // Test string (UUID-style) primary keys
-    auto fetcher = new MockDB!()();
-    fetcher.setTableData("items", `[
+    auto db = new MockDB!()();
+    db.setTableData("items", `[
         {"id": "abc-123", "name": "First"},
         {"id": "def-456", "name": "Second"},
         {"id": "ghi-789", "name": "Third"}
@@ -751,11 +814,11 @@ unittest {
 
     // Fetch by string IDs
     auto refs = [AnyRef("Item:abc-123"), AnyRef("Item:def-456")];
-    auto names = awaitSync(fetcher.fetchColumn!string("items", "name", refs));
+    auto names = awaitSync(db.session.fetchColumn!string("items", "name", refs));
     assert(names == ["First", "Second"]);
 
     // Fetch all IDs as strings
-    auto allIds = fetcher.fetchAllIdsStringSync("items");
+    auto allIds = db.fetchAllIdsStringSync("items");
     assert(allIds == ["abc-123", "def-456", "ghi-789"]);
 }
 
@@ -763,12 +826,12 @@ unittest {
     import ae.utils.promise.await : awaitSync;
 
     // Test string FK references
-    auto fetcher = new MockDB!()();
-    fetcher.setTableData("categories", `[
+    auto db = new MockDB!()();
+    db.setTableData("categories", `[
         {"id": "cat-a", "name": "Category A"},
         {"id": "cat-b", "name": "Category B"}
     ]`);
-    fetcher.setTableData("products", `[
+    db.setTableData("products", `[
         {"id": "prod-1", "category_id": "cat-a", "name": "Product 1"},
         {"id": "prod-2", "category_id": "cat-b", "name": "Product 2"},
         {"id": "prod-3", "category_id": "cat-a", "name": "Product 3"}
@@ -776,12 +839,12 @@ unittest {
 
     // Fetch belongsTo with string FKs
     auto childRefs = [AnyRef("Product:prod-1"), AnyRef("Product:prod-2")];
-    auto parents = awaitSync(fetcher.fetchBelongsTo("products", "category_id", "Category", childRefs));
+    auto parents = awaitSync(db.session.fetchBelongsTo("products", "category_id", "Category", childRefs));
     assert(parents == [AnyRef("Category:cat-a"), AnyRef("Category:cat-b")]);
 
     // Fetch hasMany with string FKs
     auto parentRefs = [AnyRef("Category:cat-a"), AnyRef("Category:cat-b")];
-    auto children = awaitSync(fetcher.fetchChildren("products", "Product", "category_id", parentRefs));
+    auto children = awaitSync(db.session.fetchChildren("products", "Product", "category_id", parentRefs));
     assert(children.length == 2);
     assert(children[0].length == 2);  // cat-a has 2 products
     assert(children[1].length == 1);  // cat-b has 1 product
@@ -792,9 +855,9 @@ unittest {
     import dunamis.core.types : encodeCompositeKey, decodeCompositeKey;
 
     // Test composite primary keys (e.g., OrderItem with order_id + product_id)
-    auto fetcher = new MockDB!()();
-    fetcher.setPrimaryKey("order_items", "order_id", "product_id");
-    fetcher.setTableData("order_items", `[
+    auto db = new MockDB!()();
+    db.setPrimaryKey("order_items", "order_id", "product_id");
+    db.setTableData("order_items", `[
         {"order_id": 1, "product_id": 100, "quantity": 2, "price": 10.00},
         {"order_id": 1, "product_id": 101, "quantity": 1, "price": 25.00},
         {"order_id": 2, "product_id": 100, "quantity": 3, "price": 10.00},
@@ -807,10 +870,10 @@ unittest {
     auto ref3 = AnyRef("OrderItem:2,100");  // order 2, product 100
 
     // Verify key building
-    assert(fetcher.fetchAllIdsStringSync("order_items") == ["1,100", "1,101", "2,100", "2,102"]);
+    assert(db.fetchAllIdsStringSync("order_items") == ["1,100", "1,101", "2,100", "2,102"]);
 
     // Fetch column values by composite key
-    auto quantities = awaitSync(fetcher.fetchColumn!long("order_items", "quantity", [ref1, ref2, ref3]));
+    auto quantities = awaitSync(db.session.fetchColumn!long("order_items", "quantity", [ref1, ref2, ref3]));
     assert(quantities == [2, 1, 3]);
 }
 
@@ -819,9 +882,9 @@ unittest {
     import dunamis.core.types : encodeCompositeKey;
 
     // Test composite keys with special characters (requiring quoting)
-    auto fetcher = new MockDB!()();
-    fetcher.setPrimaryKey("translations", "locale", "key");
-    fetcher.setTableData("translations", `[
+    auto db = new MockDB!()();
+    db.setPrimaryKey("translations", "locale", "key");
+    db.setTableData("translations", `[
         {"locale": "en-US", "key": "hello", "value": "Hello"},
         {"locale": "en-US", "key": "hello,world", "value": "Hello, World"},
         {"locale": "de-DE", "key": "hello", "value": "Hallo"}
@@ -834,6 +897,6 @@ unittest {
     auto ref1 = AnyRef("Translation:en-US,hello");
     auto ref2 = AnyRef("Translation:" ~ encodedKey);  // en-US,"hello,world"
 
-    auto values = awaitSync(fetcher.fetchColumn!string("translations", "value", [ref1, ref2]));
+    auto values = awaitSync(db.session.fetchColumn!string("translations", "value", [ref1, ref2]));
     assert(values == ["Hello", "Hello, World"]);
 }

@@ -22,7 +22,7 @@ import dunamis.relational.schema : BelongsToInfo, PrimaryKey;
 // ============================================================================
 
 /// Expression that prefetches data for a QueryNode.
-/// When evaluated, executes the query and stores results in RelationalEvalContext.
+/// When evaluated, executes the query and stores results in the RelationalSession.
 ///
 /// Projection expressions depend on this to ensure data is loaded before reading.
 /// Uses EvalContext's expression memoization to prevent duplicate fetches when
@@ -53,12 +53,10 @@ class PrefetchExpr : Expr!(AnyRef[]) {
     override Promise!(AnyRef[][]) eval(EvalContext ctx) {
         import dunamis.relational.query_node : FilterType;
 
-        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-
-        // Set up fetcher from QueryNode if not already set (for mutation-returned entities)
-        if (relCtx.fetcher is null && _node.dataFetcher !is null) {
-            relCtx.fetcher = _node.dataFetcher;
-        }
+        // Get session from QueryNode's data source
+        auto ds = _node.dataSource;
+        if (ds is null) return resolve([cast(AnyRef[])[]]);
+        auto session = cast(RelationalSession) ctx.getSession(ds);
 
         // For mutation-returned entities: if this is a root node with no filter,
         // get the refs from the MapExpr's stored values and use them as the filter
@@ -70,8 +68,8 @@ class PrefetchExpr : Expr!(AnyRef[]) {
         }
 
         // Fast-path: data already stored from a previous evaluation
-        if (relCtx.getQueryResult(_node.id) !is null) {
-            return resolve([relCtx.getQueryResult(_node.id).allRefs()]);
+        if (session.getQueryResult(_node.id) !is null) {
+            return resolve([session.getQueryResult(_node.id).allRefs()]);
         }
 
         // Note: Expression memoization is handled by evalAs(), so we don't need
@@ -92,13 +90,13 @@ class PrefetchExpr : Expr!(AnyRef[]) {
             // Get parent result for child nodes
             QueryResult parentResult = null;
             if (node.parent !is null) {
-                parentResult = relCtx.getQueryResult(node.parent.id);
+                parentResult = session.getQueryResult(node.parent.id);
             }
 
-            // Execute the query via DataFetcher (async)
-            return relCtx.fetcher.executeQueryNode(node, parentResult);
+            // Execute the query via session (async)
+            return session.executeQueryNode(node, parentResult);
         }).then((QueryResult result) {
-            relCtx.storeQueryResult(node.id, result);
+            session.storeQueryResult(node.id, result);
             return [result.allRefs()];
         });
     }
@@ -195,13 +193,14 @@ class ProjectColumnExpr(T) : Expr!T, ProjectColumnInfo {
         auto queryNodeId = _queryNodeId;
         auto column = _column;
         auto input = _input;
+        auto prefetch = cast(PrefetchExpr) _prefetch;
 
         // Ensure data is prefetched, then evaluate input refs, then read
         return evalAs!(AnyRef[])(_prefetch, ctx).then((_) {
             return evalAs!AnyRef(input, ctx);
         }).then((AnyRef[] refs) {
-            auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-            return relCtx.getColumnValues!T(queryNodeId, column, refs);
+            auto session = cast(RelationalSession) ctx.getSession(prefetch.node.dataSource);
+            return session.getColumnValues!T(queryNodeId, column, refs);
         });
     }
 
@@ -249,13 +248,14 @@ class ProjectJoinedColumnExpr(T) : Expr!T, ProjectJoinedColumnInfo {
         auto joinAlias = _joinAlias;
         auto column = _column;
         auto input = _input;
+        auto prefetch = cast(PrefetchExpr) _prefetch;
 
         // Ensure data is prefetched, then evaluate input refs, then read
         return evalAs!(AnyRef[])(_prefetch, ctx).then((_) {
             return evalAs!AnyRef(input, ctx);
         }).then((AnyRef[] refs) {
-            auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-            return relCtx.getJoinedColumnValues!T(queryNodeId, joinAlias, column, refs);
+            auto session = cast(RelationalSession) ctx.getSession(prefetch.node.dataSource);
+            return session.getJoinedColumnValues!T(queryNodeId, joinAlias, column, refs);
         });
     }
 
@@ -289,11 +289,12 @@ class ProjectRefsExpr : Expr!(AnyRef[]) {
 
     override Promise!(AnyRef[][]) eval(EvalContext ctx) {
         auto queryNodeId = _queryNodeId;
+        auto prefetch = cast(PrefetchExpr) _prefetch;
 
         // Ensure data is prefetched, then read refs
         return evalAs!(AnyRef[])(_prefetch, ctx).then((_) {
-            auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-            auto result = relCtx.getQueryResult(queryNodeId);
+            auto session = cast(RelationalSession) ctx.getSession(prefetch.node.dataSource);
+            auto result = session.getQueryResult(queryNodeId);
             if (result is null) {
                 return [cast(AnyRef[])[]];  // Single empty result for the single root parent
             }
@@ -336,13 +337,14 @@ class ProjectChildRefsExpr : Expr!(AnyRef[]) {
     override Promise!(AnyRef[][]) eval(EvalContext ctx) {
         auto queryNodeId = _queryNodeId;
         auto parentInput = _parentInput;
+        auto prefetch = cast(PrefetchExpr) _prefetch;
 
         // Ensure data is prefetched, then get parent refs, then lookup children
         return evalAs!(AnyRef[])(_prefetch, ctx).then((_) {
             return evalAs!AnyRef(parentInput, ctx);
         }).then((AnyRef[] parentRefs) {
-            auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-            auto result = relCtx.getQueryResult(queryNodeId);
+            auto session = cast(RelationalSession) ctx.getSession(prefetch.node.dataSource);
+            auto result = session.getQueryResult(queryNodeId);
             if (result is null) {
                 return parentRefs.map!(_ => cast(AnyRef[])[]).array;
             }
@@ -393,14 +395,15 @@ class ProjectBelongsToExpr : Expr!AnyRef {
         auto fkColumn = _fkColumn;
         auto parentTypeName = _parentTypeName;
         auto input = _input;
+        auto prefetch = cast(PrefetchExpr) _prefetch;
 
         // Ensure data is prefetched, then evaluate input refs, then read FK values
         return evalAs!(AnyRef[])(_prefetch, ctx).then((_) {
             return evalAs!AnyRef(input, ctx);
         }).then((AnyRef[] refs) {
-            auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+            auto session = cast(RelationalSession) ctx.getSession(prefetch.node.dataSource);
             // Read FK as string to support non-numeric IDs
-            auto fkValues = relCtx.getColumnValues!string(queryNodeId, fkColumn, refs);
+            auto fkValues = session.getColumnValues!string(queryNodeId, fkColumn, refs);
             return fkValues.map!(fk => fk.length == 0 ? AnyRef.init : makeAnyRef(parentTypeName, fk)).array;
         });
     }
@@ -485,9 +488,11 @@ unittest {
         @PrimaryKey long id;
     }
 
+    _testDb = new MockDB!();
+
     // Test ProjectColumnExpr
     auto ctx = new EvalContext();
-    auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+    auto session = cast(RelationalSession) ctx.getSession(_testDb);
 
     // Set up mock QueryResult (pre-stored, so PrefetchExpr will just return)
     auto result = new QueryResult();
@@ -496,10 +501,11 @@ unittest {
         parseJSON(`{"id": 2, "first_name": "Bob"}`)
     ];
     result.loadFromRows(rows, "User", ["id"]);
-    relCtx.storeQueryResult(QueryNodeId(0), result);
+    session.storeQueryResult(QueryNodeId(0), result);
 
     // Create mock QueryNode and PrefetchExpr
     auto node = new QueryNode(QueryNodeId(0), "User", "users", ["id"]);
+    node.dataSource = _testDb;
     auto prefetch = new PrefetchExpr(node);
 
     // Create a mock input that returns the refs via EntityToAnyRefExpr
@@ -517,10 +523,13 @@ unittest {
 
 unittest {
     import std.json : parseJSON;
+    import dunamis.relational.mock : MockDB;
+    static MockDB!() _testRefsDb;
 
     // Test ProjectRefsExpr
+    _testRefsDb = new MockDB!();
     auto ctx = new EvalContext();
-    auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+    auto session = cast(RelationalSession) ctx.getSession(_testRefsDb);
 
     auto result = new QueryResult();
     auto rows = [
@@ -529,10 +538,11 @@ unittest {
         parseJSON(`{"id": 3}`)
     ];
     result.loadFromRows(rows, "User", ["id"]);
-    relCtx.storeQueryResult(QueryNodeId(0), result);
+    session.storeQueryResult(QueryNodeId(0), result);
 
     // Create mock QueryNode and PrefetchExpr
     auto node = new QueryNode(QueryNodeId(0), "User", "users", ["id"]);
+    node.dataSource = _testRefsDb;
     auto prefetch = new PrefetchExpr(node);
 
     auto proj = new ProjectRefsExpr(QueryNodeId(0), prefetch);
@@ -558,9 +568,11 @@ unittest {
         @PrimaryKey long id;
     }
 
+    _testDb2 = new MockDB!();
+
     // Test ProjectBelongsToExpr
     auto ctx = new EvalContext();
-    auto relCtx = ctx.getSourceContext!RelationalEvalContext();
+    auto session = cast(RelationalSession) ctx.getSession(_testDb2);
 
     auto result = new QueryResult();
     auto rows = [
@@ -568,10 +580,11 @@ unittest {
         parseJSON(`{"id": 2, "author_id": 20}`)
     ];
     result.loadFromRows(rows, "Post", ["id"]);
-    relCtx.storeQueryResult(QueryNodeId(0), result);
+    session.storeQueryResult(QueryNodeId(0), result);
 
     // Create mock QueryNode and PrefetchExpr
     auto node = new QueryNode(QueryNodeId(0), "Post", "posts", ["id"]);
+    node.dataSource = _testDb2;
     auto prefetch = new PrefetchExpr(node);
 
     // Create a mock input that returns the refs via EntityToAnyRefExpr

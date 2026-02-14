@@ -10,6 +10,7 @@ import ae.utils.promise;
 import dunamis.core.types;
 import dunamis.core.expr;
 import dunamis.core.eval;
+import dunamis.core.datasource : DataSource;
 import dunamis.core.optimize : OptimizeContext;
 import dunamis.relational.eval_context;
 import dunamis.relational.schema : EntityID, hasAutoIncrement;
@@ -92,6 +93,11 @@ class InsertExpr(Entity) : Expr!Entity {
         // No dependencies
     }
 
+    override DataSource[] dataSources() {
+        auto db = EntityID!Entity.db;
+        return db !is null ? [db] : [];
+    }
+
     override Expr!Entity optimize(OptimizeContext ctx) {
         return this;  // Mutations are not optimizable
     }
@@ -102,23 +108,19 @@ class InsertExpr(Entity) : Expr!Entity {
         if (auto cached = ctx.getCachedEval!Entity(this))
             return cached;
 
-        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-
-        // Ensure fetcher is available
-        auto fetcher = EntityID!Entity.db;
-        if (fetcher is null) {
+        // Ensure session is available
+        auto db = EntityID!Entity.db;
+        if (db is null) {
             return resolve(cast(Entity[])[]);
         }
 
-        if (relCtx.fetcher is null) {
-            relCtx.fetcher = fetcher;
-        }
+        auto session = cast(RelationalSession) ctx.getSession(db);
 
-        // Execute INSERT via DataFetcher
-        auto promise = relCtx.fetcher.executeInsert(_table, _typeName, _input, _pkColumns, _isAutoIncrement)
+        // Execute INSERT via session
+        auto promise = session.executeInsert(_table, _typeName, _input, _pkColumns, _isAutoIncrement)
             .then((QueryResult result) {
                 // Store result for field access
-                relCtx.storeMutationResult(_typeName, result);
+                session.storeMutationResult(_typeName, result);
 
                 // Convert refs to entities
                 auto refs = result.allRefs();
@@ -190,24 +192,25 @@ class UpdateExpr(Entity) : Expr!(Entity[]) {
         // No dependencies
     }
 
+    override DataSource[] dataSources() {
+        auto db = EntityID!Entity.db;
+        return db !is null ? [db] : [];
+    }
+
     override Expr!(Entity[]) optimize(OptimizeContext ctx) {
         return this;
     }
 
     override Promise!(Entity[][]) eval(EvalContext ctx) {
-        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-
-        auto fetcher = EntityID!Entity.db;
-        if (fetcher is null) {
+        auto db = EntityID!Entity.db;
+        if (db is null) {
             return resolve([cast(Entity[])[]]);
         }
 
-        if (relCtx.fetcher is null) {
-            relCtx.fetcher = fetcher;
-        }
+        auto session = cast(RelationalSession) ctx.getSession(db);
 
-        // Execute UPDATE via DataFetcher
-        return relCtx.fetcher.executeUpdate(_table, _typeName, _input, _pkColumns)
+        // Execute UPDATE via session
+        return session.executeUpdate(_table, _typeName, _input, _pkColumns)
             .then((QueryResult result) {
                 auto refs = result.allRefs();
                 import dunamis.relational.schema : makeEntityFromRef;
@@ -254,24 +257,25 @@ class DeleteExpr(Entity) : Expr!bool {
         // No dependencies
     }
 
+    override DataSource[] dataSources() {
+        auto db = EntityID!Entity.db;
+        return db !is null ? [db] : [];
+    }
+
     override Expr!bool optimize(OptimizeContext ctx) {
         return this;
     }
 
     override Promise!(bool[]) eval(EvalContext ctx) {
-        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-
-        auto fetcher = EntityID!Entity.db;
-        if (fetcher is null) {
+        auto db = EntityID!Entity.db;
+        if (db is null) {
             return resolve([false]);
         }
 
-        if (relCtx.fetcher is null) {
-            relCtx.fetcher = fetcher;
-        }
+        auto session = cast(RelationalSession) ctx.getSession(db);
 
-        // Execute DELETE via DataFetcher
-        return relCtx.fetcher.executeDelete(_table, _ids, _pkColumns)
+        // Execute DELETE via session
+        return session.executeDelete(_table, _ids, _pkColumns)
             .then((int count) {
                 return [count > 0];
             });

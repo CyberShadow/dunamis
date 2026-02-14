@@ -190,7 +190,7 @@ mixin template SourceContextRegistry() {
 /// Untyped reference for internal storage where entity type doesn't matter.
 /// Format: "TypeName:localId" (e.g., "User:123", "Order:a1b2-c3d4")
 ///
-/// Used in EvalContext, DataFetcher internals, and anywhere entity type
+/// Used in EvalContext, DataSource internals, and anywhere entity type
 /// doesn't need to be known at compile time.
 struct AnyRef {
     string id;

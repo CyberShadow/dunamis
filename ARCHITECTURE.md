@@ -24,7 +24,7 @@
 
 The three middle-tier packages (graphql, schema, relational) depend only on core and are completely isolated from each other. DB-specific packages (postgres, sqlite, mysql) depend on relational for shared SQL generation and query planning.
 
-The Executor is data-source agnostic. Data sources travel with expressions — root expressions (like `getByIds!User`) carry their DataFetcher. The executor walks the expression tree to collect optimizers needed for each data source.
+The Executor is data-source agnostic. Data sources travel with expressions — root expressions (like `getByIds!User`) carry their DataSource. The executor walks the expression tree to collect optimizers needed for each data source.
 
 The schema layer defines a typed API that can be consumed by any presentation format. GraphQL is one such format; business logic within the application can also query the schema directly using D's type system.
 

@@ -47,7 +47,7 @@ Expr!ResultType belongsTo(Parent, ResultType = Parent, string fk, Child)(Expr!Ch
 
 /// Populate plain field values into entities by fetching from database.
 /// Used by GetByIdsExpr and GetAllExpr in naive mode to pre-populate fields.
-private Promise!(Entity[]) populatePlainFields(Entity)(DataFetcher fetcher, Entity[] entities) {
+private Promise!(Entity[]) populatePlainFields(Entity)(RelationalSession session, Entity[] entities) {
     import ae.utils.promise : all;
     import dunamis.core.types : AnyRef;
 
@@ -69,7 +69,7 @@ private Promise!(Entity[]) populatePlainFields(Entity)(DataFetcher fetcher, Enti
             enum columnName = getPlainFieldColumnName!(Entity, fieldName);
             alias FieldType = typeof(__traits(getMember, Entity.init, fieldName));
 
-            fetches ~= fetcher.fetchColumn!FieldType(table, columnName, refs)
+            fetches ~= session.fetchColumn!FieldType(table, columnName, refs)
                 .then((FieldType[] values) {
                     foreach (i, ref e; entities) {
                         __traits(getMember, e, fieldName) = values[i];
@@ -132,9 +132,9 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
         auto node = relCtx.getOrCreateNode(mapExpr, EntityID!Entity.typeName, EntityID!Entity.table,
                                            getPkColumns!Entity);
 
-        // Set the data fetcher on the node (for mutation-returned entities that bypass GetByIdsExpr)
-        if (node.dataFetcher is null && EntityID!Entity.db !is null) {
-            node.dataFetcher = EntityID!Entity.db;
+        // Set the data source on the node (for mutation-returned entities that bypass GetByIdsExpr)
+        if (node.dataSource is null && EntityID!Entity.db !is null) {
+            node.dataSource = EntityID!Entity.db;
         }
 
         // Configure the node based on collection type (if not already configured)
@@ -288,10 +288,11 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
         auto column = _column;
         auto input = _input;
 
-        // Ensure fetcher is set up from Entity's data source
-        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-        if (relCtx.fetcher is null && EntityID!Entity.db !is null) {
-            relCtx.fetcher = EntityID!Entity.db;
+        // Get session from Entity's data source
+        auto db = EntityID!Entity.db;
+        RelationalSession session;
+        if (db !is null) {
+            session = cast(RelationalSession) ctx.getSession(db);
         }
 
         // Get the entity refs from the input chain, then fetch column
@@ -305,13 +306,13 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
             }
 
             // First, check for mutation results (mutations store their results here)
-            if (relCtx.hasMutationResult(EntityID!Entity.typeName)) {
-                return resolve(relCtx.getMutationColumnValues!T(EntityID!Entity.typeName, column, entityRefs));
+            if (session !is null && session.hasMutationResult(EntityID!Entity.typeName)) {
+                return resolve(session.getMutationColumnValues!T(EntityID!Entity.typeName, column, entityRefs));
             }
 
             // Otherwise, fetch from database (async)
-            if (relCtx.fetcher !is null) {
-                return relCtx.fetcher.fetchColumn!T(EntityID!Entity.table, column, entityRefs);
+            if (session !is null) {
+                return session.fetchColumn!T(EntityID!Entity.table, column, entityRefs);
             }
 
             // Fallback to empty results
@@ -351,32 +352,27 @@ class GetByIdsExpr(Entity) : Expr!(Entity[]), RootExprInfo {
     }
 
     override ExprOptimizer[] requestedOptimizers() {
-        auto fetcher = EntityID!Entity.db;
-        if (fetcher !is null) {
-            return fetcher.requestedOptimizers();
+        auto db = EntityID!Entity.db;
+        if (db !is null) {
+            return db.requestedOptimizers();
         }
         return [];
     }
 
     override DataSource[] dataSources() {
-        auto fetcher = EntityID!Entity.db;
-        return fetcher !is null ? [fetcher] : [];
+        auto db = EntityID!Entity.db;
+        return db !is null ? [db] : [];
     }
 
     override Promise!(Entity[][]) eval(EvalContext ctx) {
-        auto fetcher = EntityID!Entity.db;
-        if (fetcher !is null) {
-            auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-            if (relCtx.fetcher is null) {
-                relCtx.fetcher = fetcher;
-            }
-        }
+        auto db = EntityID!Entity.db;
 
         // Populate eager fields if any exist
         enum plainFields = getPlainFieldNames!Entity;
         static if (plainFields.length > 0) {
-            if (fetcher !is null && _entities.length > 0) {
-                return populatePlainFields!Entity(fetcher, _entities)
+            if (db !is null && _entities.length > 0) {
+                auto session = cast(RelationalSession) ctx.getSession(db);
+                return populatePlainFields!Entity(session, _entities)
                     .then((Entity[] populated) => [populated]);
             }
         }
@@ -391,7 +387,7 @@ class GetByIdsExpr(Entity) : Expr!(Entity[]), RootExprInfo {
     AnyRef[] filterRefs() { return _entities.map!(e => entityToRef(e)).array; }
     string entityTypeName() { return EntityID!Entity.typeName; }
     string entityTable() { return EntityID!Entity.table; }
-    DataFetcher dataFetcher() { return EntityID!Entity.db; }
+    DataSource dataSource() { return EntityID!Entity.db; }
 }
 
 /// Factory function to create GetByIdsExpr (works with any ID type)
@@ -438,21 +434,21 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
     }
 
     override ExprOptimizer[] requestedOptimizers() {
-        auto fetcher = EntityID!Entity.db;
-        if (fetcher !is null) {
-            return fetcher.requestedOptimizers();
+        auto db = EntityID!Entity.db;
+        if (db !is null) {
+            return db.requestedOptimizers();
         }
         return [];
     }
 
     override DataSource[] dataSources() {
-        auto fetcher = EntityID!Entity.db;
-        return fetcher !is null ? [fetcher] : [];
+        auto db = EntityID!Entity.db;
+        return db !is null ? [db] : [];
     }
 
     override Expr!(Entity[]) optimize(OptimizeContext ctx) {
-        auto fetcher = EntityID!Entity.db;
-        if (fetcher is null) return this;
+        auto db = EntityID!Entity.db;
+        if (db is null) return this;
 
         auto relCtx = ctx.getSourceContext!RelationalOptimizeContext();
 
@@ -469,14 +465,10 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
     }
 
     override Promise!(Entity[][]) eval(EvalContext ctx) {
-        auto fetcher = EntityID!Entity.db;
+        auto db = EntityID!Entity.db;
+        if (db is null) return resolve([cast(Entity[])[]]);
 
-        if (fetcher !is null) {
-            auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-            if (relCtx.fetcher is null) {
-                relCtx.fetcher = fetcher;
-            }
-        }
+        auto session = cast(RelationalSession) ctx.getSession(db);
 
         // Optimized path: use PrefetchExpr to fetch data, then read refs
         if (_prefetch !is null) {
@@ -488,9 +480,8 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
                 // Column data is fetched via CTE, but plain fields need struct population.
                 enum plainFields = getPlainFieldNames!Entity;
                 static if (plainFields.length > 0) {
-                    auto fetcher = EntityID!Entity.db;
-                    if (fetcher !is null && entities.length > 0) {
-                        return populatePlainFields!Entity(fetcher, entities)
+                    if (entities.length > 0) {
+                        return populatePlainFields!Entity(session, entities)
                             .then((Entity[] populated) => [populated]);
                     }
                 }
@@ -500,14 +491,13 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
         }
 
         // Fallback: naive path using fetchAllIdsString
-        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-        return relCtx.fetchAllIdsString(EntityID!Entity.table, EntityID!Entity.typeName, getPkColumns!Entity).then((AnyRef[] refs) {
+        return session.fetchAllIdsAsRefs(EntityID!Entity.table, EntityID!Entity.typeName, getPkColumns!Entity).then((AnyRef[] refs) {
             auto entities = refs.map!(r => makeEntityFromRef!Entity(r)).array;
 
             enum plainFields = getPlainFieldNames!Entity;
             static if (plainFields.length > 0) {
-                if (fetcher !is null && entities.length > 0) {
-                    return populatePlainFields!Entity(fetcher, entities)
+                if (entities.length > 0) {
+                    return populatePlainFields!Entity(session, entities)
                         .then((Entity[] populated) => [populated]);
                 }
             }
@@ -521,7 +511,7 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
     AnyRef[] filterRefs() { return []; }
     string entityTypeName() { return EntityID!Entity.typeName; }
     string entityTable() { return EntityID!Entity.table; }
-    DataFetcher dataFetcher() { return EntityID!Entity.db; }
+    DataSource dataSource() { return EntityID!Entity.db; }
 
     // MapExprInfo implementation (for QueryNode creation)
     Object collection() { return this; }
@@ -574,9 +564,10 @@ class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Child[]), HasManyInfo 
     override Promise!(Child[][]) eval(EvalContext ctx) {
         auto input = _input;
 
-        auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-        if (relCtx.fetcher is null && EntityID!Child.db !is null) {
-            relCtx.fetcher = EntityID!Child.db;
+        auto db = EntityID!Child.db;
+        RelationalSession session;
+        if (db !is null) {
+            session = cast(RelationalSession) ctx.getSession(db);
         }
 
         static if (!is(Parent == void)) {
@@ -593,8 +584,8 @@ class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Child[]), HasManyInfo 
                     parentRefs.map!(r => r.toString()).array, fk, EntityID!Child.table);
                 stdout.flush();
             }
-            if (relCtx.fetcher !is null) {
-                return relCtx.fetcher.fetchChildren(EntityID!Child.table, EntityID!Child.typeName, fk, parentRefs)
+            if (session !is null) {
+                return session.fetchChildren(EntityID!Child.table, EntityID!Child.typeName, fk, parentRefs)
                     .then((AnyRef[][] children) {
                         debug(filter) {
                             import std.stdio : writefln, stdout;
@@ -709,9 +700,10 @@ class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultTyp
         auto input = _input;
 
         static if (!is(Child == void)) {
-            auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-            if (relCtx.fetcher is null && EntityID!Child.db !is null) {
-                relCtx.fetcher = EntityID!Child.db;
+            auto db = EntityID!Child.db;
+            RelationalSession session;
+            if (db !is null) {
+                session = cast(RelationalSession) ctx.getSession(db);
             }
         }
 
@@ -726,9 +718,8 @@ class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultTyp
             static if (is(Child == void)) {
                 return resolve(childRefs.map!(_ => ResultType.init).array);
             } else {
-                auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-                if (relCtx.fetcher !is null) {
-                    return relCtx.fetcher.fetchBelongsTo(EntityID!Child.table, fk, EntityID!Parent.typeName, childRefs)
+                if (session !is null) {
+                    return session.fetchBelongsTo(EntityID!Child.table, fk, EntityID!Parent.typeName, childRefs)
                         .then((AnyRef[] parentRefs) {
                             static if (is(ResultType == Parent)) {
                                 return parentRefs.map!(r => makeEntityFromRef!Parent(r)).array;

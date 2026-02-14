@@ -8,7 +8,7 @@ import std.typecons : Nullable;
 
 import ae.utils.promise;
 
-import dunamis.core.datasource : DataSource;
+import dunamis.core.datasource : DataSource, DataSession;
 import dunamis.core.types;
 import dunamis.core.sorting : OrderBySpec, SortDirection;
 import dunamis.relational.query_node;
@@ -66,21 +66,20 @@ T enumFromDbString(T)(string s) if (is(T == enum)) {
 }
 
 // ============================================================================
-// Data Fetcher Base Class
+// Relational Session (Per-Request)
 // ============================================================================
 
-/// Base class for fetching data from a relational data source.
+/// Per-request session for relational data sources.
+///
+/// Holds the connection and transaction state for a single query/mutation
+/// execution. Created by DataSource.createSession().
 ///
 /// The main method is executeQueryNode(), which executes a QueryNode as a
-/// single query and returns all results. SqlDataFetcher generates and executes
-/// SQL; MockDB!() filters in-memory data.
+/// single query and returns all results.
 ///
-/// The individual fetch methods (fetchColumn, fetchChildren, etc.) are used
-/// by the naive (unoptimized) evaluation path and internally by MockDB!().
-///
-/// Extends DataSource for lifecycle management (setup/teardown).
-/// Override setup() and teardown() to add transaction control and session setup.
-abstract class DataFetcher : DataSource {
+/// Individual fetch methods (fetchColumn, fetchChildren, etc.) are used
+/// by the naive (unoptimized) evaluation path.
+abstract class RelationalSession : DataSession {
     import dunamis.core.optimize : ExprOptimizer;
     import dunamis.core.expr : ExprBase;
 
@@ -88,16 +87,93 @@ abstract class DataFetcher : DataSource {
     /// Used by naive-path fetchColumn* methods to generate correct WHERE clauses.
     protected string[][string] _pkColumnsByTable;
 
+    /// Pre-fetched query results, keyed by QueryNode ID.
+    /// Stored by PrefetchExpr after query execution, read by ProjectColumnExpr.
+    private QueryResult[QueryNodeId] _queryResults;
+
+    /// Mutation results, keyed by entity type name.
+    /// Stored by InsertExpr/UpdateExpr, read by ColumnAccessExpr.
+    private QueryResult[string] _mutationResults;
+
+    /// Clear per-request state at the start of each request.
+    /// Subclasses that override setup() should call super.setup().
+    override Promise!void setup() {
+        _queryResults.clear();
+        _mutationResults.clear();
+        return resolve();
+    }
+
     /// Get the PK columns for a table (defaults to ["id"] if not cached)
     protected string[] getPkColumnsForTable(string table) {
         return _pkColumnsByTable.get(table, ["id"]);
     }
 
-    /// Get the optimizers this data source needs.
-    /// Default: no additional optimizers.
-    /// SQL-backed fetchers would override to return [new SqlOptimizer()].
-    ExprOptimizer[] requestedOptimizers() {
-        return [];
+    // =========================================================================
+    // Query Result Storage (for optimized path)
+    // =========================================================================
+
+    /// Store results from a QueryNode execution
+    void storeQueryResult(QueryNodeId queryNodeId, QueryResult result) {
+        assert(result !is null, "Cannot store null QueryResult");
+        _queryResults[queryNodeId] = result;
+    }
+
+    /// Check if we have results for a query node
+    bool hasQueryResult(QueryNodeId queryNodeId) {
+        return (queryNodeId in _queryResults) !is null;
+    }
+
+    /// Get query result by node ID
+    QueryResult getQueryResult(QueryNodeId queryNodeId) {
+        return _queryResults.get(queryNodeId, null);
+    }
+
+    /// Get column values from pre-fetched results
+    T[] getColumnValues(T)(QueryNodeId queryNodeId, string column, AnyRef[] refs) {
+        auto result = _queryResults.get(queryNodeId, null);
+        if (result is null) return refs.map!(_ => T.init).array;
+        return result.getColumn!T(column, refs);
+    }
+
+    /// Get column values from a JOINed table
+    T[] getJoinedColumnValues(T)(QueryNodeId queryNodeId, JoinAlias joinAlias, string column, AnyRef[] refs) {
+        auto result = _queryResults.get(queryNodeId, null);
+        if (result is null) return refs.map!(_ => T.init).array;
+        return result.getJoinedColumn!T(joinAlias, column, refs);
+    }
+
+    /// Fetch all IDs for a table as strings, wrapped in AnyRef
+    Promise!(AnyRef[]) fetchAllIdsAsRefs(string table, string typeName, string[] pkColumns) {
+        // Cache PK columns for later use by fetchColumn* methods
+        _pkColumnsByTable[table] = pkColumns;
+        return fetchAllIdsString(table, pkColumns).then((string[] ids) {
+            return ids.map!(id => makeAnyRef(typeName, id)).array;
+        });
+    }
+
+    // =========================================================================
+    // Mutation Result Storage
+    // =========================================================================
+
+    /// Store mutation result for later field access.
+    /// Called by InsertExpr/UpdateExpr after executing the mutation.
+    void storeMutationResult(string typeName, QueryResult result) {
+        assert(typeName.length > 0, "Mutation typeName must not be empty");
+        assert(result !is null, "Cannot store null mutation QueryResult");
+        _mutationResults[typeName] = result;
+    }
+
+    /// Get column values from mutation results.
+    /// Used by ColumnAccessExpr when evaluating fields on mutation results.
+    T[] getMutationColumnValues(T)(string typeName, string column, AnyRef[] refs) {
+        auto result = _mutationResults.get(typeName, null);
+        if (result is null) return refs.map!(_ => T.init).array;
+        return result.getColumn!T(column, refs);
+    }
+
+    /// Check if we have mutation results for a type
+    bool hasMutationResult(string typeName) {
+        return (typeName in _mutationResults) !is null;
     }
 
     /// Get the original expression for a computed column alias (for fallback evaluation).
@@ -108,7 +184,7 @@ abstract class DataFetcher : DataSource {
         return null;
     }
 
-    /// Returns true if this fetcher supports the naive (unoptimized) evaluation path.
+    /// Returns true if this session supports the naive (unoptimized) evaluation path.
     /// Some async databases (PostgreSQL, MySQL) only support the optimized path.
     /// Default: true (assumes naive path is supported).
     bool supportsNaivePath() {
@@ -127,9 +203,6 @@ abstract class DataFetcher : DataSource {
     ///
     /// For root nodes, parentResult is null.
     /// For child nodes, parentResult contains the parent's data (for FK lookups).
-    ///
-    /// SqlDataFetcher: generates SQL from QueryNode, executes, parses results.
-    /// MockDB!(): filters in-memory data based on QueryNode criteria.
     abstract Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult);
 
     // =========================================================================
@@ -571,88 +644,6 @@ class QueryResult {
     }
 }
 
-// ============================================================================
-// Relational Eval Context
-// ============================================================================
-
-/// Relational-specific evaluation context.
-/// Holds DataFetcher and QueryResults for relational data access.
-/// Retrieved via EvalContext.getSourceContext!RelationalEvalContext()
-class RelationalEvalContext {
-    /// Data fetcher for naive evaluation (when not optimized)
-    DataFetcher fetcher;
-
-    /// Pre-fetched query results, keyed by QueryNode ID.
-    /// Stored by PrefetchExpr after query execution, read by ProjectColumnExpr.
-    private QueryResult[QueryNodeId] _queryResults;
-
-    /// Mutation results, keyed by entity type name.
-    /// Stored by InsertExpr/UpdateExpr, read by ColumnAccessExpr.
-    private QueryResult[string] _mutationResults;
-
-    /// Store results from a QueryNode execution
-    void storeQueryResult(QueryNodeId queryNodeId, QueryResult result) {
-        assert(result !is null, "Cannot store null QueryResult");
-        _queryResults[queryNodeId] = result;
-    }
-
-    /// Check if we have results for a query node
-    bool hasQueryResult(QueryNodeId queryNodeId) {
-        return (queryNodeId in _queryResults) !is null;
-    }
-
-    /// Get query result by node ID
-    QueryResult getQueryResult(QueryNodeId queryNodeId) {
-        return _queryResults.get(queryNodeId, null);
-    }
-
-    /// Get column values from pre-fetched results
-    T[] getColumnValues(T)(QueryNodeId queryNodeId, string column, AnyRef[] refs) {
-        auto result = _queryResults.get(queryNodeId, null);
-        if (result is null) return refs.map!(_ => T.init).array;
-        return result.getColumn!T(column, refs);
-    }
-
-    /// Get column values from a JOINed table
-    T[] getJoinedColumnValues(T)(QueryNodeId queryNodeId, JoinAlias joinAlias, string column, AnyRef[] refs) {
-        auto result = _queryResults.get(queryNodeId, null);
-        if (result is null) return refs.map!(_ => T.init).array;
-        return result.getJoinedColumn!T(joinAlias, column, refs);
-    }
-
-    /// Fetch all IDs for a table as strings, wrapped in AnyRef (delegates to fetcher)
-    Promise!(AnyRef[]) fetchAllIdsString(string table, string typeName, string[] pkColumns) {
-        if (fetcher !is null) {
-            // Cache PK columns for later use by fetchColumn* methods
-            fetcher._pkColumnsByTable[table] = pkColumns;
-            return fetcher.fetchAllIdsString(table, pkColumns).then((string[] ids) {
-                return ids.map!(id => makeAnyRef(typeName, id)).array;
-            });
-        }
-        return resolve(cast(AnyRef[])[]);
-    }
-
-    /// Store mutation result for later field access.
-    /// Called by InsertExpr/UpdateExpr after executing the mutation.
-    void storeMutationResult(string typeName, QueryResult result) {
-        assert(typeName.length > 0, "Mutation typeName must not be empty");
-        assert(result !is null, "Cannot store null mutation QueryResult");
-        _mutationResults[typeName] = result;
-    }
-
-    /// Get column values from mutation results.
-    /// Used by ColumnAccessExpr when evaluating fields on mutation results.
-    T[] getMutationColumnValues(T)(string typeName, string column, AnyRef[] refs) {
-        auto result = _mutationResults.get(typeName, null);
-        if (result is null) return refs.map!(_ => T.init).array;
-        return result.getColumn!T(column, refs);
-    }
-
-    /// Check if we have mutation results for a type
-    bool hasMutationResult(string typeName) {
-        return (typeName in _mutationResults) !is null;
-    }
-}
 
 // ============================================================================
 // Tests
@@ -694,14 +685,18 @@ unittest {
 }
 
 unittest {
-    // Test RelationalEvalContext
-    auto ctx = new RelationalEvalContext();
+    // Test RelationalSession query result storage
+    import dunamis.relational.mock : MockDB;
+    static MockDB!() _testDb;
+    _testDb = new MockDB!();
+
+    auto session = cast(RelationalSession) _testDb.createSession();
 
     auto result = new QueryResult();
     result.initialize("User", [AnyRef("User:1"), AnyRef("User:2")]);
-    ctx.storeQueryResult(QueryNodeId(0), result);
+    session.storeQueryResult(QueryNodeId(0), result);
 
-    assert(ctx.hasQueryResult(QueryNodeId(0)));
-    assert(!ctx.hasQueryResult(QueryNodeId(1)));
-    assert(ctx.getQueryResult(QueryNodeId(0)) is result);
+    assert(session.hasQueryResult(QueryNodeId(0)));
+    assert(!session.hasQueryResult(QueryNodeId(1)));
+    assert(session.getQueryResult(QueryNodeId(0)) is result);
 }

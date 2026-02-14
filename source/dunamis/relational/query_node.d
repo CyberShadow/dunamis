@@ -7,7 +7,7 @@ import std.typecons : Nullable;
 
 import dunamis.core.types : AnyRef;
 import dunamis.core.sorting : OrderBySpec, SortDirection;
-import dunamis.relational.eval_context : DataFetcher;
+import dunamis.core.datasource : DataSource;
 
 // ============================================================================
 // Typed Identifiers
@@ -87,8 +87,8 @@ class QueryNode {
     /// Root filter IDs (for byId/byIds filters)
     AnyRef[] rootFilterRefs;
 
-    /// DataFetcher for this query node (set during optimization from Entity._db)
-    DataFetcher dataFetcher;
+    /// Data source for this query node (set during optimization from Entity._db)
+    DataSource dataSource;
 
     /// MapExpr identity for looking up currentRefs at eval time
     /// Used for mutation-returned entities where refs aren't known at optimization time

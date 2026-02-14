@@ -72,10 +72,34 @@ struct GraphQLError {
 /// - Source-specific context registration
 ///
 /// Usage:
-///   auto relCtx = evalCtx.getSourceContext!RelationalEvalContext();
-///   auto values = relCtx.getColumnValues!string("name", refs);
+///   auto session = cast(RelationalSession) evalCtx.getSession(db);
+///   auto values = session.getColumnValues!string(nodeId, "name", refs);
 class EvalContext {
-    mixin SourceContextRegistry;
+    // ========================================================================
+    // Data Session Management
+    // ========================================================================
+
+    import dunamis.core.datasource : DataSource, DataSession;
+
+    /// Per-request sessions keyed by their data source singleton.
+    /// Created lazily via getSession() and managed by the Executor.
+    private DataSession[DataSource] _sessions;
+
+    /// Get or create a per-request session for a data source.
+    /// Sessions are cached: calling getSession(ds) twice returns the same session.
+    /// The Executor calls setup()/teardown() on all sessions.
+    DataSession getSession(DataSource ds) {
+        if (auto s = ds in _sessions)
+            return *s;
+        auto s = ds.createSession();
+        _sessions[ds] = s;
+        return s;
+    }
+
+    /// Get all sessions (for Executor lifecycle management).
+    @property DataSession[] allSessions() {
+        return _sessions.values;
+    }
 
     /// Generic value storage keyed by expression identity.
     /// Expressions use this to pass values to their children.
@@ -199,24 +223,6 @@ class EvalContext {
 // ============================================================================
 // Tests
 // ============================================================================
-
-/// Test source context class (must be at module level for `new T()` to work)
-private class TestEvalSourceContext {
-    int value = 99;
-}
-
-unittest {
-    // Test source context creation
-    auto ctx = new EvalContext();
-
-    auto src1 = ctx.getSourceContext!TestEvalSourceContext("db1");
-    auto src2 = ctx.getSourceContext!TestEvalSourceContext("db2");
-    auto src1again = ctx.getSourceContext!TestEvalSourceContext("db1");
-
-    assert(src1 !is src2);  // Different source IDs
-    assert(src1 is src1again);  // Same source ID returns same context
-    assert(src1.value == 99);
-}
 
 unittest {
     // Test generic value storage

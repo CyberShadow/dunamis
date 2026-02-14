@@ -2,7 +2,7 @@ module dunamis.relational.schema.interfaces;
 
 import dunamis.core.expr.base : ExprBase;
 import dunamis.core.types : AnyRef;
-import dunamis.relational.eval_context : DataFetcher;
+import dunamis.core.datasource : DataSource;
 import dunamis.relational.query_node : FilterType;
 
 // ============================================================================
@@ -72,12 +72,12 @@ interface RootExprInfo {
     /// Entity table name for the root query
     string entityTable();
 
-    /// The data fetcher for this root (may be null for legacy usage)
-    DataFetcher dataFetcher();
+    /// The data source for this root (may be null for legacy usage)
+    DataSource dataSource();
 }
 
 /// Source ID for an entity - uses table name as unique identifier.
-/// This is used to key into RelationalEvalContext for multi-source scenarios.
+/// This is used for multi-source scenarios.
 template entitySourceId(Entity) {
     import dunamis.relational.schema.types : EntityID;
     enum entitySourceId = EntityID!Entity.table;

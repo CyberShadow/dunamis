@@ -74,8 +74,6 @@ abstract class IntegrationTestRunner(alias db, alias Schema) {
                 locale = *localeHeader;
             }
 
-            db.reset();
-
             auto compiledQuery = compileQuery!Schema(query, variables);
             auto executor = new Executor();
 

@@ -14,7 +14,7 @@ import dunamis.core.eval;
 import dunamis.core.expr;
 import dunamis.core.filtering : FilterByInfo;
 import dunamis.core.optimize : OptimizeContext, ExprOptimizer;
-import dunamis.relational.eval_context : RelationalEvalContext, QueryResult;
+import dunamis.relational.eval_context : RelationalSession, QueryResult;
 import dunamis.relational.query_node;
 import dunamis.relational.schema;
 import dunamis.relational.project;
@@ -109,6 +109,10 @@ class SqlOptimizer : ExprOptimizer {
     /// Optimize an expression tree, applying SQL push-down where possible.
     /// This should be called AFTER the standard optimizer has run.
     override void optimize(ExprBase expr, OptimizeContext ctx) {
+        // Clear per-request state — QueryNodeIds restart from 0 each request,
+        // so stale computed columns from previous requests would collide.
+        _computedColumns.clear();
+        _nextComputedAlias = 0;
         optimizeRecursive(expr, ctx);
     }
 
@@ -798,6 +802,12 @@ class CapturingSqlOptimizer : SqlOptimizer {
         super(dialect);
     }
 
+    /// Clear captured expressions when starting a new request
+    override void optimize(ExprBase expr, OptimizeContext ctx) {
+        _originalExprs.clear();
+        super.optimize(expr, ctx);
+    }
+
     /// Override to capture original expression before replacement
     override protected ExprBase tryPushDownBinaryOp(ExprBase expr, BinaryOpInfo binOp, OptimizeContext ctx) {
         auto replacement = super.tryPushDownBinaryOp(expr, binOp, ctx);
@@ -874,21 +884,22 @@ class ProjectComputedExpr(T) : Expr!T, ProjectComputedInfo {
         auto queryNodeId = _queryNodeId;
         auto alias_ = _alias;
         auto input = _input;
+        auto prefetch = cast(PrefetchExpr) _prefetch;
 
         // Ensure data is prefetched, then evaluate input refs, then read
         return evalAs!(AnyRef[])(_prefetch, ctx).then((_) {
             return evalAs!AnyRef(input, ctx);
         }).then((AnyRef[] refs) {
-            auto relCtx = ctx.getSourceContext!RelationalEvalContext();
-            auto queryResult = relCtx.getQueryResult(queryNodeId);
+            auto session = cast(RelationalSession) ctx.getSession(prefetch.node.dataSource);
+            auto queryResult = session.getQueryResult(queryNodeId);
 
             // Fast path: computed column exists in QueryResult (real DB)
             if (queryResult !is null && queryResult.hasColumn(alias_)) {
-                return resolve(relCtx.getColumnValues!T(queryNodeId, alias_, refs));
+                return resolve(session.getColumnValues!T(queryNodeId, alias_, refs));
             }
 
             // Fallback path: evaluate original expression (MockDB)
-            auto originalExpr = relCtx.fetcher.getOriginalExpr(alias_);
+            auto originalExpr = session.getOriginalExpr(alias_);
             if (originalExpr !is null) {
                 return evalAs!T(originalExpr, ctx);
             }

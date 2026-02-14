@@ -12,6 +12,7 @@ import ae.utils.promise;
 import dunamis.core.types : AnyRef, makeAnyRef;
 import dunamis.core.optimize : ExprOptimizer;
 import dunamis.core.expr : ExprBase;
+import dunamis.core.datasource : DataSource, DataSession;
 import dunamis.relational.eval_context;
 import dunamis.relational.query_node;
 import dunamis.relational.sql_optimizer;
@@ -19,52 +20,39 @@ import dunamis.mysql.dialect : mysqlDialect;
 import dunamis.relational.sql : toSQL;
 import dunamis.mysql.sql;
 
-/// MySQL data fetcher using ae.net.db.mysql.
-/// Executes SQL generated from QueryNodes against a MySQL database.
-///
-/// Parameterized by DBConfig for compile-time feature configuration.
-class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
-    /// Configuration accessible at compile time
-    enum configuration = config;
+// ============================================================================
+// MySQL Session (Per-Request)
+// ============================================================================
 
+/// Per-request session for MySQL.
+/// Holds cached results and per-query state for a single evaluation.
+class MySQLSession : RelationalSession {
     private MySqlConnection _conn;
+    private Promise!MySqlConnection delegate() _connFactory;
     private SqlOptimizer _sqlOptimizer;
     private QueryNode[] _executedNodes;
     private string _cachedSQL;
-    private QueryResult[QueryNodeId] _cachedResults;  // Store child results from CTE query (by node ID)
-    private QueryResult[string] _cachedResultsByType;  // Also index by type name for fetchChildren
+    private QueryResult[QueryNodeId] _cachedResults;
+    private QueryResult[string] _cachedResultsByType;
 
-    this(MySqlConnection conn) {
-        _conn = conn;
-        _sqlOptimizer = new SqlOptimizer(mysqlDialect());
+    /// Create with a connection factory. The factory is called in setup().
+    this(Promise!MySqlConnection delegate() connFactory, SqlOptimizer sqlOptimizer) {
+        _connFactory = connFactory;
+        _sqlOptimizer = sqlOptimizer;
     }
 
-    /// Return the SqlOptimizer to enable SQL push-down
-    override ExprOptimizer[] requestedOptimizers() {
-        return [_sqlOptimizer];
-    }
-
-    /// Get original expression for fallback evaluation (not used - real DB evaluates SQL)
-    override ExprBase getOriginalExpr(string alias_) {
-        return null;
-    }
-
-    /// Reset for next query
-    void reset() {
-        _executedNodes = [];
-        _cachedSQL = "";
-        _sqlOptimizer = new SqlOptimizer(mysqlDialect());
-        _cachedResults.clear();
-        _cachedResultsByType.clear();
-    }
-
-    /// Begin a transaction.
+    /// Acquire connection and begin a transaction.
     override Promise!void setup() {
-        return _conn.query("BEGIN").array().then((MySqlConnection.Row[] _) { });
+        super.setup();
+        return _connFactory().then((MySqlConnection conn) {
+            _conn = conn;
+            return _conn.query("BEGIN").array();
+        }).then((MySqlConnection.Row[] _) { });
     }
 
     /// Commit or rollback the transaction.
     override Promise!void teardown(bool success) {
+        if (_conn is null) return resolve();  // setup failed
         auto sql = success ? "COMMIT" : "ROLLBACK";
         return _conn.query(sql).array().then((MySqlConnection.Row[] _) { });
     }
@@ -72,6 +60,11 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
     /// Execute raw SQL for session setup.
     override Promise!void execute(string sql) {
         return _conn.query(sql).array().then((MySqlConnection.Row[] _) { });
+    }
+
+    /// Get original expression for fallback evaluation (not used - real DB evaluates SQL)
+    override ExprBase getOriginalExpr(string alias_) {
+        return null;
     }
 
     /// Get the generated SQL (for debugging)
@@ -562,31 +555,68 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataFetcher {
     }
 }
 
+// ============================================================================
+// MySQL Data Source (Singleton Factory)
+// ============================================================================
+
+/// MySQL data source using ae.net.db.mysql.
+/// Holds a connection factory and creates per-request sessions.
+/// Each session acquires its own connection from the factory.
+///
+/// Parameterized by DBConfig for compile-time feature configuration.
+class MySQLDB(DBConfig config = defaultDBConfig) : DataSource {
+    /// Configuration accessible at compile time
+    enum configuration = config;
+
+    private Promise!MySqlConnection delegate() _connFactory;
+    private SqlOptimizer _sqlOptimizer;
+
+    /// Create with a connection factory. Each session will call the factory
+    /// to acquire its own connection.
+    this(Promise!MySqlConnection delegate() connFactory) {
+        _connFactory = connFactory;
+        _sqlOptimizer = new SqlOptimizer(mysqlDialect());
+    }
+
+    /// Create with a shared connection (wrapped as factory).
+    /// Only safe when requests are processed serially (e.g., single-threaded tests).
+    this(MySqlConnection conn) {
+        this(() => resolve(conn));
+    }
+
+    /// Return the SqlOptimizer to enable SQL push-down
+    override ExprOptimizer[] requestedOptimizers() {
+        return [_sqlOptimizer];
+    }
+
+    /// Create a fresh per-request session.
+    override DataSession createSession() {
+        return new MySQLSession(_connFactory, _sqlOptimizer);
+    }
+}
+
 /// Create a MySQLDB instance from connection parameters.
-Promise!(MySQLDB!config) createMySQLDB(DBConfig config = defaultDBConfig)(
+/// Each session will create its own connection using these parameters.
+MySQLDB!config createMySQLDB(DBConfig config = defaultDBConfig)(
     string host, ushort port, string database, string user, string password
 ) {
     import dunamis.mysql.connection : connect;
 
-    return connect(host, port, database, user, password).then((conn) {
-        return new MySQLDB!config(conn);
-    });
+    return new MySQLDB!config(() => connect(host, port, database, user, password));
 }
 
 /// Create a MySQLDB instance from environment variables.
-Promise!(MySQLDB!config) createMySQLDBFromEnv(DBConfig config = defaultDBConfig)() {
+/// Each session will create its own connection from environment variables.
+MySQLDB!config createMySQLDBFromEnv(DBConfig config = defaultDBConfig)() {
     import dunamis.mysql.connection : connectFromEnv;
 
-    return connectFromEnv().then((conn) {
-        return new MySQLDB!config(conn);
-    });
+    return new MySQLDB!config(() => connectFromEnv());
 }
 
 /// Create a MySQLDB instance from a connection string.
-Promise!(MySQLDB!config) createMySQLDBFromUri(DBConfig config = defaultDBConfig)(string uri) {
+/// Each session will create its own connection using this URI.
+MySQLDB!config createMySQLDBFromUri(DBConfig config = defaultDBConfig)(string uri) {
     import dunamis.mysql.connection : connectFromUri;
 
-    return connectFromUri(uri).then((conn) {
-        return new MySQLDB!config(conn);
-    });
+    return new MySQLDB!config(() => connectFromUri(uri));
 }

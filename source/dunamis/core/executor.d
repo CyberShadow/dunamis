@@ -15,15 +15,17 @@ import dunamis.core.types;
 /// 1. Optimizes the expression tree (unless disabled)
 /// 2. Walks tree to collect data source-specific optimizers
 /// 3. Runs collected optimizers
-/// 4. Calls setup() on all collected data sources
-/// 5. Evaluates the expression
-/// 6. Calls teardown() on all data sources (success=true on success, false on error)
+/// 4. Creates per-request sessions for all data sources
+/// 5. Calls setup() on all sessions
+/// 6. Evaluates the expression
+/// 7. Calls teardown() on all sessions (success=true on success, false on error)
 class Executor {
     /// Execute an expression, optionally with optimization.
     /// Returns a Promise that resolves to the result.
     ///
     /// Data source lifecycle:
-    ///   setup() is called on all collected data sources before evaluation.
+    ///   A per-request session is created for each data source.
+    ///   setup() is called on all sessions before evaluation.
     ///   teardown(true) is called after successful evaluation.
     ///   teardown(false) is called if evaluation fails.
     Promise!T execute(E, T = E.ResultType)(E expr, bool optimize = true) {
@@ -60,10 +62,15 @@ class Executor {
             return toEval.eval(evalCtx).then((results) => results[0]);
         }
 
-        // Setup all data sources, then evaluate, then teardown
-        auto setupChain = resolve();
+        // Create per-request sessions for each data source
+        DataSession[] sessions;
         foreach (ds; sources)
-            setupChain = setupChain.then(() => ds.setup());
+            sessions ~= evalCtx.getSession(ds);
+
+        // Setup all sessions, then evaluate, then teardown
+        auto setupChain = resolve();
+        foreach (s; sessions)
+            setupChain = setupChain.then(() => s.setup());
 
         return setupChain.then(() {
             evalCtx.setValues!AnyRef(null, [queryRoot]);
@@ -71,14 +78,14 @@ class Executor {
         }).then((T[] results) {
             // Teardown with success
             auto p = resolve();
-            foreach (ds; sources)
-                p = p.then(() => ds.teardown(true));
+            foreach (s; sessions)
+                p = p.then(() => s.teardown(true));
             return p.then(() => results[0]);
         }).except((Exception e) {
             // Teardown with failure
             auto p = resolve();
-            foreach (ds; sources)
-                p = p.then(() => ds.teardown(false));
+            foreach (s; sessions)
+                p = p.then(() => s.teardown(false));
             return p.then(() { throw e; return T.init; });
         });
     }
