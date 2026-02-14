@@ -8,7 +8,7 @@ public import dunamis.graphql.compiler.validation;
 import std.json;
 
 import graphql.ast : OperationTypeEnum;
-import graphql.lexer;
+import graphql.lexer : Lexer, QueryParser;
 import graphql.parser;
 
 import dunamis.core.expr : Expr;
@@ -28,9 +28,10 @@ alias GraphQLResult = Expr!JSONValue;
 /// computed fields (static methods taking Expr!T). This guarantees a uniform
 /// field representation — see the Schema Protocol in core/discovery.d.
 ///
-/// Requires a Schema type created with Schema!(Query) or Schema!(Query, Mutation).
-/// The Schema template applies NormalizePlugin, which converts plain fields
-/// and methods into the canonical computed field form.
+/// Requires a Schema type created with Schema!(Query), Schema!(Query, Mutation),
+/// or Schema!(Query, Mutation, Subscription). The Schema template applies
+/// NormalizePlugin, which converts plain fields and methods into the canonical
+/// computed field form.
 ///
 /// Example:
 /// ---
@@ -54,9 +55,21 @@ GraphQLResult compileQuery(alias SchemaType)(string queryString, JSONValue varia
 {
     alias QueryType = SchemaType.Query;
     alias MutationType = SchemaType.Mutation;
+    static if (__traits(hasMember, SchemaType, "Subscription"))
+        alias SubscriptionType = SchemaType.Subscription;
+    else
+        struct SubscriptionType {}
 
-    // Parse the GraphQL query
-    auto lexer = Lexer(queryString);
+    // Parse the GraphQL query.
+    // The graphql-d lexer in QueryParser.yes mode (default) doesn't recognize
+    // "subscription" as a keyword, only "query" and "mutation". Use QueryParser.no
+    // when the query contains a subscription operation. QueryParser.no enables
+    // more keywords but can break argument names like "input", so we only use it
+    // when needed.
+    import std.algorithm : startsWith;
+    import std.string : stripLeft;
+    auto qp = queryString.stripLeft.startsWith("subscription") ? QueryParser.no : QueryParser.yes;
+    auto lexer = Lexer(queryString, qp);
     auto parser = Parser(lexer);
     auto doc = parser.parseDocument();
 
@@ -79,12 +92,14 @@ GraphQLResult compileQuery(alias SchemaType)(string queryString, JSONValue varia
     bool isMutation = op.ot !is null && op.ot.ruleSelection == OperationTypeEnum.Mutation;
     bool isSubscription = op.ot !is null && op.ot.ruleSelection == OperationTypeEnum.Sub;
 
-    if (isSubscription) {
-        throw new CompilerException("Subscriptions are not supported");
-    }
-
     // Compile based on operation type
-    if (isMutation) {
+    if (isSubscription) {
+        static if (getFields!SubscriptionType.length > 0) {
+            return compileRootSubscriptionSet!(SubscriptionType, SchemaType)(op.ss, variables, fragments);
+        } else {
+            throw new CompilerException("Subscription operations require a Schema with Subscription type");
+        }
+    } else if (isMutation) {
         static if (getFields!MutationType.length > 0) {
             return compileRootMutationSet!MutationType(op.ss, variables, fragments);
         } else {
@@ -3387,4 +3402,125 @@ unittest {
     assert(postItems.length == 2, "Should have 2 post results");
     assert(userItems[0]["firstName"].str == "Alice");
     assert(postItems[0]["title"].str == "Hello World");
+}
+
+// Test: subscription compilation
+unittest {
+    import std.json;
+    import dunamis.core;
+    import dunamis.core.expr.combinators : EventSourceExpr;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+    import dunamis.relational.eval_context;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    static struct Subscription {
+        static Expr!User userCreated(Expr!Subscription s) {
+            return eventSource!User();
+        }
+    }
+
+    alias TestSchema = Schema!(Query, void, Subscription);
+
+    db = new MockDB!();
+    db.setTableData("users", `[{"id": 1, "first_name": "Alice"}]`);
+
+    // Compile a subscription query — just verifies compilation succeeds
+    auto query = compileQuery!TestSchema(`subscription { userCreated { firstName } }`);
+    assert(query !is null);
+}
+
+// Test: subscription rejects multiple root fields
+unittest {
+    import std.json;
+    import dunamis.core;
+    import dunamis.core.expr.combinators : EventSourceExpr;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+    import dunamis.relational.eval_context;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    static struct Subscription {
+        static Expr!User userCreated(Expr!Subscription s) {
+            return eventSource!User();
+        }
+        static Expr!User userUpdated(Expr!Subscription s) {
+            return eventSource!User();
+        }
+    }
+
+    alias TestSchema = Schema!(Query, void, Subscription);
+
+    db = new MockDB!();
+
+    // Multiple root fields should fail validation
+    try {
+        compileQuery!TestSchema(`subscription { userCreated { firstName } userUpdated { firstName } }`);
+        assert(false, "Should have thrown");
+    } catch (ValidationException e) {
+        assert(e.errors.length > 0);
+        bool foundSingleFieldError = false;
+        foreach (err; e.errors) {
+            if (err.message == "Subscription operations must have exactly one root field") {
+                foundSingleFieldError = true;
+                break;
+            }
+        }
+        assert(foundSingleFieldError, "Expected single root field error");
+    }
+}
+
+// Test: subscription without Subscription type throws
+unittest {
+    import std.json;
+    import dunamis.core;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+    import dunamis.relational.eval_context;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    alias TestSchema = Schema!(Query);
+
+    db = new MockDB!();
+
+    // Subscription on schema without subscription type should fail validation
+    try {
+        compileQuery!TestSchema(`subscription { userCreated { firstName } }`);
+        assert(false, "Should have thrown");
+    } catch (CompilerException e) {
+        // Validation error about no subscription type
+    }
 }

@@ -304,13 +304,18 @@ private RuntimeInputFieldInfo[] buildRuntimeInputFields(T)() {
 /// Build the complete __Schema introspection JSON.
 /// Accepts either a Schema type or a raw Query type.
 JSONValue buildIntrospectionJson(alias SchemaOrQuery)() {
-    // Determine Query/Mutation types
+    // Determine Query/Mutation/Subscription types
     static if (isSchema!SchemaOrQuery) {
         alias QueryType = SchemaOrQuery.Query;
         alias MutationType = SchemaOrQuery.Mutation;
+        static if (__traits(hasMember, SchemaOrQuery, "Subscription"))
+            alias SubscriptionType = SchemaOrQuery.Subscription;
+        else
+            struct SubscriptionType {}
     } else {
         alias QueryType = SchemaOrQuery;
         struct MutationType {}
+        struct SubscriptionType {}
     }
 
     // Discover all types (same pattern as generateSchemaSDL)
@@ -375,6 +380,11 @@ JSONValue buildIntrospectionJson(alias SchemaOrQuery)() {
         types ~= buildObjectTypeJsonFromFields!MutationType("Mutation");
     }
 
+    // Subscription type (if it has fields)
+    static if (getFields!SubscriptionType.length > 0) {
+        types ~= buildObjectTypeJsonFromFields!SubscriptionType("Subscription");
+    }
+
     // Entity/object types (skip abstract types — they have their own entries)
     static foreach (Entity; AllEntityTypes) {
         static if (!isAbstractType!Entity) {
@@ -400,6 +410,13 @@ JSONValue buildIntrospectionJson(alias SchemaOrQuery)() {
         mutationTypeRef = JSONValue(null);
     }
 
+    JSONValue subscriptionTypeRef;
+    static if (getFields!SubscriptionType.length > 0) {
+        subscriptionTypeRef = JSONValue(["name": JSONValue("Subscription")]);
+    } else {
+        subscriptionTypeRef = JSONValue(null);
+    }
+
     // Standard directives
     JSONValue[] directives;
     directives ~= directiveJson("skip", "Directs the executor to skip this field or fragment when the `if` argument is true.",
@@ -415,7 +432,7 @@ JSONValue buildIntrospectionJson(alias SchemaOrQuery)() {
     return JSONValue([
         "queryType": queryTypeRef,
         "mutationType": mutationTypeRef,
-        "subscriptionType": JSONValue(null),
+        "subscriptionType": subscriptionTypeRef,
         "types": JSONValue(types),
         "directives": JSONValue(directives)
     ]);

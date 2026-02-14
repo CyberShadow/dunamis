@@ -323,9 +323,14 @@ template generateSchemaSDL(alias SchemaOrQuery) {
     static if (isSchema!SchemaOrQuery) {
         alias QueryType = SchemaOrQuery.Query;
         alias MutationType = SchemaOrQuery.Mutation;
+        static if (__traits(hasMember, SchemaOrQuery, "Subscription"))
+            alias SubscriptionType = SchemaOrQuery.Subscription;
+        else
+            struct SubscriptionType {}
     } else {
         alias QueryType = SchemaOrQuery;
         struct MutationType {}
+        struct SubscriptionType {}
     }
 
     // Use Schema-provided AllEntityTypes if available (for plugins like PaginationPlugin),
@@ -394,6 +399,13 @@ template generateSchemaSDL(alias SchemaOrQuery) {
         enum mutationSdl = generateObjectTypeSDL!MutationType("Mutation");
         static if (mutationSdl.length > 0) {
             result ~= mutationSdl;
+            result ~= "\n";
+        }
+
+        // Generate Subscription type if it has fields
+        enum subscriptionSdl = generateObjectTypeSDL!SubscriptionType("Subscription");
+        static if (subscriptionSdl.length > 0) {
+            result ~= subscriptionSdl;
             result ~= "\n";
         }
 

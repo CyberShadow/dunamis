@@ -20,10 +20,39 @@ import dunamis.graphql.compiler.values;
 import dunamis.graphql.compiler.fields;
 
 // ============================================================================
-// Root Mutation Compilation
+// Root Subscription Compilation
 // ============================================================================
 
 package(dunamis.graphql):
+
+/// Compile the root selection set for subscriptions.
+/// GraphQL spec requires exactly one root field for subscriptions.
+DynamicJsonObjectExpr compileRootSubscriptionSet(Subscription, alias SchemaType = Subscription)(SelectionSet ss, JSONValue variables, FragmentMap fragments) {
+    auto selections = iterateSelections(ss);
+
+    if (selections.length == 0) {
+        throw new CompilerException("Empty subscription selection set");
+    }
+
+    string[] fieldNames;
+    ExprBase[] fieldExprs;
+
+    processSelections!(getGraphQLTypeName!Subscription)(
+        selections, variables, fragments, fieldNames, fieldExprs,
+        (field) => compileRootField!(Subscription, SchemaType)(field, variables, fragments)
+    );
+
+    // GraphQL spec: subscriptions must have exactly one root field
+    if (fieldNames.length != 1) {
+        throw new CompilerException("Subscription operations must have exactly one root field, got " ~ fieldNames.length.to!string);
+    }
+
+    return new DynamicJsonObjectExpr(fieldNames, fieldExprs);
+}
+
+// ============================================================================
+// Root Mutation Compilation
+// ============================================================================
 
 /// Compile the root selection set for mutations (sequential execution)
 SequentialJsonObjectExpr compileRootMutationSet(Mutation)(SelectionSet ss, JSONValue variables, FragmentMap fragments) {

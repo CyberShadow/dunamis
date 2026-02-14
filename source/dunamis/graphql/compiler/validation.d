@@ -74,6 +74,10 @@ ValidationError[] validateQuery(alias SchemaType)(
 ) if (isSchema!SchemaType) {
     alias QueryType = SchemaType.Query;
     alias MutationType = SchemaType.Mutation;
+    static if (__traits(hasMember, SchemaType, "Subscription"))
+        alias SubscriptionType = SchemaType.Subscription;
+    else
+        struct SubscriptionType {}
 
     ValidationError[] errors;
 
@@ -84,9 +88,16 @@ ValidationError[] validateQuery(alias SchemaType)(
 
     // 2. Type-aware checks (templated on schema types)
     bool isMutation = op.ot !is null && op.ot.ruleSelection == OperationTypeEnum.Mutation;
+    bool isSubscription = op.ot !is null && op.ot.ruleSelection == OperationTypeEnum.Sub;
 
     if (op.ss !is null) {
-        if (isMutation) {
+        if (isSubscription) {
+            static if (getFields!SubscriptionType.length > 0) {
+                errors ~= validateSubscriptionSelectionSet!(SubscriptionType, SchemaType)(op.ss, fragments);
+            } else {
+                errors ~= ValidationError("Subscription operations require a Schema with Subscription type");
+            }
+        } else if (isMutation) {
             static if (getFields!MutationType.length > 0) {
                 errors ~= validateRootSelectionSet!(MutationType, SchemaType)(op.ss, fragments);
             }
@@ -347,6 +358,43 @@ private void collectVariableRefsFromDirectives(Directives dirs, ref Token[string
 // ============================================================================
 // Type-Aware Validations
 // ============================================================================
+
+/// Validate a subscription selection set.
+/// Enforces the GraphQL spec requirement of exactly one root field.
+private ValidationError[] validateSubscriptionSelectionSet(Subscription, alias SchemaSource)(
+    SelectionSet ss, FragmentMap fragments
+) {
+    // First, validate fields the same way as any root selection set
+    auto errors = validateRootSelectionSet!(Subscription, SchemaSource)(ss, fragments);
+
+    // Count root fields to enforce single-field rule
+    auto selections = iterateSelections(ss);
+    size_t fieldCount = 0;
+    foreach (sel; selections) {
+        if (sel.ruleSelection == SelectionEnum.Field) {
+            fieldCount++;
+        }
+    }
+
+    if (fieldCount > 1) {
+        // Get location from the second field for the error
+        size_t seen = 0;
+        foreach (sel; selections) {
+            if (sel.ruleSelection == SelectionEnum.Field) {
+                seen++;
+                if (seen == 2) {
+                    errors ~= fieldError(
+                        "Subscription operations must have exactly one root field",
+                        sel.field
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    return errors;
+}
 
 /// Validate a root selection set against a Query/Mutation type.
 private ValidationError[] validateRootSelectionSet(Query, alias SchemaSource)(
