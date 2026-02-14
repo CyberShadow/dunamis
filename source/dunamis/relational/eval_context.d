@@ -8,7 +8,7 @@ import std.typecons : Nullable;
 
 import ae.utils.promise;
 
-import dunamis.core.datasource : DataSource, DataSession;
+import dunamis.core.datasource : DataSource, DataSession, SetupMode;
 import dunamis.core.types;
 import dunamis.core.sorting : OrderBySpec, SortDirection;
 import dunamis.relational.query_node;
@@ -97,7 +97,7 @@ abstract class RelationalSession : DataSession {
 
     /// Clear per-request state at the start of each request.
     /// Subclasses that override setup() should call super.setup().
-    override Promise!void setup() {
+    override Promise!void setup(SetupMode mode = SetupMode.query) {
         _queryResults.clear();
         _mutationResults.clear();
         return resolve();

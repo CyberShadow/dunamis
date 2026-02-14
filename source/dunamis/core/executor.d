@@ -3,7 +3,7 @@ module dunamis.core.executor;
 import ae.utils.promise;
 import ae.utils.promise.await : awaitSync;
 
-import dunamis.core.datasource;
+import dunamis.core.datasource : DataSource, DataSession, SetupMode;
 import dunamis.core.eval;
 import dunamis.core.expr;
 import dunamis.core.optimize;
@@ -79,13 +79,13 @@ class Executor {
             // Teardown with success
             auto p = resolve();
             foreach (s; sessions)
-                p = p.then(() => s.teardown(true));
+                p = p.then(() => s.teardown(SetupMode.query, true));
             return p.then(() => results[0]);
         }).except((Exception e) {
             // Teardown with failure
             auto p = resolve();
             foreach (s; sessions)
-                p = p.then(() => s.teardown(false));
+                p = p.then(() => s.teardown(SetupMode.query, false));
             return p.then(() { throw e; return T.init; });
         });
     }

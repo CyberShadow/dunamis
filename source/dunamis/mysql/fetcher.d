@@ -12,7 +12,7 @@ import ae.utils.promise;
 import dunamis.core.types : AnyRef, makeAnyRef;
 import dunamis.core.optimize : ExprOptimizer;
 import dunamis.core.expr : ExprBase;
-import dunamis.core.datasource : DataSource, DataSession;
+import dunamis.core.datasource : DataSource, DataSession, SetupMode;
 import dunamis.relational.eval_context;
 import dunamis.relational.query_node;
 import dunamis.relational.sql_optimizer;
@@ -42,8 +42,8 @@ class MySQLSession : RelationalSession {
     }
 
     /// Acquire connection and begin a transaction.
-    override Promise!void setup() {
-        super.setup();
+    override Promise!void setup(SetupMode mode = SetupMode.query) {
+        super.setup(mode);
         return _connFactory().then((MySqlConnection conn) {
             _conn = conn;
             return _conn.query("BEGIN").array();
@@ -51,7 +51,7 @@ class MySQLSession : RelationalSession {
     }
 
     /// Commit or rollback the transaction.
-    override Promise!void teardown(bool success) {
+    override Promise!void teardown(SetupMode mode = SetupMode.query, bool success = true) {
         if (_conn is null) return resolve();  // setup failed
         auto sql = success ? "COMMIT" : "ROLLBACK";
         return _conn.query(sql).array().then((MySqlConnection.Row[] _) { });

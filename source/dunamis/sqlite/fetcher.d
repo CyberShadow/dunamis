@@ -12,7 +12,7 @@ import ae.utils.promise : Promise, resolve;
 import dunamis.core.types : AnyRef, makeAnyRef;
 import dunamis.core.optimize : ExprOptimizer;
 import dunamis.core.expr : ExprBase;
-import dunamis.core.datasource : DataSource, DataSession;
+import dunamis.core.datasource : DataSource, DataSession, SetupMode;
 import dunamis.relational.eval_context;
 import std.format : format;
 import dunamis.relational.query_node;
@@ -41,14 +41,14 @@ class SQLiteSession : RelationalSession {
     }
 
     /// Begin a transaction.
-    override Promise!void setup() {
-        super.setup();
+    override Promise!void setup(SetupMode mode = SetupMode.query) {
+        super.setup(mode);
         _db.exec("BEGIN");
         return resolve();
     }
 
     /// Commit or rollback the transaction.
-    override Promise!void teardown(bool success) {
+    override Promise!void teardown(SetupMode mode = SetupMode.query, bool success = true) {
         _db.exec(success ? "COMMIT" : "ROLLBACK");
         return resolve();
     }

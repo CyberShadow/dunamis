@@ -4,6 +4,28 @@ import ae.utils.promise;
 
 import dunamis.core.optimize : ExprOptimizer;
 
+/// Lifecycle phase for a data session.
+enum SetupMode {
+    query,    /// Normal query/mutation: BEGIN transaction
+    listen,   /// Set up change listeners (LISTEN channels, hooks)
+    respond,  /// Respond to event: BEGIN with point-in-time snapshot
+}
+
+/// Represents a data change event from a data source.
+///
+/// DB implementations subclass to attach opaque state for point-in-time reads
+/// (e.g., PostgreSQL snapshot ID, MockDB snapshot reference).
+/// The subscription engine passes ChangeEvent through opaquely — produced by
+/// the data source in listen mode, consumed in respond mode.
+class ChangeEvent {
+    /// The kind of change that occurred.
+    enum Kind { created, updated, deleted }
+
+    string table;
+    Kind kind;
+    string[] ids;
+}
+
 /// Per-request session for a data source.
 ///
 /// Each query/mutation execution gets its own DataSession, created by
@@ -15,12 +37,16 @@ import dunamis.core.optimize : ExprOptimizer;
 class DataSession {
     /// Called before execution begins.
     /// Override to BEGIN transaction, SET LOCAL variables, etc.
-    Promise!void setup() { return resolve(); }
+    /// For subscriptions, mode controls the lifecycle phase:
+    ///   query:   normal BEGIN (queries and mutations)
+    ///   listen:  set up change listeners (LISTEN, hooks)
+    ///   respond: BEGIN with point-in-time snapshot from event
+    Promise!void setup(SetupMode mode = SetupMode.query) { return resolve(); }
 
     /// Called after execution completes.
     /// success=true: execution succeeded (COMMIT).
     /// success=false: execution failed (ROLLBACK).
-    Promise!void teardown(bool success) { return resolve(); }
+    Promise!void teardown(SetupMode mode = SetupMode.query, bool success = true) { return resolve(); }
 }
 
 /// Base class for data sources that need lifecycle management.
