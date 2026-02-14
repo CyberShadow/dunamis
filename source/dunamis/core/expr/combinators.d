@@ -307,6 +307,55 @@ auto context(T)(ExprBase batchRef) if (is(T == struct)) {
 }
 
 // ============================================================================
+// EventSourceExpr: Subscription Event Delivery
+// ============================================================================
+
+/// Expression that reads event data from the EvalContext.
+/// Used as the root expression for subscription fields. The subscription
+/// executor delivers event data via deliver() before evaluating the tree.
+///
+/// Always produces a batch of size 1 (one event per evaluation).
+///
+/// Example (subscription executor loop):
+/// ---
+/// auto expr = eventSource!ChangeEvent();
+/// // ... compile and optimize expression tree once ...
+///
+/// while (true) {
+///     auto event = waitForEvent();
+///     auto ctx = new EvalContext();
+///     expr.deliver(ctx, event);
+///     auto result = awaitSync(tree.eval(ctx));
+///     sendToClient(result);
+/// }
+/// ---
+class EventSourceExpr(T) : Expr!T {
+    override ExprBase[] dependencies() { return []; }
+    override void replaceDependency(size_t, ExprBase) {}
+    override Expr!T optimize(OptimizeContext ctx) { return this; }
+
+    /// Deliver event data into the given eval context.
+    /// Call this before evaluating the expression tree.
+    void deliver(EvalContext ctx, T value) {
+        ctx.setValues!T(this, [value]);
+    }
+
+    override Promise!(T[]) eval(EvalContext ctx) {
+        auto values = ctx.getValues!T(this);
+        if (values.length == 0) {
+            throw new Exception("EventSourceExpr: no event data delivered");
+        }
+        return resolve(values);
+    }
+}
+
+/// Create an event source expression.
+/// The expression reads event data from the EvalContext at eval time.
+auto eventSource(T)() {
+    return new EventSourceExpr!T();
+}
+
+// ============================================================================
 // EffectExpr: Deferred Side Effects
 // ============================================================================
 
@@ -1363,4 +1412,73 @@ unittest {
     assert(!result[0][0].isError && result[0][0].value == 20);
     assert(result[0][1].isError);  // "bad" can't be converted to int
     assert(!result[0][2].isError && result[0][2].value == 10);
+}
+
+unittest {
+    // Test EventSourceExpr - basic event delivery
+    static struct TestEvent {
+        string table;
+        int count;
+    }
+
+    auto expr = eventSource!TestEvent();
+    auto ctx = new EvalContext();
+    ctx.setValues!AnyRef(null, [queryRoot]);
+
+    expr.deliver(ctx, TestEvent("users", 3));
+    auto result = awaitSync(expr.eval(ctx));
+    assert(result.length == 1);
+    assert(result[0].table == "users");
+    assert(result[0].count == 3);
+}
+
+unittest {
+    // Test EventSourceExpr with downstream use()
+    auto expr = eventSource!int();
+    auto ctx = new EvalContext();
+    ctx.setValues!AnyRef(null, [queryRoot]);
+
+    auto doubled = use((int n) => n * 2, expr);
+
+    expr.deliver(ctx, 42);
+    auto result = awaitSync(doubled.eval(ctx));
+    assert(result == [84]);
+}
+
+unittest {
+    // Test EventSourceExpr with ChangeEvent (class type)
+    import dunamis.core.datasource : ChangeEvent;
+
+    auto expr = eventSource!ChangeEvent();
+    auto ctx = new EvalContext();
+    ctx.setValues!AnyRef(null, [queryRoot]);
+
+    auto event = new ChangeEvent();
+    event.table = "users";
+    event.kind = ChangeEvent.Kind.created;
+    event.ids = ["1", "2", "3"];
+
+    expr.deliver(ctx, event);
+    auto result = awaitSync(expr.eval(ctx));
+    assert(result.length == 1);
+    assert(result[0].table == "users");
+    assert(result[0].kind == ChangeEvent.Kind.created);
+    assert(result[0].ids == ["1", "2", "3"]);
+}
+
+unittest {
+    // Test EventSourceExpr - re-evaluation with fresh context
+    auto expr = eventSource!int();
+
+    // First event
+    auto ctx1 = new EvalContext();
+    ctx1.setValues!AnyRef(null, [queryRoot]);
+    expr.deliver(ctx1, 10);
+    assert(awaitSync(expr.eval(ctx1)) == [10]);
+
+    // Second event with fresh context
+    auto ctx2 = new EvalContext();
+    ctx2.setValues!AnyRef(null, [queryRoot]);
+    expr.deliver(ctx2, 20);
+    assert(awaitSync(expr.eval(ctx2)) == [20]);
 }
