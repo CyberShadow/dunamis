@@ -5,6 +5,7 @@ public import dunamis.schema.filtering;
 public import dunamis.schema.sorting;
 public import dunamis.schema.pagination;
 public import dunamis.schema.crud;
+public import dunamis.schema.subscriptions;
 public import dunamis.schema.type_mapping;
 public import dunamis.schema.overrides;
 
