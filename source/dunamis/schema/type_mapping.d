@@ -2,7 +2,7 @@ module dunamis.schema.type_mapping;
 
 import std.meta : AliasSeq;
 import std.typecons : Nullable;
-import dunamis.schema.plugin : isSchema;
+import dunamis.schema.plugin : isSchema, RemapTypeAttributes;
 
 // ============================================================================
 // Value Mapping Helpers
@@ -273,7 +273,7 @@ template ExternalTypesPlugin(alias S, NewMappings...) if (isSchema!S) {
     // After NormalizePlugin, all types have only static Expr methods.
     // Just forward with value mapping applied.
     template _MappedType(T) {
-        @(__traits(getAttributes, T))
+        @(RemapTypeAttributes!(_TypeMap, __traits(getAttributes, T)))
         @OriginalName(__traits(identifier, T))
         struct _MappedType {
             mixin(_MappedTypeBody!T);

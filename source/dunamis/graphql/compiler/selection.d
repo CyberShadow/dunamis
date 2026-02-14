@@ -10,8 +10,10 @@ import graphql.ast;
 import dunamis.core.expr : ExprBase, ExprResultType, Expr, isExpr, singleton,
     DynamicJsonObjectExpr, SequentialJsonObjectExpr, MapExpr,
     use, toJsonValue, map, constant;
-import dunamis.core.types : isCustomScalar, isGqlResult, GqlResult;
-import dunamis.core.discovery : getSchemaFields, fieldResultType;
+import dunamis.core.expr.combinators : SubsetExpr, ConcatArrayExpr, UnionExprInfo;
+import dunamis.core.types : isCustomScalar, isGqlResult, GqlResult, isAbstractType;
+import dunamis.core.discovery : getSchemaFields, fieldResultType, getAllObjectTypes,
+    getAbstractTypeMembers, getNarrowTargets, getAllAbstractTypes;
 import dunamis.graphql.introspection;
 import dunamis.graphql.schema;
 import dunamis.graphql.compiler.values;
@@ -74,7 +76,7 @@ ExprBase compileRootField(Parent, alias IntrospectionSource = Parent)(Field fiel
         alias memberSym = __traits(getMember, Parent, member);
         enum gqlName = getGqlName!(memberSym, member);
         if (fieldName == gqlName) {
-            return callRootField!(memberSym, Parent)(parentExpr, field.args, field.ss, variables, fragments, nestedPath);
+            return callRootField!(memberSym, Parent, IntrospectionSource)(parentExpr, field.args, field.ss, variables, fragments, nestedPath);
         }
     }}
 
@@ -84,7 +86,8 @@ ExprBase compileRootField(Parent, alias IntrospectionSource = Parent)(Field fiel
 /// Call a root field function and handle the return type.
 /// Root fields return Expr!T which we may need to descend into with a selection set.
 /// Works for both Query and Mutation fields.
-ExprBase callRootField(alias fn, Parent)(Expr!Parent parent, Arguments args, SelectionSet ss, JSONValue variables, FragmentMap fragments, JSONValue[] pathPrefix = []) {
+/// SchemaSource enables abstract type resolution (default void = no abstract types).
+ExprBase callRootField(alias fn, Parent, alias SchemaSource = void)(Expr!Parent parent, Arguments args, SelectionSet ss, JSONValue variables, FragmentMap fragments, JSONValue[] pathPrefix = []) {
     import std.traits : Parameters, ReturnType, ParameterDefaults, ParameterIdentifierTuple;
     import std.typecons : tuple;
     import dunamis.core.expr : Expr, ExprResultType, isExpr;
@@ -115,7 +118,7 @@ ExprBase callRootField(alias fn, Parent)(Expr!Parent parent, Arguments args, Sel
     }
 
     // Handle return type generically
-    return compileFieldResult!(typeof(resultExpr))(resultExpr, ss, variables, fragments, pathPrefix);
+    return compileFieldResult!(typeof(resultExpr), SchemaSource)(resultExpr, ss, variables, fragments, pathPrefix);
 }
 
 /// Wrap an expression to convert its result to JSONValue
@@ -241,34 +244,37 @@ DynamicJsonObjectExpr compileRootSelectionSet(Query, alias IntrospectionSource =
 /// Compile a selection set into a MapExpr with DynamicJsonObjectExpr body.
 /// Returns Expr!(JSONValue[]) which is the result of mapping over the collection.
 /// Note: Explicit return type breaks circular template instantiation.
-MapExpr!(Entity, DynamicJsonObjectExpr) compileMapExpr(Entity, Coll)(Coll collection, SelectionSet ss, JSONValue variables, FragmentMap fragments, JSONValue[] pathPrefix = []) {
+/// SchemaSource enables abstract type resolution for nested fields.
+MapExpr!(Entity, DynamicJsonObjectExpr) compileMapExpr(Entity, alias SchemaSource = void, Coll)(Coll collection, SelectionSet ss, JSONValue variables, FragmentMap fragments, JSONValue[] pathPrefix = []) {
     return map!(
-        (Expr!Entity entity) => compileSelectionSetBody!Entity(entity, ss, variables, fragments, pathPrefix)
+        (Expr!Entity entity) => compileSelectionSetBody!(Entity, SchemaSource)(entity, ss, variables, fragments, pathPrefix)
     )(collection);
 }
 
 /// Compile the body of a selection set (the fields to extract).
 /// Works with any struct type that has field methods.
-DynamicJsonObjectExpr compileSelectionSetBody(T)(Expr!T ref_, SelectionSet ss, JSONValue variables, FragmentMap fragments, JSONValue[] pathPrefix = []) {
+/// SchemaSource enables abstract type resolution for nested fields.
+DynamicJsonObjectExpr compileSelectionSetBody(T, alias SchemaSource = void)(Expr!T ref_, SelectionSet ss, JSONValue variables, FragmentMap fragments, JSONValue[] pathPrefix = []) {
     auto selections = iterateSelections(ss);
     if (selections.length == 0) {
         throw new CompilerException("Empty selection set for " ~ T.stringof);
     }
 
     // Build field name/value pairs for jsonObject
-    return compileFieldsToJsonObject!T(ref_, selections, variables, fragments, pathPrefix);
+    return compileFieldsToJsonObject!(T, SchemaSource)(ref_, selections, variables, fragments, pathPrefix);
 }
 
 /// Compile selected fields into a jsonObject call.
 /// Works with any struct type that has field methods.
-DynamicJsonObjectExpr compileFieldsToJsonObject(T)(Expr!T ref_, Selection[] selections, JSONValue variables, FragmentMap fragments, JSONValue[] pathPrefix = []) {
+/// SchemaSource enables abstract type resolution for nested fields.
+DynamicJsonObjectExpr compileFieldsToJsonObject(T, alias SchemaSource = void)(Expr!T ref_, Selection[] selections, JSONValue variables, FragmentMap fragments, JSONValue[] pathPrefix = []) {
     // Collect field expressions
     ExprBase[] fieldExprs;
     string[] fieldNames;
 
     processSelections!(getGraphQLTypeName!T)(
         selections, variables, fragments, fieldNames, fieldExprs,
-        (field) => compileFieldAccess!T(ref_, field, variables, fragments, pathPrefix)
+        (field) => compileFieldAccess!(T, SchemaSource)(ref_, field, variables, fragments, pathPrefix)
     );
 
     // Determine non-null flags for null bubbling
@@ -322,17 +328,26 @@ DynamicJsonObjectExpr buildDynamicJsonObject(string[] names, ExprBase[] exprs, J
 }
 
 /// Compile the result of a field method based on its return type.
-/// Handles scalars, structs (with selection sets), and arrays.
+/// Handles scalars, structs (with selection sets), arrays, and abstract types.
 /// Scalars are wrapped to convert to JSONValue.
 /// Structs/arrays of structs compile selection sets.
-ExprBase compileFieldResult(ResultExpr)(ResultExpr resultExpr, SelectionSet ss, JSONValue variables, FragmentMap fragments, JSONValue[] pathPrefix = []) {
+/// SchemaSource enables abstract type resolution (default void = no abstract types).
+ExprBase compileFieldResult(ResultExpr, alias SchemaSource = void)(ResultExpr resultExpr, SelectionSet ss, JSONValue variables, FragmentMap fragments, JSONValue[] pathPrefix = []) {
     import dunamis.core.expr : ExprResultType, UnwrapNullableExpr, finalizeNullableObjectExpr;
 
     alias ResultType = ExprResultType!ResultExpr;
 
     // Arrays need element type inspection
     static if (is(ResultType == E[], E)) {
-        static if (isCustomScalar!E || !is(E == struct) || isGqlResult!E) {
+        // Abstract type array (union/interface) — per-member dispatch
+        static if (is(E == struct) && isAbstractType!E && !is(SchemaSource == void)) {
+            if (ss is null) {
+                throw new CompilerException(
+                    "Field returning [" ~ E.stringof ~ "] requires a selection set");
+            }
+            return compileAbstractArrayResult!(E, SchemaSource)(resultExpr, ss, variables, fragments, pathPrefix);
+        }
+        else static if (isCustomScalar!E || !is(E == struct) || isGqlResult!E) {
             // Array of scalars (custom or primitive) or GqlResult elements - wrap to JSON
             return wrapAsJsonExpr(resultExpr);
         } else {
@@ -341,7 +356,7 @@ ExprBase compileFieldResult(ResultExpr)(ResultExpr resultExpr, SelectionSet ss, 
                 throw new CompilerException(
                     "Field returning [" ~ E.stringof ~ "] requires a selection set");
             }
-            return compileMapExpr!E(resultExpr, ss, variables, fragments, pathPrefix);
+            return compileMapExpr!(E, SchemaSource)(resultExpr, ss, variables, fragments, pathPrefix);
         }
     }
     // GqlResult types — materialize errors to Nullable and recurse
@@ -349,7 +364,7 @@ ExprBase compileFieldResult(ResultExpr)(ResultExpr resultExpr, SelectionSet ss, 
         import dunamis.core.expr.json : materializeResult;
         alias Inner = typeof(ResultType.init.value);
         auto materialized = materializeResult!Inner(resultExpr, pathPrefix);
-        return compileFieldResult!(typeof(materialized))(materialized, ss, variables, fragments, pathPrefix);
+        return compileFieldResult!(typeof(materialized), SchemaSource)(materialized, ss, variables, fragments, pathPrefix);
     }
     // Nullable structs (entities) - handle null case specially
     else static if (is(ResultType == Nullable!T, T) && is(T == struct) && !isCustomScalar!T) {
@@ -361,7 +376,7 @@ ExprBase compileFieldResult(ResultExpr)(ResultExpr resultExpr, SelectionSet ss, 
         // This preserves the chain for optimization (findMapExprFromChain)
         auto unwrapper = new UnwrapNullableExpr!T(resultExpr);
         // Compile selection set using the unwrapper as input
-        auto innerExpr = compileSelectionSetBody!T(unwrapper, ss, variables, fragments, pathPrefix);
+        auto innerExpr = compileSelectionSetBody!(T, SchemaSource)(unwrapper, ss, variables, fragments, pathPrefix);
         // Wrap in nullable handler
         return finalizeNullableObjectExpr!T(resultExpr, unwrapper, innerExpr);
     }
@@ -375,7 +390,7 @@ ExprBase compileFieldResult(ResultExpr)(ResultExpr resultExpr, SelectionSet ss, 
             throw new CompilerException(
                 "Field returning " ~ ResultType.stringof ~ " requires a selection set");
         }
-        return compileSelectionSetBody!ResultType(resultExpr, ss, variables, fragments, pathPrefix);
+        return compileSelectionSetBody!(ResultType, SchemaSource)(resultExpr, ss, variables, fragments, pathPrefix);
     }
     // Scalars (primitives and CustomScalar) - wrap to JSON
     else {
@@ -385,7 +400,8 @@ ExprBase compileFieldResult(ResultExpr)(ResultExpr resultExpr, SelectionSet ss, 
 
 /// Compile access to a single field.
 /// Finds a computed field method with signature (Expr!T, args...) -> Expr!U and calls it.
-ExprBase compileFieldAccess(T)(Expr!T ref_, Field field, JSONValue variables, FragmentMap fragments, JSONValue[] pathPrefix = []) {
+/// SchemaSource enables abstract type resolution for nested fields.
+ExprBase compileFieldAccess(T, alias SchemaSource = void)(Expr!T ref_, Field field, JSONValue variables, FragmentMap fragments, JSONValue[] pathPrefix = []) {
     auto fieldName = getFieldName(field);
 
     // Build nested path for selection sets within this field
@@ -400,7 +416,7 @@ ExprBase compileFieldAccess(T)(Expr!T ref_, Field field, JSONValue variables, Fr
             enum gqlName = getGqlName!(memberSym, member);
             if (fieldName == gqlName) {
                 auto resultExpr = callComputedField!(memberSym, T)(ref_, field.args, variables);
-                return compileFieldResult!(typeof(resultExpr))(resultExpr, field.ss, variables, fragments, nestedPath);
+                return compileFieldResult!(typeof(resultExpr), SchemaSource)(resultExpr, field.ss, variables, fragments, nestedPath);
             }
         }
     }}
@@ -411,4 +427,39 @@ ExprBase compileFieldAccess(T)(Expr!T ref_, Field field, JSONValue variables, Fr
     }
 
     throw new CompilerException("Unknown field '" ~ fieldName ~ "' on type " ~ T.stringof);
+}
+
+// ============================================================================
+// Abstract Type Compilation (Unions / Interfaces)
+// ============================================================================
+
+/// Compile an abstract type array result (union or interface).
+/// For each concrete member type:
+///   1. SubsetExpr extracts that member's elements
+///   2. MapExpr compiles that member's fields using type-conditioned selections
+///   3. ConcatArrayExpr merges all per-member JSON arrays
+ExprBase compileAbstractArrayResult(AbstractT, alias SchemaSource, ResultExpr)(
+    ResultExpr resultExpr, SelectionSet ss, JSONValue variables, FragmentMap fragments, JSONValue[] pathPrefix = [])
+{
+    alias AllTypes = getAllObjectTypes!(SchemaSource.Query);
+    alias Members = getAbstractTypeMembers!(AbstractT, AllTypes);
+
+    static assert(Members.length > 0,
+        "Abstract type " ~ AbstractT.stringof ~ " has no concrete members");
+
+    ExprBase[] memberJsonExprs;
+
+    static foreach (Member; Members) {{
+        // 1. Extract this member type's elements from the union batch
+        auto subset = new SubsetExpr!Member(resultExpr);
+
+        // 2. Compile selection set for this member type
+        // processSelections will naturally filter type-conditioned fragments
+        auto memberMapExpr = compileMapExpr!(Member, SchemaSource)(subset, ss, variables, fragments, pathPrefix);
+
+        memberJsonExprs ~= memberMapExpr;
+    }}
+
+    // 3. Concatenate all per-member JSON arrays
+    return new ConcatArrayExpr(memberJsonExprs);
 }

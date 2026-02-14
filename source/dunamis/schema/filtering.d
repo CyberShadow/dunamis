@@ -1062,7 +1062,7 @@ template FilterPlugin(alias S) if (isSchema!S) {
 
     // Generate filtered versions of each entity type
     template FilteredEntity(Entity) {
-        @(__traits(getAttributes, Entity))
+        @(RemapTypeAttributes!(EntityTypeMap, __traits(getAttributes, Entity)))
         @OriginalName(__traits(identifier, Entity))
         struct FilteredEntity {
             mixin WrapFields!(Entity, EntityTypeMap, FilteredArrayField);

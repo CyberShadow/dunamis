@@ -2546,3 +2546,845 @@ unittest {
     assert(users.length == 1);
     assert(users[0]["firstName"].str == "Alice");
 }
+
+// ============================================================================
+// Abstract Type Tests (Unions / Interfaces)
+// ============================================================================
+
+// Union type: query with typed fragments
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core;
+    import dunamis.core.expr.combinators : unionOf;
+    import dunamis.core.types : ImplementedBy;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+    import dunamis.graphql.schema : Schema;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+    }
+
+    @DemoEntity!(db, "posts")
+    static struct Post {
+        mixin DemoId;
+        mixin Col!("title", string);
+    }
+
+    // Union: SearchResult = User | Post
+    @ImplementedBy!(User, Post)
+    static struct SearchResult {}
+
+    static struct Query {
+        mixin Table!(User, "users");
+        mixin Table!(Post, "posts");
+
+        // search returns all users and posts as a union
+        static auto search(Expr!Query q) {
+            return unionOf!SearchResult(users(q), posts(q));
+        }
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "first_name": "Alice"},
+        {"id": 2, "first_name": "Bob"}
+    ]`);
+    db.setTableData("posts", `[
+        {"id": 1, "title": "Hello World"},
+        {"id": 2, "title": "GraphQL Unions"}
+    ]`);
+
+    alias MySchema = Schema!(Query);
+
+    auto query = compileQuery!MySchema(`{
+        search {
+            ... on User { firstName }
+            ... on Post { title }
+        }
+    }`);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query));
+
+    auto items = result["search"].array;
+    assert(items.length == 4, "Should have 2 users + 2 posts = 4 results");
+
+    // Collect results by type (order is implementation-defined for unions)
+    JSONValue[] userItems, postItems;
+    foreach (item; items) {
+        if ("firstName" in item) userItems ~= item;
+        else if ("title" in item) postItems ~= item;
+    }
+    assert(userItems.length == 2, "Should have 2 user results");
+    assert(postItems.length == 2, "Should have 2 post results");
+    assert(userItems[0]["firstName"].str == "Alice");
+    assert(userItems[1]["firstName"].str == "Bob");
+    assert(postItems[0]["title"].str == "Hello World");
+    assert(postItems[1]["title"].str == "GraphQL Unions");
+}
+
+// Union type: __typename returns concrete type name
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core;
+    import dunamis.core.expr.combinators : unionOf;
+    import dunamis.core.types : ImplementedBy;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+    import dunamis.graphql.schema : Schema;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+    }
+
+    @DemoEntity!(db, "posts")
+    static struct Post {
+        mixin DemoId;
+        mixin Col!("title", string);
+    }
+
+    @ImplementedBy!(User, Post)
+    static struct SearchResult {}
+
+    static struct Query {
+        mixin Table!(User, "users");
+        mixin Table!(Post, "posts");
+
+        static auto search(Expr!Query q) {
+            return unionOf!SearchResult(users(q), posts(q));
+        }
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[{"id": 1, "first_name": "Alice"}]`);
+    db.setTableData("posts", `[{"id": 1, "title": "Hello"}]`);
+
+    alias MySchema = Schema!(Query);
+
+    auto query = compileQuery!MySchema(`{
+        search {
+            __typename
+            ... on User { firstName }
+            ... on Post { title }
+        }
+    }`);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query));
+
+    import std.conv : to;
+    auto items = result["search"].array;
+    assert(items.length == 2, "Expected 2 items, got " ~ items.length.to!string ~
+        ": " ~ result["search"].toString());
+
+    // Collect by type (order is implementation-defined for unions)
+    JSONValue[] userItems, postItems;
+    foreach (item; items) {
+        if (item["__typename"].str == "User") userItems ~= item;
+        else if (item["__typename"].str == "Post") postItems ~= item;
+    }
+    assert(userItems.length == 1, "Expected 1 user, got " ~ userItems.length.to!string);
+    assert(postItems.length == 1, "Expected 1 post, got " ~ postItems.length.to!string);
+    assert(userItems[0]["firstName"].str == "Alice");
+    assert(postItems[0]["title"].str == "Hello");
+}
+
+// Union type: SDL generation
+unittest {
+    import std.algorithm : canFind;
+    import dunamis.core;
+    import dunamis.core.types : ImplementedBy;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+    import dunamis.graphql.schema : Schema;
+    import dunamis.graphql.schema.generation : generateSchemaSDL;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+    }
+
+    @DemoEntity!(db, "posts")
+    static struct Post {
+        mixin DemoId;
+        mixin Col!("title", string);
+    }
+
+    @ImplementedBy!(User, Post)
+    static struct SearchResult {}
+
+    static struct Query {
+        mixin Table!(User, "users");
+        mixin Table!(Post, "posts");
+
+        static auto search(Expr!Query q) {
+            return unionOf!SearchResult(users(q), posts(q));
+        }
+    }
+
+    alias MySchema = Schema!(Query);
+    enum sdl = generateSchemaSDL!MySchema;
+
+    // Should contain union declaration
+    assert(sdl.canFind("union SearchResult ="), "SDL should contain union declaration: " ~ sdl);
+    // Should contain both member types
+    assert(sdl.canFind("User") && sdl.canFind("Post"),
+        "SDL should contain both union members: " ~ sdl);
+    // Should contain the search field on Query returning the union type
+    assert(sdl.canFind("search: [SearchResult!]!"),
+        "Query should have search field returning union array: " ~ sdl);
+}
+
+// Union type: introspection
+unittest {
+    import std.json;
+    import dunamis.core;
+    import dunamis.core.types : ImplementedBy;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+    import dunamis.graphql.schema : Schema;
+    import dunamis.graphql.introspection : buildIntrospectionJson;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+    }
+
+    @DemoEntity!(db, "posts")
+    static struct Post {
+        mixin DemoId;
+        mixin Col!("title", string);
+    }
+
+    @ImplementedBy!(User, Post)
+    static struct SearchResult {}
+
+    static struct Query {
+        mixin Table!(User, "users");
+        mixin Table!(Post, "posts");
+
+        static auto search(Expr!Query q) {
+            return unionOf!SearchResult(users(q), posts(q));
+        }
+    }
+
+    alias MySchema = Schema!(Query);
+    auto schemaJson = buildIntrospectionJson!(MySchema.Query)();
+
+    // Find the SearchResult type
+    bool foundUnion = false;
+    foreach (t; schemaJson["types"].array) {
+        if (t["name"].str == "SearchResult") {
+            foundUnion = true;
+            assert(t["kind"].str == "UNION",
+                "SearchResult should be UNION, got: " ~ t["kind"].str);
+            // Should have possibleTypes listing the member types
+            auto possible = t["possibleTypes"].array;
+            assert(possible.length == 2,
+                "Should have 2 possible types");
+            // Collect names (order may vary)
+            string[] names;
+            foreach (p; possible) names ~= p["name"].str;
+            import std.algorithm : canFind;
+            assert(names.canFind("User"), "possibleTypes should include User");
+            assert(names.canFind("Post"), "possibleTypes should include Post");
+            // Union should have no fields
+            assert(t["fields"].isNull, "Union should have no fields");
+        }
+    }
+    assert(foundUnion, "Should have SearchResult union type in introspection");
+}
+
+// Union type: validation — missing selection set on union field
+unittest {
+    import dunamis.core;
+    import dunamis.core.types : ImplementedBy;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+    import dunamis.graphql.schema : Schema;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+    }
+
+    @DemoEntity!(db, "posts")
+    static struct Post {
+        mixin DemoId;
+        mixin Col!("title", string);
+    }
+
+    @ImplementedBy!(User, Post)
+    static struct SearchResult {}
+
+    static struct Query {
+        mixin Table!(User, "users");
+        mixin Table!(Post, "posts");
+
+        static auto search(Expr!Query q) {
+            return unionOf!SearchResult(users(q), posts(q));
+        }
+    }
+
+    alias MySchema = Schema!(Query);
+
+    // Querying a union field without a selection set should fail validation
+    bool caught = false;
+    try {
+        auto query = compileQuery!MySchema(`{ search }`);
+    } catch (CompilerException e) {
+        caught = true;
+        import std.algorithm : canFind;
+        assert(e.msg.canFind("selection set"),
+            "Error should mention selection set, got: " ~ e.msg);
+    }
+    assert(caught, "Should throw CompilerException for union field without selection set");
+}
+
+// Interface type: query with shared fields + typed fragments
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core;
+    import dunamis.core.expr.combinators : unionOf;
+    import dunamis.core.types : ImplementedBy, AbstractField;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+    import dunamis.graphql.schema : Schema;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+    }
+
+    @DemoEntity!(db, "posts")
+    static struct Post {
+        mixin DemoId;
+        mixin Col!("title", string);
+    }
+
+    // Interface: Node has a shared "id" field
+    @ImplementedBy!(User, Post)
+    static struct Node {
+        mixin AbstractField!("id", string);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+        mixin Table!(Post, "posts");
+
+        static auto nodes(Expr!Query q) {
+            return unionOf!Node(users(q), posts(q));
+        }
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "first_name": "Alice"},
+        {"id": 2, "first_name": "Bob"}
+    ]`);
+    db.setTableData("posts", `[
+        {"id": 10, "title": "Hello World"},
+        {"id": 20, "title": "GraphQL Interfaces"}
+    ]`);
+
+    alias MySchema = Schema!(Query);
+
+    // Query interface with shared field (id) + typed fragments for member-specific fields
+    auto query = compileQuery!MySchema(`{
+        nodes {
+            __typename
+            ... on User { firstName }
+            ... on Post { title }
+        }
+    }`);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query));
+
+    auto items = result["nodes"].array;
+    assert(items.length == 4, "Should have 2 users + 2 posts = 4 results");
+
+    JSONValue[] userItems, postItems;
+    foreach (item; items) {
+        if (item["__typename"].str == "User") userItems ~= item;
+        else if (item["__typename"].str == "Post") postItems ~= item;
+    }
+    assert(userItems.length == 2, "Should have 2 user results");
+    assert(postItems.length == 2, "Should have 2 post results");
+    assert(userItems[0]["firstName"].str == "Alice");
+    assert(postItems[0]["title"].str == "Hello World");
+}
+
+// Interface type: SDL generation
+unittest {
+    import std.algorithm : canFind;
+    import dunamis.core;
+    import dunamis.core.types : ImplementedBy, AbstractField;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+    import dunamis.graphql.schema : Schema;
+    import dunamis.graphql.schema.generation : generateSchemaSDL;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+    }
+
+    @DemoEntity!(db, "posts")
+    static struct Post {
+        mixin DemoId;
+        mixin Col!("title", string);
+    }
+
+    @ImplementedBy!(User, Post)
+    static struct Node {
+        mixin AbstractField!("id", string);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+        mixin Table!(Post, "posts");
+
+        static auto nodes(Expr!Query q) {
+            return unionOf!Node(users(q), posts(q));
+        }
+    }
+
+    alias MySchema = Schema!(Query);
+    enum sdl = generateSchemaSDL!MySchema;
+
+    // Should contain interface declaration with the shared field
+    assert(sdl.canFind("interface Node"), "SDL should contain interface declaration: " ~ sdl);
+    assert(sdl.canFind("id: String!"),
+        "Interface should have id field: " ~ sdl);
+
+    // Object types should declare implements clause
+    assert(sdl.canFind("type User implements Node"),
+        "User should implement Node: " ~ sdl);
+    assert(sdl.canFind("type Post implements Node"),
+        "Post should implement Node: " ~ sdl);
+}
+
+// Interface type: introspection
+unittest {
+    import std.json;
+    import std.algorithm : canFind;
+    import dunamis.core;
+    import dunamis.core.types : ImplementedBy, AbstractField;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+    import dunamis.graphql.schema : Schema;
+    import dunamis.graphql.introspection : buildIntrospectionJson;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+    }
+
+    @DemoEntity!(db, "posts")
+    static struct Post {
+        mixin DemoId;
+        mixin Col!("title", string);
+    }
+
+    @ImplementedBy!(User, Post)
+    static struct Node {
+        mixin AbstractField!("id", string);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+        mixin Table!(Post, "posts");
+
+        static auto nodes(Expr!Query q) {
+            return unionOf!Node(users(q), posts(q));
+        }
+    }
+
+    alias MySchema = Schema!(Query);
+    auto schemaJson = buildIntrospectionJson!(MySchema.Query)();
+
+    // Find the Node type — should be INTERFACE
+    bool foundInterface = false;
+    foreach (t; schemaJson["types"].array) {
+        if (t["name"].str == "Node") {
+            foundInterface = true;
+            assert(t["kind"].str == "INTERFACE",
+                "Node should be INTERFACE, got: " ~ t["kind"].str);
+
+            // Should have possibleTypes listing the member types
+            auto possible = t["possibleTypes"].array;
+            assert(possible.length == 2, "Should have 2 possible types");
+            string[] names;
+            foreach (p; possible) names ~= p["name"].str;
+            assert(names.canFind("User"), "possibleTypes should include User");
+            assert(names.canFind("Post"), "possibleTypes should include Post");
+
+            // Interface should have fields (the shared id field)
+            assert(!t["fields"].isNull, "Interface should have fields");
+            auto fields = t["fields"].array;
+            assert(fields.length >= 1, "Interface should have at least 1 field");
+            string[] fieldNames;
+            foreach (f; fields) fieldNames ~= f["name"].str;
+            assert(fieldNames.canFind("id"), "Interface should have 'id' field");
+        }
+    }
+    assert(foundInterface, "Should have Node interface type in introspection");
+
+    // Verify User declares "implements Node" in its interfaces list
+    foreach (t; schemaJson["types"].array) {
+        if (t["name"].str == "User") {
+            assert(!t["interfaces"].isNull, "User should have interfaces list");
+            auto ifaces = t["interfaces"].array;
+            assert(ifaces.length >= 1, "User should implement at least 1 interface");
+            string[] ifaceNames;
+            foreach (iface; ifaces) ifaceNames ~= iface["name"].str;
+            assert(ifaceNames.canFind("Node"), "User should implement Node");
+        }
+    }
+}
+
+// Union validation: invalid type condition
+unittest {
+    import dunamis.core;
+    import dunamis.core.types : ImplementedBy;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+    import dunamis.graphql.schema : Schema;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+    }
+
+    @DemoEntity!(db, "posts")
+    static struct Post {
+        mixin DemoId;
+        mixin Col!("title", string);
+    }
+
+    @ImplementedBy!(User, Post)
+    static struct SearchResult {}
+
+    static struct Query {
+        mixin Table!(User, "users");
+        mixin Table!(Post, "posts");
+
+        static auto search(Expr!Query q) {
+            return unionOf!SearchResult(users(q), posts(q));
+        }
+    }
+
+    alias MySchema = Schema!(Query);
+
+    // Type condition "Comment" is not a member of SearchResult
+    bool caught = false;
+    try {
+        auto query = compileQuery!MySchema(`{
+            search {
+                ... on Comment { text }
+            }
+        }`);
+    } catch (CompilerException e) {
+        caught = true;
+        import std.algorithm : canFind;
+        assert(e.msg.canFind("Comment") && e.msg.canFind("not a member"),
+            "Error should mention invalid type condition: " ~ e.msg);
+    }
+    assert(caught, "Should throw for invalid type condition on union");
+}
+
+// Union validation: bare field on union (not allowed)
+unittest {
+    import dunamis.core;
+    import dunamis.core.types : ImplementedBy;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+    import dunamis.graphql.schema : Schema;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+    }
+
+    @DemoEntity!(db, "posts")
+    static struct Post {
+        mixin DemoId;
+        mixin Col!("title", string);
+    }
+
+    @ImplementedBy!(User, Post)
+    static struct SearchResult {}
+
+    static struct Query {
+        mixin Table!(User, "users");
+        mixin Table!(Post, "posts");
+
+        static auto search(Expr!Query q) {
+            return unionOf!SearchResult(users(q), posts(q));
+        }
+    }
+
+    alias MySchema = Schema!(Query);
+
+    // Bare field on union — only __typename is allowed
+    bool caught = false;
+    try {
+        auto query = compileQuery!MySchema(`{
+            search {
+                firstName
+            }
+        }`);
+    } catch (CompilerException e) {
+        caught = true;
+        import std.algorithm : canFind;
+        assert(e.msg.canFind("Cannot query field") && e.msg.canFind("union"),
+            "Error should mention cannot query on union: " ~ e.msg);
+    }
+    assert(caught, "Should throw for bare field on union type");
+}
+
+// Interface validation: unknown field on member via fragment
+unittest {
+    import dunamis.core;
+    import dunamis.core.types : ImplementedBy, AbstractField;
+    import dunamis.core.expr.combinators : unionOf;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+    import dunamis.graphql.schema : Schema;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+    }
+
+    @DemoEntity!(db, "posts")
+    static struct Post {
+        mixin DemoId;
+        mixin Col!("title", string);
+    }
+
+    @ImplementedBy!(User, Post)
+    static struct Node {
+        mixin AbstractField!("id", string);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+        mixin Table!(Post, "posts");
+
+        static auto nodes(Expr!Query q) {
+            return unionOf!Node(users(q), posts(q));
+        }
+    }
+
+    alias MySchema = Schema!(Query);
+
+    // "nonExistent" doesn't exist on User
+    bool caught = false;
+    try {
+        auto query = compileQuery!MySchema(`{
+            nodes {
+                ... on User { nonExistent }
+            }
+        }`);
+    } catch (CompilerException e) {
+        caught = true;
+        import std.algorithm : canFind;
+        assert(e.msg.canFind("Unknown field") && e.msg.canFind("nonExistent"),
+            "Error should mention unknown field: " ~ e.msg);
+    }
+    assert(caught, "Should throw for unknown field in typed fragment");
+}
+
+// Union type: with plugins applied (tests AbstractTypeCastExpr + RemapTypeAttributes)
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core;
+    import dunamis.core.expr.combinators : unionOf;
+    import dunamis.core.types : ImplementedBy;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+    import dunamis.graphql.schema : Schema;
+    import dunamis.graphql : ApplyPlugins, FilterPlugin, SortingPlugin;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+    }
+
+    @DemoEntity!(db, "posts")
+    static struct Post {
+        mixin DemoId;
+        mixin Col!("title", string);
+    }
+
+    @ImplementedBy!(User, Post)
+    static struct SearchResult {}
+
+    static struct Query {
+        mixin Table!(User, "users");
+        mixin Table!(Post, "posts");
+
+        static auto search(Expr!Query q) {
+            return unionOf!SearchResult(users(q), posts(q));
+        }
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "first_name": "Alice"},
+        {"id": 2, "first_name": "Bob"}
+    ]`);
+    db.setTableData("posts", `[
+        {"id": 1, "title": "Hello World"},
+        {"id": 2, "title": "GraphQL Unions"}
+    ]`);
+
+    // Full plugin chain — tests AbstractTypeCastExpr wrapping
+    alias FullSchema = ApplyPlugins!(Schema!(Query), FilterPlugin, SortingPlugin);
+
+    auto query = compileQuery!FullSchema(`{
+        search {
+            __typename
+            ... on User { firstName }
+            ... on Post { title }
+        }
+    }`);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query));
+
+    auto items = result["search"].array;
+    assert(items.length == 4, "Should have 2 users + 2 posts = 4 results");
+
+    JSONValue[] userItems, postItems;
+    foreach (item; items) {
+        if (item["__typename"].str == "User") userItems ~= item;
+        else if (item["__typename"].str == "Post") postItems ~= item;
+    }
+    assert(userItems.length == 2, "Should have 2 user results");
+    assert(postItems.length == 2, "Should have 2 post results");
+    assert(userItems[0]["firstName"].str == "Alice");
+    assert(postItems[0]["title"].str == "Hello World");
+}
+
+// Union type: named fragments (spread) with type conditions
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core;
+    import dunamis.core.expr.combinators : unionOf;
+    import dunamis.core.types : ImplementedBy;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+    import dunamis.graphql.schema : Schema;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+    }
+
+    @DemoEntity!(db, "posts")
+    static struct Post {
+        mixin DemoId;
+        mixin Col!("title", string);
+    }
+
+    @ImplementedBy!(User, Post)
+    static struct SearchResult {}
+
+    static struct Query {
+        mixin Table!(User, "users");
+        mixin Table!(Post, "posts");
+
+        static auto search(Expr!Query q) {
+            return unionOf!SearchResult(users(q), posts(q));
+        }
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id": 1, "first_name": "Alice"},
+        {"id": 2, "first_name": "Bob"}
+    ]`);
+    db.setTableData("posts", `[
+        {"id": 1, "title": "Hello World"},
+        {"id": 2, "title": "GraphQL Unions"}
+    ]`);
+
+    alias MySchema = Schema!(Query);
+
+    auto query = compileQuery!MySchema(`
+        query {
+            search {
+                ...UserFields
+                ...PostFields
+            }
+        }
+        fragment UserFields on User { firstName }
+        fragment PostFields on Post { title }
+    `);
+
+    auto executor = new Executor();
+    auto result = awaitSync(executor.execute(query));
+
+    auto items = result["search"].array;
+    assert(items.length == 4, "Should have 2 users + 2 posts = 4 results");
+
+    JSONValue[] userItems, postItems;
+    foreach (item; items) {
+        if ("firstName" in item) userItems ~= item;
+        else if ("title" in item) postItems ~= item;
+    }
+    assert(userItems.length == 2, "Should have 2 user results");
+    assert(postItems.length == 2, "Should have 2 post results");
+    assert(userItems[0]["firstName"].str == "Alice");
+    assert(postItems[0]["title"].str == "Hello World");
+}

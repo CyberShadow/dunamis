@@ -375,6 +375,206 @@ The three-state mapping (`Nullable!(Nullable!T)`) supports patch mutation semant
 
 This distinction is semantic (handled in your resolver logic), not schema-level — GraphQL represents both `Nullable!T` and `Nullable!(Nullable!T)` as nullable types.
 
+## Union & Interface Types
+
+Union and interface types allow a single field to return objects of different entity types. Use `@ImplementedBy` to declare which concrete types belong to the abstract type, and `unionOf!` to build the expression.
+
+### Unions
+
+A union has no fields of its own — clients use typed fragments to access member-specific fields:
+
+```d
+import dunamis.core.types : ImplementedBy, Implements;
+import dunamis.core.expr.combinators : unionOf;
+
+// Declare a union: SearchResult = User | Post
+@ImplementedBy!(User, Post)
+struct SearchResult {}
+
+struct Query {
+    mixin Table!(User, "users");
+    mixin Table!(Post, "posts");
+
+    // Return all users and posts as a union
+    static auto search(Expr!Query q) {
+        return unionOf!SearchResult(users(q), posts(q));
+    }
+}
+```
+
+Generates GraphQL schema:
+
+```graphql
+union SearchResult = User | Post
+
+type Query {
+  search: [SearchResult!]!
+}
+```
+
+Query with typed fragments:
+
+```graphql
+{
+  search {
+    __typename
+    ... on User { firstName lastName }
+    ... on Post { title }
+  }
+}
+```
+
+Returns:
+
+```json
+{
+  "search": [
+    {"__typename": "User", "firstName": "Alice", "lastName": "Smith"},
+    {"__typename": "User", "firstName": "Bob", "lastName": "Jones"},
+    {"__typename": "Post", "title": "Hello World"}
+  ]
+}
+```
+
+### Interfaces
+
+An interface declares shared fields using `AbstractField`. Concrete types must have matching fields (enforced by the schema):
+
+```d
+import dunamis.core.types : ImplementedBy, AbstractField;
+
+// Declare an interface with a shared "id" field
+@ImplementedBy!(User, Post)
+struct ContentNode {
+    mixin AbstractField!("id", long);
+}
+
+struct Query {
+    mixin Table!(User, "users");
+    mixin Table!(Post, "posts");
+
+    static auto contentNodes(Expr!Query q) {
+        return unionOf!ContentNode(users(q), posts(q));
+    }
+}
+```
+
+Generates GraphQL schema:
+
+```graphql
+interface ContentNode {
+  id: Int!
+}
+
+type User implements ContentNode {
+  id: Int!
+  firstName: String!
+  ...
+}
+
+type Post implements ContentNode {
+  id: Int!
+  title: String!
+  ...
+}
+
+type Query {
+  contentNodes: [ContentNode!]!
+}
+```
+
+Query — shared fields are accessible directly, member-specific fields via fragments:
+
+```graphql
+{
+  contentNodes {
+    __typename
+    id
+    ... on User { firstName }
+    ... on Post { title }
+  }
+}
+```
+
+### Named Fragments
+
+Both unions and interfaces support named fragments:
+
+```graphql
+query {
+  search {
+    __typename
+    ...UserFields
+    ...PostFields
+  }
+}
+fragment UserFields on User {
+  firstName
+  fullName
+}
+fragment PostFields on Post {
+  title
+  author { firstName }
+}
+```
+
+### Declaring Membership
+
+There are two ways to declare which concrete types belong to an abstract type:
+
+**`@ImplementedBy` on the abstract type** — lists all members centrally:
+
+```d
+@ImplementedBy!(User, Post)
+struct SearchResult {}
+```
+
+**`@Implements` on the concrete type** — each member declares itself:
+
+```d
+@Implements!SearchResult
+struct Comment {
+    // ...
+}
+```
+
+Both can be combined. `@ImplementedBy` provides the base member list, and `@Implements` adds additional members. This is useful when you want to extend a union or interface without modifying its definition:
+
+```d
+// Core schema defines the union with two members
+@ImplementedBy!(User, Post)
+struct SearchResult {}
+
+// A separate module adds Comment to the union
+@Implements!SearchResult
+struct Comment { ... }
+
+// At runtime, SearchResult = User | Post | Comment
+```
+
+A concrete type can implement multiple abstract types:
+
+```d
+@Implements!(SearchResult, ContentNode)
+struct Article { ... }
+```
+
+### Union vs Interface
+
+| | Union | Interface |
+|---|---|---|
+| Declaration | `@ImplementedBy!(A, B) struct U {}` | `@ImplementedBy!(A, B) struct I { mixin AbstractField!(...); }` |
+| Shared fields | None | Declared via `AbstractField` |
+| Bare field access | Only `__typename` | `__typename` + shared fields |
+| GraphQL SDL | `union U = A \| B` | `interface I { ... }` + `type A implements I { ... }` |
+| GraphQL kind | `UNION` | `INTERFACE` |
+
+The distinction is automatic: if the abstract type has schema fields (`AbstractField` mixins), it's an interface; otherwise it's a union.
+
+### Plugin Compatibility
+
+Union and interface types work with all plugins (`FilterPlugin`, `SortingPlugin`, `PaginationPlugin`). Plugins wrap abstract types through the schema chain automatically — the `@ImplementedBy` UDA is remapped to reference the plugin-wrapped member types.
+
 ## Schema & DDL Generation
 
 Generate GraphQL schema and SQL DDL at compile time:

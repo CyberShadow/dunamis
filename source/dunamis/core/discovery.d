@@ -12,7 +12,8 @@ import std.traits;
 import std.typecons : Nullable;
 
 import dunamis.core.expr : Expr, ExprResultType, isExpr;
-import dunamis.core.types : isCustomScalar, isInternalMember, isPlainField, isPlainMethod, isGqlResult;
+import dunamis.core.types : isCustomScalar, isInternalMember, isPlainField, isPlainMethod, isGqlResult,
+    isAbstractType, getImplementedByMembers, implementsAbstractType, ImplementedBy, Implements;
 
 // ============================================================================
 // Field Introspection
@@ -240,6 +241,9 @@ template extractObjectFromType(T) {
     } else static if (isGqlResult!T) {
         // GqlResult - unwrap to inner type
         alias extractObjectFromType = extractObjectFromType!(typeof(T.init.value));
+    } else static if (isAbstractType!T) {
+        // Abstract type (union/interface) — include in type graph for member discovery
+        alias extractObjectFromType = T;
     } else static if (isObjectType!T) {
         // Object type (struct with valid field methods)
         alias extractObjectFromType = T;
@@ -249,9 +253,16 @@ template extractObjectFromType(T) {
     }
 }
 
-/// Get all object types directly referenced by a type (via field return types)
+/// Get all object types directly referenced by a type (via field return types).
+/// For abstract types, also follows @ImplementedBy links to include member types.
 template getRelatedTypes(T) {
-    alias getRelatedTypes = getRelatedTypesImpl!(T, 0, __traits(allMembers, T));
+    alias _fieldRelated = getRelatedTypesImpl!(T, 0, __traits(allMembers, T));
+    // For abstract types, also include member types from @ImplementedBy
+    static if (isAbstractType!T) {
+        alias getRelatedTypes = AliasSeq!(_fieldRelated, getImplementedByMembers!T);
+    } else {
+        alias getRelatedTypes = _fieldRelated;
+    }
 }
 
 /// Get root object types from a Query type
@@ -279,6 +290,98 @@ template uniqueTypesForExpand(Types...) {
     } else {
         alias uniqueTypesForExpand = AliasSeq!(Types[0], uniqueTypesForExpand!(Types[1..$]));
     }
+}
+
+// ============================================================================
+// Abstract Type Protocol
+// ============================================================================
+
+/// Get the concrete member types of an abstract type.
+/// Merges two declaration modes:
+///   1. @ImplementedBy!(Members...) on the abstract type (including through _normalizedSource chain)
+///   2. @Implements!(AbstractTypes...) on member types (scanned from AllTypes)
+///
+/// AllTypes is typically getAllObjectTypes!Query — the set of known concrete types.
+/// This is the single source of truth for "what types does this abstract type contain?"
+template getAbstractTypeMembers(AbstractT, AllTypes...) {
+    alias _fromUDA = getImplementedByMembers!AbstractT;
+    alias _fromImpl = _collectImplementors!(AbstractT, AllTypes);
+    alias getAbstractTypeMembers = uniqueTypes!(AliasSeq!(_fromUDA, _fromImpl));
+}
+
+/// Get the narrow targets for a type (types it can be narrowed to via `... on TypeName`).
+/// For abstract types: returns concrete member types.
+/// For concrete types: returns empty tuple (no narrowing).
+///
+/// This is the compiler's single entry point for type narrowing.
+template getNarrowTargets(T, AllTypes...) {
+    static if (isAbstractType!T) {
+        alias getNarrowTargets = getAbstractTypeMembers!(T, AllTypes);
+    } else {
+        alias getNarrowTargets = AliasSeq!();
+    }
+}
+
+/// Discover all abstract types from a set of types and their field return types.
+/// Scans for structs with @ImplementedBy UDA.
+template getAllAbstractTypes(AllTypes...) {
+    alias getAllAbstractTypes = _filterAbstractTypes!(AllTypes);
+}
+
+/// Get the abstract interfaces that a concrete type implements.
+/// Returns a tuple of abstract types that have schema fields (i.e., interfaces, not unions).
+template getImplementedInterfaces(T, AllAbstractTypes...) {
+    alias getImplementedInterfaces = _filterImplementedInterfaces!(T, AllAbstractTypes);
+}
+
+// --- Private abstract type helpers ---
+
+/// Collect types from AllTypes that declare @Implements for AbstractT
+private template _collectImplementors(AbstractT, AllTypes...) {
+    static if (AllTypes.length == 0) {
+        alias _collectImplementors = AliasSeq!();
+    } else {
+        static if (implementsAbstractType!(AllTypes[0], AbstractT)) {
+            alias _collectImplementors = AliasSeq!(AllTypes[0], _collectImplementors!(AbstractT, AllTypes[1..$]));
+        } else {
+            alias _collectImplementors = _collectImplementors!(AbstractT, AllTypes[1..$]);
+        }
+    }
+}
+
+/// Filter a type list to only abstract types
+private template _filterAbstractTypes(Types...) {
+    static if (Types.length == 0) {
+        alias _filterAbstractTypes = AliasSeq!();
+    } else {
+        static if (isAbstractType!(Types[0])) {
+            alias _filterAbstractTypes = AliasSeq!(Types[0], _filterAbstractTypes!(Types[1..$]));
+        } else {
+            alias _filterAbstractTypes = _filterAbstractTypes!(Types[1..$]);
+        }
+    }
+}
+
+/// Filter abstract types to those that T is a member of AND that have schema fields (interfaces)
+private template _filterImplementedInterfaces(T, AllAbstractTypes...) {
+    static if (AllAbstractTypes.length == 0) {
+        alias _filterImplementedInterfaces = AliasSeq!();
+    } else {
+        alias AbstractT = AllAbstractTypes[0];
+        alias Rest = _filterImplementedInterfaces!(T, AllAbstractTypes[1..$]);
+        // Check: is T a member of this abstract type, and does the abstract type have schema fields?
+        static if (_isMemberOf!(T, AbstractT) && getSchemaFields!AbstractT.length > 0) {
+            alias _filterImplementedInterfaces = AliasSeq!(AbstractT, Rest);
+        } else {
+            alias _filterImplementedInterfaces = Rest;
+        }
+    }
+}
+
+/// Check if T is a member of abstract type AbstractT (via @ImplementedBy on AbstractT)
+private template _isMemberOf(T, AbstractT) {
+    alias Members = getImplementedByMembers!AbstractT;
+    enum _isMemberOf = staticContains!(T, Members);
 }
 
 // ============================================================================
@@ -512,4 +615,175 @@ unittest {
 
     static assert(is(fieldResultType!(Post, "tags") == string[]));
     static assert(is(fieldResultType!(Post, "bio") == Nullable!string));
+}
+
+// ============================================================================
+// Abstract Type Protocol — Unit Tests
+// ============================================================================
+
+unittest {
+    import dunamis.core.expr : Expr;
+    import dunamis.core.types : ImplementedBy, Implements, AbstractField;
+
+    // Wrapper struct enables forward references between nested types
+    static struct S {
+        static struct User {
+            static Expr!string name(Expr!User u) { assert(false); }
+            static Expr!long id(Expr!User u) { assert(false); }
+        }
+
+        static struct Post {
+            static Expr!string title(Expr!Post p) { assert(false); }
+            static Expr!long id(Expr!Post p) { assert(false); }
+        }
+
+        // Union (no shared fields)
+        @ImplementedBy!(User, Post)
+        static struct SearchResult {}
+    }
+
+    alias User = S.User;
+    alias Post = S.Post;
+    alias SearchResult = S.SearchResult;
+
+    // isAbstractType detection
+    static assert(isAbstractType!SearchResult);
+    static assert(!isAbstractType!User);
+
+    // Pure unions don't pass isObjectType (no fields)
+    static assert(!isObjectType!SearchResult);
+
+    // extractObjectFromType handles abstract types
+    static assert(is(extractObjectFromType!SearchResult == SearchResult));
+    static assert(is(extractObjectFromType!(SearchResult[]) == SearchResult));
+
+    // getAbstractTypeMembers from @ImplementedBy
+    alias members = getAbstractTypeMembers!(SearchResult, User, Post);
+    static assert(members.length == 2);
+    static assert(is(members[0] == User));
+    static assert(is(members[1] == Post));
+
+    // getNarrowTargets for abstract type returns members
+    alias targets = getNarrowTargets!(SearchResult, User, Post);
+    static assert(targets.length == 2);
+
+    // getNarrowTargets for concrete type returns empty
+    alias noTargets = getNarrowTargets!(User, User, Post);
+    static assert(noTargets.length == 0);
+
+    // getAllAbstractTypes finds abstract types
+    alias abstracts = getAllAbstractTypes!(SearchResult, User, Post);
+    static assert(abstracts.length == 1);
+    static assert(is(abstracts[0] == SearchResult));
+}
+
+unittest {
+    import dunamis.core.expr : Expr;
+    import dunamis.core.types : ImplementedBy, Implements, AbstractField;
+
+    static struct S {
+        static struct User {
+            static Expr!string name(Expr!User u) { assert(false); }
+            static Expr!long id(Expr!User u) { assert(false); }
+        }
+
+        static struct Post {
+            static Expr!string title(Expr!Post p) { assert(false); }
+            static Expr!long id(Expr!Post p) { assert(false); }
+        }
+
+        // Interface (has shared fields via AbstractField)
+        @ImplementedBy!(User, Post)
+        static struct Node {
+            mixin AbstractField!("id", long);
+        }
+
+        // Pure union for comparison
+        @ImplementedBy!(User, Post)
+        static struct SearchResult {}
+    }
+
+    alias User = S.User;
+    alias Node = S.Node;
+    alias SearchResult = S.SearchResult;
+
+    // Interface passes isObjectType (has a valid field method from AbstractField)
+    static assert(isAbstractType!Node);
+    static assert(isObjectType!Node);
+
+    // getSchemaFields picks up the AbstractField-generated method
+    enum fields = getSchemaFields!Node;
+    static assert(fields.length == 1);
+    static assert(fields[0] == "id");
+
+    // fieldResultType works on AbstractField
+    static assert(is(fieldResultType!(Node, "id") == long));
+
+    // getImplementedInterfaces: Node is an interface (has schema fields)
+    alias nodeInterfaces = getImplementedInterfaces!(User, Node);
+    static assert(nodeInterfaces.length == 1);
+    static assert(is(nodeInterfaces[0] == Node));
+
+    // Pure union has no schema fields, so not returned as interface
+    alias searchInterfaces = getImplementedInterfaces!(User, SearchResult);
+    static assert(searchInterfaces.length == 0);
+}
+
+unittest {
+    import dunamis.core.expr : Expr;
+    import dunamis.core.types : ImplementedBy, Implements;
+
+    // Test @Implements merging
+    static struct S {
+        @ImplementedBy!(User, Post)
+        static struct SearchResult {}
+
+        static struct User {
+            static Expr!string name(Expr!User u) { assert(false); }
+        }
+
+        static struct Post {
+            static Expr!string title(Expr!Post p) { assert(false); }
+        }
+
+        @Implements!SearchResult
+        static struct Comment {
+            static Expr!string body_(Expr!Comment c) { assert(false); }
+        }
+    }
+
+    // getAbstractTypeMembers merges @ImplementedBy + @Implements
+    alias members = getAbstractTypeMembers!(S.SearchResult, S.User, S.Post, S.Comment);
+    static assert(members.length == 3);  // User, Post from @ImplementedBy + Comment from @Implements
+}
+
+unittest {
+    import dunamis.core.expr : Expr;
+    import dunamis.core.types : ImplementedBy;
+
+    // Test BFS type discovery follows @ImplementedBy links
+    static struct S {
+        static struct User {
+            static Expr!string name(Expr!User u) { assert(false); }
+        }
+
+        static struct Post {
+            static Expr!string title(Expr!Post p) { assert(false); }
+        }
+
+        @ImplementedBy!(User, Post)
+        static struct SearchResult {}
+
+        static struct Query {
+            static Expr!(SearchResult[]) search(Expr!Query q) { assert(false); }
+        }
+    }
+
+    // getAllObjectTypes should discover User and Post through SearchResult's @ImplementedBy
+    alias allTypes = getAllObjectTypes!(S.Query);
+
+    // Should contain SearchResult, User, Post
+    static assert(staticContains!(S.SearchResult, allTypes));
+    static assert(staticContains!(S.User, allTypes));
+    static assert(staticContains!(S.Post, allTypes));
 }

@@ -4,7 +4,10 @@ import std.meta;
 import std.traits;
 import std.typecons : Nullable;
 
-import dunamis.core.types : isCustomScalar;
+import dunamis.core.types : isCustomScalar, isAbstractType, getImplementedByMembers, isInternalMember;
+import dunamis.core.discovery : getAllObjectTypes, getAllAbstractTypes, getAbstractTypeMembers,
+    getImplementedInterfaces, getSchemaFields, isObjectType, uniqueTypesForExpand,
+    isValidFieldMethod;
 import dunamis.core.expr : Expr, ExprResultType, isExpr;
 import dunamis.graphql.schema.udas;
 import dunamis.graphql.schema.fields;
@@ -16,13 +19,28 @@ import dunamis.graphql.schema.discovery;
 // ============================================================================
 
 /// Generate GraphQL SDL for any object type (entity, Query, or Mutation).
-string generateObjectTypeSDL(T)(string typeName) {
+/// The AllAbstractTypes parameter enables `implements` clause generation.
+string generateObjectTypeSDL(T, AllAbstractTypes...)(string typeName) {
     enum fields = getFields!T;
 
     static if (fields.length == 0) {
         return "";  // No fields defined
     } else {
-        string result = "type " ~ typeName ~ " {\n";
+        string result = "type " ~ typeName;
+
+        // Add implements clause for interface types
+        static if (AllAbstractTypes.length > 0) {
+            enum interfaces = _getInterfaceNames!(T, AllAbstractTypes);
+            static if (interfaces.length > 0) {
+                result ~= " implements";
+                foreach (i, name; interfaces) {
+                    if (i > 0) result ~= " &";
+                    result ~= " " ~ name;
+                }
+            }
+        }
+
+        result ~= " {\n";
 
         foreach (field; fields) {
             // Skip hidden fields
@@ -240,6 +258,60 @@ package(dunamis.graphql) template getAllCustomScalarNames(Entities...) {
     }();
 }
 
+/// Get the GraphQL names of interfaces that a concrete type implements.
+private template _getInterfaceNames(T, AllAbstractTypes...) {
+    enum string[] _getInterfaceNames = () {
+        string[] names;
+        static foreach (AbstractT; AllAbstractTypes) {
+            // Interface = abstract type with schema fields
+            static if (getSchemaFields!AbstractT.length > 0) {
+                // Check if T is a member of this interface
+                static if (_staticContainsType!(T, getImplementedByMembers!AbstractT)) {
+                    names ~= getGraphQLTypeName!AbstractT;
+                }
+            }
+        }
+        return names;
+    }();
+}
+
+/// Check if T is in a type tuple
+private template _staticContainsType(T, Types...) {
+    enum _staticContainsType = () {
+        static foreach (U; Types) {
+            static if (is(T == U)) return true;
+        }
+        return false;
+    }();
+}
+
+/// Generate GraphQL SDL for a union type.
+string generateUnionTypeSDL(Union, AllTypes...)(string typeName) {
+    alias Members = getAbstractTypeMembers!(Union, AllTypes);
+
+    string result = "union " ~ typeName ~ " =";
+    static foreach (i, Member; Members) {
+        static if (i > 0) {
+            result ~= " |";
+        }
+        result ~= " " ~ getGraphQLTypeName!Member;
+    }
+    result ~= "\n";
+    return result;
+}
+
+/// Generate GraphQL SDL for an interface type.
+string generateInterfaceTypeSDL(T)(string typeName) {
+    enum fields = getFields!T;
+    string result = "interface " ~ typeName ~ " {\n";
+    foreach (field; fields) {
+        if (field.hidden) continue;
+        result ~= "  " ~ field.name ~ ": " ~ field.graphqlType ~ "\n";
+    }
+    result ~= "}\n";
+    return result;
+}
+
 /// Generate complete GraphQL schema SDL.
 /// Accepts either a Schema type or a raw Query type (for backwards compatibility).
 /// If the Schema provides an AllEntityTypes member, it will be used instead of
@@ -278,6 +350,9 @@ template generateSchemaSDL(alias SchemaOrQuery) {
     // Collect enum types from entities
     alias AllEnumTypes = getAllEnumTypes!QueryType;
 
+    // Discover abstract types (unions + interfaces)
+    alias AllAbstractTypes = getAllAbstractTypes!AllTypes;
+
     enum generateSchemaSDL = () {
         string result;
 
@@ -295,6 +370,22 @@ template generateSchemaSDL(alias SchemaOrQuery) {
             result ~= "\n";
         }
 
+        // Generate union types (abstract types with no schema fields)
+        static foreach (AbstractT; AllAbstractTypes) {
+            static if (getSchemaFields!AbstractT.length == 0) {
+                result ~= generateUnionTypeSDL!(AbstractT, AllTypes)(getGraphQLTypeName!AbstractT);
+                result ~= "\n";
+            }
+        }
+
+        // Generate interface types (abstract types with schema fields)
+        static foreach (AbstractT; AllAbstractTypes) {
+            static if (getSchemaFields!AbstractT.length > 0) {
+                result ~= generateInterfaceTypeSDL!AbstractT(getGraphQLTypeName!AbstractT);
+                result ~= "\n";
+            }
+        }
+
         // Generate Query type
         result ~= generateObjectTypeSDL!QueryType("Query");
         result ~= "\n";
@@ -306,10 +397,12 @@ template generateSchemaSDL(alias SchemaOrQuery) {
             result ~= "\n";
         }
 
-        // Generate each discovered object type
+        // Generate each discovered object type (skip abstract types — they have their own SDL)
         static foreach (Entity; AllTypes) {
-            result ~= generateObjectTypeSDL!Entity(getGraphQLTypeName!Entity);
-            result ~= "\n";
+            static if (!isAbstractType!Entity) {
+                result ~= generateObjectTypeSDL!(Entity, AllAbstractTypes)(getGraphQLTypeName!Entity);
+                result ~= "\n";
+            }
         }
 
         // Generate input types (discovered from computed field arguments)

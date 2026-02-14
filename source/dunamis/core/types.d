@@ -3,6 +3,7 @@ module dunamis.core.types;
 import std.algorithm;
 import std.array;
 import std.conv;
+import std.meta : AliasSeq;
 import std.string : indexOf;
 import std.typecons : Nullable;
 
@@ -314,6 +315,185 @@ string[] decodeCompositeKey(string encoded) {
     return result;
 }
 
+
+// ============================================================================
+// Abstract Type Support (Unions + Interfaces)
+// ============================================================================
+
+/// UDA: placed on abstract type, declares its concrete member types.
+/// This is the SOLE mechanism for declaring a type as abstract.
+///
+/// A type with @ImplementedBy and no schema fields (no AbstractField mixins)
+/// is a UNION. A type with @ImplementedBy AND AbstractField mixins is an INTERFACE.
+///
+/// Example:
+/// ---
+/// // Union (no shared fields)
+/// @ImplementedBy!(User, Post)
+/// struct SearchResult {}
+///
+/// // Interface (has shared fields)
+/// @ImplementedBy!(User, Post)
+/// struct Node {
+///     mixin AbstractField!("id", long);
+/// }
+/// ---
+struct ImplementedBy(Members...) {
+    alias members = Members;
+}
+
+/// UDA: placed on concrete member types, declares which abstract types they implement.
+/// This is an alternative (or supplement) to @ImplementedBy for declaring membership.
+///
+/// Example:
+/// ---
+/// @Implements!Node
+/// struct User { ... }
+/// ---
+struct Implements(AbstractTypes...) {
+    alias types = AbstractTypes;
+}
+
+/// Extract the member types from an @ImplementedBy UDA on type T.
+/// Walks the _normalizedSource chain for plugin compatibility.
+/// Returns an AliasSeq of member types, or empty AliasSeq if T has no @ImplementedBy.
+template getImplementedByMembers(T) {
+    import std.traits : getUDAs;
+    // Check T directly for @ImplementedBy
+    static if (_hasImplementedBy!T) {
+        alias getImplementedByMembers = _extractImplementedByMembers!T;
+    }
+    // Walk _normalizedSource chain for plugin-wrapped types
+    else static if (__traits(compiles, T._normalizedSource) && is(typeof(T._normalizedSource) == S, S) && is(S == struct)) {
+        alias getImplementedByMembers = getImplementedByMembers!S;
+    } else {
+        alias getImplementedByMembers = AliasSeq!();
+    }
+}
+
+/// Check if a type is an abstract type (has @ImplementedBy with at least one member).
+template isAbstractType(T) {
+    enum isAbstractType = getImplementedByMembers!T.length > 0;
+}
+
+/// Check if concrete type T declares @Implements for abstract type U.
+/// Walks the _normalizedSource chain for plugin compatibility.
+template implementsAbstractType(T, U) {
+    static if (_hasImplementsFor!(T, U)) {
+        enum implementsAbstractType = true;
+    }
+    // Walk _normalizedSource chain
+    else static if (__traits(compiles, T._normalizedSource) && is(typeof(T._normalizedSource) == S, S) && is(S == struct)) {
+        enum implementsAbstractType = implementsAbstractType!(S, U);
+    } else {
+        enum implementsAbstractType = false;
+    }
+}
+
+// --- Private helpers ---
+
+private template _hasImplementedBy(T) {
+    import std.traits : getUDAs;
+    enum _hasImplementedBy = () {
+        static foreach (attr; __traits(getAttributes, T)) {
+            static if (is(typeof(attr) == struct) && is(typeof(attr) == ImplementedBy!M, M...)) {
+                return true;
+            } else static if (is(attr == ImplementedBy!M, M...)) {
+                return true;
+            }
+        }
+        return false;
+    }();
+}
+
+private template _extractImplementedByMembers(T) {
+    static foreach (attr; __traits(getAttributes, T)) {
+        static if (is(attr == ImplementedBy!M, M...)) {
+            alias _extractImplementedByMembers = M;
+        }
+    }
+}
+
+/// Check if T has @Implements that includes U
+private template _hasImplementsFor(T, U) {
+    enum _hasImplementsFor = () {
+        static foreach (attr; __traits(getAttributes, T)) {
+            static if (is(attr == Implements!A, A...)) {
+                static foreach (AbstractT; A) {
+                    static if (is(AbstractT == U)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }();
+}
+
+// ============================================================================
+// AbstractField Mixin (for Interfaces)
+// ============================================================================
+
+/// Mixin: generates a proxy computed field on an abstract type for shared field access.
+/// The generated method passes isValidFieldMethod, so getSchemaFields picks it up.
+///
+/// Usage:
+/// ---
+/// @ImplementedBy!(User, Post)
+/// struct Node {
+///     mixin AbstractField!("id", long);
+///     mixin AbstractField!("createdAt", string);
+/// }
+/// ---
+mixin template AbstractField(string fieldName, ResultType) {
+    import dunamis.core.expr : Expr;
+    // Generate a computed field method that the Schema Protocol will discover.
+    // The actual implementation dispatches at runtime to the concrete type's field.
+    // At compile time, this just needs to have the right signature.
+    mixin("static Expr!(ResultType) " ~ fieldName ~ "(Expr!(typeof(this)) self) {" ~
+          "  assert(false, \"AbstractField." ~ fieldName ~ " should not be called directly — " ~
+          "use the compiler's abstract type dispatch instead\");" ~
+          "}");
+}
+
+unittest {
+    import std.meta : AliasSeq;
+    import dunamis.core.expr : Expr;
+
+    // Wrapper struct enables forward references between nested types
+    static struct S {
+        static struct User {}
+        static struct Post {}
+
+        @ImplementedBy!(User, Post)
+        static struct SearchResult {}
+
+        @Implements!SearchResult
+        static struct Comment {}
+
+        @ImplementedBy!(User, Post)
+        static struct Node {
+            mixin AbstractField!("id", long);
+        }
+    }
+
+    // Test @ImplementedBy UDA
+    static assert(isAbstractType!(S.SearchResult));
+    static assert(!isAbstractType!(S.User));
+    static assert(!isAbstractType!(S.Post));
+
+    alias members = getImplementedByMembers!(S.SearchResult);
+    static assert(members.length == 2);
+    static assert(is(members[0] == S.User));
+    static assert(is(members[1] == S.Post));
+
+    // Test @Implements UDA
+    static assert(implementsAbstractType!(S.Comment, S.SearchResult));
+    static assert(!implementsAbstractType!(S.User, S.SearchResult));
+
+    // Test AbstractField mixin
+    static assert(isAbstractType!(S.Node));
+}
 
 // ============================================================================
 // Custom Scalar Support

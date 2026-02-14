@@ -1860,6 +1860,134 @@ void testFilterTagsByCategory() {
 }
 
 // ============================================================================
+// Union / Interface (Abstract Type) Tests
+// ============================================================================
+
+void testUnionQueryWithTypedFragments() {
+    auto response = graphql(`{
+        search {
+            __typename
+            ... on User { firstName lastName }
+            ... on Post { title }
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto results = response["data"]["search"].array;
+    // Should contain all 3 seeded users + 3 seeded posts (at least)
+    assertTrue(results.length >= 5, "Expected at least 5 search results (3 users + 2+ posts), got " ~ results.length.to!string);
+
+    int userCount = 0;
+    int postCount = 0;
+    foreach (item; results) {
+        auto typeName = item["__typename"].str;
+        if (typeName == "User") {
+            userCount++;
+            assertTrue(("firstName" in item) !is null, "User should have firstName");
+            assertTrue(("lastName" in item) !is null, "User should have lastName");
+        } else if (typeName == "Post") {
+            postCount++;
+            assertTrue(("title" in item) !is null, "Post should have title");
+        } else {
+            assertTrue(false, "Unexpected __typename: " ~ typeName);
+        }
+    }
+    assertTrue(userCount >= 3, "Expected at least 3 users in search results, got " ~ userCount.to!string);
+    assertTrue(postCount >= 2, "Expected at least 2 posts in search results, got " ~ postCount.to!string);
+}
+
+void testInterfaceQueryWithTypedFragments() {
+    auto response = graphql(`{
+        contentNodes {
+            __typename
+            id
+            ... on User { firstName }
+            ... on Post { title }
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto results = response["data"]["contentNodes"].array;
+    assertTrue(results.length >= 5, "Expected at least 5 content nodes, got " ~ results.length.to!string);
+
+    foreach (item; results) {
+        auto typeName = item["__typename"].str;
+        assertTrue(typeName == "User" || typeName == "Post",
+            "Expected User or Post, got " ~ typeName);
+        // Interface field: id should be present on all items
+        assertTrue(("id" in item) !is null, "ContentNode should have id field");
+    }
+}
+
+void testUnionWithNamedFragmentsAndNestedSelection() {
+    auto response = graphql(`
+        query {
+            search {
+                __typename
+                ...UserFields
+                ...PostFields
+            }
+        }
+        fragment UserFields on User {
+            firstName
+            fullName
+        }
+        fragment PostFields on Post {
+            title
+            author { firstName }
+        }
+    `);
+
+    assertNoErrors(response);
+    auto results = response["data"]["search"].array;
+    assertTrue(results.length >= 5, "Expected at least 5 search results");
+
+    bool foundUser = false;
+    bool foundPostWithAuthor = false;
+    foreach (item; results) {
+        auto typeName = item["__typename"].str;
+        if (typeName == "User") {
+            foundUser = true;
+            assertTrue(("firstName" in item) !is null, "User should have firstName");
+            assertTrue(("fullName" in item) !is null, "User should have fullName");
+        } else if (typeName == "Post") {
+            assertTrue(("title" in item) !is null, "Post should have title");
+            assertTrue(("author" in item) !is null, "Post should have author");
+            auto author = item["author"];
+            assertTrue(("firstName" in author) !is null, "Author should have firstName");
+            if (author["firstName"].str.length > 0) foundPostWithAuthor = true;
+        }
+    }
+    assertTrue(foundUser, "Expected at least one User in results");
+    assertTrue(foundPostWithAuthor, "Expected at least one Post with nested author");
+}
+
+void testUnionIntrospection() {
+    auto response = graphql(`{
+        __type(name: "SearchResult") {
+            kind
+            possibleTypes { name }
+        }
+    }`);
+
+    assertNoErrors(response);
+    auto typeInfo = response["data"]["__type"];
+    assertTrue(typeInfo["kind"].str == "UNION", "SearchResult should be UNION kind, got " ~ typeInfo["kind"].str);
+
+    auto possibleTypes = typeInfo["possibleTypes"].array;
+    assertTrue(possibleTypes.length == 2, "Expected 2 possibleTypes, got " ~ possibleTypes.length.to!string);
+
+    bool foundUser = false;
+    bool foundPost = false;
+    foreach (pt; possibleTypes) {
+        if (pt["name"].str == "User") foundUser = true;
+        if (pt["name"].str == "Post") foundPost = true;
+    }
+    assertTrue(foundUser, "possibleTypes should contain User");
+    assertTrue(foundPost, "possibleTypes should contain Post");
+}
+
+// ============================================================================
 // Test Registration
 // ============================================================================
 
@@ -1973,4 +2101,10 @@ static this() {
     registerTest("Composite PK persistence", "tests", &testCompositePkPersistence);
     registerTest("Sort tags by name (composite PK)", "tests", &testSortTagsByName);
     registerTest("Filter tags by category (composite PK)", "tests", &testFilterTagsByCategory);
+
+    // Union / Interface (abstract type) tests
+    registerTest("Union query with typed fragments", "tests", &testUnionQueryWithTypedFragments);
+    registerTest("Interface query with typed fragments", "tests", &testInterfaceQueryWithTypedFragments);
+    registerTest("Union with named fragments and nested selection", "tests", &testUnionWithNamedFragmentsAndNestedSelection);
+    registerTest("Union introspection via __type", "tests", &testUnionIntrospection);
 }

@@ -64,7 +64,7 @@ template SortingPlugin(alias S) if (isSchema!S) {
 
     // Generate sorted versions of each entity type.
     template SortedEntity(Entity) {
-        @(__traits(getAttributes, Entity))
+        @(RemapTypeAttributes!(EntityTypeMap, __traits(getAttributes, Entity)))
         @OriginalName(__traits(identifier, Entity))
         struct SortedEntity {
             mixin WrapFields!(Entity, EntityTypeMap, SortedArrayField);

@@ -1084,6 +1084,261 @@ unittest {
         "Expected context value replicated across batch");
 }
 
+// ============================================================================
+// Abstract Type Expressions (Unions / Interfaces)
+// ============================================================================
+
+/// Interface for runtime member key lookup on union/abstract type expressions.
+/// Decouples compile-time member types (known to the compiler) from runtime
+/// storage keys (created by UnionExpr at construction time).
+///
+/// The compiler creates SubsetExpr at compile time for each concrete member type.
+/// SubsetExpr needs the runtime Object key to retrieve that member's elements
+/// from EvalContext. UnionExprInfo bridges this gap.
+interface UnionExprInfo {
+    /// Get the EvalContext storage key for a specific member type.
+    /// Returns null if the type is not a member of this union.
+    Object memberKeyForType(TypeInfo ti);
+
+    /// Trigger evaluation of this union expression.
+    /// Must be called before reading member data from EvalContext.
+    /// Uses evalAs caching internally — safe to call multiple times.
+    Promise!void triggerEval(EvalContext ctx);
+}
+
+/// Concatenates heterogeneous arrays from multiple sources into a single
+/// abstract/union type batch, storing per-member results in EvalContext.
+///
+/// Each member source is evaluated sequentially. Results are stored under
+/// per-type Object keys in EvalContext, accessible via UnionExprInfo.
+/// The expression returns a size_t[] "index array" where each element's
+/// value encodes which member type it belongs to and its position within
+/// that member's batch.
+///
+/// Usage (via unionOf factory):
+/// ---
+/// auto searchResults = unionOf!SearchResult(Query.users(), Query.posts());
+/// ---
+class UnionExpr(AbstractT, Members...) : Expr!(AbstractT[]), UnionExprInfo {
+    private ExprBase[] _sources;
+    private Object[Members.length] _memberKeys;
+    private TypeInfo[Members.length] _memberTypeIds;
+
+    this(staticMap!(toArrayExpr, Members) sources) {
+        static foreach (i; 0 .. Members.length) {
+            _sources ~= sources[i];
+            _memberKeys[i] = new Object();
+            _memberTypeIds[i] = typeid(Members[i]);
+        }
+    }
+
+    /// UnionExprInfo: get the storage key for a member type
+    Object memberKeyForType(TypeInfo ti) {
+        static foreach (i; 0 .. Members.length) {
+            if (ti == _memberTypeIds[i])
+                return _memberKeys[i];
+        }
+        return null;
+    }
+
+    /// UnionExprInfo: trigger evaluation (relies on evalAs caching for dedup)
+    Promise!void triggerEval(EvalContext ctx) {
+        return evalAs!(AbstractT[])(cast(ExprBase) this, ctx).then((AbstractT[][] _) {});
+    }
+
+    override ExprBase[] dependencies() {
+        return _sources.dup;
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        _sources[index] = newDep;
+    }
+
+    override Expr!(AbstractT[]) optimize(OptimizeContext ctx) {
+        foreach (i, ref src; _sources) {
+            static foreach (j; 0 .. Members.length) {
+                if (i == j) {
+                    src = (cast(Expr!(Members[j][])) src).optimize(ctx);
+                }
+            }
+        }
+        return this;
+    }
+
+    override Promise!(AbstractT[][]) eval(EvalContext ctx) {
+        // Evaluate all member sources, store results in EvalContext,
+        // return dummy AbstractT[] (SubsetExpr reads from EvalContext, not this)
+        return _evalMemberSources(ctx).then((size_t[][] countArr) {
+            auto count = cast(size_t) countArr[0][0];
+            return [new AbstractT[](count)];
+        });
+    }
+
+    // Evaluate member sources sequentially, store in EvalContext, track total count
+    private Promise!(size_t[][]) _evalMemberSources(EvalContext ctx) {
+        auto p = resolve(cast(size_t[][]) [[cast(size_t) 0]]);
+
+        static foreach (i; 0 .. Members.length) {{
+            auto key = _memberKeys[i];
+            auto src = _sources[i];
+
+            p = p.then((size_t[][] prev) {
+                return evalAs!(Members[i][])(src, ctx).then((Members[i][][] memberResults) {
+                    // Flatten member results and store in context
+                    Members[i][] flat;
+                    foreach (group; memberResults) {
+                        flat ~= group;
+                    }
+                    ctx.setValues!(Members[i])(key, flat);
+
+                    return [[prev[0][0] + flat.length]];
+                });
+            });
+        }}
+
+        return p;
+    }
+}
+
+/// Helper: map a type to Expr!(T[])
+private template toArrayExpr(T) {
+    alias toArrayExpr = Expr!(T[]);
+}
+
+/// Extracts elements of a single concrete type from a union expression's stored results.
+/// Used by the compiler to process one member type's fields at a time.
+class SubsetExpr(Member) : Expr!(Member[]) {
+    private ExprBase _unionExpr;  // must implement UnionExprInfo
+    private Object _memberKey;    // may be set lazily from UnionExprInfo
+
+    this(ExprBase unionExpr) {
+        _unionExpr = unionExpr;
+        // Try to resolve key immediately
+        if (auto info = cast(UnionExprInfo) unionExpr) {
+            _memberKey = info.memberKeyForType(typeid(Member));
+        }
+    }
+
+    /// Construct with explicit key (for cases where UnionExprInfo isn't directly available)
+    this(ExprBase unionExpr, Object memberKey) {
+        _unionExpr = unionExpr;
+        _memberKey = memberKey;
+    }
+
+    override ExprBase[] dependencies() {
+        return [_unionExpr];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0) _unionExpr = newDep;
+    }
+
+    override Expr!(Member[]) optimize(OptimizeContext ctx) {
+        // Optimize the parent union expression.
+        // Multiple SubsetExprs may share the same UnionExpr parent;
+        // optimizeExpr is idempotent after the first pass.
+        _unionExpr = optimizeExpr(_unionExpr, ctx);
+        return this;
+    }
+
+    override Promise!(Member[][]) eval(EvalContext ctx) {
+        if (_memberKey is null) {
+            if (auto info = cast(UnionExprInfo) _unionExpr) {
+                _memberKey = info.memberKeyForType(typeid(Member));
+            }
+        }
+        assert(_memberKey !is null, "SubsetExpr: no member key for " ~ Member.stringof);
+
+        auto key = _memberKey;
+        // Ensure parent union is evaluated first (stores member data in EvalContext).
+        // Uses evalAs caching — safe when multiple SubsetExprs share one UnionExpr.
+        auto info = cast(UnionExprInfo) _unionExpr;
+        assert(info !is null, "SubsetExpr: parent must implement UnionExprInfo");
+        return info.triggerEval(ctx).then(() {
+            return [ctx.getValues!Member(key)];
+        });
+    }
+}
+
+// Module-level alias for JSONValue to use in class declarations
+private import std.json : _JSONValue = JSONValue;
+
+/// Concatenates multiple JSONValue[] results into a single JSONValue[].
+/// Used by the compiler to merge per-type-condition JSON arrays from
+/// union/interface compilation.
+class ConcatArrayExpr : Expr!(_JSONValue[]) {
+    private ExprBase[] _sources;
+
+    this(ExprBase[] sources...) {
+        _sources = sources.dup;
+    }
+
+    override ExprBase[] dependencies() {
+        return _sources.dup;
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        _sources[index] = newDep;
+    }
+
+    override Expr!(_JSONValue[]) optimize(OptimizeContext ctx) {
+        foreach (ref src; _sources) {
+            src = optimizeExpr(src, ctx);
+        }
+        return this;
+    }
+
+    override Promise!(_JSONValue[][]) eval(EvalContext ctx) {
+        // Build the chain using indexed access to avoid D closure capture issues.
+        // D's foreach loop variables are captured by reference, so all closures
+        // would see the last iteration's value. Using array indexing is safe.
+        auto sources = _sources;
+        auto p = resolve(cast(_JSONValue[][]) [cast(_JSONValue[])[]]);
+
+        foreach (i; 0 .. sources.length) {
+            p = _chainSource(p, sources[i], ctx);
+        }
+        return p;
+    }
+
+    private static Promise!(_JSONValue[][]) _chainSource(
+        Promise!(_JSONValue[][]) prev, ExprBase src, EvalContext ctx)
+    {
+        return prev.then((_JSONValue[][] prevArr) {
+            return evalAs!(_JSONValue[])(src, ctx).then((_JSONValue[][] srcResults) {
+                _JSONValue[] merged = prevArr[0];
+                foreach (group; srcResults) {
+                    merged ~= group;
+                }
+                return [merged];
+            });
+        });
+    }
+}
+
+/// Factory function: create a UnionExpr from multiple member array sources.
+///
+/// Example:
+/// ---
+/// auto results = unionOf!SearchResult(Query.users(), Query.posts());
+/// ---
+auto unionOf(AbstractT, Sources...)(Sources sources)
+    if (Sources.length >= 1)
+{
+    // Extract member types from source expression types
+    alias MemberTypes = staticMap!(ArrayElementType, staticMap!(ExprResultType, Sources));
+    return new UnionExpr!(AbstractT, MemberTypes)(sources);
+}
+
+/// Helper: extract T from T[]
+private template ArrayElementType(T) {
+    static if (is(T == E[], E)) {
+        alias ArrayElementType = E;
+    } else {
+        static assert(false, "Expected array type, got " ~ T.stringof);
+    }
+}
+
 unittest {
     // Test tryUse - catches per-element exceptions and wraps in GqlResult
     import std.conv : to, ConvException;

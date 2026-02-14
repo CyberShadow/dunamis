@@ -37,8 +37,9 @@ import std.traits : Parameters, ReturnType, isSomeString;
 import std.typecons : Nullable;
 
 import dunamis.core.expr : Expr, ExprResultType, isExpr;
+import dunamis.core.expr.combinators : UnionExprInfo;
 import dunamis.core.discovery : isObjectType;
-import dunamis.core.types : isInternalMember;
+import dunamis.core.types : isInternalMember, isAbstractType, getImplementedByMembers;
 
 // ============================================================================
 // Type Reference Substitution
@@ -58,6 +59,9 @@ template ReplaceTypeRefs(T, alias TypeMap) {
     } else static if (is(T == Nullable!U, U)) {
         // Nullable: transform inner type
         alias ReplaceTypeRefs = Nullable!(ReplaceTypeRefs!(U, TypeMap));
+    } else static if (isAbstractType!T) {
+        // Abstract type (union/interface): apply TypeMap
+        alias ReplaceTypeRefs = TypeMap!T;
     } else static if (isObjectType!T) {
         // Entity/object type: apply TypeMap
         alias ReplaceTypeRefs = TypeMap!T;
@@ -131,6 +135,105 @@ template getTransformFieldInfo(Entity) {
 // via the module-level import above.
 
 // ============================================================================
+// Abstract Type Casting
+// ============================================================================
+
+/// Expression wrapper that remaps an abstract type (union/interface) through
+/// a plugin's TypeMap. Implements UnionExprInfo by delegating to the inner
+/// expression with member type remapping.
+///
+/// When a plugin wraps entity types, abstract type fields like `search()` still
+/// return `Expr!(RawSearchResult[])` from the original field method. This wrapper
+/// converts that to `Expr!(NormalizedSearchResult[])` and bridges the member type
+/// lookup: when the compiler creates `SubsetExpr!NormalizedUser`, it calls
+/// `memberKeyForType(typeid(NormalizedUser))` on this wrapper, which maps it
+/// to the inner expression's raw member key and entity-casts the data.
+class AbstractTypeCastExpr(ToAbstract, FromAbstract, alias TypeMap, FromMembers...)
+    : Expr!(ToAbstract[]), UnionExprInfo
+{
+    import dunamis.core.eval : EvalContext;
+    import dunamis.core.optimize : OptimizeContext;
+    import dunamis.core.expr.base : ExprBase, evalAs, optimizeExpr;
+    import dunamis.core.expr.combinators : UnionExprInfo;
+    import ae.utils.promise : Promise;
+
+    private ExprBase _inner;
+    private Object[FromMembers.length] _castKeys;
+
+    this(Expr!(FromAbstract[]) inner) {
+        _inner = inner;
+        static foreach (i; 0 .. FromMembers.length) {
+            _castKeys[i] = new Object();
+        }
+    }
+
+    override ExprBase[] dependencies() {
+        return [_inner];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0) _inner = newDep;
+    }
+
+    override Expr!(ToAbstract[]) optimize(OptimizeContext ctx) {
+        _inner = optimizeExpr(_inner, ctx);
+        return this;
+    }
+
+    /// UnionExprInfo: map normalized member TypeInfo to our cast key.
+    Object memberKeyForType(TypeInfo ti) {
+        static foreach (i; 0 .. FromMembers.length) {
+            if (ti == typeid(TypeMap!(FromMembers[i])))
+                return _castKeys[i];
+        }
+        return null;
+    }
+
+    /// UnionExprInfo: trigger evaluation via evalAs caching (safe for multiple SubsetExprs).
+    Promise!void triggerEval(EvalContext ctx) {
+        return evalAs!(ToAbstract[])(cast(ExprBase) this, ctx)
+            .then((ToAbstract[][] _) {});
+    }
+
+    override Promise!(ToAbstract[][]) eval(EvalContext ctx) {
+        auto innerInfo = cast(UnionExprInfo) _inner;
+        assert(innerInfo !is null,
+            "AbstractTypeCastExpr: inner expression must implement UnionExprInfo");
+
+        auto castKeys = _castKeys;
+
+        return innerInfo.triggerEval(ctx).then(() {
+            _doEntityCast(innerInfo, ctx, castKeys);
+            return [cast(ToAbstract[]) []];
+        });
+    }
+
+    /// Entity-cast each member's stored data from raw to normalized types.
+    /// Static method to avoid D closure capture issues.
+    private static void _doEntityCast(
+        UnionExprInfo innerInfo, EvalContext ctx,
+        ref Object[FromMembers.length] castKeys)
+    {
+        import dunamis.schema.entity_cast : entityCastValue;
+
+        static foreach (i; 0 .. FromMembers.length) {{
+            alias RawMember = FromMembers[i];
+            alias CastMember = TypeMap!RawMember;
+
+            auto rawKey = innerInfo.memberKeyForType(typeid(RawMember));
+            if (rawKey !is null) {
+                auto rawData = ctx.getValues!RawMember(rawKey);
+                CastMember[] castData = new CastMember[rawData.length];
+                foreach (j; 0 .. rawData.length) {
+                    castData[j] = entityCastValue!(CastMember, RawMember)(rawData[j]);
+                }
+                ctx.setValues!CastMember(castKeys[i], castData);
+            }
+        }}
+    }
+}
+
+// ============================================================================
 // Entity Result Wrapping
 // ============================================================================
 
@@ -150,7 +253,17 @@ auto wrapEntityResult(alias TypeMap, R)(R result)
     alias ResultT = ExprResultType!R;
 
     static if (is(ResultT == E[], E) && !isSomeString!ResultT) {
-        static if (isObjectType!E) {
+        static if (isAbstractType!E) {
+            alias MappedE = TypeMap!E;
+            static if (is(MappedE == E)) {
+                return result;
+            } else {
+                // Wrap abstract type expression, preserving UnionExprInfo
+                // for SubsetExpr to interact with at eval time.
+                alias RawMembers = getImplementedByMembers!E;
+                return new AbstractTypeCastExpr!(MappedE, E, TypeMap, RawMembers)(result);
+            }
+        } else static if (isObjectType!E) {
             alias MappedE = TypeMap!E;
             static if (is(MappedE == E)) {
                 return result;

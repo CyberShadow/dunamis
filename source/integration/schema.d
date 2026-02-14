@@ -149,6 +149,8 @@ mixin template TestSchema(alias db) {
     import std.json : JSONValue;
     import std.typecons : Nullable;
     import dunamis.core.expr : Expr, context, use;
+    import dunamis.core.expr.combinators : unionOf;
+    import dunamis.core.types : ImplementedBy, AbstractField;
     import dunamis.graphql : Schema, SortingPlugin, FilterPlugin, CrudMutationPlugin, ApplyPlugins;
     import dunamis.graphql.schema : GqlName;
     import dunamis.relational.schema : Table, ForeignKey, BelongsTo, HasMany, Col, getAll, hasMany;
@@ -325,6 +327,16 @@ mixin template TestSchema(alias db) {
         string description;
     }
 
+    /// Union type: SearchResult = User | Post
+    @ImplementedBy!(User, Post)
+    struct SearchResult {}
+
+    /// Interface type: ContentNode (has id field, implemented by User and Post)
+    @ImplementedBy!(User, Post)
+    struct ContentNode {
+        mixin AbstractField!("id", long);
+    }
+
     struct Query {
         mixin Table!(User, "users");
         mixin Table!(Post, "posts");
@@ -332,6 +344,16 @@ mixin template TestSchema(alias db) {
         mixin Table!(Task, "tasks");
         mixin Table!(Tag, "tags");
         mixin Table!(UserBadge, "userBadges");
+
+        /// Returns all users and posts as a union
+        static auto search(Expr!Query q) {
+            return unionOf!SearchResult(users(q), posts(q));
+        }
+
+        /// Returns all users and posts as an interface
+        static auto contentNodes(Expr!Query q) {
+            return unionOf!ContentNode(users(q), posts(q));
+        }
     }
 
     struct Mutation {

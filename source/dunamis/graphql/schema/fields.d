@@ -8,7 +8,7 @@ import std.meta;
 import std.traits;
 import std.typecons : Nullable;
 
-import dunamis.core.types : isCustomScalar, isGqlResult, GqlResult;
+import dunamis.core.types : isCustomScalar, isGqlResult, GqlResult, isAbstractType;
 import dunamis.core.expr : Expr, ExprResultType, isExpr;
 import dunamis.graphql.schema.udas;
 
@@ -85,6 +85,9 @@ template graphqlBaseTypeName(T) {
     } else static if (is(T == JSONValue)) {
         // Raw JSON value - use JSON scalar
         enum graphqlBaseTypeName = "JSON";
+    } else static if (isAbstractType!T) {
+        // Abstract type (union/interface) - use type name
+        enum graphqlBaseTypeName = getGraphQLTypeName!T;
     } else static if (isObjectType!T) {
         // Object type (struct with valid field methods) - use type name
         enum graphqlBaseTypeName = getGraphQLTypeName!T;

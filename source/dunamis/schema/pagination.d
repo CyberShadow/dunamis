@@ -62,7 +62,7 @@ template PaginationPlugin(alias S) if (isSchema!S) {
 
     // Generate paginated versions of each entity type.
     template PaginatedEntity(Entity) {
-        @(__traits(getAttributes, Entity))
+        @(RemapTypeAttributes!(EntityTypeMap, __traits(getAttributes, Entity)))
         @OriginalName(__traits(identifier, Entity))
         struct PaginatedEntity {
             mixin WrapFields!(Entity, EntityTypeMap, PaginatedArrayField);

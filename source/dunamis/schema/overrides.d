@@ -33,7 +33,7 @@ import dunamis.core.eval : EvalContext;
 import dunamis.core.optimize : OptimizeContext;
 import dunamis.core.expr.base : ExprBase, Expr, ExprResultType;
 import dunamis.core.expr.primitives : EntityCastInfo;
-import dunamis.schema.plugin : isSchema, OriginalName;
+import dunamis.schema.plugin : isSchema, OriginalName, RemapTypeAttributes;
 
 // ============================================================================
 // Override Expression
@@ -282,7 +282,7 @@ template FieldOverridePlugin(alias S) if (isSchema!S) {
 
     /// Overridable version of each discovered entity type.
     template OverridableEntity(Entity) {
-        @(__traits(getAttributes, Entity))
+        @(RemapTypeAttributes!(EntityTypeMap, __traits(getAttributes, Entity)))
         @OriginalName(__traits(identifier, Entity))
         struct OverridableEntity {
             mixin OverridableFields!(Entity, EntityTypeMap, getOriginalTypeName!Entity);

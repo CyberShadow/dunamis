@@ -9,9 +9,11 @@
 /// This module provides building blocks for writing plugins.
 module dunamis.schema.plugin;
 
+import std.meta : AliasSeq, staticMap;
 import std.traits : Parameters, ReturnType, hasUDA;
 
 import dunamis.core.expr : Expr, ExprResultType, isExpr;
+import dunamis.core.types : ImplementedBy, Implements;
 
 // Re-export commonly needed utilities
 public import dunamis.core.types : isInternalMember;
@@ -121,6 +123,42 @@ struct OriginalName { string name; }
 /// Used as the default TypeMap for forwarding mixins.
 template IdentityTypeMap(T) {
     alias IdentityTypeMap = T;
+}
+
+// ============================================================================
+// UDA Remapping for Abstract Types
+// ============================================================================
+
+/// Remap type references in @ImplementedBy and @Implements UDAs through a TypeMap.
+/// Non-matching attributes are passed through unchanged.
+///
+/// Every plugin that wraps entity types should use this instead of raw
+/// @(__traits(getAttributes, Entity)) to keep abstract type membership
+/// declarations consistent with the current plugin level's type system.
+///
+/// Example:
+/// ---
+/// template WrappedEntity(Entity) {
+///     @(RemapTypeAttributes!(EntityTypeMap, __traits(getAttributes, Entity)))
+///     @OriginalName(__traits(identifier, Entity))
+///     struct WrappedEntity {
+///         mixin WrapFields!(Entity, EntityTypeMap, ...);
+///     }
+/// }
+/// ---
+template RemapTypeAttributes(alias TypeMap, Attrs...) {
+    static if (Attrs.length == 0) {
+        alias RemapTypeAttributes = AliasSeq!();
+    } else {
+        alias _Rest = RemapTypeAttributes!(TypeMap, Attrs[1..$]);
+        static if (is(Attrs[0] == ImplementedBy!M, M...)) {
+            alias RemapTypeAttributes = AliasSeq!(ImplementedBy!(staticMap!(TypeMap, M)), _Rest);
+        } else static if (is(Attrs[0] == Implements!A, A...)) {
+            alias RemapTypeAttributes = AliasSeq!(Implements!(staticMap!(TypeMap, A)), _Rest);
+        } else {
+            alias RemapTypeAttributes = AliasSeq!(Attrs[0], _Rest);
+        }
+    }
 }
 
 // ============================================================================
@@ -283,7 +321,7 @@ template NormalizePlugin(RawQuery, RawMutation) {
 
     // Create normalized version of each discovered type
     template _NormalizedType(T) {
-        @(__traits(getAttributes, T))
+        @(RemapTypeAttributes!(_TypeMap, __traits(getAttributes, T)))
         @OriginalName(__traits(identifier, T))
         struct _NormalizedType {
             mixin NormalizeFields!(T, _TypeMap);
@@ -1085,5 +1123,102 @@ unittest {
                 "Non-hidden field '" ~ field.name ~ "' starts with _ on SortedQuery");
         }
     }}
+}
+
+// Test RemapTypeAttributes
+unittest {
+    import dunamis.core.types : ImplementedBy, Implements;
+    import dunamis.schema.plugin : OriginalName;
+
+    // Mock types
+    static struct A {}
+    static struct B {}
+    static struct MappedA {}
+    static struct MappedB {}
+
+    // TypeMap that maps A → MappedA, B → MappedB
+    template TestTypeMap(T) {
+        static if (is(T == A)) alias TestTypeMap = MappedA;
+        else static if (is(T == B)) alias TestTypeMap = MappedB;
+        else alias TestTypeMap = T;
+    }
+
+    // @ImplementedBy gets remapped
+    alias remapped = RemapTypeAttributes!(TestTypeMap, ImplementedBy!(A, B));
+    static assert(remapped.length == 1);
+    static assert(is(remapped[0] == ImplementedBy!(MappedA, MappedB)));
+
+    // @Implements gets remapped
+    alias remapped2 = RemapTypeAttributes!(TestTypeMap, Implements!A);
+    static assert(remapped2.length == 1);
+    static assert(is(remapped2[0] == Implements!MappedA));
+
+    // Non-matching attributes pass through
+    alias remapped3 = RemapTypeAttributes!(TestTypeMap, OriginalName("test"));
+    static assert(remapped3.length == 1);
+
+    // Mixed: @ImplementedBy + value UDA
+    alias remapped4 = RemapTypeAttributes!(TestTypeMap, ImplementedBy!(A, B), OriginalName("test"));
+    static assert(remapped4.length == 2);
+    static assert(is(remapped4[0] == ImplementedBy!(MappedA, MappedB)));
+
+    // Empty input
+    alias remapped5 = RemapTypeAttributes!(TestTypeMap);
+    static assert(remapped5.length == 0);
+}
+
+// Test NormalizePlugin remaps @ImplementedBy on abstract types
+unittest {
+    import dunamis.core.expr : Expr;
+    import dunamis.core.types : ImplementedBy, AbstractField, isAbstractType, getImplementedByMembers;
+    import dunamis.core.discovery : getAllObjectTypes;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+    import dunamis.graphql.schema : Schema;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("name", string);
+    }
+
+    @DemoEntity!(db, "posts")
+    static struct Post {
+        mixin DemoId;
+        mixin Col!("title", string);
+    }
+
+    @ImplementedBy!(User, Post)
+    static struct Node {
+        mixin AbstractField!("id", string);
+    }
+
+    static struct TestQuery {
+        mixin Table!(User, "users");
+        mixin Table!(Post, "posts");
+
+        static auto nodes(Expr!TestQuery q) {
+            import dunamis.core.expr.combinators : unionOf;
+            return unionOf!Node(users(q), posts(q));
+        }
+    }
+
+    alias MySchema = Schema!(TestQuery);
+
+    // After normalization, the normalized entity types should be discoverable
+    alias AllTypes = getAllObjectTypes!(MySchema.Query);
+
+    // The normalized User/Post types should have @ImplementedBy remapped
+    // through the plugin chain. Verify abstract type is still detected.
+    static assert(isAbstractType!Node, "Raw Node should be abstract");
+
+    // Verify the schema can generate SDL (exercises _containsByName path)
+    import dunamis.graphql.schema : generateSchemaSDL;
+    import std.algorithm : canFind;
+    enum sdl = generateSchemaSDL!MySchema;
+    static assert(sdl.canFind("interface Node"), "Should generate interface Node");
+    static assert(sdl.canFind("implements Node"), "User/Post should implement Node");
 }
 

@@ -8,7 +8,9 @@ import std.meta;
 import std.traits;
 import std.typecons : Nullable;
 
-import dunamis.core.types : isCustomScalar;
+import dunamis.core.types : isCustomScalar, isAbstractType, getImplementedByMembers;
+import dunamis.core.discovery : getAllAbstractTypes, getAbstractTypeMembers, getImplementedInterfaces,
+    getSchemaFields;
 import dunamis.core.expr : Expr, ExprResultType, isExpr;
 import dunamis.graphql.schema;
 
@@ -73,6 +75,14 @@ private JSONValue buildBaseTypeRefJson(T)() {
     // Enum
     else static if (is(T == enum)) {
         return namedType("ENUM", __traits(identifier, T));
+    }
+    // Abstract type: interface (has schema fields)
+    else static if (isAbstractType!T && getSchemaFields!T.length > 0) {
+        return namedType("INTERFACE", getGraphQLTypeName!T);
+    }
+    // Abstract type: union (no schema fields)
+    else static if (isAbstractType!T) {
+        return namedType("UNION", getGraphQLTypeName!T);
     }
     // Object type (entity or POD struct with fields)
     else static if (isObjectType!T) {
@@ -321,6 +331,9 @@ JSONValue buildIntrospectionJson(alias SchemaOrQuery)() {
 
     alias AllEnumTypes = getAllEnumTypes!QueryType;
 
+    // Discover abstract types
+    alias AllAbstractTypes = getAllAbstractTypes!AllEntityTypes;
+
     // Build types array
     JSONValue[] types;
 
@@ -340,6 +353,20 @@ JSONValue buildIntrospectionJson(alias SchemaOrQuery)() {
         types ~= buildEnumTypeJson!EnumType();
     }
 
+    // Union types (abstract types with no schema fields)
+    static foreach (AbstractT; AllAbstractTypes) {
+        static if (getSchemaFields!AbstractT.length == 0) {
+            types ~= buildUnionTypeJson!(AbstractT, AllEntityTypes)();
+        }
+    }
+
+    // Interface types (abstract types with schema fields)
+    static foreach (AbstractT; AllAbstractTypes) {
+        static if (getSchemaFields!AbstractT.length > 0) {
+            types ~= buildInterfaceTypeJson!(AbstractT, AllEntityTypes)();
+        }
+    }
+
     // Query type
     types ~= buildObjectTypeJsonFromFields!QueryType("Query");
 
@@ -348,9 +375,11 @@ JSONValue buildIntrospectionJson(alias SchemaOrQuery)() {
         types ~= buildObjectTypeJsonFromFields!MutationType("Mutation");
     }
 
-    // Entity/object types
+    // Entity/object types (skip abstract types — they have their own entries)
     static foreach (Entity; AllEntityTypes) {
-        types ~= buildObjectTypeJsonFromFields!Entity(getGraphQLTypeName!Entity);
+        static if (!isAbstractType!Entity) {
+            types ~= buildObjectTypeJsonFromFields!(Entity, AllAbstractTypes)(getGraphQLTypeName!Entity);
+        }
     }
 
     // Input types
@@ -548,7 +577,7 @@ private JSONValue scalarTypeJson(string name) {
     ]);
 }
 
-private JSONValue buildObjectTypeJsonFromFields(T)(string typeName) {
+private JSONValue buildObjectTypeJsonFromFields(T, AllAbstractTypes...)(string typeName) {
     enum rtFields = getRuntimeFields!T;
     JSONValue[] fields;
     static foreach (f; rtFields) {{
@@ -561,7 +590,30 @@ private JSONValue buildObjectTypeJsonFromFields(T)(string typeName) {
             fields ~= fieldJsonFull(f.name, f.description, f.typeJson, f.deprecation, argJsons);
         }
     }}
-    return objectTypeJson(typeName, fields);
+
+    // Build interfaces list
+    JSONValue[] interfaces;
+    static if (AllAbstractTypes.length > 0) {
+        static foreach (AbstractT; AllAbstractTypes) {
+            // Interface = abstract type with schema fields, and T is a member
+            static if (getSchemaFields!AbstractT.length > 0 &&
+                       _staticContainsType!(T, getImplementedByMembers!AbstractT)) {
+                interfaces ~= namedType("INTERFACE", getGraphQLTypeName!AbstractT);
+            }
+        }
+    }
+
+    return objectTypeJson(typeName, fields, interfaces);
+}
+
+/// Check if T is in a type tuple
+private template _staticContainsType(T, Types...) {
+    enum _staticContainsType = () {
+        static foreach (U; Types) {
+            static if (is(T == U)) return true;
+        }
+        return false;
+    }();
 }
 
 private JSONValue buildEnumTypeJson(E)() {
@@ -607,16 +659,67 @@ private JSONValue buildInputObjectTypeJson(T)() {
     ]);
 }
 
-private JSONValue objectTypeJson(string typeName, JSONValue[] fields) {
+private JSONValue objectTypeJson(string typeName, JSONValue[] fields, JSONValue[] interfaces = []) {
     return JSONValue([
         "kind": JSONValue("OBJECT"),
         "name": JSONValue(typeName),
         "description": JSONValue(null),
         "fields": JSONValue(fields),
         "inputFields": JSONValue(null),
-        "interfaces": JSONValue(cast(JSONValue[]) []),
+        "interfaces": JSONValue(interfaces),
         "enumValues": JSONValue(null),
         "possibleTypes": JSONValue(null)
+    ]);
+}
+
+private JSONValue buildUnionTypeJson(Union, AllTypes...)() {
+    alias Members = getAbstractTypeMembers!(Union, AllTypes);
+    JSONValue[] possibleTypes;
+    static foreach (Member; Members) {
+        possibleTypes ~= namedType("OBJECT", getGraphQLTypeName!Member);
+    }
+
+    return JSONValue([
+        "kind": JSONValue("UNION"),
+        "name": JSONValue(getGraphQLTypeName!Union),
+        "description": JSONValue(null),
+        "fields": JSONValue(null),
+        "inputFields": JSONValue(null),
+        "interfaces": JSONValue(null),
+        "enumValues": JSONValue(null),
+        "possibleTypes": JSONValue(possibleTypes)
+    ]);
+}
+
+private JSONValue buildInterfaceTypeJson(T, AllTypes...)() {
+    // Interface has fields from AbstractField
+    enum rtFields = getRuntimeFields!T;
+    JSONValue[] fields;
+    static foreach (f; rtFields) {{
+        static if (!f.hidden) {
+            JSONValue[] argJsons;
+            static foreach (arg; f.args) {
+                argJsons ~= inputValueJson(arg.name, "", arg.typeJson, arg.defaultValue);
+            }
+            fields ~= fieldJsonFull(f.name, f.description, f.typeJson, f.deprecation, argJsons);
+        }
+    }}
+
+    alias Members = getAbstractTypeMembers!(T, AllTypes);
+    JSONValue[] possibleTypes;
+    static foreach (Member; Members) {
+        possibleTypes ~= namedType("OBJECT", getGraphQLTypeName!Member);
+    }
+
+    return JSONValue([
+        "kind": JSONValue("INTERFACE"),
+        "name": JSONValue(getGraphQLTypeName!T),
+        "description": JSONValue(null),
+        "fields": JSONValue(fields),
+        "inputFields": JSONValue(null),
+        "interfaces": JSONValue(null),
+        "enumValues": JSONValue(null),
+        "possibleTypes": JSONValue(possibleTypes)
     ]);
 }
 
