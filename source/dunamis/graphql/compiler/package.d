@@ -3404,9 +3404,10 @@ unittest {
     assert(postItems[0]["title"].str == "Hello World");
 }
 
-// Test: subscription compilation
+// Test: subscription compilation and execution via SubscriptionExecutor
 unittest {
     import std.json;
+    import ae.utils.promise.await : awaitSync;
     import dunamis.core;
     import dunamis.core.expr.combinators : EventSourceExpr;
     import dunamis.relational.schema;
@@ -3436,9 +3437,18 @@ unittest {
     db = new MockDB!();
     db.setTableData("users", `[{"id": 1, "first_name": "Alice"}]`);
 
-    // Compile a subscription query — just verifies compilation succeeds
+    // Compile a subscription query
     auto query = compileQuery!TestSchema(`subscription { userCreated { firstName } }`);
     assert(query !is null);
+
+    // Use SubscriptionExecutor to deliver events
+    auto executor = new Executor();
+    auto sub = new SubscriptionExecutor!User(executor, query);
+
+    // Deliver an event with a User entity
+    import dunamis.relational.demo : Int64;
+    auto result = awaitSync(sub.execute(User(Int64(1))));
+    assert("userCreated" in result, "Result should have userCreated field");
 }
 
 // Test: subscription rejects multiple root fields

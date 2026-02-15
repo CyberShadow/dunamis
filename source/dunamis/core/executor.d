@@ -142,6 +142,101 @@ class Executor {
 }
 
 // ============================================================================
+// Subscription Executor
+// ============================================================================
+
+/// Manages a subscription's lifecycle: optimizes the expression tree once,
+/// then re-evaluates it for each event delivery.
+///
+/// Usage:
+/// ---
+/// auto query = compileQuery!MySchema(`subscription { userCreated { firstName } }`);
+/// auto sub = SubscriptionExecutor!User(executor, query);
+///
+/// // For each event:
+/// auto result = sub.execute(someUser);  // Returns JSONValue
+/// ---
+class SubscriptionExecutor(T) {
+    import dunamis.core.expr.combinators : EventSourceExpr;
+    import std.json : JSONValue;
+
+    private Expr!JSONValue _optimized;
+    private EventSourceExpr!T _eventSource;
+    private DataSource[] _sources;
+
+    this(Executor executor, Expr!JSONValue expr) {
+        // Optimize once
+        auto optCtx = new OptimizeContext();
+        _optimized = cast(Expr!JSONValue) expr.optimize(optCtx);
+
+        foreach (optimizer; executor.collectOptimizers(_optimized)) {
+            optimizer.optimize(_optimized, optCtx);
+        }
+
+        // Find the EventSourceExpr in the tree
+        _eventSource = findEventSource(_optimized);
+        if (_eventSource is null) {
+            throw new Exception("SubscriptionExecutor: no EventSourceExpr!" ~
+                T.stringof ~ " found in expression tree");
+        }
+
+        // Collect data sources
+        _sources = executor.collectDataSources(_optimized);
+    }
+
+    /// Deliver an event and evaluate the subscription query.
+    /// Creates a fresh EvalContext for each event.
+    Promise!JSONValue execute(T value) {
+        import std.json : JSONValue;
+
+        auto evalCtx = new EvalContext();
+        _eventSource.deliver(evalCtx, value);
+        evalCtx.setValues!AnyRef(null, [queryRoot]);
+
+        if (_sources.length == 0) {
+            return _optimized.eval(evalCtx)
+                .then((JSONValue[] results) => results[0]);
+        }
+
+        // Create sessions and manage lifecycle
+        DataSession[] sessions;
+        foreach (ds; _sources)
+            sessions ~= evalCtx.getSession(ds);
+
+        auto setupChain = resolve();
+        foreach (s; sessions)
+            setupChain = setupChain.then(() => s.setup(SetupMode.respond));
+
+        return setupChain.then(() {
+            return _optimized.eval(evalCtx);
+        }).then((JSONValue[] results) {
+            auto p = resolve();
+            foreach (s; sessions)
+                p = p.then(() => s.teardown(SetupMode.respond, true));
+            return p.then(() => results[0]);
+        }).except((Exception e) {
+            auto p = resolve();
+            foreach (s; sessions)
+                p = p.then(() => s.teardown(SetupMode.respond, false));
+            return p.then(() { throw e; return JSONValue.init; });
+        });
+    }
+
+    /// Walk the expression tree to find the EventSourceExpr!T.
+    private static EventSourceExpr!T findEventSource(ExprBase root) {
+        if (root is null) return null;
+
+        if (auto es = cast(EventSourceExpr!T) root) return es;
+
+        foreach (dep; root.dependencies()) {
+            if (auto found = findEventSource(dep))
+                return found;
+        }
+        return null;
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -243,4 +338,47 @@ unittest {
 
     auto result = awaitSync(executor.execute(query, evalCtx));
     assert(result == ["user-1/tenant-abc/a"]);
+}
+
+// Test: SubscriptionExecutor basic event delivery
+unittest {
+    import std.json;
+    import dunamis.core.expr.combinators : EventSourceExpr;
+
+    static struct User {
+        string name;
+    }
+
+    // Build a simple subscription expression tree:
+    // eventSource!User → use to transform single entity to JSON
+    auto es = new EventSourceExpr!User();
+    auto query = use((User user) => JSONValue(["name": JSONValue(user.name)]), es);
+
+    auto executor = new Executor();
+    auto sub = new SubscriptionExecutor!User(executor, query);
+
+    // Deliver an event
+    auto result = awaitSync(sub.execute(User("Alice")));
+    assert(result["name"].str == "Alice");
+
+    // Deliver another event — fresh context
+    auto result2 = awaitSync(sub.execute(User("Bob")));
+    assert(result2["name"].str == "Bob");
+}
+
+// Test: SubscriptionExecutor with no EventSourceExpr throws
+unittest {
+    import std.json;
+
+    static struct Dummy { string x; }
+
+    auto expr = singleton(JSONValue("hello"));
+    auto executor = new Executor();
+
+    try {
+        auto sub = new SubscriptionExecutor!Dummy(executor, expr);
+        assert(false, "Should have thrown");
+    } catch (Exception e) {
+        // Expected: no EventSourceExpr found
+    }
 }
