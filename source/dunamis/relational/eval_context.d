@@ -8,7 +8,7 @@ import std.typecons : Nullable;
 
 import ae.utils.promise;
 
-import dunamis.core.datasource : DataSource, DataSession, SetupMode;
+import dunamis.core.datasource : DataSource, DataSession, SetupMode, ChangeEvent;
 import dunamis.core.types;
 import dunamis.core.sorting : OrderBySpec, SortDirection;
 import dunamis.relational.query_node;
@@ -95,11 +95,48 @@ abstract class RelationalSession : DataSession {
     /// Stored by InsertExpr/UpdateExpr, read by ColumnAccessExpr.
     private QueryResult[string] _mutationResults;
 
+    /// Pending change events queued during mutations, fired post-commit.
+    private ChangeEvent[] _pendingEvents;
+
+    /// Listener for change events. When null (default), recordChange() is a
+    /// no-op — zero overhead without subscriptions.
+    private void delegate(ChangeEvent) _eventListener;
+
+    /// Register a listener for change events (set by subscription infrastructure).
+    void setEventListener(void delegate(ChangeEvent) listener) {
+        _eventListener = listener;
+    }
+
+    /// Record a change event (called by mutation expressions after DB operation).
+    /// No-op when no event listener is registered.
+    void recordChange(string table, ChangeEvent.Kind kind, string[] ids) {
+        if (_eventListener is null) return;
+        auto event = new ChangeEvent();
+        event.table = table;
+        event.kind = kind;
+        event.ids = ids;
+        _pendingEvents ~= event;
+    }
+
     /// Clear per-request state at the start of each request.
     /// Subclasses that override setup() should call super.setup().
     override Promise!void setup(SetupMode mode = SetupMode.query) {
+        _pendingEvents = [];
         _queryResults.clear();
         _mutationResults.clear();
+        return resolve();
+    }
+
+    /// Fire pending events post-commit and clear queue.
+    /// Subclasses that override teardown() should call super.teardown() to
+    /// ensure events fire after the transaction commits.
+    override Promise!void teardown(SetupMode mode = SetupMode.query, bool success = true) {
+        if (success && _pendingEvents.length > 0 && _eventListener !is null) {
+            foreach (event; _pendingEvents) {
+                _eventListener(event);
+            }
+        }
+        _pendingEvents = [];
         return resolve();
     }
 

@@ -47,10 +47,10 @@ class SQLiteSession : RelationalSession {
         return resolve();
     }
 
-    /// Commit or rollback the transaction.
+    /// Commit or rollback the transaction, then fire pending events.
     override Promise!void teardown(SetupMode mode = SetupMode.query, bool success = true) {
         _db.exec(success ? "COMMIT" : "ROLLBACK");
-        return resolve();
+        return super.teardown(mode, success);
     }
 
     /// Execute raw SQL for session setup.

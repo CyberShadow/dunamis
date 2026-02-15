@@ -900,3 +900,96 @@ unittest {
     auto values = awaitSync(db.session.fetchColumn!string("translations", "value", [ref1, ref2]));
     assert(values == ["Hello", "Hello, World"]);
 }
+
+// ============================================================================
+// Mutation Event Hook Tests
+// ============================================================================
+
+unittest {
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core.datasource : ChangeEvent, SetupMode;
+
+    // Test: events are queued via recordChange and fired post-teardown
+    auto db = new MockDB!()();
+    auto session = cast(RelationalSession) db.createSession();
+
+    ChangeEvent[] firedEvents;
+    session.setEventListener((ChangeEvent e) { firedEvents ~= e; });
+
+    // Record a change event (simulates what InsertExpr does after executeInsert)
+    session.recordChange("users", ChangeEvent.Kind.created, ["1"]);
+    assert(firedEvents.length == 0, "Events should not fire before teardown");
+
+    // Successful teardown fires events
+    awaitSync(session.teardown(SetupMode.query, true));
+    assert(firedEvents.length == 1, "Expected 1 event after teardown");
+    assert(firedEvents[0].table == "users");
+    assert(firedEvents[0].kind == ChangeEvent.Kind.created);
+    assert(firedEvents[0].ids == ["1"]);
+}
+
+unittest {
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core.datasource : ChangeEvent, SetupMode;
+
+    // Test: rollback does NOT fire events
+    auto db = new MockDB!()();
+    auto session = cast(RelationalSession) db.createSession();
+
+    ChangeEvent[] firedEvents;
+    session.setEventListener((ChangeEvent e) { firedEvents ~= e; });
+
+    session.recordChange("users", ChangeEvent.Kind.created, ["1"]);
+
+    // Failed teardown should NOT fire events
+    awaitSync(session.teardown(SetupMode.query, false));
+    assert(firedEvents.length == 0, "Events should not fire on rollback");
+}
+
+unittest {
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core.datasource : ChangeEvent, SetupMode;
+
+    // Test: multiple events fire in order
+    auto db = new MockDB!()();
+    auto session = cast(RelationalSession) db.createSession();
+
+    ChangeEvent[] firedEvents;
+    session.setEventListener((ChangeEvent e) { firedEvents ~= e; });
+
+    session.recordChange("users", ChangeEvent.Kind.created, ["1"]);
+    session.recordChange("users", ChangeEvent.Kind.updated, ["1"]);
+    session.recordChange("users", ChangeEvent.Kind.deleted, ["2"]);
+
+    assert(firedEvents.length == 0, "Events should not fire before teardown");
+
+    awaitSync(session.teardown(SetupMode.query, true));
+    assert(firedEvents.length == 3, "Expected 3 events after teardown");
+    assert(firedEvents[0].kind == ChangeEvent.Kind.created);
+    assert(firedEvents[1].kind == ChangeEvent.Kind.updated);
+    assert(firedEvents[1].ids == ["1"]);
+    assert(firedEvents[2].kind == ChangeEvent.Kind.deleted);
+    assert(firedEvents[2].ids == ["2"]);
+}
+
+unittest {
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core.datasource : ChangeEvent, SetupMode;
+
+    // Test: setup clears stale events, no listener is a no-op
+    auto db = new MockDB!()();
+    auto session = cast(RelationalSession) db.createSession();
+
+    // No listener set — recordChange should be a no-op
+    session.recordChange("users", ChangeEvent.Kind.created, ["1"]);
+    awaitSync(session.teardown(SetupMode.query, true));
+    // No crash, no error — just a no-op
+
+    // After setup, events from previous request are cleared
+    ChangeEvent[] firedEvents;
+    session.setEventListener((ChangeEvent e) { firedEvents ~= e; });
+    session.recordChange("users", ChangeEvent.Kind.created, ["1"]);
+    awaitSync(session.setup(SetupMode.query));  // Clears pending events
+    awaitSync(session.teardown(SetupMode.query, true));
+    assert(firedEvents.length == 0, "Events should be cleared by setup()");
+}

@@ -10,7 +10,7 @@ import ae.utils.promise;
 import dunamis.core.types;
 import dunamis.core.expr;
 import dunamis.core.eval;
-import dunamis.core.datasource : DataSource;
+import dunamis.core.datasource : DataSource, ChangeEvent;
 import dunamis.core.optimize : OptimizeContext;
 import dunamis.relational.eval_context;
 import dunamis.relational.schema : EntityID, hasAutoIncrement;
@@ -122,8 +122,12 @@ class InsertExpr(Entity) : Expr!Entity {
                 // Store result for field access
                 session.storeMutationResult(_typeName, result);
 
-                // Convert refs to entities
+                // Record change event for subscription notifications
                 auto refs = result.allRefs();
+                session.recordChange(_table, ChangeEvent.Kind.created,
+                    refs.map!(r => r.localId).array);
+
+                // Convert refs to entities
                 import dunamis.relational.schema : makeEntityFromRef, entityToRef;
                 auto entities = refs.map!(r => makeEntityFromRef!Entity(r)).array;
 
@@ -212,6 +216,9 @@ class UpdateExpr(Entity) : Expr!(Entity[]) {
         // Execute UPDATE via session
         return session.executeUpdate(_table, _typeName, _input, _pkColumns)
             .then((QueryResult result) {
+                // Record change event for subscription notifications
+                session.recordChange(_table, ChangeEvent.Kind.updated, _input.ids);
+
                 auto refs = result.allRefs();
                 import dunamis.relational.schema : makeEntityFromRef;
                 auto entities = refs.map!(r => makeEntityFromRef!Entity(r)).array;
@@ -277,6 +284,10 @@ class DeleteExpr(Entity) : Expr!bool {
         // Execute DELETE via session
         return session.executeDelete(_table, _ids, _pkColumns)
             .then((int count) {
+                // Record change event for subscription notifications
+                if (count > 0) {
+                    session.recordChange(_table, ChangeEvent.Kind.deleted, _ids);
+                }
                 return [count > 0];
             });
     }

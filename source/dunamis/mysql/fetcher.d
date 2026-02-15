@@ -50,11 +50,13 @@ class MySQLSession : RelationalSession {
         }).then((MySqlConnection.Row[] _) { });
     }
 
-    /// Commit or rollback the transaction.
+    /// Commit or rollback the transaction, then fire pending events.
     override Promise!void teardown(SetupMode mode = SetupMode.query, bool success = true) {
         if (_conn is null) return resolve();  // setup failed
         auto sql = success ? "COMMIT" : "ROLLBACK";
-        return _conn.query(sql).array().then((MySqlConnection.Row[] _) { });
+        return _conn.query(sql).array().then((MySqlConnection.Row[] _) {
+            return super.teardown(mode, success);
+        });
     }
 
     /// Execute raw SQL for session setup.
