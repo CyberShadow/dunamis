@@ -403,6 +403,14 @@ mixin template TestSchema(alias db) {
         }
     }
 
-    alias BaseSchema = Schema!(Query, Mutation);
+    struct Subscription {
+        import dunamis.core.expr.combinators : eventSource;
+
+        static Expr!User userCreated(Expr!Subscription s) {
+            return eventSource!User();
+        }
+    }
+
+    alias BaseSchema = Schema!(Query, Mutation, Subscription);
     alias MySchema = ApplyPlugins!(BaseSchema, CrudMutationPlugin, FilterPlugin, SortingPlugin);
 }

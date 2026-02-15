@@ -1988,6 +1988,52 @@ void testUnionIntrospection() {
 }
 
 // ============================================================================
+// Subscription Tests
+// ============================================================================
+
+void testSubscriptionUserCreated() {
+    import core.thread : Thread;
+    import core.time : msecs;
+
+    // Result storage (heap-allocated, accessible from both threads)
+    static class SubState {
+        JSONValue result;
+        string error;
+    }
+    auto state = new SubState();
+
+    // Subscribe in background thread (blocks until event fires)
+    auto subThread = new Thread({
+        try {
+            state.result = graphql(`subscription { userCreated { firstName } }`);
+        } catch (Exception e) {
+            state.error = e.msg;
+        }
+    });
+    subThread.start();
+
+    // Wait for subscription to register with the server
+    Thread.sleep(200.msecs);
+
+    // Send mutation — triggers event and unblocks subscription
+    auto suffix = modeSuffix();
+    auto firstName = "Sub" ~ suffix;
+    auto mutResult = graphql(`mutation {
+        createUserWithName(firstName: "` ~ firstName ~ `", lastName: "SubUser") { id }
+    }`);
+    assertNoErrors(mutResult);
+
+    // Wait for subscription thread to complete
+    subThread.join();
+
+    assertTrue(state.error.length == 0,
+        "Subscription failed: " ~ state.error);
+    assertNoErrors(state.result);
+    assertEqual(state.result["data"]["userCreated"]["firstName"],
+        JSONValue(firstName));
+}
+
+// ============================================================================
 // Test Registration
 // ============================================================================
 
@@ -2107,4 +2153,7 @@ static this() {
     registerTest("Interface query with typed fragments", "tests", &testInterfaceQueryWithTypedFragments);
     registerTest("Union with named fragments and nested selection", "tests", &testUnionWithNamedFragmentsAndNestedSelection);
     registerTest("Union introspection via __type", "tests", &testUnionIntrospection);
+
+    // Subscription tests
+    registerTest("Subscription: userCreated fires on mutation", "tests", &testSubscriptionUserCreated);
 }

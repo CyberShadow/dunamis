@@ -34,7 +34,7 @@ mixin TestSchema!db;
 // Test Runner
 // ============================================================================
 
-class MySQLTestRunner : IntegrationTestRunner!(db, MySchema) {
+class MySQLTestRunner : IntegrationTestRunner!(db, MySchema, User) {
     private MySqlConnection mysqlConn;
 
     override string testName() {

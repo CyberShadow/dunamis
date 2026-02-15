@@ -26,7 +26,12 @@ import ae.sys.data : Data;
 import ae.sys.dataset : DataVec, joinToGC;
 
 import dunamis.core : EvalContext, Executor;
+import dunamis.core.executor : SubscriptionExecutor;
+import dunamis.core.datasource : ChangeEvent;
 import dunamis.graphql : compileQuery;
+import dunamis.relational.eval_context : RelationalSession;
+import dunamis.relational.schema : makeEntityFromRef, EntityID;
+import dunamis.core.types : makeAnyRef;
 
 import integration.test_framework : runAllTests;
 import integration.schema : RequestContext, seedDatabase;
@@ -38,10 +43,15 @@ import integration.schema : RequestContext, seedDatabase;
  *   db - The module-level database instance (alias)
  *   Schema - The GraphQL schema type (from TestSchema mixin)
  */
-abstract class IntegrationTestRunner(alias db, alias Schema) {
+abstract class IntegrationTestRunner(alias db, alias Schema, SubEntityType) {
     protected HttpServer server;
     protected shared bool serverReady = false;
     protected shared int exitCode = 1;
+
+    /// Subscription support: SubEntityType is the raw (non-normalized) entity type
+    /// used by EventSourceExpr in the subscription's expression tree.
+    private SubscriptionExecutor!SubEntityType _subExecutor;
+    private HttpServerConnection _pendingSubConn;
 
     /// Override to set up the database connection and schema
     abstract void setupDatabase();
@@ -62,6 +72,12 @@ abstract class IntegrationTestRunner(alias db, alias Schema) {
             auto query = json["query"].str;
             JSONValue variables = "variables" in json ? json["variables"] : JSONValue.emptyObject;
 
+            // Detect subscription operations
+            if (query.length >= 12 && query[0..12] == "subscription") {
+                handleSubscription(query, variables, conn);
+                return;
+            }
+
             // Check for optimization preference via header (defaults to true)
             bool optimize = true;
             if (auto optHeader = "X-Optimize" in request.headers) {
@@ -79,6 +95,14 @@ abstract class IntegrationTestRunner(alias db, alias Schema) {
 
             auto evalCtx = new EvalContext();
             evalCtx.setRequestContext(RequestContext(locale));
+
+            // Wire event listener for subscription dispatch
+            if (_subExecutor !is null) {
+                auto session = cast(RelationalSession) evalCtx.getSession(db);
+                if (session !is null) {
+                    session.setEventListener(&dispatchEvent);
+                }
+            }
 
             executor.execute(compiledQuery, evalCtx, optimize).then((JSONValue result) {
                 auto response = new HttpResponseEx();
@@ -107,6 +131,49 @@ abstract class IntegrationTestRunner(alias db, alias Schema) {
         } catch (Exception e) {
             sendError(conn, e.msg);
         }
+    }
+
+    /// Handle a subscription operation: compile, create executor, hold connection open
+    private void handleSubscription(string query, JSONValue variables, HttpServerConnection conn) {
+        auto compiledQuery = compileQuery!Schema(query, variables);
+        auto executor = new Executor();
+        _subExecutor = new SubscriptionExecutor!SubEntityType(executor, compiledQuery);
+        _pendingSubConn = conn;
+        // Don't send response — connection held open until event fires
+    }
+
+    /// Dispatch a change event to the pending subscription
+    private void dispatchEvent(ChangeEvent event) {
+        if (_subExecutor is null || _pendingSubConn is null) return;
+
+        enum subTable = EntityID!SubEntityType.table;
+        enum subTypeName = EntityID!SubEntityType.typeName;
+
+        if (event.table != subTable || event.kind != ChangeEvent.Kind.created) return;
+
+        // Construct entity from event ID and evaluate subscription
+        auto entity = makeEntityFromRef!SubEntityType(
+            makeAnyRef(subTypeName, event.ids[0]));
+
+        auto conn = _pendingSubConn;
+        auto subExec = _subExecutor;
+        _pendingSubConn = null;
+        _subExecutor = null;
+
+        subExec.execute(entity).then((JSONValue result) {
+            sendJsonResponse(conn, JSONValue(["data": result]));
+        }).except((Exception e) {
+            sendError(conn, e.msg);
+        });
+    }
+
+    /// Send a JSON response with status 200
+    protected void sendJsonResponse(HttpServerConnection conn, JSONValue json) {
+        auto response = new HttpResponseEx();
+        response.status = HttpStatusCode.OK;
+        response.headers["Content-Type"] = "application/json";
+        response.data = DataVec(Data(cast(immutable(ubyte)[]) json.toString()));
+        conn.sendResponse(response);
     }
 
     /// Send error response
