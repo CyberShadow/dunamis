@@ -3,7 +3,7 @@ module dunamis.core.executor;
 import ae.utils.promise;
 import ae.utils.promise.await : awaitSync;
 
-import dunamis.core.datasource : DataSource, DataSession, SetupMode;
+import dunamis.core.datasource : ChangeEvent, DataSource, DataSession, SetupMode;
 import dunamis.core.eval;
 import dunamis.core.expr;
 import dunamis.core.optimize;
@@ -237,6 +237,126 @@ class SubscriptionExecutor(T) {
 }
 
 // ============================================================================
+// Subscription Manager
+// ============================================================================
+
+/// Holds a table name and a type-erased handler for subscription events.
+/// Created by relational helpers (e.g., `createSubscriptionHandler`) and
+/// passed to `SubscriptionManager.subscribe()`.
+struct SubscriptionRegistration {
+    string tableName;
+    SubscriptionManager.Handler handler;
+}
+
+/// Manages persistent subscriptions with dispatch by table name.
+///
+/// Supports multiple concurrent subscriptions per table. Each subscription
+/// gets a unique ID for later removal via `unsubscribe()`.
+///
+/// Usage:
+/// ---
+/// auto mgr = new SubscriptionManager();
+///
+/// // Register a subscription (persistent — stays until unsubscribed)
+/// auto id = mgr.subscribe("users", handler, onResult, onError);
+///
+/// // Wire event dispatch
+/// session.setEventListener(mgr.eventListener());
+///
+/// // Later: remove the subscription
+/// mgr.unsubscribe(id);
+/// ---
+class SubscriptionManager {
+    import std.json : JSONValue;
+
+    alias Handler = Promise!JSONValue delegate(ChangeEvent);
+    alias ResultCallback = void delegate(JSONValue);
+    alias ErrorCallback = void delegate(Exception);
+
+    private struct Entry {
+        size_t id;
+        Handler handler;
+        ResultCallback onResult;
+        ErrorCallback onError;
+    }
+
+    private Entry[][string] _byTable;
+    private size_t _nextId;
+
+    /// Register a persistent subscription. Returns an ID for unsubscribe().
+    size_t subscribe(string tableName, Handler handler,
+                     ResultCallback onResult, ErrorCallback onError = null) {
+        auto id = _nextId++;
+        _byTable[tableName] ~= Entry(id, handler, onResult, onError);
+        return id;
+    }
+
+    /// ditto
+    size_t subscribe(SubscriptionRegistration reg,
+                     ResultCallback onResult, ErrorCallback onError = null) {
+        return subscribe(reg.tableName, reg.handler, onResult, onError);
+    }
+
+    /// Subscribe once, then auto-unsubscribe after first event delivery.
+    /// Useful for HTTP long-poll testing; real transports use persistent subscribe().
+    size_t subscribeOnce(string tableName, Handler handler,
+                         ResultCallback onResult, ErrorCallback onError = null) {
+        size_t id;
+        id = subscribe(tableName, handler, (JSONValue result) {
+            unsubscribe(id);
+            onResult(result);
+        }, onError is null ? null : (Exception e) {
+            unsubscribe(id);
+            onError(e);
+        });
+        return id;
+    }
+
+    /// ditto
+    size_t subscribeOnce(SubscriptionRegistration reg,
+                         ResultCallback onResult, ErrorCallback onError = null) {
+        return subscribeOnce(reg.tableName, reg.handler, onResult, onError);
+    }
+
+    /// Remove a subscription by ID.
+    void unsubscribe(size_t id) {
+        foreach (table, ref entries; _byTable) {
+            for (size_t i = 0; i < entries.length; i++) {
+                if (entries[i].id == id) {
+                    entries = entries[0 .. i] ~ entries[i + 1 .. $];
+                    if (entries.length == 0)
+                        _byTable.remove(table);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Dispatch an event to all matching subscriptions.
+    void dispatch(ChangeEvent event) {
+        if (auto entries = event.table in _byTable) {
+            foreach (ref entry; *entries) {
+                entry.handler(event).then((JSONValue result) {
+                    entry.onResult(result);
+                }).except((Exception e) {
+                    if (entry.onError !is null)
+                        entry.onError(e);
+                });
+            }
+        }
+    }
+
+    /// Returns a delegate suitable for setEventListener().
+    void delegate(ChangeEvent) eventListener() {
+        return &dispatch;
+    }
+
+    @property bool hasSubscriptions() const {
+        return _byTable.length > 0;
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -381,4 +501,109 @@ unittest {
     } catch (Exception e) {
         // Expected: no EventSourceExpr found
     }
+}
+
+// Test: SubscriptionManager dispatch and unsubscribe
+unittest {
+    import std.json;
+
+    auto mgr = new SubscriptionManager();
+
+    JSONValue[] received;
+    size_t id = mgr.subscribe("users",
+        (ChangeEvent event) {
+            return resolve(JSONValue(["table": JSONValue(event.table)]));
+        },
+        (JSONValue result) { received ~= result; }
+    );
+
+    assert(mgr.hasSubscriptions);
+
+    // Dispatch an event
+    auto event = new ChangeEvent();
+    event.table = "users";
+    event.kind = ChangeEvent.Kind.created;
+    event.ids = ["1"];
+    mgr.dispatch(event);
+
+    // Resolve promises
+    import ae.net.asockets : socketManager;
+    socketManager.loop();
+
+    assert(received.length == 1);
+    assert(received[0]["table"].str == "users");
+
+    // Unsubscribe
+    mgr.unsubscribe(id);
+    assert(!mgr.hasSubscriptions);
+
+    // Dispatch again — no callback
+    mgr.dispatch(event);
+    socketManager.loop();
+    assert(received.length == 1);
+}
+
+// Test: SubscriptionManager subscribeOnce auto-removes
+unittest {
+    import std.json;
+
+    auto mgr = new SubscriptionManager();
+
+    JSONValue[] received;
+    mgr.subscribeOnce("posts",
+        (ChangeEvent event) {
+            return resolve(JSONValue(["id": JSONValue(event.ids[0])]));
+        },
+        (JSONValue result) { received ~= result; }
+    );
+
+    assert(mgr.hasSubscriptions);
+
+    auto event = new ChangeEvent();
+    event.table = "posts";
+    event.kind = ChangeEvent.Kind.created;
+    event.ids = ["42"];
+
+    // First dispatch — delivers and auto-unsubscribes
+    mgr.dispatch(event);
+    import ae.net.asockets : socketManager;
+    socketManager.loop();
+
+    assert(received.length == 1);
+    assert(received[0]["id"].str == "42");
+    assert(!mgr.hasSubscriptions);
+
+    // Second dispatch — no effect
+    mgr.dispatch(event);
+    socketManager.loop();
+    assert(received.length == 1);
+}
+
+// Test: SubscriptionManager with SubscriptionRegistration
+unittest {
+    import std.json;
+
+    auto mgr = new SubscriptionManager();
+
+    JSONValue[] received;
+    auto reg = SubscriptionRegistration("items",
+        (ChangeEvent event) {
+            return resolve(JSONValue("handled"));
+        }
+    );
+
+    mgr.subscribe(reg, (JSONValue result) { received ~= result; });
+    assert(mgr.hasSubscriptions);
+
+    auto event = new ChangeEvent();
+    event.table = "items";
+    event.kind = ChangeEvent.Kind.created;
+    event.ids = ["1"];
+    mgr.dispatch(event);
+
+    import ae.net.asockets : socketManager;
+    socketManager.loop();
+
+    assert(received.length == 1);
+    assert(received[0].str == "handled");
 }

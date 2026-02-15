@@ -26,12 +26,11 @@ import ae.sys.data : Data;
 import ae.sys.dataset : DataVec, joinToGC;
 
 import dunamis.core : EvalContext, Executor;
-import dunamis.core.executor : SubscriptionExecutor;
-import dunamis.core.datasource : ChangeEvent;
-import dunamis.graphql : compileQuery;
+import dunamis.core.expr.combinators : SubscriptionResultExpr;
+import dunamis.core.executor : SubscriptionExecutor, SubscriptionManager;
+import dunamis.graphql : compileQuery, GraphQLResult;
 import dunamis.relational.eval_context : RelationalSession;
-import dunamis.relational.schema : makeEntityFromRef, EntityID;
-import dunamis.core.types : makeAnyRef;
+import dunamis.relational.subscription : createSubscriptionHandler;
 
 import integration.test_framework : runAllTests;
 import integration.schema : RequestContext, seedDatabase;
@@ -48,10 +47,12 @@ abstract class IntegrationTestRunner(alias db, alias Schema, SubEntityType) {
     protected shared bool serverReady = false;
     protected shared int exitCode = 1;
 
-    /// Subscription support: SubEntityType is the raw (non-normalized) entity type
-    /// used by EventSourceExpr in the subscription's expression tree.
-    private SubscriptionExecutor!SubEntityType _subExecutor;
-    private HttpServerConnection _pendingSubConn;
+    /// Manages active subscriptions and dispatches change events.
+    private SubscriptionManager _subManager;
+
+    this() {
+        _subManager = new SubscriptionManager();
+    }
 
     /// Override to set up the database connection and schema
     abstract void setupDatabase();
@@ -72,9 +73,11 @@ abstract class IntegrationTestRunner(alias db, alias Schema, SubEntityType) {
             auto query = json["query"].str;
             JSONValue variables = "variables" in json ? json["variables"] : JSONValue.emptyObject;
 
-            // Detect subscription operations
-            if (query.length >= 12 && query[0..12] == "subscription") {
-                handleSubscription(query, variables, conn);
+            auto compiledQuery = compileQuery!Schema(query, variables);
+
+            // Branch on operation type (embedded in the expression tree)
+            if (cast(SubscriptionResultExpr) compiledQuery) {
+                handleSubscription(compiledQuery, conn);
                 return;
             }
 
@@ -90,17 +93,16 @@ abstract class IntegrationTestRunner(alias db, alias Schema, SubEntityType) {
                 locale = *localeHeader;
             }
 
-            auto compiledQuery = compileQuery!Schema(query, variables);
             auto executor = new Executor();
 
             auto evalCtx = new EvalContext();
             evalCtx.setRequestContext(RequestContext(locale));
 
             // Wire event listener for subscription dispatch
-            if (_subExecutor !is null) {
+            if (_subManager.hasSubscriptions) {
                 auto session = cast(RelationalSession) evalCtx.getSession(db);
                 if (session !is null) {
-                    session.setEventListener(&dispatchEvent);
+                    session.setEventListener(_subManager.eventListener());
                 }
             }
 
@@ -133,38 +135,20 @@ abstract class IntegrationTestRunner(alias db, alias Schema, SubEntityType) {
         }
     }
 
-    /// Handle a subscription operation: compile, create executor, hold connection open
-    private void handleSubscription(string query, JSONValue variables, HttpServerConnection conn) {
-        auto compiledQuery = compileQuery!Schema(query, variables);
+    /// Handle a subscription operation: create executor, register with manager
+    private void handleSubscription(GraphQLResult query, HttpServerConnection conn) {
         auto executor = new Executor();
-        _subExecutor = new SubscriptionExecutor!SubEntityType(executor, compiledQuery);
-        _pendingSubConn = conn;
+        auto subExec = new SubscriptionExecutor!SubEntityType(executor, query);
+        auto reg = createSubscriptionHandler(subExec);
+        _subManager.subscribeOnce(reg,
+            (JSONValue result) {
+                sendJsonResponse(conn, JSONValue(["data": result]));
+            },
+            (Exception e) {
+                sendError(conn, e.msg);
+            }
+        );
         // Don't send response — connection held open until event fires
-    }
-
-    /// Dispatch a change event to the pending subscription
-    private void dispatchEvent(ChangeEvent event) {
-        if (_subExecutor is null || _pendingSubConn is null) return;
-
-        enum subTable = EntityID!SubEntityType.table;
-        enum subTypeName = EntityID!SubEntityType.typeName;
-
-        if (event.table != subTable || event.kind != ChangeEvent.Kind.created) return;
-
-        // Construct entity from event ID and evaluate subscription
-        auto entity = makeEntityFromRef!SubEntityType(
-            makeAnyRef(subTypeName, event.ids[0]));
-
-        auto conn = _pendingSubConn;
-        auto subExec = _subExecutor;
-        _pendingSubConn = null;
-        _subExecutor = null;
-
-        subExec.execute(entity).then((JSONValue result) {
-            sendJsonResponse(conn, JSONValue(["data": result]));
-        }).except((Exception e) {
-            sendError(conn, e.msg);
-        });
     }
 
     /// Send a JSON response with status 200

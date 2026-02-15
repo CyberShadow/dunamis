@@ -358,6 +358,40 @@ abstract class Expr(T) : ExprBase {
 }
 
 // ============================================================================
+// Forwarding Expression
+// ============================================================================
+
+/// Non-final base class for expression wrappers that forward evaluation to an
+/// inner expression. Subclass this to tag or wrap expressions without changing
+/// their evaluation semantics.
+///
+/// The wrapper is transparent to the optimizer: `dependencies()` reports the
+/// inner expression, so tree-walking (data source collection, optimizer
+/// collection) naturally reaches through it. `optimize()` delegates to the
+/// inner expression and preserves the wrapper as root.
+class ForwardingExpr(T) : Expr!T {
+    protected Expr!T _inner;
+
+    this(Expr!T inner) { _inner = inner; }
+
+    override ExprBase[] dependencies() { return [_inner]; }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        assert(index == 0);
+        _inner = cast(Expr!T) newDep;
+    }
+
+    override Expr!T optimize(OptimizeContext ctx) {
+        _inner = _inner.optimize(ctx);
+        return this;
+    }
+
+    override Promise!(T[]) eval(EvalContext ctx) {
+        return _inner.eval(ctx);
+    }
+}
+
+// ============================================================================
 // Helper Templates
 // ============================================================================
 

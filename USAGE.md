@@ -607,7 +607,6 @@ import dunamis.graphql : compileQuery;
 db = new MockDB!();  // Initialize the static db
 auto executor = new Executor();
 
-// Simple query (db derived from Query → Entity → static db variable)
 auto query = compileQuery!Query(`{
     users {
         firstName
@@ -639,6 +638,7 @@ auto query = compileQuery!Query(`
         }
     }
 `, variables);
+auto result = executor.execute(query);
 ```
 
 **Multiple root fields:**
@@ -648,6 +648,7 @@ auto query = compileQuery!Query(`{
     users { firstName }
     posts { title }
 }`);
+auto result = executor.execute(query);
 // Returns: {"users": [...], "posts": [...]}
 ```
 
@@ -667,6 +668,7 @@ auto query = compileQuery!MySchema(`{
         age
     }
 }`);
+auto result = executor.execute(query);
 ```
 
 **Available filter operators:**
@@ -1108,3 +1110,100 @@ auto query = map!((Expr!User u) {
 })(users);
 // If element 2 fails, error path is ["users", 2, "name"] (not ["users", "name"])
 ```
+
+## Subscriptions
+
+GraphQL subscriptions let clients receive real-time updates when data changes. Dunamis supports subscriptions through change events fired after mutations commit.
+
+### Schema Definition
+
+Add a `Subscription` type to your schema. Use `Schema!(Query, Mutation, Subscription)`:
+
+```d
+struct Subscription {}  // Empty — RdbmsSubscriptionPlugin auto-generates fields
+
+alias FinalSchema = ApplyPlugins!(Schema!(Query, Mutation, Subscription),
+    FilterPlugin, SortingPlugin, PaginationPlugin,
+    RdbmsSubscriptionPlugin,  // Auto-generates subscription fields from entities
+);
+```
+
+`RdbmsSubscriptionPlugin` generates a subscription field for each entity (e.g., `userCreated`, `postCreated`). The generated field returns the entity type's selection set, so clients can select exactly which fields to receive on each event.
+
+### Detecting Subscription Operations
+
+The operation type is embedded in the result expression, consistent with how queries use `DynamicJsonObjectExpr` (parallel) and mutations use `SequentialJsonObjectExpr` (sequential). Subscriptions wrap the result in `SubscriptionResultExpr`:
+
+```d
+import dunamis.core.expr.combinators : SubscriptionResultExpr;
+
+auto query = compileQuery!FinalSchema(`
+    subscription {
+        userCreated { firstName lastName }
+    }
+`);
+
+if (cast(SubscriptionResultExpr) query) {
+    // This is a subscription — route to SubscriptionExecutor
+}
+```
+
+### SubscriptionExecutor
+
+`SubscriptionExecutor!T` optimizes the expression tree once, then re-evaluates it for each event:
+
+```d
+import dunamis.core.executor : SubscriptionExecutor;
+
+auto query = compileQuery!FinalSchema(`subscription { userCreated { firstName } }`);
+auto subExec = new SubscriptionExecutor!User(new Executor(), query);
+
+// For each change event, construct the entity and evaluate:
+auto result = subExec.execute(someUser);  // Returns Promise!JSONValue
+```
+
+### SubscriptionManager
+
+`SubscriptionManager` dispatches change events to registered subscriptions by table name:
+
+```d
+import dunamis.core.executor : SubscriptionManager;
+
+auto mgr = new SubscriptionManager();
+
+// Register a persistent subscription
+auto id = mgr.subscribe("users", handler, onResult, onError);
+
+// Wire event dispatch on each mutation's session
+session.setEventListener(mgr.eventListener());
+
+// Remove when done
+mgr.unsubscribe(id);
+```
+
+For one-shot delivery (e.g., HTTP long-poll), use `subscribeOnce` which auto-removes after the first event.
+
+### createSubscriptionHandler
+
+`createSubscriptionHandler` eliminates the boilerplate of constructing entities from change events:
+
+```d
+import dunamis.relational.subscription : createSubscriptionHandler;
+
+auto query = compileQuery!FinalSchema(`subscription { userCreated { firstName } }`);
+auto subExec = new SubscriptionExecutor!User(new Executor(), query);
+auto reg = createSubscriptionHandler(subExec);
+// reg.tableName == "users", reg.handler converts ChangeEvent → entity → Promise!JSONValue
+
+mgr.subscribeOnce(reg, onResult, onError);
+```
+
+### Event Flow
+
+1. Client sends a subscription query
+2. Server compiles it, creates a `SubscriptionExecutor`, registers with `SubscriptionManager`
+3. A mutation executes and commits
+4. The data source fires a `ChangeEvent` post-commit
+5. `SubscriptionManager.dispatch()` routes the event to matching subscriptions
+6. The subscription handler constructs the entity from the event and evaluates the query
+7. The result is sent to the client

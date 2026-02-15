@@ -11,4 +11,5 @@ public {
     import dunamis.relational.schema;
     import dunamis.relational.sql;
     import dunamis.relational.sql_optimizer;
+    import dunamis.relational.subscription;
 }

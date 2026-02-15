@@ -356,6 +356,20 @@ auto eventSource(T)() {
 }
 
 // ============================================================================
+// SubscriptionResultExpr: Subscription Operation Marker
+// ============================================================================
+
+/// Wraps a subscription query's result expression to mark it as a subscription
+/// operation. Analogous to how SequentialJsonObjectExpr marks mutations —
+/// the expression type itself carries the operation semantics.
+///
+/// Servers use `cast(SubscriptionResultExpr)` to detect subscription operations
+/// and route them to SubscriptionExecutor instead of direct execution.
+class SubscriptionResultExpr : ForwardingExpr!(_JSONValue) {
+    this(Expr!_JSONValue inner) { super(inner); }
+}
+
+// ============================================================================
 // EffectExpr: Deferred Side Effects
 // ============================================================================
 

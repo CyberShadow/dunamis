@@ -33,6 +33,14 @@ alias GraphQLResult = Expr!JSONValue;
 /// NormalizePlugin, which converts plain fields and methods into the canonical
 /// computed field form.
 ///
+/// The operation type is embedded in the result expression:
+/// - Queries → DynamicJsonObjectExpr (parallel evaluation)
+/// - Mutations → SequentialJsonObjectExpr (ordered side effects)
+/// - Subscriptions → SubscriptionResultExpr (delayed, repeatable delivery)
+///
+/// To detect subscription results, use:
+///   `cast(SubscriptionResultExpr) query !is null`
+///
 /// Example:
 /// ---
 /// alias MySchema = Schema!(Query);
@@ -81,10 +89,16 @@ GraphQLResult compileQuery(alias SchemaType)(string queryString, JSONValue varia
     bool isMutation = op.ot !is null && op.ot.ruleSelection == OperationTypeEnum.Mutation;
     bool isSubscription = op.ot !is null && op.ot.ruleSelection == OperationTypeEnum.Sub;
 
-    // Compile based on operation type
+    // Compile based on operation type.
+    // The result expression type encodes the operation semantics:
+    //   Query        → DynamicJsonObjectExpr  (parallel, no side effects)
+    //   Mutation     → SequentialJsonObjectExpr (sequential, side effects)
+    //   Subscription → SubscriptionResultExpr  (delayed delivery)
     if (isSubscription) {
         static if (getFields!SubscriptionType.length > 0) {
-            return compileRootSubscriptionSet!(SubscriptionType, SchemaType)(op.ss, variables, fragments);
+            import dunamis.core.expr.combinators : SubscriptionResultExpr;
+            return new SubscriptionResultExpr(
+                compileRootSubscriptionSet!(SubscriptionType, SchemaType)(op.ss, variables, fragments));
         } else {
             throw new CompilerException("Subscription operations require a Schema with Subscription type");
         }
