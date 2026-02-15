@@ -8,7 +8,7 @@ public import dunamis.graphql.compiler.validation;
 import std.json;
 
 import graphql.ast : OperationTypeEnum;
-import graphql.lexer : Lexer, QueryParser;
+import graphql.lexer;
 import graphql.parser;
 
 import dunamis.core.expr : Expr;
@@ -60,16 +60,8 @@ GraphQLResult compileQuery(alias SchemaType)(string queryString, JSONValue varia
     else
         struct SubscriptionType {}
 
-    // Parse the GraphQL query.
-    // The graphql-d lexer in QueryParser.yes mode (default) doesn't recognize
-    // "subscription" as a keyword, only "query" and "mutation". Use QueryParser.no
-    // when the query contains a subscription operation. QueryParser.no enables
-    // more keywords but can break argument names like "input", so we only use it
-    // when needed.
-    import std.algorithm : startsWith;
-    import std.string : stripLeft;
-    auto qp = queryString.stripLeft.startsWith("subscription") ? QueryParser.no : QueryParser.yes;
-    auto lexer = Lexer(queryString, qp);
+    // Parse the GraphQL query
+    auto lexer = Lexer(queryString);
     auto parser = Parser(lexer);
     auto doc = parser.parseDocument();
 

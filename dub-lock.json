@@ -6,9 +6,9 @@
       "sha256": "10srdkbcv0qcnrpm01csykl8vxlmjdgm9lkfilcsncic2v0za0bq"
     },
     "graphqld": {
-      "version": "542374109b26018c9542631c90d1ba2acef32a8b",
-      "repository": "git+https://github.com/vpanteleev-sym/graphqld.git",
-      "sha256": "1wyf1bbmclxyyhsr0y0a5wgc7aw8k4k7p0wm4ngy33j69lnvznih"
+      "version": "7b8c9cd0f2482deab6a9ecb3dbf6d9d246860972",
+      "repository": "git+https://github.com/CyberShadow/graphqld.git",
+      "sha256": "1ml3lj0f4wycmb1rdyh2zkvyl4fascn9mkwp48mz1940d7ss8n0n"
     }
   }
 }
