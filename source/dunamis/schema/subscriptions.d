@@ -32,22 +32,18 @@ import dunamis.schema.plugin : isSchema;
 /// set against the event payload.
 template RdbmsSubscriptionPlugin(alias S) if (isSchema!S) {
     import dunamis.schema.plugin : WrapFields, IdentityTypeMap, ForwardField;
-    import dunamis.relational.schema.attrs : hasTableEntity, extractTableEntity;
 
     alias Query = S.Query;
     alias Mutation = S.Mutation;
 
     struct GeneratedSubscription {
         // Forward existing subscription fields
-        static if (__traits(hasMember, S, "Subscription"))
-            mixin WrapFields!(S.Subscription, IdentityTypeMap, ForwardField);
+        mixin WrapFields!(S.Subscription, IdentityTypeMap, ForwardField);
 
         // Generate subscription fields for each entity discovered from Query
         static foreach (_member; __traits(allMembers, S.Query)) {
-            static if (__traits(compiles, hasTableEntity!(__traits(getMember, S.Query, _member))) &&
-                       hasTableEntity!(__traits(getMember, S.Query, _member))) {
+            static if (_isEntityField!(S.Query, _member)) {
                 mixin _SubscriptionFieldsMixin!(
-                    extractTableEntity!(__traits(getMember, S.Query, _member)),
                     _extractNormalizedEntity!(S.Query, _member),
                     S
                 );
@@ -59,15 +55,21 @@ template RdbmsSubscriptionPlugin(alias S) if (isSchema!S) {
 }
 
 /// Mixin template that generates subscription fields for a single entity type.
-/// Uses OriginalEntity for naming (has @Entity UDA with type name) and
-/// NormalizedEntity for the return type (post-normalization wrapper).
-mixin template _SubscriptionFieldsMixin(OriginalEntity, NormalizedEntity, alias S) {
+/// Gets the entity name from `@OriginalName` UDA (set by normalization chain).
+mixin template _SubscriptionFieldsMixin(Entity, alias S) {
     static import dunamis.core.expr;
     static import dunamis.core.expr.combinators;
     mixin(() {
-        import dunamis.relational.schema.attrs : getEntityTypeName;
+        import dunamis.schema.plugin : OriginalName;
 
-        enum typeName = getEntityTypeName!OriginalEntity;
+        // Get entity name from @OriginalName UDA
+        enum typeName = () {
+            static foreach (attr; __traits(getAttributes, Entity)) {
+                static if (is(typeof(attr) == OriginalName))
+                    return attr.name;
+            }
+            return __traits(identifier, Entity);
+        }();
 
         // Lowercase first letter for field name
         enum fieldBase = () {
@@ -77,40 +79,41 @@ mixin template _SubscriptionFieldsMixin(OriginalEntity, NormalizedEntity, alias 
             return cast(string) name;
         }();
 
-        // Check for existing fields on S.Subscription (if it exists)
-        enum hasExistingSubscription = __traits(hasMember, S, "Subscription");
-
         string result = "";
 
         // <entity>Created
-        static if (!hasExistingSubscription ||
-                   !__traits(hasMember, S.Subscription, fieldBase ~ "Created")) {
-            result ~= "static dunamis.core.expr.Expr!(NormalizedEntity) " ~
+        static if (!__traits(hasMember, S.Subscription, fieldBase ~ "Created")) {
+            result ~= "static dunamis.core.expr.Expr!(Entity) " ~
                 fieldBase ~ "Created" ~
                 "(dunamis.core.expr.Expr!(typeof(this)) parent) {" ~
-                " return dunamis.core.expr.combinators.eventSource!(NormalizedEntity)(); }\n";
+                " return dunamis.core.expr.combinators.eventSource!(Entity)(); }\n";
         }
 
         // <entity>Updated
-        static if (!hasExistingSubscription ||
-                   !__traits(hasMember, S.Subscription, fieldBase ~ "Updated")) {
-            result ~= "static dunamis.core.expr.Expr!(NormalizedEntity) " ~
+        static if (!__traits(hasMember, S.Subscription, fieldBase ~ "Updated")) {
+            result ~= "static dunamis.core.expr.Expr!(Entity) " ~
                 fieldBase ~ "Updated" ~
                 "(dunamis.core.expr.Expr!(typeof(this)) parent) {" ~
-                " return dunamis.core.expr.combinators.eventSource!(NormalizedEntity)(); }\n";
+                " return dunamis.core.expr.combinators.eventSource!(Entity)(); }\n";
         }
 
         // <entity>Deleted
-        static if (!hasExistingSubscription ||
-                   !__traits(hasMember, S.Subscription, fieldBase ~ "Deleted")) {
-            result ~= "static dunamis.core.expr.Expr!(NormalizedEntity) " ~
+        static if (!__traits(hasMember, S.Subscription, fieldBase ~ "Deleted")) {
+            result ~= "static dunamis.core.expr.Expr!(Entity) " ~
                 fieldBase ~ "Deleted" ~
                 "(dunamis.core.expr.Expr!(typeof(this)) parent) {" ~
-                " return dunamis.core.expr.combinators.eventSource!(NormalizedEntity)(); }\n";
+                " return dunamis.core.expr.combinators.eventSource!(Entity)(); }\n";
         }
 
         return result;
     }());
+}
+
+/// Check if a Query member is an entity-backed field (has @TableEntity UDA).
+private template _isEntityField(alias QueryType, string member) {
+    import dunamis.relational.schema.attrs : hasTableEntity;
+    enum _isEntityField = __traits(compiles, hasTableEntity!(__traits(getMember, QueryType, member))) &&
+                          hasTableEntity!(__traits(getMember, QueryType, member));
 }
 
 /// Extract the normalized entity type from a Query field's return type.
