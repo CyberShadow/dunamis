@@ -55,10 +55,7 @@ GraphQLResult compileQuery(alias SchemaType)(string queryString, JSONValue varia
 {
     alias QueryType = SchemaType.Query;
     alias MutationType = SchemaType.Mutation;
-    static if (__traits(hasMember, SchemaType, "Subscription"))
-        alias SubscriptionType = SchemaType.Subscription;
-    else
-        struct SubscriptionType {}
+    alias SubscriptionType = SchemaType.Subscription;
 
     // Parse the GraphQL query
     auto lexer = Lexer(queryString);

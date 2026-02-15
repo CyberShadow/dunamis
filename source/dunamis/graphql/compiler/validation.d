@@ -74,10 +74,7 @@ ValidationError[] validateQuery(alias SchemaType)(
 ) if (isSchema!SchemaType) {
     alias QueryType = SchemaType.Query;
     alias MutationType = SchemaType.Mutation;
-    static if (__traits(hasMember, SchemaType, "Subscription"))
-        alias SubscriptionType = SchemaType.Subscription;
-    else
-        struct SubscriptionType {}
+    alias SubscriptionType = SchemaType.Subscription;
 
     ValidationError[] errors;
 

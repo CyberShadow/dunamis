@@ -308,10 +308,7 @@ JSONValue buildIntrospectionJson(alias SchemaOrQuery)() {
     static if (isSchema!SchemaOrQuery) {
         alias QueryType = SchemaOrQuery.Query;
         alias MutationType = SchemaOrQuery.Mutation;
-        static if (__traits(hasMember, SchemaOrQuery, "Subscription"))
-            alias SubscriptionType = SchemaOrQuery.Subscription;
-        else
-            struct SubscriptionType {}
+        alias SubscriptionType = SchemaOrQuery.Subscription;
     } else {
         alias QueryType = SchemaOrQuery;
         struct MutationType {}

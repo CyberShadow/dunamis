@@ -298,6 +298,15 @@ template ExternalTypesPlugin(alias S, NewMappings...) if (isSchema!S) {
         }
     }
 
+    // Wrap Subscription: forward all fields with value mapping
+    struct Subscription {
+        static foreach (_m; getFieldMembers!(S.Subscription)) {
+            static if (isComputedField!(S.Subscription, _m)) {
+                mixin ForwardFieldWithMappings!(S.Subscription, _m, _TypeMap, NewMappings);
+            }
+        }
+    }
+
 }
 
 // ============================================================================
