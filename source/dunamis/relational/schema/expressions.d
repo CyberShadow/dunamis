@@ -110,6 +110,11 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
             _input = newDep;
     }
 
+    override DataSource[] dataSources() {
+        auto db = EntityID!Entity.db;
+        return db !is null ? [db] : [];
+    }
+
     override Expr!T optimize(OptimizeContext ctx) {
         // First optimize input
         _input = (cast(Expr!Entity) _input).optimize(ctx);

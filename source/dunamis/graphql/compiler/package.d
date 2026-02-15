@@ -3434,10 +3434,16 @@ unittest {
     auto executor = new Executor();
     auto sub = new SubscriptionExecutor!User(executor, query);
 
-    // Deliver an event with a User entity
+    // Deliver an event with a User entity (id=1 → Alice)
     import dunamis.relational.demo : Int64;
     auto result = awaitSync(sub.execute(User(Int64(1))));
     assert("userCreated" in result, "Result should have userCreated field");
+
+    // Verify the field value was actually fetched from the database
+    auto userCreated = result["userCreated"];
+    assert("firstName" in userCreated, "userCreated should have firstName field: " ~ userCreated.toString());
+    assert(userCreated["firstName"].str == "Alice",
+        "firstName should be 'Alice', got: " ~ userCreated["firstName"].toString());
 }
 
 // Test: subscription rejects multiple root fields
