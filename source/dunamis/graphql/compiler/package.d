@@ -4,6 +4,7 @@ public import dunamis.graphql.compiler.values;
 public import dunamis.graphql.compiler.fields;
 public import dunamis.graphql.compiler.selection;
 public import dunamis.graphql.compiler.validation;
+public import dunamis.graphql.compiler.extensions;
 
 import std.json;
 
