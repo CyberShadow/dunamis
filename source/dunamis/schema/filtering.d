@@ -19,8 +19,10 @@ import std.conv : to;
 import std.algorithm : canFind;
 
 import dunamis.core.expr : Expr, ExprResultType, ExprBase;
+import dunamis.core.types : isCustomScalar;
 import dunamis.core.filtering : filterBy, FilterByExpr, FilterItemExpr, FilterByInfo;
 import dunamis.schema.plugin;
+import dunamis.graphql.schema.udas : GqlName, getGraphQLTypeName;
 // isSchema imported via dunamis.schema.plugin wildcard import above
 
 // ============================================================================
@@ -32,7 +34,7 @@ import dunamis.schema.plugin;
 struct StringFilter {
     Nullable!string equalTo;
     Nullable!string notEqualTo;
-    Nullable!(string[]) in_;
+    @GqlName("in") Nullable!(string[]) in_;
     Nullable!(string[]) notIn;
     Nullable!string lessThan;
     Nullable!string lessThanOrEqualTo;
@@ -42,6 +44,7 @@ struct StringFilter {
     Nullable!string startsWith;
     Nullable!string endsWith;
     Nullable!string containsInsensitive;
+    Nullable!string includesInsensitive;
     Nullable!string startsWithInsensitive;
     Nullable!string endsWithInsensitive;
     Nullable!bool isNull;
@@ -52,7 +55,7 @@ struct StringFilter {
 struct IntFilter {
     Nullable!int equalTo;
     Nullable!int notEqualTo;
-    Nullable!(int[]) in_;
+    @GqlName("in") Nullable!(int[]) in_;
     Nullable!(int[]) notIn;
     Nullable!int lessThan;
     Nullable!int lessThanOrEqualTo;
@@ -66,7 +69,7 @@ struct IntFilter {
 struct LongFilter {
     Nullable!long equalTo;
     Nullable!long notEqualTo;
-    Nullable!(long[]) in_;
+    @GqlName("in") Nullable!(long[]) in_;
     Nullable!(long[]) notIn;
     Nullable!long lessThan;
     Nullable!long lessThanOrEqualTo;
@@ -80,7 +83,7 @@ struct LongFilter {
 struct FloatFilter {
     Nullable!double equalTo;
     Nullable!double notEqualTo;
-    Nullable!(double[]) in_;
+    @GqlName("in") Nullable!(double[]) in_;
     Nullable!(double[]) notIn;
     Nullable!double lessThan;
     Nullable!double lessThanOrEqualTo;
@@ -100,10 +103,44 @@ struct BooleanFilter {
 /// Enum filter input type template.
 /// Generates a filter type for any D enum with equality and set membership operations.
 struct EnumFilter(E) if (is(E == enum)) {
+    enum __gqlTypeName = getGraphQLTypeName!E ~ "Filter";
     Nullable!E equalTo;
     Nullable!E notEqualTo;
-    Nullable!(E[]) in_;
+    @GqlName("in") Nullable!(E[]) in_;
     Nullable!(E[]) notIn;
+    Nullable!bool isNull;
+}
+
+template isDateRangeType(T) {
+    // Range value objects are deliberately identified structurally.  Avoid
+    // invoking scalar-name discovery here: this predicate is instantiated for
+    // primitive columns too, and a generated range type is wrapped by
+    // schema normalization before the filter plugin sees it.
+    enum isDateRangeType = __traits(hasMember, T, "start") &&
+        __traits(hasMember, T, "end");
+}
+
+template dateRangeEndpoint(Range) if (isDateRangeType!Range) {
+    import std.traits : isSomeFunction, ReturnType;
+    import dunamis.core.expr : ExprResultType;
+
+    alias StartMember = __traits(getMember, Range, "start");
+    static if (isSomeFunction!StartMember)
+        alias MaybeEndpoint = ExprResultType!(ReturnType!StartMember);
+    else
+        alias MaybeEndpoint = typeof(Range.init.start);
+    static if (is(MaybeEndpoint == Nullable!E, E))
+        alias dateRangeEndpoint = E;
+    else
+        alias dateRangeEndpoint = MaybeEndpoint;
+}
+
+/// PostgreSQL range filter.  Native execution currently needs the element
+/// containment predicate; a compatibility schema may advertise
+/// a wider range vocabulary for extension handling.
+struct DateRangeFilter(Range) if (isDateRangeType!Range) {
+    enum __gqlTypeName = "DateRangeFilter";
+    Nullable!(dateRangeEndpoint!Range) containsElement;
     Nullable!bool isNull;
 }
 
@@ -113,7 +150,9 @@ struct EnumFilter(E) if (is(E == enum)) {
 
 /// Map D types to their corresponding filter types.
 template FilterTypeFor(T) {
-    static if (is(T == string)) {
+    static if (isCustomScalar!T) {
+        alias FilterTypeFor = StringFilter;
+    } else static if (is(T == string)) {
         alias FilterTypeFor = StringFilter;
     } else static if (is(T == int)) {
         alias FilterTypeFor = IntFilter;
@@ -123,6 +162,8 @@ template FilterTypeFor(T) {
         alias FilterTypeFor = FloatFilter;
     } else static if (is(T == bool)) {
         alias FilterTypeFor = BooleanFilter;
+    } else static if (isDateRangeType!T) {
+        alias FilterTypeFor = DateRangeFilter!T;
     } else {
         // Default to StringFilter for unknown types
         alias FilterTypeFor = StringFilter;
@@ -149,12 +190,44 @@ template getFilterableColumns(Entity) {
     }();
 }
 
+/// Get singular belongs-to relationship names for an entity.
+/// BelongsTo methods carry @BelongsToParent metadata, which avoids treating
+/// arbitrary computed object-returning fields as database relationships.
+template getBelongsToFields(Entity) {
+    import dunamis.relational.schema.attrs : hasBelongsToParent;
+
+    enum string[] getBelongsToFields = () {
+        string[] relationships;
+        static foreach (member; __traits(allMembers, Entity)) {{
+            static if (!isInternalMember!member &&
+                       __traits(compiles, typeof(__traits(getMember, Entity, member)))) {
+                alias candidate = __traits(getMember, Entity, member);
+                static if (hasBelongsToParent!candidate)
+                    relationships ~= member;
+            }
+        }}
+        return relationships;
+    }();
+}
+
+/// Extract the parent entity type recorded on a belongs-to method.
+template getBelongsToParentType(Entity, string member) {
+    import dunamis.relational.schema.attrs : extractBelongsToParent;
+    alias getBelongsToParentType = extractBelongsToParent!
+        (__traits(getMember, Entity, member));
+}
+
 /// Check if a type is an object type (has fields/methods, not a scalar).
 /// Used to distinguish entity/POD array elements (get nested ListFilter)
 /// from scalar array elements (get ListFilter!ScalarFilter).
 template isEntityType(T) {
     import dunamis.core.discovery : isObjectType;
-    enum isEntityType = isObjectType!T;
+    import dunamis.core.types : isCustomScalar;
+    import std.typecons : Nullable;
+    static if (is(T == Nullable!U, U))
+        enum isEntityType = isEntityType!U;
+    else
+        enum isEntityType = !isCustomScalar!T && isObjectType!T;
 }
 
 /// Check if a member is an array-returning method (returns Expr!(T[]) for any T).
@@ -176,10 +249,14 @@ template isArrayReturningMethod(Entity, string member) {
             // different type identity across module boundaries)
             static if (params.length == 1 && is(params[0] : Expr!ParamT, ParamT)) {
                 alias retType = ReturnType!method;
+                alias resultType = ExprResultType!retType;
 
                 // Check if return type is Expr!(ElementT[]) for any ElementT
                 // Exclude string (which is immutable(char)[]) - it's a scalar, not an array field
-                static if (is(retType : Expr!(ElementT[]), ElementT) && !is(retType : Expr!string)) {
+                import dunamis.core.types : isCustomScalar;
+                static if (!isCustomScalar!resultType &&
+                           is(retType == Expr!(ElementT[]), ElementT) &&
+                           !is(retType == Expr!string)) {
                     enum isArrayReturningMethod = true;
                 } else {
                     enum isArrayReturningMethod = false;
@@ -209,7 +286,14 @@ template isEntityArrayField(Entity, string member) {
 template isScalarArrayField(Entity, string member) {
     static if (isArrayReturningMethod!(Entity, member)) {
         alias ElementT = getArrayElementType!(Entity, member);
-        enum isScalarArrayField = !isEntityType!ElementT;
+        import std.typecons : Nullable;
+        // Nullable collection elements need lifted comparison expressions;
+        // until those are available, keep the collection queryable without
+        // advertising a filter the executor cannot evaluate correctly.
+        static if (is(ElementT == Nullable!U, U))
+            enum isScalarArrayField = false;
+        else
+            enum isScalarArrayField = !isEntityType!ElementT;
     } else {
         enum isScalarArrayField = false;
     }
@@ -256,7 +340,10 @@ template getScalarArrayFields(Entity) {
 
 /// Map a scalar type to its filter type name.
 template scalarFilterTypeName(T) {
-    static if (is(T == string)) {
+    import std.typecons : Nullable;
+    static if (is(T == Nullable!U, U)) {
+        enum scalarFilterTypeName = scalarFilterTypeName!U;
+    } else static if (is(T == string)) {
         enum scalarFilterTypeName = "StringFilter";
     } else static if (is(T == int)) {
         enum scalarFilterTypeName = "IntFilter";
@@ -278,7 +365,7 @@ template getArrayElementType(Entity, string member) {
     alias method = __traits(getMember, Entity, member);
     alias retType = ReturnType!method;
     // retType is Expr!(T[]), extract T
-    static if (is(retType : Expr!(T[]), T)) {
+    static if (is(retType == Expr!(T[]), T)) {
         alias getArrayElementType = T;
     } else {
         static assert(false, "Method " ~ member ~ " does not return Expr!(T[])");
@@ -289,6 +376,7 @@ template getArrayElementType(Entity, string member) {
 /// Used to filter parent entities based on their related children.
 /// Uses pointers to avoid Nullable initialization issues with complex nested types.
 struct ListFilter(ChildFilter) {
+    enum __gqlTypeName = getGraphQLTypeName!ChildFilter ~ "ListFilter";
     /// At least one child matches the filter
     ChildFilter* some;
     /// All children match the filter
@@ -317,12 +405,17 @@ template _ShallowFilterFor(Entity) {
     }
 
     mixin(() {
-        string result = "struct _ShallowFilter {\n";
+        string result = "@GqlName(\"" ~ getGraphQLTypeName!Entity ~ "ShallowFilter\")\n";
+        result ~= "struct _ShallowFilter {\n";
 
         static foreach (member; getFilterableColumns!Entity) {{
             alias ColType = _ColTypeFor!member;
 
-            static if (is(ColType == string)) {
+            static if (isDateRangeType!ColType) {
+                result ~= "    Nullable!(DateRangeFilter!(_ColTypeFor!\"" ~ member ~ "\")) " ~ member ~ ";\n";
+            } else static if (isCustomScalar!ColType) {
+                result ~= "    Nullable!(FilterTypeFor!(_ColTypeFor!\"" ~ member ~ "\")) " ~ member ~ ";\n";
+            } else static if (is(ColType == string)) {
                 result ~= "    Nullable!StringFilter " ~ member ~ ";\n";
             } else static if (is(ColType == int)) {
                 result ~= "    Nullable!IntFilter " ~ member ~ ";\n";
@@ -334,11 +427,16 @@ template _ShallowFilterFor(Entity) {
                 result ~= "    Nullable!BooleanFilter " ~ member ~ ";\n";
             } else static if (is(ColType == enum)) {
                 result ~= "    Nullable!(EnumFilter!(_EnumType_" ~ member ~ ")) " ~ member ~ ";\n";
+            } else static if (is(ColType == Nullable!U, U)) {
+                static if (is(U == int))
+                    result ~= "    Nullable!IntFilter " ~ member ~ ";\n";
+                else static if (is(U == long))
+                    result ~= "    Nullable!LongFilter " ~ member ~ ";\n";
             }
         }}
 
-        result ~= "    typeof(this)[] and;\n";
-        result ~= "    typeof(this)[] or;\n";
+        result ~= "    Nullable!(typeof(this)[]) and;\n";
+        result ~= "    Nullable!(typeof(this)[]) or;\n";
         result ~= "    typeof(this)* not;\n";
 
         result ~= "}\n";
@@ -383,13 +481,18 @@ template _FilterTypesFor(Entity) {
     mixin(() {
         string result = "";
 
+        result ~= "@GqlName(\"" ~ getGraphQLTypeName!Entity ~ "Filter\")\n";
         result ~= "struct _EntityFilter {\n";
 
         // Filterable column fields
         static foreach (member; getFilterableColumns!Entity) {{
             alias ColType = _ColTypeFor!member;
 
-            static if (is(ColType == string)) {
+            static if (isDateRangeType!ColType) {
+                result ~= "    Nullable!(DateRangeFilter!(_ColTypeFor!\"" ~ member ~ "\")) " ~ member ~ ";\n";
+            } else static if (isCustomScalar!ColType) {
+                result ~= "    Nullable!(FilterTypeFor!(_ColTypeFor!\"" ~ member ~ "\")) " ~ member ~ ";\n";
+            } else static if (is(ColType == string)) {
                 result ~= "    Nullable!StringFilter " ~ member ~ ";\n";
             } else static if (is(ColType == int)) {
                 result ~= "    Nullable!IntFilter " ~ member ~ ";\n";
@@ -401,8 +504,26 @@ template _FilterTypesFor(Entity) {
                 result ~= "    Nullable!BooleanFilter " ~ member ~ ";\n";
             } else static if (is(ColType == enum)) {
                 result ~= "    Nullable!(EnumFilter!(_EnumType_" ~ member ~ ")) " ~ member ~ ";\n";
+            } else static if (is(ColType == Nullable!U, U)) {
+                static if (is(U == int))
+                    result ~= "    Nullable!IntFilter " ~ member ~ ";\n";
+                else static if (is(U == long))
+                    result ~= "    Nullable!LongFilter " ~ member ~ ";\n";
+            } else static if (isEntityType!ColType && !isDateRangeType!ColType) {
+                // Belongs-to / foreign-key relationship. Use the shallow
+                // target filter so relationship predicates do not create
+                // recursive filter type cycles.
+                result ~= "    Nullable!(_ShallowFilterFor!(_ColTypeFor!\"" ~
+                    member ~ "\")._ShallowFilter) " ~ member ~ ";\n";
             }
         }}
+
+        // Singular belongs-to relationships use a shallow target filter to
+        // prevent recursive input-type cycles (for example User.manager).
+        static foreach (member; getBelongsToFields!Entity) {
+            result ~= "    Nullable!(_ShallowFilterFor!(getBelongsToParentType!(Entity, \"" ~
+                member ~ "\"))._ShallowFilter) " ~ member ~ ";\n";
+        }
 
         // Entity array fields — reference shallow filter via module-level template
         static foreach (member; getEntityArrayFields!Entity) {
@@ -412,12 +533,16 @@ template _FilterTypesFor(Entity) {
         // Scalar array fields
         static foreach (member; getScalarArrayFields!Entity) {{
             alias ElemType = getArrayElementType!(Entity, member);
-            result ~= "    Nullable!(ListFilter!" ~ scalarFilterTypeName!ElemType ~ ") " ~ member ~ ";\n";
+            // Enum arrays need an EnumFilter-aware collection predicate. Until
+            // that predicate is available, keep the field queryable but do not
+            // advertise a type-incorrect StringFilter for it.
+            static if (!is(ElemType == enum))
+                result ~= "    Nullable!(ListFilter!" ~ scalarFilterTypeName!ElemType ~ ") " ~ member ~ ";\n";
         }}
 
         // Logical combinators (self-referential)
-        result ~= "    typeof(this)[] and;\n";
-        result ~= "    typeof(this)[] or;\n";
+        result ~= "    Nullable!(typeof(this)[]) and;\n";
+        result ~= "    Nullable!(typeof(this)[]) or;\n";
         result ~= "    typeof(this)* not;\n";
 
         result ~= "}\n";
@@ -449,9 +574,37 @@ Expr!bool buildFilterPredicateFromStruct(Entity, FilterType, ItemExpr)(ItemExpr 
                 // Use alias for the column method (required for calling static methods)
                 alias colMethod = __traits(getMember, Entity, member);
                 auto colExpr = colMethod(item);
-                auto cond = buildConditionFromScalarFilter(colExpr, __traits(getMember, filter, member).get, item);
+                alias ColType = ExprResultType!(ReturnType!colMethod);
+                static if (isEntityType!ColType && !isDateRangeType!ColType)
+                    auto cond = buildFilterPredicateFromStruct(colExpr,
+                        __traits(getMember, filter, member).get);
+                else
+                    auto cond = buildConditionFromScalarFilter(colExpr,
+                        __traits(getMember, filter, member).get, item);
                 if (cond !is null) {
                     conditions ~= cond;
+                }
+            }
+        }
+    }}
+
+
+    // Process singular belongs-to relationships (e.g. Post.author -> User).
+    static foreach (member; getBelongsToFields!Entity) {{
+        static if (__traits(hasMember, FilterType, member)) {
+            auto relationshipFilter = __traits(getMember, filter, member);
+            if (!relationshipFilter.isNull) {
+                alias relationshipMethod = __traits(getMember, Entity, member);
+                auto relationshipExpr = relationshipMethod(item);
+                alias RelationshipEntity = ExprResultType!(typeof(relationshipExpr));
+                static if (is(RelationshipEntity == Nullable!Parent, Parent)) {
+                    import dunamis.core.expr.json : UnwrapNullableExpr;
+                    auto unwrapped = new UnwrapNullableExpr!Parent(relationshipExpr);
+                    conditions ~= buildFilterPredicateFromStruct!Parent(
+                        unwrapped, relationshipFilter.get);
+                } else {
+                    conditions ~= buildFilterPredicateFromStruct!RelationshipEntity(
+                        relationshipExpr, relationshipFilter.get);
                 }
             }
         }
@@ -588,9 +741,9 @@ Expr!bool buildFilterPredicateFromStruct(Entity, FilterType, ItemExpr)(ItemExpr 
     }}
 
     // Handle 'and' combinator
-    if (filter.and.length > 0) {
+    if (!filter.and.isNull && filter.and.get.length > 0) {
         Expr!bool[] andPreds;
-        foreach (ref subFilter; filter.and) {
+        foreach (ref subFilter; filter.and.get) {
             andPreds ~= buildFilterPredicateFromStruct!Entity(item, subFilter);
         }
         if (andPreds.length > 0) {
@@ -603,9 +756,9 @@ Expr!bool buildFilterPredicateFromStruct(Entity, FilterType, ItemExpr)(ItemExpr 
     }
 
     // Handle 'or' combinator
-    if (filter.or.length > 0) {
+    if (!filter.or.isNull && filter.or.get.length > 0) {
         Expr!bool[] orPreds;
-        foreach (ref subFilter; filter.or) {
+        foreach (ref subFilter; filter.or.get) {
             orPreds ~= buildFilterPredicateFromStruct!Entity(item, subFilter);
         }
         if (orPreds.length > 0) {
@@ -637,82 +790,158 @@ Expr!bool buildFilterPredicateFromStruct(Entity, FilterType, ItemExpr)(ItemExpr 
 /// Build a condition from a scalar filter (StringFilter, IntFilter, etc.)
 Expr!bool buildConditionFromScalarFilter(ColExpr, ScalarFilter)(ColExpr colExpr, ScalarFilter filter, ExprBase lengthSource) {
     import dunamis.core.expr : constant;
+    import dunamis.core.expr.operators : sqlBinaryBool;
+    import dunamis.core.types : isCustomScalar;
+
+    enum isNullableColumn = is(ColExpr.ResultType == Nullable!NullableElement, NullableElement);
+
+    auto operand(V)(V value) {
+        static if (is(ColExpr.ResultType == Nullable!U, U))
+            static if (isCustomScalar!U)
+                return constant(Nullable!U(U(value)), lengthSource);
+            else
+                return constant(Nullable!U(value), lengthSource);
+        else static if (isCustomScalar!(ColExpr.ResultType))
+            return constant(ColExpr.ResultType(value), lengthSource);
+        else
+            return constant(value, lengthSource);
+    }
 
     Expr!bool[] conditions;
+
+    static if (isDateRangeType!(ColExpr.ResultType)) {
+        if (!filter.containsElement.isNull) {
+            alias Range = ColExpr.ResultType;
+            conditions ~= sqlBinaryBool(colExpr, "rangeContains",
+                constant(filter.containsElement.get.to!string, lengthSource),
+                (Range range, string element) {
+                    // PostgreSQL's canonical date ranges are half-open: [start, end).
+                    // Nullable endpoints represent unbounded sides.
+                    static if (__traits(hasMember, Range, "_normalizedSource"))
+                        auto raw = range._normalizedSource;
+                    else
+                        auto raw = range;
+                    bool afterStart = raw.start.isNull || raw.start.get.value <= element;
+                    bool beforeEnd = raw.end.isNull || element < raw.end.get.value;
+                    return afterStart && beforeEnd;
+                });
+        }
+    } else {
 
     // Check each operator in the scalar filter
     static if (__traits(hasMember, ScalarFilter, "equalTo")) {
         if (!filter.equalTo.isNull) {
-            conditions ~= colExpr.eq(constant(filter.equalTo.get, lengthSource));
+            conditions ~= colExpr.eq(operand(filter.equalTo.get));
         }
     }
 
     static if (__traits(hasMember, ScalarFilter, "notEqualTo")) {
         if (!filter.notEqualTo.isNull) {
-            conditions ~= colExpr.ne(constant(filter.notEqualTo.get, lengthSource));
+            conditions ~= colExpr.ne(operand(filter.notEqualTo.get));
+        }
+    }
+
+    static if (__traits(hasMember, ScalarFilter, "in_")) {
+        if (!filter.in_.isNull) {
+            auto values = filter.in_.get;
+            Expr!bool membership = constant(false, lengthSource);
+            foreach (value; values)
+                membership = membership.or(colExpr.eq(operand(value)));
+            conditions ~= membership;
+        }
+    }
+
+    static if (__traits(hasMember, ScalarFilter, "notIn")) {
+        if (!filter.notIn.isNull) {
+            auto values = filter.notIn.get;
+            Expr!bool membership = constant(true, lengthSource);
+            foreach (value; values)
+                membership = membership.and(colExpr.ne(operand(value)));
+            conditions ~= membership;
         }
     }
 
     static if (__traits(hasMember, ScalarFilter, "lessThan")) {
-        if (!filter.lessThan.isNull) {
-            conditions ~= colExpr.lt(constant(filter.lessThan.get, lengthSource));
+        static if (!isNullableColumn) {
+            if (!filter.lessThan.isNull) {
+                conditions ~= colExpr.lt(operand(filter.lessThan.get));
+            }
         }
     }
 
     static if (__traits(hasMember, ScalarFilter, "lessThanOrEqualTo")) {
-        if (!filter.lessThanOrEqualTo.isNull) {
-            conditions ~= colExpr.le(constant(filter.lessThanOrEqualTo.get, lengthSource));
+        static if (!isNullableColumn) {
+            if (!filter.lessThanOrEqualTo.isNull) {
+                conditions ~= colExpr.le(operand(filter.lessThanOrEqualTo.get));
+            }
         }
     }
 
     static if (__traits(hasMember, ScalarFilter, "greaterThan")) {
-        if (!filter.greaterThan.isNull) {
-            conditions ~= colExpr.gt(constant(filter.greaterThan.get, lengthSource));
+        static if (!isNullableColumn) {
+            if (!filter.greaterThan.isNull) {
+                conditions ~= colExpr.gt(operand(filter.greaterThan.get));
+            }
         }
     }
 
     static if (__traits(hasMember, ScalarFilter, "greaterThanOrEqualTo")) {
-        if (!filter.greaterThanOrEqualTo.isNull) {
-            conditions ~= colExpr.ge(constant(filter.greaterThanOrEqualTo.get, lengthSource));
+        static if (!isNullableColumn) {
+            if (!filter.greaterThanOrEqualTo.isNull) {
+                conditions ~= colExpr.ge(operand(filter.greaterThanOrEqualTo.get));
+            }
         }
     }
 
     // String-specific operators
-    static if (__traits(hasMember, ScalarFilter, "contains")) {
+    static if (__traits(hasMember, ScalarFilter, "contains") &&
+               is(ColExpr.ResultType == string)) {
         if (!filter.contains.isNull) {
             conditions ~= colExpr.contains(filter.contains.get);
         }
     }
 
-    static if (__traits(hasMember, ScalarFilter, "startsWith")) {
+    static if (__traits(hasMember, ScalarFilter, "startsWith") &&
+               is(ColExpr.ResultType == string)) {
         if (!filter.startsWith.isNull) {
             conditions ~= colExpr.startsWith(filter.startsWith.get);
         }
     }
 
-    static if (__traits(hasMember, ScalarFilter, "endsWith")) {
+    static if (__traits(hasMember, ScalarFilter, "endsWith") &&
+               is(ColExpr.ResultType == string)) {
         if (!filter.endsWith.isNull) {
             conditions ~= colExpr.endsWith(filter.endsWith.get);
         }
     }
 
     // Case-insensitive string operators
-    static if (__traits(hasMember, ScalarFilter, "containsInsensitive")) {
+    static if (__traits(hasMember, ScalarFilter, "containsInsensitive") &&
+               is(ColExpr.ResultType == string)) {
         if (!filter.containsInsensitive.isNull) {
             conditions ~= colExpr.containsInsensitive(filter.containsInsensitive.get);
         }
     }
+    static if (__traits(hasMember, ScalarFilter, "includesInsensitive") &&
+               is(ColExpr.ResultType == string)) {
+        if (!filter.includesInsensitive.isNull) {
+            conditions ~= colExpr.containsInsensitive(filter.includesInsensitive.get);
+        }
+    }
 
-    static if (__traits(hasMember, ScalarFilter, "startsWithInsensitive")) {
+    static if (__traits(hasMember, ScalarFilter, "startsWithInsensitive") &&
+               is(ColExpr.ResultType == string)) {
         if (!filter.startsWithInsensitive.isNull) {
             conditions ~= colExpr.startsWithInsensitive(filter.startsWithInsensitive.get);
         }
     }
 
-    static if (__traits(hasMember, ScalarFilter, "endsWithInsensitive")) {
+    static if (__traits(hasMember, ScalarFilter, "endsWithInsensitive") &&
+               is(ColExpr.ResultType == string)) {
         if (!filter.endsWithInsensitive.isNull) {
             conditions ~= colExpr.endsWithInsensitive(filter.endsWithInsensitive.get);
         }
+    }
     }
 
     // Combine conditions with AND
@@ -897,10 +1126,15 @@ private Expr!bool buildComparisonFromJson(Entity)(FilterItemExpr!Entity item, st
 template isFilterableType(T) {
     import std.traits : Unqual;
     import std.typecons : Nullable;
+    import dunamis.core.types : isCustomScalar;
 
     // Unwrap Nullable if present
     static if (is(T : Nullable!U, U)) {
         enum isFilterableType = isFilterableType!U;
+    } else static if (isDateRangeType!T) {
+        enum isFilterableType = true;
+    } else static if (isCustomScalar!T) {
+        enum isFilterableType = true;
     } else {
         // Check if it's a basic scalar type or enum
         enum isFilterableType = is(T == string) || is(T == int) || is(T == long) ||
@@ -913,7 +1147,8 @@ template isFilterableType(T) {
 /// This excludes FK columns, relationship columns, and computed fields with extra arguments.
 /// A valid column method takes exactly one parameter (Expr!Entity) and returns a filterable type.
 template isEntityColumnMethod(Entity, string member) {
-    static if (__traits(hasMember, Entity, member)) {
+    static if (__traits(hasMember, Entity, member) &&
+               __traits(compiles, typeof(__traits(getMember, Entity, member)))) {
         alias memberType = typeof(__traits(getMember, Entity, member));
         static if (is(memberType == function)) {
             alias params = Parameters!memberType;
@@ -940,6 +1175,43 @@ template isEntityColumnMethod(Entity, string member) {
 /// Build a typed condition for a specific column type.
 private Expr!bool buildTypedCondition(ColType)(Expr!ColType colExpr, string op, JSONValue value, ExprBase lengthSource) {
     import dunamis.core.expr : constant;
+    import dunamis.core.expr.operators : sqlBinaryBool;
+
+    // Date ranges are stored by the relational layer as their
+    // PostgreSQL text representation. Preserve that lightweight storage type
+    // while still compiling the range-specific GraphQL filter vocabulary to
+    // native PostgreSQL operators.
+    static if (is(ColType == string)) {
+        string rangeLiteral(JSONValue range) {
+            auto start = "start" in range && !range["start"].isNull
+                ? range["start"].str : "";
+            auto end = "end" in range && !range["end"].isNull
+                ? range["end"].str : "";
+            return "[" ~ start ~ "," ~ end ~ ")";
+        }
+        string rangeOperator;
+        string operand;
+        if (op == "containsElement" && value.type == JSONType.string) {
+            rangeOperator = "rangeContains";
+            operand = value.str;
+        } else if (value.type == JSONType.object) {
+            operand = rangeLiteral(value);
+            switch (op) {
+                case "contains": rangeOperator = "rangeContains"; break;
+                case "containedBy": rangeOperator = "rangeContainedBy"; break;
+                case "overlaps": rangeOperator = "rangeOverlaps"; break;
+                case "strictlyLeftOf": rangeOperator = "rangeStrictlyLeft"; break;
+                case "strictlyRightOf": rangeOperator = "rangeStrictlyRight"; break;
+                case "notExtendsRightOf": rangeOperator = "rangeNotExtendsRight"; break;
+                case "notExtendsLeftOf": rangeOperator = "rangeNotExtendsLeft"; break;
+                case "adjacentTo": rangeOperator = "rangeAdjacent"; break;
+                default: break;
+            }
+        }
+        if (rangeOperator.length)
+            return sqlBinaryBool(colExpr, rangeOperator,
+                constant(operand, lengthSource));
+    }
 
     switch (op) {
         case "equalTo":
@@ -1052,18 +1324,23 @@ T extractJsonValue(T)(JSONValue value) {
 /// Into:
 ///   User.posts(filter: PostFilter): [Post!]!
 template FilterPlugin(alias S) if (isSchema!S) {
-    import std.meta : AliasSeq, staticMap;
+    import std.meta : AliasSeq, Filter, staticMap;
     import dunamis.core.discovery : getAllObjectTypes;
+    import dunamis.relational.schema.attrs : hasEntityAttr;
     import dunamis.schema.transform : isTypeInList;
 
     // Get all entity types discovered from the schema
     alias _OriginalQuery = S.Query;
-    alias _AllEntityTypes = getAllObjectTypes!_OriginalQuery;
+    alias _AllObjectTypes = getAllObjectTypes!_OriginalQuery;
+    template IsRelationalEntity(T) {
+        enum IsRelationalEntity = hasEntityAttr!T;
+    }
+    alias _AllEntityTypes = Filter!(IsRelationalEntity, _AllObjectTypes);
 
     // Generate filtered versions of each entity type
     template FilteredEntity(Entity) {
         @(RemapTypeAttributes!(EntityTypeMap, __traits(getAttributes, Entity)))
-        @OriginalName(__traits(identifier, Entity))
+        @OriginalName(getGraphQLTypeName!Entity)
         struct FilteredEntity {
             mixin WrapFields!(Entity, EntityTypeMap, FilteredArrayField);
         }
@@ -1128,6 +1405,11 @@ mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) 
     alias _SrcEntity = ExprResultType!(_SrcParams[0]);
     alias _ElementType = ArrayFieldElementType!(__traits(getMember, SourceQuery, fieldName));
 
+    static if (!isEntityType!_ElementType) {
+        import dunamis.schema.plugin : ForwardField;
+        mixin ForwardField!(SourceQuery, fieldName, TypeMap);
+    } else {
+
     // Filter type from module-level template — doesn't leak _ColTypeFor,
     // _EnumType_*, _EntityFilter, _ShallowFilter, or _*ChildFilter into the host struct.
     alias _FilterType = _FilterTypesFor!_ElementType._EntityFilter;
@@ -1165,6 +1447,7 @@ mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) 
               "return wrapEntityResult!(TypeMap)(_applyFilter(" ~
               "__traits(getMember, SourceQuery, \"" ~ fieldName ~ "\")(" ~ argList ~ "), filter)); }";
     }());
+    }
 }
 
 // ============================================================================
@@ -1178,6 +1461,41 @@ unittest {
     static assert(is(FilterTypeFor!long == LongFilter));
     static assert(is(FilterTypeFor!double == FloatFilter));
     static assert(is(FilterTypeFor!bool == BooleanFilter));
+}
+
+unittest {
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core : CustomScalar, Executor;
+    import dunamis.graphql.compiler : compileQuery;
+    import dunamis.graphql.schema : Schema;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
+    import dunamis.relational.schema : Col, Table;
+
+    alias TestDate = CustomScalar!(string, "TestDate",
+        (string value) => JSONValue(value),
+        (JSONValue value) => value.str);
+    static MockDB!() testDb;
+
+    @DemoEntity!(testDb, "dated_rows")
+    static struct DatedRow {
+        mixin DemoId;
+        mixin Col!("date", TestDate);
+    }
+    static struct Query { mixin Table!(DatedRow, "datedRows"); }
+    alias FilteredSchema = FilterPlugin!(Schema!Query);
+
+    testDb = new MockDB!();
+    testDb.setTableData("dated_rows",
+        `[{"id":1,"date":"2020-07-01"},{"id":2,"date":"2021-01-01"}]`);
+    auto variables = JSONValue(["date": JSONValue("2021-01-01")]);
+    auto expression = compileQuery!FilteredSchema(`
+        query($date: TestDate!) {
+            datedRows(filter: {date: {equalTo: $date}}) { id }
+        }
+    `, variables);
+    auto result = awaitSync(new Executor().execute(expression));
+    assert(result["datedRows"].array.length == 1, result.toString());
+    assert(result["datedRows"][0]["id"].integer == 2);
 }
 
 unittest {

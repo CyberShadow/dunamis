@@ -17,6 +17,7 @@ import std.typecons : Nullable;
 
 import dunamis.core.expr : Expr, ExprResultType;
 import dunamis.core.sorting : SortDirection;
+import dunamis.graphql.schema.udas : getGraphQLTypeName;
 import dunamis.schema.plugin;
 
 // ============================================================================
@@ -54,18 +55,23 @@ import dunamis.schema.plugin;
 /// // { users(orderBy: [{field: lastName, direction: DESC}]) { posts(orderBy: [{field: title}]) { title } } }
 /// ---
 template SortingPlugin(alias S) if (isSchema!S) {
-    import std.meta : AliasSeq, staticMap;
+    import std.meta : AliasSeq, Filter, staticMap;
     import dunamis.core.discovery : getAllObjectTypes;
+    import dunamis.relational.schema.attrs : hasEntityAttr;
     import dunamis.schema.transform : isTypeInList;
 
     // Get all entity types discovered from the schema
     alias _OriginalQuery = S.Query;
-    alias _AllEntityTypes = getAllObjectTypes!_OriginalQuery;
+    alias _AllObjectTypes = getAllObjectTypes!_OriginalQuery;
+    template IsRelationalEntity(T) {
+        enum IsRelationalEntity = hasEntityAttr!T;
+    }
+    alias _AllEntityTypes = Filter!(IsRelationalEntity, _AllObjectTypes);
 
     // Generate sorted versions of each entity type.
     template SortedEntity(Entity) {
         @(RemapTypeAttributes!(EntityTypeMap, __traits(getAttributes, Entity)))
-        @OriginalName(__traits(identifier, Entity))
+        @OriginalName(getGraphQLTypeName!Entity)
         struct SortedEntity {
             mixin WrapFields!(Entity, EntityTypeMap, SortedArrayField);
         }
@@ -145,6 +151,7 @@ template getSortableFields(Entity) {
                     static if (isZeroArgField!method
                             && __traits(getVisibility, method) == "public"
                             && !hasEnumReturn!method
+                            && !isArrayResult!ResultT
                             && is(typeof(ResultT.init < ResultT.init))) {
                         fields ~= member;
                     }
@@ -166,6 +173,13 @@ private template hasEnumReturn(alias method) {
     } else {
         enum hasEnumReturn = is(ResultT == enum);
     }
+}
+
+private template isArrayResult(T) {
+    static if (is(T == E[], E))
+        enum isArrayResult = true;
+    else
+        enum isArrayResult = false;
 }
 
 // ============================================================================
@@ -191,8 +205,9 @@ template SortedArrayFieldCode(SourceQuery, string fieldName, alias TypeMap) {
     private enum string _wrap = "dunamis.schema.transform.wrapEntityResult";
 
     // Field-specific names to avoid conflicts when multiple array fields coexist
-    private enum string _enumName = "_OrderByFieldEnum_" ~ fieldName;
-    private enum string _structName = "_OrderByStruct_" ~ fieldName;
+    private enum string _scopeName = getGraphQLTypeName!SourceQuery;
+    private enum string _enumName = "_OrderByFieldEnum_" ~ _scopeName ~ "_" ~ fieldName;
+    private enum string _structName = "_OrderByStruct_" ~ _scopeName ~ "_" ~ fieldName;
     private enum string _singleSort = "_applySingleSort_" ~ fieldName;
     private enum string _sorting = "_applySorting_" ~ fieldName;
 
@@ -301,7 +316,16 @@ mixin template SortedArrayField(SourceQuery, string fieldName, alias TypeMap) {
     static import dunamis.schema.entity_cast;
     static import dunamis.core.sorting;
     static import dunamis.schema.transform;
-    mixin(SortedArrayFieldCode!(SourceQuery, fieldName, TypeMap));
+    import dunamis.core.discovery : isObjectType;
+    import dunamis.schema.plugin : ArrayFieldElementType, ForwardField;
+    import std.typecons : Nullable;
+    alias _ElementType = ArrayFieldElementType!(__traits(getMember, SourceQuery, fieldName));
+    static if (is(_ElementType == Nullable!U, U))
+        mixin ForwardField!(SourceQuery, fieldName, TypeMap);
+    else static if (isObjectType!_ElementType)
+        mixin(SortedArrayFieldCode!(SourceQuery, fieldName, TypeMap));
+    else
+        mixin ForwardField!(SourceQuery, fieldName, TypeMap);
 }
 
 // ============================================================================

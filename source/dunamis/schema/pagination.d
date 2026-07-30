@@ -52,13 +52,18 @@ import dunamis.schema.plugin;
 /// //   User.posts(first: Int, offset: Int): [Post!]!
 /// ---
 template PaginationPlugin(alias S) if (isSchema!S) {
-    import std.meta : AliasSeq, staticMap;
+    import std.meta : AliasSeq, Filter, staticMap;
     import dunamis.core.discovery : getAllObjectTypes;
+    import dunamis.relational.schema.attrs : hasEntityAttr;
     import dunamis.schema.transform : isTypeInList;
 
     // Get all entity types discovered from the schema
     alias _OriginalQuery = S.Query;
-    alias _AllEntityTypes = getAllObjectTypes!_OriginalQuery;
+    alias _AllObjectTypes = getAllObjectTypes!_OriginalQuery;
+    template IsRelationalEntity(T) {
+        enum IsRelationalEntity = hasEntityAttr!T;
+    }
+    alias _AllEntityTypes = Filter!(IsRelationalEntity, _AllObjectTypes);
 
     // Generate paginated versions of each entity type.
     template PaginatedEntity(Entity) {
@@ -174,7 +179,13 @@ mixin template PaginatedArrayField(SourceQuery, string fieldName, alias TypeMap)
     static import dunamis.core.pagination;
     static import dunamis.schema.transform;
     static import dunamis.schema.plugin;
-    mixin(PaginatedArrayFieldCode!(SourceQuery, fieldName, TypeMap));
+    import dunamis.core.discovery : isObjectType;
+    import dunamis.schema.plugin : ArrayFieldElementType, ForwardField;
+    alias _ElementType = ArrayFieldElementType!(__traits(getMember, SourceQuery, fieldName));
+    static if (isObjectType!_ElementType)
+        mixin(PaginatedArrayFieldCode!(SourceQuery, fieldName, TypeMap));
+    else
+        mixin ForwardField!(SourceQuery, fieldName, TypeMap);
 }
 
 // ============================================================================
