@@ -281,16 +281,14 @@ class PostgresSession : RelationalSession {
             idValues = node.rootFilterRefs.map!(r => r.localId).array;
         }
 
-        // Use prepared statement for parameterized query
-        return _conn.prepare(sql).then((PreparedStatement stmt) {
-            // Execute with array parameter for $1
-            if (idValues.length > 0) {
-                // PostgreSQL array as string: {1,2,3}
-                return stmt.query("{" ~ idValues.join(",") ~ "}").array();
-            } else {
-                return stmt.query().array();
-            }
-        }).then((PgSqlConnection.Row[] rows) => parseQueryResult(rows, allNodes));
+        if (idValues.length > 0) {
+            // PostgreSQL array as string: {1,2,3}
+            return _conn.extendedQuery(sql, "{" ~ idValues.join(",") ~ "}").array()
+                .then((PgSqlConnection.Row[] rows) => parseQueryResult(rows, allNodes));
+        }
+
+        return _conn.prepare(sql).then((PreparedStatement stmt) => stmt.query().array())
+            .then((PgSqlConnection.Row[] rows) => parseQueryResult(rows, allNodes));
     }
 
     /// Parse PostgreSQL result into QueryResult.

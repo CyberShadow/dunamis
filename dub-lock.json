@@ -1,9 +1,9 @@
 {
   "dependencies": {
     "ae": {
-      "version": "85f44a586afccdaf652a60489dc3604b23dba893",
-      "repository": "git+https://github.com/CyberShadow/ae.git",
-      "sha256": "10srdkbcv0qcnrpm01csykl8vxlmjdgm9lkfilcsncic2v0za0bq"
+      "version": "be927b8e3ed8c75f3a6b9611372ed2172c619dd7",
+      "repository": "https://github.com/CyberShadow/ae.git",
+      "sha256": "sha256-PGKI9+E1QflgmK4xQMM7Mp5MYC/IgZ7S8CMmFUuQGIY="
     },
     "graphqld": {
       "version": "7b8c9cd0f2482deab6a9ecb3dbf6d9d246860972",
