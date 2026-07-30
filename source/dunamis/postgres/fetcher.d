@@ -207,6 +207,52 @@ class PostgresSession : RelationalSession {
         }).then((PgSqlConnection.Row[] _) { });
     }
 
+    /// Execute SQL which returns one integer column.  This is intentionally a
+    /// small escape hatch for application-specific database shims whose
+    /// semantics cannot be expressed as relational query nodes (for example
+    /// versioned writes).
+    Promise!(long[]) queryLongs(string sql) {
+        return _conn.prepare(sql).then((PreparedStatement stmt) {
+            return stmt.query().array();
+        }).then((PgSqlConnection.Row[] rows) {
+            long[] values;
+            values.reserve(rows.length);
+            foreach (row; rows)
+                values ~= row.column!long(0);
+            return values;
+        });
+    }
+
+    /// Execute SQL which returns one text column.
+    Promise!(string[]) queryStrings(string sql) {
+        return _conn.prepare(sql).then((PreparedStatement stmt) {
+            return stmt.query().array();
+        }).then((PgSqlConnection.Row[] rows) {
+            string[] values;
+            values.reserve(rows.length);
+            foreach (row; rows)
+                values ~= row.column!string(0);
+            return values;
+        });
+    }
+
+    /// Execute SQL which returns one JSON/JSONB column. This is the generic
+    /// session-scoped data-request escape hatch for in-process D extensions:
+    /// they can request application-specific projections while retaining the
+    /// current transaction and request-local database settings, instead of
+    /// recursively entering GraphQL over HTTP.
+    Promise!(JSONValue[]) queryJson(string sql) {
+        return _conn.prepare(sql).then((PreparedStatement stmt) {
+            return stmt.query().array();
+        }).then((PgSqlConnection.Row[] rows) {
+            JSONValue[] values;
+            values.reserve(rows.length);
+            foreach (row; rows)
+                values ~= parseJSON(row.column!string(0));
+            return values;
+        });
+    }
+
     /// Get original expression for fallback evaluation (not used - real DB evaluates SQL)
     override ExprBase getOriginalExpr(string alias_) {
         return null;
