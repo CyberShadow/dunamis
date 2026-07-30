@@ -39,7 +39,8 @@ import std.typecons : Nullable;
 import dunamis.core.expr : Expr, ExprResultType, isExpr;
 import dunamis.core.expr.combinators : UnionExprInfo;
 import dunamis.core.discovery : isObjectType;
-import dunamis.core.types : isInternalMember, isAbstractType, getImplementedByMembers;
+import dunamis.core.types : isInternalMember, isAbstractType, isCustomScalar,
+    getImplementedByMembers;
 
 // ============================================================================
 // Type Reference Substitution
@@ -59,6 +60,10 @@ template ReplaceTypeRefs(T, alias TypeMap) {
     } else static if (is(T == Nullable!U, U)) {
         // Nullable: transform inner type
         alias ReplaceTypeRefs = Nullable!(ReplaceTypeRefs!(U, TypeMap));
+    } else static if (isCustomScalar!T) {
+        // Custom scalars are GraphQL leaves even though their D
+        // representation is a struct.
+        alias ReplaceTypeRefs = T;
     } else static if (isAbstractType!T) {
         // Abstract type (union/interface): apply TypeMap
         alias ReplaceTypeRefs = TypeMap!T;
@@ -252,7 +257,9 @@ auto wrapEntityResult(alias TypeMap, R)(R result)
 
     alias ResultT = ExprResultType!R;
 
-    static if (is(ResultT == E[], E) && !isSomeString!ResultT) {
+    static if (isCustomScalar!ResultT) {
+        return result;
+    } else static if (is(ResultT == E[], E) && !isSomeString!ResultT) {
         static if (isAbstractType!E) {
             alias MappedE = TypeMap!E;
             static if (is(MappedE == E)) {
@@ -273,12 +280,14 @@ auto wrapEntityResult(alias TypeMap, R)(R result)
         } else {
             return result;
         }
-    } else static if (is(ResultT == Nullable!U, U) && isObjectType!U) {
-        alias MappedU = TypeMap!U;
-        static if (is(MappedU == U)) {
+    } else static if (is(ResultT == Nullable!UCustom, UCustom) && isCustomScalar!UCustom) {
+        return result;
+    } else static if (is(ResultT == Nullable!UObject, UObject) && isObjectType!UObject) {
+        alias MappedU = TypeMap!UObject;
+        static if (is(MappedU == UObject)) {
             return result;
         } else {
-            return use(&nullableEntityCastValue!(MappedU, U), result);
+            return use(&nullableEntityCastValue!(MappedU, UObject), result);
         }
     } else static if (isObjectType!ResultT) {
         alias MappedT = TypeMap!ResultT;

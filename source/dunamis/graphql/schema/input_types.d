@@ -56,7 +56,7 @@ template generateEnumTypeSDL(E) if (isGraphQLEnum!E) {
     import std.traits : EnumMembers;
 
     enum generateEnumTypeSDL = () {
-        string result = "enum " ~ __traits(identifier, E) ~ " {\n";
+        string result = "enum " ~ getGraphQLTypeName!E ~ " {\n";
         static foreach (member; EnumMembers!E) {
             result ~= "  " ~ __traits(identifier, member) ~ "\n";
         }
@@ -107,7 +107,12 @@ template getInputTypeFields(T) if (isInputType!T) {
                             enum gqlType = graphqlInputTypeName!MemberType ~ "!";
                         }
 
-                        fields ~= InputFieldInfo(member, gqlType, false, "");
+                        fields ~= InputFieldInfo(
+                            getGqlName!(__traits(getMember, T, member), member),
+                            gqlType,
+                            false,
+                            "",
+                        );
                     }
                 }
             }
@@ -148,8 +153,7 @@ template graphqlInputTypeName(T) {
         // Raw JSON value
         enum graphqlInputTypeName = "JSON";
     } else static if (isInputType!T) {
-        // Input type struct - use struct name as type name
-        enum graphqlInputTypeName = T.stringof;
+        enum graphqlInputTypeName = getGraphQLTypeName!T;
     } else static if (isObjectType!T) {
         // Object type reference in input (e.g., for ID references)
         enum graphqlInputTypeName = getGraphQLTypeName!T;

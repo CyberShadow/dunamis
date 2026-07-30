@@ -16,12 +16,20 @@ import dunamis.core.discovery : isObjectType, extractObjectFromType, getSchemaFi
     getAbstractTypeMembers, getAllObjectTypes;
 import dunamis.graphql.schema;
 import dunamis.graphql.compiler.values;
+import dunamis.graphql.compiler.extensions : extensionFieldExists;
 
 // ============================================================================
 // Types
 // ============================================================================
 
 package(dunamis.graphql):
+
+private template isScalarElement(T) {
+    static if (is(T == Nullable!U, U))
+        enum isScalarElement = isScalarElement!U;
+    else
+        enum isScalarElement = isCustomScalar!T || !is(T == struct) || isGqlResult!T;
+}
 
 /// A validation error with source location information.
 struct ValidationError {
@@ -452,6 +460,8 @@ private ValidationError[] validateRootField(Parent, alias SchemaSource)(Field fi
         }
     }}
 
+    if (extensionFieldExists !is null &&
+        extensionFieldExists(getGraphQLTypeName!Parent, fieldName)) return [];
     return [fieldError("Unknown field '" ~ fieldName ~ "' on type " ~ getGraphQLTypeName!Parent, field)];
 }
 
@@ -514,6 +524,8 @@ private ValidationError[] validateFieldAccess(T, alias SchemaSource)(Field field
         }
     }}
 
+    if (extensionFieldExists !is null &&
+        extensionFieldExists(getGraphQLTypeName!T, fieldName)) return [];
     return [fieldError("Unknown field '" ~ fieldName ~ "' on type " ~ getGraphQLTypeName!T, field)];
 }
 
@@ -633,7 +645,7 @@ private ValidationError[] validateFieldResultType(ResultType, alias SchemaSource
             }
             return validateAbstractSelectionSet!(E, SchemaSource)(field.ss, fragments, visited);
         }
-        else static if (isCustomScalar!E || !is(E == struct) || isGqlResult!E) {
+        else static if (isScalarElement!E) {
             // Array of scalars — no selection set allowed
             if (field.ss !is null) {
                 return [fieldError(

@@ -12,6 +12,7 @@ import graphql.ast;
 
 import dunamis.core.types : isCustomScalar;
 import dunamis.graphql.schema : isInputType, isInternalMember;
+import dunamis.graphql.schema.udas : getGqlName;
 
 // ============================================================================
 // Internal: AST Navigation
@@ -241,7 +242,7 @@ string extractTypeNameArg(Arguments args, JSONValue variables) {
 }
 
 /// Convert a GraphQL AST Value to JSONValue
-JSONValue valueToJson(Value val) {
+JSONValue valueToJson(Value val, JSONValue variables = JSONValue.emptyObject) {
     import graphql.ast : ValueEnum;
 
     if (val is null || val.ruleSelection == ValueEnum.N) {
@@ -266,12 +267,27 @@ JSONValue valueToJson(Value val) {
                     auto name = vals.name.value;
                     auto vov = vals.val;
                     if (vov !is null && vov.ruleSelection == ValueOrVariableEnum.Val && vov.val !is null) {
-                        obj[name] = valueToJson(vov.val);
+                        obj[name] = valueToJson(vov.val, variables);
+                    } else if (vov !is null && vov.ruleSelection == ValueOrVariableEnum.Var && vov.var !is null) {
+                        auto variableName = vov.var.name.value;
+                        if (!(variableName in variables))
+                            throw new CompilerException("Missing variable $" ~ variableName);
+                        obj[name] = variables[variableName];
                     }
                     vals = vals.follow;
                 }
             }
             return JSONValue(obj);
+        }
+        case ValueEnum.ARR: {
+            JSONValue[] values;
+            auto current = val.arr is null ? null : val.arr.vals;
+            while (current !is null) {
+                if (current.val !is null)
+                    values ~= valueToJson(current.val, variables);
+                current = current.follow;
+            }
+            return JSONValue(values);
         }
         default:
             throw new CompilerException("Unsupported value type: " ~ val.ruleSelection.to!string);
@@ -422,8 +438,9 @@ T extractInputObjectFromJson(T)(JSONValue json) if (isInputType!T) {
             static if (__traits(compiles, typeof(__traits(getMember, T.init, member)))) {
                 alias MemberType = typeof(__traits(getMember, T, member));
                 static if (!is(MemberType == function) && !is(MemberType == void)) {
-                    if (member in json.object) {
-                        __traits(getMember, result, member) = extractValueFromJson!MemberType(json.object[member]);
+                    enum gqlName = getGqlName!(__traits(getMember, T, member), member);
+                    if (gqlName in json.object) {
+                        __traits(getMember, result, member) = extractValueFromJson!MemberType(json.object[gqlName]);
                     }
                 }
             }
@@ -565,7 +582,8 @@ void setInputField(T)(ref T obj, string fieldName, Value val) if (isInputType!T)
             static if (__traits(compiles, typeof(__traits(getMember, T.init, member)))) {
                 alias MemberType = typeof(__traits(getMember, T, member));
                 static if (!is(MemberType == function) && !is(MemberType == void)) {
-                    if (fieldName == member) {
+                    enum gqlName = getGqlName!(__traits(getMember, T, member), member);
+                    if (fieldName == gqlName) {
                         // Special cases for self-referential types - handle inline to break
                         // template instantiation cycle that would otherwise occur with extractValue
                         static if (is(MemberType == T*)) {

@@ -58,6 +58,8 @@ template getGraphQLTypeName(T) {
         // Check for @GqlName UDA on the type (user-applied, presentation layer)
         static if (hasUDA!(T, GqlName)) {
             return getUDAs!(T, GqlName)[0].name;
+        } else static if (__traits(hasMember, T, "__gqlTypeName")) {
+            return T.__gqlTypeName;
         } else {
             // Check for @OriginalName UDA (applied by plugin wrappers)
             import dunamis.schema.plugin : OriginalName;

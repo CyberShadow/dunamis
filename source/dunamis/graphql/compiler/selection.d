@@ -18,12 +18,20 @@ import dunamis.graphql.introspection;
 import dunamis.graphql.schema;
 import dunamis.graphql.compiler.values;
 import dunamis.graphql.compiler.fields;
+import dunamis.graphql.compiler.extensions : extensionFieldExists, compileExtensionField;
 
 // ============================================================================
 // Root Subscription Compilation
 // ============================================================================
 
 package(dunamis.graphql):
+
+private template isScalarElement(T) {
+    static if (is(T == Nullable!U, U))
+        enum isScalarElement = isScalarElement!U;
+    else
+        enum isScalarElement = isCustomScalar!T || !is(T == struct) || isGqlResult!T;
+}
 
 /// Compile the root selection set for subscriptions.
 /// GraphQL spec requires exactly one root field for subscriptions.
@@ -108,6 +116,11 @@ ExprBase compileRootField(Parent, alias IntrospectionSource = Parent)(Field fiel
             return callRootField!(memberSym, Parent, IntrospectionSource)(parentExpr, field.args, field.ss, variables, fragments, nestedPath);
         }
     }}
+
+    if (extensionFieldExists !is null && compileExtensionField !is null &&
+        extensionFieldExists(getGraphQLTypeName!Parent, fieldName))
+        return compileExtensionField(getGraphQLTypeName!Parent, fieldName, null,
+            field.args, field.ss, variables);
 
     throw new CompilerException("Unknown field: " ~ fieldName);
 }
@@ -376,7 +389,7 @@ ExprBase compileFieldResult(ResultExpr, alias SchemaSource = void)(ResultExpr re
             }
             return compileAbstractArrayResult!(E, SchemaSource)(resultExpr, ss, variables, fragments, pathPrefix);
         }
-        else static if (isCustomScalar!E || !is(E == struct) || isGqlResult!E) {
+        else static if (isScalarElement!E) {
             // Array of scalars (custom or primitive) or GqlResult elements - wrap to JSON
             return wrapAsJsonExpr(resultExpr);
         } else {
@@ -453,6 +466,19 @@ ExprBase compileFieldAccess(T, alias SchemaSource = void)(Expr!T ref_, Field fie
     // __typename: returns the GraphQL type name as a constant
     if (fieldName == "__typename") {
         return wrapAsJsonExpr(constant(getGraphQLTypeName!T, ref_));
+    }
+
+    if (extensionFieldExists !is null && compileExtensionField !is null &&
+        extensionFieldExists(getGraphQLTypeName!T, fieldName)) {
+        static foreach (member; getSchemaFields!T) {{
+            alias memberSym = __traits(getMember, T, member);
+            enum gqlName = getGqlName!(memberSym, member);
+            if (gqlName == "id") {
+                auto idExpr = callComputedField!(memberSym, T)(ref_, null, variables);
+                return compileExtensionField(getGraphQLTypeName!T, fieldName,
+                    idExpr, field.args, field.ss, variables);
+            }
+        }}
     }
 
     throw new CompilerException("Unknown field '" ~ fieldName ~ "' on type " ~ T.stringof);

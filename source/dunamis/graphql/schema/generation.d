@@ -171,7 +171,7 @@ template getRootFieldArguments(alias member) {
 
 /// Generate GraphQL SDL for an input type
 string generateInputTypeSDL(T)() if (isInputType!T) {
-    string result = "input " ~ T.stringof ~ " {\n";
+    string result = "input " ~ getGraphQLTypeName!T ~ " {\n";
 
     foreach (field; getInputTypeFields!T) {
         result ~= "  " ~ field.name ~ ": " ~ field.graphqlType;
@@ -333,24 +333,39 @@ template generateSchemaSDL(alias SchemaOrQuery) {
     // Use Schema-provided AllEntityTypes if available (for plugins like PaginationPlugin),
     // otherwise discover entity types from Query
     static if (isSchema!SchemaOrQuery && __traits(hasMember, SchemaOrQuery, "AllEntityTypes")) {
-        alias AllTypes = SchemaOrQuery.AllEntityTypes;
+        alias EntityTypes = SchemaOrQuery.AllEntityTypes;
     } else {
-        alias AllTypes = getAllObjectTypes!QueryType;
+        alias EntityTypes = getAllObjectTypes!QueryType;
+    }
+    // Some database columns are composite GraphQL output objects but are not
+    // relational entities themselves.  A schema generator can register these
+    // explicitly without making filtering/sorting/pagination treat them as
+    // queryable tables.
+    alias DiscoveredOutputTypes = getAllObjectTypes!QueryType;
+    static if (isSchema!SchemaOrQuery && __traits(hasMember, SchemaOrQuery, "AdditionalObjectTypes")) {
+        alias AllTypes = uniqueTypes!(EntityTypes, DiscoveredOutputTypes, SchemaOrQuery.AdditionalObjectTypes.Types);
+    } else {
+        alias AllTypes = uniqueTypes!(EntityTypes, DiscoveredOutputTypes);
     }
 
     // Collect input types from entities AND mutations (if any)
     // Both are expanded to discover nested types (handles recursive types)
     alias EntityInputTypes = getAllInputTypes!QueryType;
+    // Root Query arguments (notably plugin-generated filters/orderings) are
+    // not part of getAllObjectTypes!QueryType, so discover them explicitly.
+    alias QueryDirectInputTypes = getInputTypesFromEntity!QueryType;
+    alias QueryInputTypes = expandAllInputTypes!(uniqueTypesForExpand!QueryDirectInputTypes);
+    alias QueryAndEntityInputTypes = uniqueTypesForExpand!(AliasSeq!(EntityInputTypes, QueryInputTypes));
     static if (getFields!MutationType.length > 0) {
         alias MutationDirectTypes = getInputTypesFromMutation!MutationType;
         alias MutationInputTypes = expandAllInputTypes!(uniqueTypesForExpand!MutationDirectTypes);
-        alias AllInputTypes = uniqueTypesForExpand!(AliasSeq!(EntityInputTypes, MutationInputTypes));
+        alias AllInputTypes = uniqueTypesForExpand!(AliasSeq!(QueryAndEntityInputTypes, MutationInputTypes));
     } else {
-        alias AllInputTypes = EntityInputTypes;
+        alias AllInputTypes = QueryAndEntityInputTypes;
     }
 
     // Collect enum types from entities
-    alias AllEnumTypes = getAllEnumTypes!QueryType;
+    alias AllEnumTypes = uniqueTypes!(getAllEnumTypes!QueryType, getEnumTypesFromEntity!QueryType);
 
     // Discover abstract types (unions + interfaces)
     alias AllAbstractTypes = getAllAbstractTypes!AllTypes;
@@ -414,11 +429,26 @@ template generateSchemaSDL(alias SchemaOrQuery) {
             }
         }
 
-        // Generate input types (discovered from computed field arguments)
-        static foreach (InputType; AllInputTypes) {
-            result ~= generateInputTypeSDL!InputType();
-            result ~= "\n";
+        // Explicit composite output values are intentionally not relational
+        // entities and can therefore be removed from AllEntityTypes by query
+        // plugins.  Emit them directly from the schema registration as well.
+        static if (isSchema!SchemaOrQuery && __traits(hasMember, SchemaOrQuery, "AdditionalObjectTypes")) {
+            static foreach (ObjectType; SchemaOrQuery.AdditionalObjectTypes.Types) {
+                result ~= generateObjectTypeSDL!ObjectType(getGraphQLTypeName!ObjectType);
+                result ~= "\n";
+            }
         }
+
+        // Generate input types (discovered from computed field arguments)
+        bool[string] emittedInputTypeNames;
+        static foreach (InputType; AllInputTypes) {{
+            enum inputTypeName = getGraphQLTypeName!InputType;
+            if (inputTypeName !in emittedInputTypeNames) {
+                emittedInputTypeNames[inputTypeName] = true;
+                result ~= generateInputTypeSDL!InputType();
+                result ~= "\n";
+            }
+        }}
 
         return result;
     }();

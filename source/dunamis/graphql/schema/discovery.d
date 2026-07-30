@@ -245,12 +245,23 @@ template getEnumTypesFromEntityImpl(Entity, size_t idx, Members...) {
 }
 
 /// Helper to extract enum types from parameters (iterative)
+template UnwrapEnumContainer(T) {
+    static if (is(T == Nullable!U, U))
+        alias UnwrapEnumContainer = UnwrapEnumContainer!U;
+    else static if (is(T == E[], E))
+        alias UnwrapEnumContainer = UnwrapEnumContainer!E;
+    else static if (is(T == U*, U))
+        alias UnwrapEnumContainer = UnwrapEnumContainer!U;
+    else
+        alias UnwrapEnumContainer = T;
+}
+
 template getEnumTypesFromParamsImpl(size_t idx, Params...) {
     static if (idx >= Params.length) {
         alias getEnumTypesFromParamsImpl = AliasSeq!();
     } else {
         alias P = Params[idx];
-        alias Unwrapped = UnwrapNullable!P;
+        alias Unwrapped = UnwrapEnumContainer!P;
         alias Rest = getEnumTypesFromParamsImpl!(idx + 1, Params);
 
         static if (isGraphQLEnum!Unwrapped) {
@@ -279,7 +290,7 @@ template getEnumTypesFromInputTypeImpl(T, size_t idx, Members...) {
             alias MemberType = typeof(__traits(getMember, T, member));
 
             static if (!is(MemberType == function) && !is(MemberType == void)) {
-                alias Unwrapped = UnwrapNullable!MemberType;
+                alias Unwrapped = UnwrapEnumContainer!MemberType;
 
                 static if (isGraphQLEnum!Unwrapped) {
                     alias getEnumTypesFromInputTypeImpl = AliasSeq!(Unwrapped, Rest);

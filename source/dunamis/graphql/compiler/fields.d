@@ -155,6 +155,9 @@ T extractArg(T, alias Default)(Arguments args, string name, JSONValue variables)
                 return T.init;
             }
         }
-        return extractValue!T(lookup.value);
+        // Go through the JSON representation so variables nested inside input
+        // object/list literals are resolved as well (e.g.
+        // `filter: {name: {equalTo: $name}}`).
+        return extractValueFromJson!T(valueToJson(lookup.value, variables));
     }
 }

@@ -24,7 +24,11 @@ To entityCastValue(To, From)(From from) {
             // Cannot use isPlainField here because entityCastValue runs during plugin type
             // construction when forward references may not yet be resolved.
             static foreach (member; __traits(allMembers, From)) {{
-                static if (!isInternalMember!member && __traits(hasMember, To, member)) {
+                // Keep the member-existence probe in a nested static-if. D may
+                // resolve both operands of `&&` during template expansion,
+                // which makes duplicated private plugin aliases ambiguous.
+                static if (!isInternalMember!member) {
+                  static if (__traits(hasMember, To, member)) {
                     // Skip non-public fields (e.g., package-scoped _normalizedSource)
                     static if (__traits(compiles, __traits(getVisibility, __traits(getMember, From, member))) &&
                                __traits(getVisibility, __traits(getMember, From, member)) == "public") {
@@ -33,6 +37,7 @@ To entityCastValue(To, From)(From from) {
                             __traits(getMember, to, member) = __traits(getMember, from, member);
                         }
                     }
+                  }
                 }
             }}
             // Wrap: To stores From as its _normalizedSource (per-layer)

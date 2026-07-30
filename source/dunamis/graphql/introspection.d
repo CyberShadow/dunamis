@@ -463,6 +463,15 @@ JSONValue applySelectionSet(JSONValue data, SelectionSet ss, JSONValue variables
 
     if (ss is null) return data;
     if (data.isNull) return data;
+    // A selection applies to the element type of a GraphQL list regardless of
+    // how many list wrappers the type has (for example [[Cell!]!]!). Recurse
+    // through every list layer before projecting object fields.
+    if (data.type == JSONType.array) {
+        JSONValue[] items;
+        foreach (item; data.array)
+            items ~= applySelectionSet(item, ss, variables, fragments);
+        return JSONValue(items);
+    }
 
     auto selections = iterateSelections(ss);
     if (selections.length == 0) return data;
@@ -967,6 +976,28 @@ package {
 // ============================================================================
 // Tests
 // ============================================================================
+
+unittest {
+    import dunamis.graphql.operations : parseOperationFields;
+
+    auto selection = parseOperationFields(
+        "query { root { cells { value } } }",
+        JSONValue.emptyObject)[0].selection;
+    auto data = JSONValue([
+        "cells": JSONValue([
+            JSONValue([JSONValue(["value": JSONValue(1), "ignored": JSONValue(2)])]),
+            JSONValue([JSONValue(["value": JSONValue(3), "ignored": JSONValue(4)])]),
+        ]),
+    ]);
+
+    auto expected = JSONValue([
+        "cells": JSONValue([
+            JSONValue([JSONValue(["value": JSONValue(1)])]),
+            JSONValue([JSONValue(["value": JSONValue(3)])]),
+        ]),
+    ]);
+    assert(applySelectionSet(data, selection, JSONValue.emptyObject) == expected);
+}
 
 unittest {
     import std.json;
