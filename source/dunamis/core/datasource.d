@@ -35,6 +35,8 @@ class ChangeEvent {
 /// Multiple concurrent requests each get their own session, even if they
 /// share the same DataSource (connection pool, in-memory store, etc.).
 class DataSession {
+    private bool _externalLeaseActive;
+    private Promise!void[] _externalLeaseWaiters;
     /// Called before execution begins.
     /// Override to BEGIN transaction, SET LOCAL variables, etc.
     /// For subscriptions, mode controls the lifecycle phase:
@@ -47,6 +49,38 @@ class DataSession {
     /// success=true: execution succeeded (COMMIT).
     /// success=false: execution failed (ROLLBACK).
     Promise!void teardown(SetupMode mode = SetupMode.query, bool success = true) { return resolve(); }
+
+    /// Temporarily release resources while evaluation waits for external work.
+    /// The logical session remains active and may later be resumed. Backends
+    /// which do not retain scarce resources can use the no-op default.
+    Promise!void suspend() { return resolve(); }
+
+    /// Reacquire resources released by suspend(), preserving request-local
+    /// session state and already-computed results.
+    Promise!void resume() { return resolve(); }
+
+    /// Serialize external work which temporarily suspends this session. A
+    /// session may be shared by sibling expressions, but its transaction and
+    /// connection lifecycle cannot safely be suspended concurrently.
+    Promise!void acquireExternalLease() {
+        if (!_externalLeaseActive) {
+            _externalLeaseActive = true;
+            return resolve();
+        }
+        auto waiter = new Promise!void;
+        _externalLeaseWaiters ~= waiter;
+        return waiter;
+    }
+
+    void releaseExternalLease() {
+        if (_externalLeaseWaiters.length) {
+            auto waiter = _externalLeaseWaiters[0];
+            _externalLeaseWaiters = _externalLeaseWaiters[1 .. $];
+            waiter.fulfill();
+        } else {
+            _externalLeaseActive = false;
+        }
+    }
 }
 
 /// Base class for data sources that need lifecycle management.

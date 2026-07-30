@@ -30,37 +30,173 @@ import dunamis.relational.sql : toSQL;
 class PostgresSession : RelationalSession {
     private PgSqlConnection _conn;
     private Promise!PgSqlConnection delegate() _connFactory;
+    private Promise!void delegate(bool continuation) _acquireConnection;
+    private void delegate() _releaseConnection;
+    private bool _hasConnectionPermit;
+    private bool _disconnectOnTeardown;
+    private size_t _setupDepth;
     private SqlOptimizer _sqlOptimizer;
     private QueryNode[] _executedNodes;
     private string _cachedSQL;
-    private QueryResult[QueryNodeId] _cachedResults;
+    private QueryResult[QueryNode] _cachedResults;
     private QueryResult[string] _cachedResultsByType;
+    private string[] _setupStatements;
+
+    /// Add transaction-local initialization SQL for this request (for
+    /// example SET LOCAL application context values).
+    void addSetupStatement(string sql) {
+        _setupStatements ~= sql;
+    }
 
     /// Create with a connection factory. The factory is called in setup().
-    this(Promise!PgSqlConnection delegate() connFactory, SqlOptimizer sqlOptimizer) {
+    this(Promise!PgSqlConnection delegate() connFactory, SqlOptimizer sqlOptimizer,
+            bool disconnectOnTeardown,
+            Promise!void delegate(bool continuation) acquireConnection = null,
+            void delegate() releaseConnection = null) {
         _connFactory = connFactory;
+        _acquireConnection = acquireConnection;
+        _releaseConnection = releaseConnection;
         _sqlOptimizer = sqlOptimizer;
+        _disconnectOnTeardown = disconnectOnTeardown;
     }
 
     /// Acquire connection and begin a transaction.
     override Promise!void setup(SetupMode mode = SetupMode.query) {
+        // Executors may be nested while sharing an EvalContext (for example a
+        // computed field can execute a selection against the current request
+        // session).  The nested executor borrows the active transaction; it
+        // must neither replace its connection nor commit it on teardown.
+        if (_setupDepth) {
+            _setupDepth++;
+            return resolve();
+        }
         super.setup(mode);
-        return _connFactory().then((PgSqlConnection conn) {
+        return acquireConnectionPermit(false).then(() => _connFactory()).then((PgSqlConnection conn) {
             _conn = conn;
             return _conn.prepare("BEGIN");
         }).then((PreparedStatement stmt) {
             return stmt.query().array();
-        }).then((PgSqlConnection.Row[] _) { });
+        }).then((PgSqlConnection.Row[] _) {
+            return executeSetupStatement(0).then(() {
+                _setupDepth = 1;
+            });
+        }).except((Exception e) {
+            discardConnection("Dunamis session setup failed");
+            throw e;
+        });
+    }
+
+    private Promise!void acquireConnectionPermit(bool continuation) {
+        if (_hasConnectionPermit)
+            return resolve();
+        auto acquired = _acquireConnection is null ? resolve() : _acquireConnection(continuation);
+        return acquired.then(() {
+            _hasConnectionPermit = true;
+        });
+    }
+
+    private void releaseConnectionPermit() {
+        if (!_hasConnectionPermit)
+            return;
+        _hasConnectionPermit = false;
+        if (_releaseConnection !is null)
+            _releaseConnection();
+    }
+
+    private void discardConnection(string reason) {
+        auto conn = _conn;
+        _conn = null;
+        if (conn !is null && _disconnectOnTeardown)
+            conn.disconnect(reason);
+        releaseConnectionPermit();
+    }
+
+    private Promise!void executeSetupStatement(size_t index) {
+        if (index >= _setupStatements.length)
+            return resolve();
+        return execute(_setupStatements[index])
+            .then(() => executeSetupStatement(index + 1));
+    }
+
+    /// Commit completed work and immediately begin a new transaction carrying
+    /// the same request-local settings. External mutation resolvers may call
+    /// back into GraphQL on another connection; retaining locks from earlier
+    /// top-level fields while waiting for that callback would deadlock.
+    Promise!void checkpoint() {
+        if (_conn is null || !_setupDepth)
+            return resolve();
+        auto conn = _conn;
+        return conn.prepare("COMMIT").then((PreparedStatement stmt) {
+            return stmt.query().array();
+        }).then((PgSqlConnection.Row[] _) {
+            return conn.prepare("BEGIN");
+        }).then((PreparedStatement stmt) {
+            return stmt.query().array();
+        }).then((PgSqlConnection.Row[] _) {
+            return executeSetupStatement(0);
+        });
+    }
+
+    /// End the current read transaction and release its connection while an
+    /// expression waits for out-of-process work. Keeping the connection here
+    /// can deadlock recursive GraphQL evaluation when every PostgreSQL
+    /// connection is held by a parent waiting for its child.
+    override Promise!void suspend() {
+        if (_conn is null || !_setupDepth)
+            return resolve();
+        auto conn = _conn;
+        return conn.prepare("COMMIT").then((PreparedStatement stmt) {
+            return stmt.query().array();
+        }).then((PgSqlConnection.Row[] _) {
+            if (_conn is conn)
+                discardConnection("Dunamis session suspended");
+        });
+    }
+
+    /// Reacquire a connection without resetting the logical session's caches
+    /// or pending evaluation state.
+    override Promise!void resume() {
+        if (_conn !is null || !_setupDepth)
+            return resolve();
+        return acquireConnectionPermit(true).then(() => _connFactory()).then((PgSqlConnection conn) {
+            _conn = conn;
+            return conn.prepare("BEGIN");
+        }).then((PreparedStatement stmt) {
+            return stmt.query().array();
+        }).then((PgSqlConnection.Row[] _) {
+            return executeSetupStatement(0);
+        }).except((Exception e) {
+            discardConnection("Dunamis session resume failed");
+            throw e;
+        });
     }
 
     /// Commit or rollback the transaction, then fire pending events.
     override Promise!void teardown(SetupMode mode = SetupMode.query, bool success = true) {
-        if (_conn is null) return resolve();  // setup failed
+        if (_setupDepth > 1) {
+            _setupDepth--;
+            return resolve();
+        }
+        if (_conn is null) {
+            _setupDepth = 0;
+            releaseConnectionPermit();
+            return resolve();  // setup failed or already torn down
+        }
         auto sql = success ? "COMMIT" : "ROLLBACK";
-        return _conn.prepare(sql).then((PreparedStatement stmt) {
+        auto conn = _conn;
+        return conn.prepare(sql).then((PreparedStatement stmt) {
             return stmt.query().array();
         }).then((PgSqlConnection.Row[] _) {
             return super.teardown(mode, success);
+        }).then(() {
+            if (_conn is conn)
+                discardConnection("Dunamis request complete");
+            _setupDepth = 0;
+        }).except((Exception e) {
+            if (_conn is conn)
+                discardConnection("Dunamis request teardown failed");
+            _setupDepth = 0;
+            throw e;
         });
     }
 
@@ -83,8 +219,8 @@ class PostgresSession : RelationalSession {
     override Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult) {
         // For child nodes, check if we already have cached results from root CTE execution
         if (!node.isRoot) {
-            if (node.id in _cachedResults) {
-                return resolve(_cachedResults[node.id]);
+            if (node in _cachedResults) {
+                return resolve(_cachedResults[node]);
             }
             // Child nodes should be fetched as part of root CTE execution
             // If we get here without cached results, something is wrong
@@ -98,7 +234,6 @@ class PostgresSession : RelationalSession {
         // Generate the full CTE query for entire node tree
         auto sql = toSQL(allNodes, postgresDialect(), _sqlOptimizer);
         _cachedSQL = sql;
-
         debug(sql) {
             import std.stdio : writefln, writeln;
             writefln("PostgresDB: Generating SQL for %d nodes:", allNodes.length);
@@ -129,9 +264,7 @@ class PostgresSession : RelationalSession {
             } else {
                 return stmt.query().array();
             }
-        }).then((PgSqlConnection.Row[] rows) {
-            return parseQueryResult(rows, _executedNodes);
-        });
+        }).then((PgSqlConnection.Row[] rows) => parseQueryResult(rows, allNodes));
     }
 
     /// Parse PostgreSQL result into QueryResult.
@@ -158,13 +291,13 @@ class PostgresSession : RelationalSession {
                     result.loadFromRows(layerRows, node.typeName, node.pkColumns);
                     rootResult = result;
                     // Also cache root result so fetchBelongsTo can find FK columns
-                    _cachedResults[node.id] = result;
+                    _cachedResults[node] = result;
                     _cachedResultsByType[node.typeName] = result;
                 } else {
                     result.loadFromRows(layerRows, node.typeName, node.pkColumns,
                                                  node.parentFk, node.parentTypeName);
                     // Cache child results for later retrieval (by node ID and type name)
-                    _cachedResults[node.id] = result;
+                    _cachedResults[node] = result;
                     _cachedResultsByType[node.typeName] = result;
                 }
             }
@@ -597,18 +730,26 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataSource {
 
     private Promise!PgSqlConnection delegate() _connFactory;
     private SqlOptimizer _sqlOptimizer;
+    private bool _disconnectSessions;
+    private size_t _activeConnections;
+    private size_t _maxConnections;
+    private Promise!void[] _continuationWaiters;
+    private Promise!void[] _connectionWaiters;
 
     /// Create with a connection factory. Each session will call the factory
     /// to acquire its own connection.
-    this(Promise!PgSqlConnection delegate() connFactory) {
+    this(Promise!PgSqlConnection delegate() connFactory,
+            bool disconnectSessions = true, size_t maxConnections = 64) {
         _connFactory = connFactory;
+        _disconnectSessions = disconnectSessions;
+        _maxConnections = maxConnections;
         _sqlOptimizer = new SqlOptimizer(postgresDialect());
     }
 
     /// Create with a shared connection (wrapped as factory).
     /// Only safe when requests are processed serially (e.g., single-threaded tests).
     this(PgSqlConnection conn) {
-        this(() => resolve(conn));
+        this(() => resolve(conn), false, 1);
     }
 
     /// Return the SqlOptimizer to enable SQL push-down
@@ -618,7 +759,40 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataSource {
 
     /// Create a fresh per-request session.
     override DataSession createSession() {
-        return new PostgresSession(_connFactory, _sqlOptimizer);
+        return new PostgresSession(_connFactory, _sqlOptimizer.snapshot(),
+            _disconnectSessions, &acquireConnection, &releaseConnection);
+    }
+
+    private Promise!void acquireConnection(bool continuation) {
+        if (_activeConnections < _maxConnections) {
+            _activeConnections++;
+            return resolve();
+        }
+        auto waiter = new Promise!void;
+        if (continuation)
+            _continuationWaiters ~= waiter;
+        else
+            _connectionWaiters ~= waiter;
+        return waiter;
+    }
+
+    private void releaseConnection() {
+        // A resumed session is already partway through a request and may
+        // suspend several times around recursive extension calls. Admit those
+        // continuations before starting more top-level work, otherwise a busy
+        // server can indefinitely push a single request to the back of the
+        // queue at every resume.
+        if (_continuationWaiters.length) {
+            auto waiter = _continuationWaiters[0];
+            _continuationWaiters = _continuationWaiters[1 .. $];
+            waiter.fulfill();
+        } else if (_connectionWaiters.length) {
+            auto waiter = _connectionWaiters[0];
+            _connectionWaiters = _connectionWaiters[1 .. $];
+            waiter.fulfill();
+        } else if (_activeConnections) {
+            _activeConnections--;
+        }
     }
 }
 
