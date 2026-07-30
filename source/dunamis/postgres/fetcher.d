@@ -287,7 +287,7 @@ class PostgresSession : RelationalSession {
                 .then((PgSqlConnection.Row[] rows) => parseQueryResult(rows, allNodes));
         }
 
-        return _conn.prepare(sql).then((PreparedStatement stmt) => stmt.query().array())
+        return _conn.extendedQuery(sql).array()
             .then((PgSqlConnection.Row[] rows) => parseQueryResult(rows, allNodes));
     }
 
