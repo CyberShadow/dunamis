@@ -2,10 +2,12 @@ module dunamis.relational.sql_optimizer;
 
 import std.algorithm;
 import std.array;
+import std.ascii : toLower;
 import std.conv;
 import std.json : JSONValue;
 import std.traits;
 import std.typecons : Nullable;
+import std.utf : byChar;
 
 import ae.utils.promise;
 
@@ -53,6 +55,10 @@ string constantToSqlLiteral(ConstantInfo info) {
     // Check for bool
     if (type == typeid(bool)) {
         return strValue == "true" ? "TRUE" : "FALSE";
+    }
+    // Database enum labels use the lowercase form of their GraphQL/D names.
+    if (cast(TypeInfo_Enum) type !is null) {
+        return ("'" ~ strValue.byChar.map!toLower.array.replace("'", "''") ~ "'").idup;
     }
     // Numeric types pass through as-is
     if (type == typeid(int) || type == typeid(long) ||
@@ -948,23 +954,23 @@ class ProjectComputedExpr(T) : Expr!T, ProjectComputedInfo {
 // ============================================================================
 
 /// Extract WHERE clause SQL from a FilterByInfo by pattern-matching its predicate.
-Nullable!string extractFilterWhereClause(FilterByInfo filterInfo) {
+Nullable!string extractFilterWhereClause(FilterByInfo filterInfo, string table = null) {
     auto predicate = filterInfo.filterPredicate;
     auto filterItem = filterInfo.filterItem;
 
-    return extractWhereFromExpr(predicate, filterItem);
+    return extractWhereFromExpr(predicate, filterItem, table);
 }
 
 /// Recursively extract WHERE SQL from an expression tree.
-Nullable!string extractWhereFromExpr(Object expr, Object filterItem) {
+Nullable!string extractWhereFromExpr(Object expr, Object filterItem, string table = null) {
     // Handle binary operators: AND, OR, comparison operators
     if (auto binOp = cast(BinaryOpInfo) expr) {
         string op = binOp.operator;
 
         // Logical operators: AND, OR
         if (op == "&&" || op == "||") {
-            auto leftSql = extractWhereFromExpr(binOp.left, filterItem);
-            auto rightSql = extractWhereFromExpr(binOp.right, filterItem);
+            auto leftSql = extractWhereFromExpr(binOp.left, filterItem, table);
+            auto rightSql = extractWhereFromExpr(binOp.right, filterItem, table);
             if (!leftSql.isNull && !rightSql.isNull) {
                 string sqlOp = (op == "&&") ? "AND" : "OR";
                 return Nullable!string("(" ~ leftSql.get ~ " " ~ sqlOp ~ " " ~ rightSql.get ~ ")");
@@ -979,8 +985,8 @@ Nullable!string extractWhereFromExpr(Object expr, Object filterItem) {
             op == "rangeNotExtendsRight" || op == "rangeNotExtendsLeft" ||
             op == "rangeAdjacent") {
             // Try to match: column op constant or constant op column
-            auto leftColInfo = extractFilterColumnInfo(binOp.left, filterItem);
-            auto rightColInfo = extractFilterColumnInfo(binOp.right, filterItem);
+            auto leftColInfo = extractFilterColumnInfo(binOp.left, filterItem, table);
+            auto rightColInfo = extractFilterColumnInfo(binOp.right, filterItem, table);
             auto leftConst = extractConstant(binOp.left);
             auto rightConst = extractConstant(binOp.right);
 
@@ -1007,7 +1013,7 @@ Nullable!string extractWhereFromExpr(Object expr, Object filterItem) {
     // Handle unary NOT operator
     if (auto unaryOp = cast(UnaryOpInfo) expr) {
         if (unaryOp.operator == "!") {
-            auto operandSql = extractWhereFromExpr(unaryOp.operand, filterItem);
+            auto operandSql = extractWhereFromExpr(unaryOp.operand, filterItem, table);
             if (!operandSql.isNull) {
                 return Nullable!string("NOT " ~ operandSql.get);
             }
@@ -1024,7 +1030,7 @@ Nullable!string extractWhereFromExpr(Object expr, Object filterItem) {
 
     // Handle LIKE expressions (contains, startsWith, endsWith)
     if (auto likeInfo = cast(LikeInfo) expr) {
-        auto colInfo = extractFilterColumnInfo(likeInfo.likeOperand, filterItem);
+        auto colInfo = extractFilterColumnInfo(likeInfo.likeOperand, filterItem, table);
         if (!colInfo.isNull) {
             // Escape single quotes in pattern and wrap in quotes
             // The pattern already has % and _ escaped as \% and \_ by escapeLikePattern()
@@ -1042,15 +1048,21 @@ Nullable!string extractWhereFromExpr(Object expr, Object filterItem) {
 }
 
 /// Try to extract column name from an expression that should be a column access on the filter item.
-private Nullable!string extractFilterColumnInfo(Object expr, Object filterItem) {
+private Nullable!string extractFilterColumnInfo(Object expr, Object filterItem, string table) {
     // Check if this is a column access expression
     auto colAccess = cast(ColumnAccessInfo) expr;
     if (colAccess is null) return Nullable!string.init;
 
     // Get the input expression and check if it's the filter item placeholder
     auto inputExpr = colAccess.inputExpr();
+    while (auto entityCast = cast(EntityCastInfo) inputExpr) {
+        auto inner = entityCast.inputExpr;
+        if (inner is null || inner is inputExpr)
+            break;
+        inputExpr = inner;
+    }
     if (cast(Object) inputExpr is filterItem) {
-        return Nullable!string(colAccess.column);
+        return Nullable!string((table.length ? table ~ "." : "") ~ colAccess.column);
     }
 
     return Nullable!string.init;

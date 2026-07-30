@@ -202,6 +202,41 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
                 if (isRootCollection) {
                     Object originalColl = coll;
 
+                    // Schema plugins commonly wrap a root collection in
+                    // element-wise maps and entity casts. These wrappers do
+                    // not change which rows belong to the collection, so a
+                    // filter immediately below them remains safe to push into
+                    // the root SQL query. Strip that filter in place while
+                    // preserving the transparent wrapper chain.
+                    Object transparentParent;
+                    Object transparentChild = coll;
+                    while (true) {
+                        Object next;
+                        if (auto map = cast(MapExprInfo) transparentChild)
+                            next = map.collection;
+                        else if (auto entityCast = cast(EntityCastInfo) transparentChild)
+                            next = entityCast.inputExpr;
+                        else
+                            break;
+                        if (next is null || next is transparentChild)
+                            break;
+                        transparentParent = transparentChild;
+                        transparentChild = next;
+                    }
+                    if (transparentParent !is null) {
+                        if (auto filter = cast(FilterByInfo) transparentChild) {
+                            import dunamis.relational.sql_optimizer : extractFilterWhereClause;
+                            auto whereSql = extractFilterWhereClause(filter, node.table);
+                            if (!whereSql.isNull) {
+                                node.addWhereClause(whereSql.get);
+                                auto parentExpr = cast(ExprBase) transparentParent;
+                                auto sourceExpr = cast(ExprBase) filter.filterSource;
+                                if (parentExpr !is null && sourceExpr !is null)
+                                    parentExpr.replaceDependency(0, sourceExpr);
+                            }
+                        }
+                    }
+
                     bool seenSort = false;
                     while (true) {
                         if (auto limitInfo = cast(LimitInfo) coll) {
@@ -221,7 +256,7 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
                             } else break;
                         } else if (auto filterByInfo = cast(FilterByInfo) coll) {
                             import dunamis.relational.sql_optimizer : extractFilterWhereClause;
-                            auto whereSql = extractFilterWhereClause(filterByInfo);
+                            auto whereSql = extractFilterWhereClause(filterByInfo, node.table);
                             if (!whereSql.isNull) {
                                 node.addWhereClause(whereSql.get);
                                 coll = filterByInfo.filterSource;
