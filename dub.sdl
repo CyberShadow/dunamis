@@ -13,7 +13,7 @@ buildType "ci" {
 sourcePaths "source"
 
 dependency "graphqld:parser" repository="git+https://github.com/CyberShadow/graphqld.git" version="7b8c9cd0f2482deab6a9ecb3dbf6d9d246860972"
-dependency "ae" repository="git+https://github.com/CyberShadow/ae.git" version="85f44a586afccdaf652a60489dc3604b23dba893"
+dependency "ae" version="0.0.3893"
 
 # Exclude sqlite modules from main package (available via subpackage, requires ae:sqlite)
 excludedSourceFiles "source/dunamis/sqlite/*"
@@ -38,7 +38,7 @@ configuration "sqlite-integration" {
     sourceFiles "source/integration/test_framework.d" "source/integration/tests.d" "source/integration/schema.d" "source/integration/test_runner.d"
     # Include sqlite sources directly for integration test
     sourceFiles "source/dunamis/sqlite/ddl.d" "source/dunamis/sqlite/dialect.d" "source/dunamis/sqlite/fetcher.d" "source/dunamis/sqlite/sql.d" "source/dunamis/sqlite/package.d"
-    dependency "ae:sqlite" repository="git+https://github.com/CyberShadow/ae.git" version="85f44a586afccdaf652a60489dc3604b23dba893"
+    dependency "ae:sqlite" version="0.0.3893"
     debugVersions "ASOCKETS_DEBUG_IDLE"
 }
 
@@ -61,5 +61,5 @@ subPackage {
     excludedSourceFiles "source/integration/*"
 
     dependency "graphqld:parser" repository="git+https://github.com/CyberShadow/graphqld.git" version="7b8c9cd0f2482deab6a9ecb3dbf6d9d246860972"
-    dependency "ae:sqlite" repository="git+https://github.com/CyberShadow/ae.git" version="85f44a586afccdaf652a60489dc3604b23dba893"
+    dependency "ae:sqlite" version="0.0.3893"
 }
