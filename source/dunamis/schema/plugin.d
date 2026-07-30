@@ -32,7 +32,6 @@ public import dunamis.core.discovery : getFieldMembers, isComputedField;
 template isSchema(alias T) {
     enum isSchema = __traits(hasMember, T, "Query") && __traits(hasMember, T, "Mutation");
 }
-
 // ============================================================================
 // Plugin Composition
 // ============================================================================
@@ -1237,4 +1236,3 @@ unittest {
     static assert(sdl.canFind("interface Node"), "Should generate interface Node");
     static assert(sdl.canFind("implements Node"), "User/Post should implement Node");
 }
-

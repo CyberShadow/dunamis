@@ -92,7 +92,6 @@ private class TestDialect : SqlDialect {
             ~ layerStr ~ " t)";
     }
 }
-
 /// Singleton test dialect instance
 private SqlDialect testDialect() {
     __gshared TestDialect instance;
@@ -2011,4 +2010,3 @@ unittest {
     assert(errors[0].message == "Name contains 'o'");
     assert(errors[1].message == "Name contains 'o'");
 }
-

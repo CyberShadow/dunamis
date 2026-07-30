@@ -37,7 +37,6 @@ template graphqlTypeName(T) {
         enum graphqlTypeName = graphqlBaseTypeName!T ~ "!";
     }
 }
-
 /// Map D types to GraphQL base type names (without nullability suffix)
 ///
 /// Recognizes:
@@ -265,4 +264,3 @@ template getFields(T) {
         return fields;
     }();
 }
-
