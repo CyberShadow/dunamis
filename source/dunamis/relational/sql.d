@@ -107,7 +107,7 @@ private string toCTE(QueryNode node, SqlDialect dialect, SqlOptimizer sqlOpt) {
         }
     } else {
         // Use parent's PK columns for the subselect
-        auto parentPkCols = node.parent.pkColumns;
+        auto parentPkCols = node.parentLinkColumns;
         auto parentPkSelect = parentPkCols.length == 1 ? parentPkCols[0] : parentPkCols.join(", ");
         sql ~= format("%s.%s IN (SELECT %s FROM layer%d)",
             node.table, node.parentFk, parentPkSelect, node.parent.id.value);
@@ -190,7 +190,7 @@ private string toCTEWithWindowFunction(QueryNode node, SqlDialect dialect, SqlOp
     }
 
     // WHERE clause for inner query
-    auto parentPkCols = node.parent.pkColumns;
+    auto parentPkCols = node.parentLinkColumns;
     auto parentPkSelect = parentPkCols.length == 1 ? parentPkCols[0] : parentPkCols.join(", ");
     sql ~= format("      WHERE %s.%s IN (SELECT %s FROM layer%d)",
         node.table, node.parentFk, parentPkSelect, node.parent.id.value);
@@ -230,20 +230,28 @@ string buildSelectColumns(QueryNode node, SqlOptimizer sqlOpt, string tableAlias
 
     // Regular columns from main table
     foreach (col; node.columns) {
-        selectParts ~= format("%s.%s", tableName, col);
+        selectParts ~= col in node.stringColumns
+            ? format("%s.%s::text AS %s", tableName, col, col)
+            : format("%s.%s", tableName, col);
     }
 
     // Columns from JOINed tables
     foreach (joinInfo; node.joins) {
         if (auto cols = joinInfo.alias_ in node.joinedColumns) {
             foreach (col; *cols) {
+                bool isStringColumn;
+                if (auto stringCols = joinInfo.alias_ in node.joinedStringColumns)
+                    isStringColumn = (col in *stringCols) !is null;
                 if (tableAlias !is null) {
                     // From window subquery: columns are already aliased
                     selectParts ~= format("%s.%s__%s AS %s__%s",
                         tableName, joinInfo.alias_.value, col, joinInfo.alias_.value, col);
                 } else {
-                    selectParts ~= format("%s.%s AS %s__%s",
-                        joinInfo.alias_.value, col, joinInfo.alias_.value, col);
+                    selectParts ~= isStringColumn
+                        ? format("%s.%s::text AS %s__%s",
+                            joinInfo.alias_.value, col, joinInfo.alias_.value, col)
+                        : format("%s.%s AS %s__%s",
+                            joinInfo.alias_.value, col, joinInfo.alias_.value, col);
                 }
             }
         }

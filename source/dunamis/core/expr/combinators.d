@@ -1,6 +1,7 @@
 module dunamis.core.expr.combinators;
 
 import std.array;
+import std.conv : to;
 import std.meta;
 import std.range : iota;
 import std.traits;
@@ -579,6 +580,16 @@ class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
 
             // 5. Evaluate body with ALL refs at once
             return evalAs!R(bodyExpr, ctx).then((R[] flatResults) {
+                // A fully failed DynamicJsonObjectExpr has no successful field
+                // from which to infer its batch size and returns one null/error
+                // placeholder. Preserve that field error for every mapped row.
+                if (flatResults.length == 1 && flatEntities.length > 1) {
+                    auto value = flatResults[0];
+                    flatResults.length = flatEntities.length;
+                    flatResults[] = value;
+                }
+                if (flatResults.length != flatEntities.length)
+                    throw new Exception("MapExpr batch mismatch for " ~ Entity.stringof);
                 // 6. Regroup to match input structure
                 R[][] result;
                 size_t offset = 0;

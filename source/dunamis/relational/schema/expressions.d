@@ -1,5 +1,16 @@
 module dunamis.relational.schema.expressions;
 
+private enum bool isStringBacked(T) = (() {
+    import std.typecons : Nullable;
+    import dunamis.core.types : isCustomScalar;
+    static if (is(T == Nullable!U, U))
+        return isStringBacked!U;
+    else static if (isCustomScalar!T)
+        return is(T.DType == string);
+    else
+        return is(T == string);
+})();
+
 import std.algorithm;
 import std.array;
 import std.conv;
@@ -134,8 +145,11 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
         auto relCtx = ctx.getSourceContext!RelationalOptimizeContext();
 
         // Get or create QueryNode for this MapExpr
-        auto node = relCtx.getOrCreateNode(mapExpr, EntityID!Entity.typeName, EntityID!Entity.table,
-                                           getPkColumns!Entity);
+        auto node = joinPath.length
+            ? relCtx.getOrCreateNode(mapExpr, joinPath[0].sourceType,
+                joinPath[0].sourceTable, joinPath[0].sourcePkColumns)
+            : relCtx.getOrCreateNode(mapExpr, EntityID!Entity.typeName,
+                EntityID!Entity.table, getPkColumns!Entity);
 
         // Set the data source on the node (for mutation-returned entities that bypass GetByIdsExpr)
         if (node.dataSource is null && EntityID!Entity.db !is null) {
@@ -243,7 +257,25 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
                     if (parentMapExpr !is null) {
                         auto parentNode = relCtx.getNode(parentMapExpr);
                         if (parentNode !is null) {
-                            node.setParent(parentNode, hasManyExpr.fkColumn, hasManyExpr.parentTypeName);
+                            string[] parentLinkColumns;
+                            Nullable!JoinAlias lastAlias;
+                            foreach (hop; parentJoinPath) {
+                                if (lastAlias.isNull)
+                                    parentNode.addColumn(hop.fk);
+                                else
+                                    parentNode.addJoinedColumn(lastAlias.get, hop.fk);
+                                lastAlias = parentNode.addJoin(hop.targetTable,
+                                    hop.targetType, hop.fk,
+                                    hop.targetPkColumns, lastAlias);
+                            }
+                            if (!lastAlias.isNull) {
+                                foreach (pk; parentJoinPath[$ - 1].targetPkColumns) {
+                                    parentNode.addJoinedColumn(lastAlias.get, pk);
+                                    parentLinkColumns ~= lastAlias.get.value ~ "__" ~ pk;
+                                }
+                            }
+                            node.setParent(parentNode, hasManyExpr.fkColumn,
+                                hasManyExpr.parentTypeName, parentLinkColumns);
                         }
                     }
                 }
@@ -264,6 +296,8 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
         if (joinPath.length == 0) {
             // Direct column access - return projection expression
             node.addColumn(_column);
+            static if (isStringBacked!T)
+                node.markStringColumn(_column);
             auto refInput = new EntityToAnyRefExpr!Entity(_input);
             return new ProjectColumnExpr!T(node.id, _column, refInput, prefetch);
         }
@@ -284,6 +318,8 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
 
         // Track the column needed from the final joined table
         node.addJoinedColumn(lastAlias.get, _column);
+        static if (isStringBacked!T)
+            node.markJoinedStringColumn(lastAlias.get, _column);
 
         // Return projection that reads from the final joined table
         return new ProjectJoinedColumnExpr!T(node.id, lastAlias.get, _column, baseInputAsAnyRef, prefetch);
@@ -751,9 +787,13 @@ class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultTyp
             return new EntityToAnyRefExpr!Child(_input);
         }
         @property string childTable() { return EntityID!Child.table; }
+        @property string childTypeName() { return EntityID!Child.typeName; }
+        @property string[] childPkColumns() { return getPkColumns!Child; }
     } else {
         @property ExprBase inputAsAnyRefExpr() { return null; }
         @property string childTable() { return ""; }
+        @property string childTypeName() { return ""; }
+        @property string[] childPkColumns() { return []; }
     }
     @property string parentTable() { return EntityID!Parent.table; }
     @property string parentTypeName() { return EntityID!Parent.typeName; }

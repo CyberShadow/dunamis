@@ -32,7 +32,7 @@ class MySQLSession : RelationalSession {
     private SqlOptimizer _sqlOptimizer;
     private QueryNode[] _executedNodes;
     private string _cachedSQL;
-    private QueryResult[QueryNodeId] _cachedResults;
+    private QueryResult[QueryNode] _cachedResults;
     private QueryResult[string] _cachedResultsByType;
 
     /// Create with a connection factory. The factory is called in setup().
@@ -76,8 +76,8 @@ class MySQLSession : RelationalSession {
     override Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult) {
         // For child nodes, check if we already have cached results from root CTE execution
         if (!node.isRoot) {
-            if (node.id in _cachedResults) {
-                return resolve(_cachedResults[node.id]);
+            if (node in _cachedResults) {
+                return resolve(_cachedResults[node]);
             }
             // Child nodes should be fetched as part of root CTE execution
             // If we get here without cached results, something is wrong
@@ -117,7 +117,7 @@ class MySQLSession : RelationalSession {
 
         // Execute query using text protocol
         return _conn.query(sql).array().then((MySqlConnection.Row[] rows) {
-            return parseQueryResult(rows, _executedNodes);
+            return parseQueryResult(rows, allNodes);
         });
     }
 
@@ -145,13 +145,13 @@ class MySQLSession : RelationalSession {
                     result.loadFromRows(layerRows, node.typeName, node.pkColumns);
                     rootResult = result;
                     // Also cache root result so fetchBelongsTo can find FK columns
-                    _cachedResults[node.id] = result;
+                    _cachedResults[node] = result;
                     _cachedResultsByType[node.typeName] = result;
                 } else {
                     result.loadFromRows(layerRows, node.typeName, node.pkColumns,
                                                  node.parentFk, node.parentTypeName);
                     // Cache child results for later retrieval (by node ID and type name)
-                    _cachedResults[node.id] = result;
+                    _cachedResults[node] = result;
                     _cachedResultsByType[node.typeName] = result;
                 }
             }

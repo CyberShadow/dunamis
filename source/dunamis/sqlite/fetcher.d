@@ -32,7 +32,7 @@ class SQLiteSession : RelationalSession {
     private SqlOptimizer _sqlOptimizer;
     private QueryNode[] _executedNodes;
     private string _cachedSQL;
-    private QueryResult[QueryNodeId] _cachedResults;
+    private QueryResult[QueryNode] _cachedResults;
     private QueryResult[string] _cachedResultsByType;
 
     this(SQLite db, SqlOptimizer sqlOptimizer) {
@@ -72,8 +72,8 @@ class SQLiteSession : RelationalSession {
     override Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult) {
         // For child nodes, check if we already have cached results from root CTE execution
         if (!node.isRoot) {
-            if (node.id in _cachedResults) {
-                return resolve(_cachedResults[node.id]);
+            if (node in _cachedResults) {
+                return resolve(_cachedResults[node]);
             }
             return resolve(new QueryResult());
         }
@@ -115,7 +115,7 @@ class SQLiteSession : RelationalSession {
             break;  // Only one row expected
         }
 
-        auto result = parseQueryResult(jsonResult, _executedNodes);
+        auto result = parseQueryResult(jsonResult, allNodes);
         return resolve(result);
     }
 
@@ -139,12 +139,12 @@ class SQLiteSession : RelationalSession {
                     result.loadFromRows(layerRows, node.typeName, node.pkColumns);
                     rootResult = result;
                     // Also cache root result so fetchBelongsTo can find FK columns
-                    _cachedResults[node.id] = result;
+                    _cachedResults[node] = result;
                     _cachedResultsByType[node.typeName] = result;
                 } else {
                     result.loadFromRows(layerRows, node.typeName, node.pkColumns,
                                                  node.parentFk, node.parentTypeName);
-                    _cachedResults[node.id] = result;
+                    _cachedResults[node] = result;
                     _cachedResultsByType[node.typeName] = result;
                 }
             }

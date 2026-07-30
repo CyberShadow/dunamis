@@ -15,6 +15,8 @@ import std.typecons : Nullable;
 /// during type introspection. Filters out D built-in methods and compiler internals.
 template isInternalMember(string name) {
     enum isInternalMember =
+        // Plugin implementation details and compiler-generated helper aliases.
+        (name.length > 0 && name[0] == '_') ||
         // D built-in methods
         name == "toString" ||
         name == "toHash" ||

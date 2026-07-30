@@ -69,6 +69,11 @@ class QueryNode {
     /// Columns to fetch (always includes PK columns)
     string[] columns;
 
+    /// Columns whose D/GraphQL representation is string-backed. PostgreSQL
+    /// JSON aggregation must cast these to text first, otherwise numeric
+    /// values lose precision or display scale.
+    bool[string] stringColumns;
+
     /// Parent node (for hasMany relationships)
     QueryNode parent;
 
@@ -80,6 +85,12 @@ class QueryNode {
 
     /// Parent type name (for encoding parent refs)
     string parentTypeName;
+
+    /// Columns in the parent CTE which identify the entity owning this
+    /// hasMany relation. Usually the parent's PK, but for hasMany reached
+    /// through belongsTo these are projected JOIN columns (for example
+    /// `j0__id`).
+    string[] parentLinkColumns;
 
     /// Root filter type (for root nodes)
     FilterType rootFilter = FilterType.none;
@@ -99,6 +110,7 @@ class QueryNode {
 
     /// Columns needed from each joined table (alias -> columns)
     string[][JoinAlias] joinedColumns;
+    bool[string][JoinAlias] joinedStringColumns;
 
     /// Pagination: limit number of results (global, for root queries)
     Nullable!size_t limit_;
@@ -143,14 +155,21 @@ class QueryNode {
         }
     }
 
+    void markStringColumn(string column) {
+        stringColumns[column] = true;
+    }
+
     /// Set this as a child node (hasMany relationship)
-    void setParent(QueryNode parent, string fk, string parentTypeName) {
+    void setParent(QueryNode parent, string fk, string parentTypeName,
+            string[] parentLinkColumns = null) {
         assert(this.parent is null, "setParent must only be called once");
         assert(parent !is null, "parent must not be null");
         assert(fk.length > 0, "FK column must not be empty");
         this.parent = parent;
         this.parentFk = fk;
         this.parentTypeName = parentTypeName;
+        this.parentLinkColumns = parentLinkColumns.length
+            ? parentLinkColumns.dup : parent.pkColumns.dup;
         addColumn(fk);  // Need FK for grouping
 
         // Also add to parent's children list
@@ -203,6 +222,10 @@ class QueryNode {
         if (!joinedColumns[joinAlias].canFind(column)) {
             joinedColumns[joinAlias] ~= column;
         }
+    }
+
+    void markJoinedStringColumn(JoinAlias joinAlias, string column) {
+        joinedStringColumns[joinAlias][column] = true;
     }
 
     /// Check if this is a root node (no parent)

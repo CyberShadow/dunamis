@@ -13,6 +13,131 @@ import dunamis.core.types;
 import dunamis.core.sorting : OrderBySpec, SortDirection;
 import dunamis.relational.query_node;
 
+/// Convert the JSON representation returned by SQL aggregation into a typed
+/// column value. Kept at module scope so both optimized QueryResult decoding
+/// and the generic/naive column dispatcher support the same type set.
+private T extractJsonValue(T)(JSONValue val) {
+    import std.conv : to;
+    import std.json : JSONType;
+    import std.typecons : Nullable;
+    import dunamis.core.types : AnyRef, isCustomScalar;
+
+    static if (is(T == Nullable!U, U)) {
+        return val.type == JSONType.null_ ? T.init : T(extractJsonValue!U(val));
+    } else if (val.type == JSONType.null_) {
+        return T.init;
+    } else static if (isCustomScalar!T) {
+        return T(extractJsonValue!(T.DType)(val));
+    } else static if (is(T == enum)) {
+        return val.type == JSONType.string ? enumFromDbString!T(val.str) : T.init;
+    } else static if (is(T == string)) {
+        if (val.type == JSONType.integer) return val.integer.to!string;
+        if (val.type == JSONType.float_) return val.floating.to!string;
+        return val.str;
+    } else static if (is(T == long)) {
+        return val.type == JSONType.string ? val.str.to!long : val.integer;
+    } else static if (is(T == int)) {
+        return val.type == JSONType.string ? val.str.to!int : cast(int) val.integer;
+    } else static if (is(T == bool)) {
+        if (val.type == JSONType.true_ || val.type == JSONType.false_)
+            return val.boolean;
+        if (val.type == JSONType.integer)
+            return val.integer != 0;
+        if (val.type == JSONType.string)
+            return val.str == "true" || val.str == "t" || val.str == "1" || val.str == "TRUE" || val.str == "T";
+        return false;
+    } else static if (is(T == double)) {
+        return val.type == JSONType.integer ? cast(double) val.integer : val.floating;
+    } else static if (is(T == float)) {
+        return val.type == JSONType.integer ? cast(float) val.integer : cast(float) val.floating;
+    } else static if (is(T == E[], E)) {
+        if (val.type == JSONType.null_)
+            return [];
+        T result;
+        if (val.type == JSONType.array) {
+            foreach (element; val.array)
+                result ~= extractJsonValue!E(element);
+        } else if (val.type == JSONType.string && val.str.length >= 2 &&
+                   val.str[0] == '{' && val.str[$ - 1] == '}') {
+            // PostgreSQL arrays may remain text literals when selected through
+            // compatibility views. Decode the one-dimensional wire syntax,
+            // preserving quoted commas/backslashes and unquoted NULL values.
+            auto body = val.str[1 .. $ - 1];
+            string token;
+            bool quoted, escaped, tokenWasQuoted;
+            void appendToken() {
+                if (!tokenWasQuoted && token == "NULL")
+                    result ~= extractJsonValue!E(JSONValue(null));
+                else
+                    result ~= extractJsonValue!E(JSONValue(token));
+                token = null;
+                tokenWasQuoted = false;
+            }
+            foreach (c; body) {
+                if (escaped) {
+                    token ~= c;
+                    escaped = false;
+                } else if (quoted && c == '\\') {
+                    escaped = true;
+                } else if (c == '"') {
+                    quoted = !quoted;
+                    tokenWasQuoted = true;
+                } else if (!quoted && c == ',') {
+                    appendToken();
+                } else {
+                    token ~= c;
+                }
+            }
+            if (body.length) appendToken();
+        } else {
+            throw new Exception("Expected JSON or PostgreSQL array while decoding " ~
+                T.stringof ~ ", got " ~ val.type.to!string ~ ": " ~ val.toString());
+        }
+        return result;
+    } else static if (is(T == struct)) {
+        import std.traits : FieldNameTuple;
+        T result;
+        // PostgreSQL range values are emitted by row_to_json as their textual
+        // representation. Decode range-shaped structs (e.g. a DateRange)
+        // into their start/end members.
+        static if (__traits(hasMember, T, "start") && __traits(hasMember, T, "end")) {
+            if (val.type == JSONType.string) {
+                auto text = val.str;
+                auto comma = text.countUntil(',');
+                if (comma >= 0 && text.length >= 2) {
+                    auto start = text[1 .. cast(size_t) comma];
+                    auto end = text[cast(size_t) comma + 1 .. $ - 1];
+                    if (start.length)
+                        result.start = extractJsonValue!(typeof(result.start))(JSONValue(start));
+                    if (end.length)
+                        result.end = extractJsonValue!(typeof(result.end))(JSONValue(end));
+                }
+                return result;
+            }
+        }
+        static foreach (fieldName; FieldNameTuple!T) {{
+            enum sqlName = (() {
+                string name;
+                foreach (i, c; fieldName) {
+                    if (c >= 'A' && c <= 'Z') {
+                        if (i > 0) name ~= '_';
+                        name ~= cast(char)(c + ('a' - 'A'));
+                    } else name ~= c;
+                }
+                return name;
+            })();
+            if (auto field = sqlName in val)
+                __traits(getMember, result, fieldName) =
+                    extractJsonValue!(typeof(__traits(getMember, result, fieldName)))(*field);
+        }}
+        return result;
+    } else static if (is(T == AnyRef)) {
+        return AnyRef(val.str);
+    } else {
+        static assert(false, "Unsupported JSON column type: " ~ T.stringof);
+    }
+}
+
 // ============================================================================
 // Data Source Configuration
 // ============================================================================
@@ -53,11 +178,12 @@ enum defaultDBConfig = DBConfig();
 /// Returns T.init for empty strings or unknown values (graceful degradation).
 T enumFromDbString(T)(string s) if (is(T == enum)) {
     import std.traits : EnumMembers;
+    import std.string : toLower;
 
     if (s.length == 0) return T.init;
 
     static foreach (member; EnumMembers!T) {
-        if (__traits(identifier, member) == s) {
+        if (__traits(identifier, member).toLower == s.toLower) {
             return member;
         }
     }
@@ -265,53 +391,7 @@ abstract class RelationalSession : DataSession {
                     if (val.type == JSONType.null_) {
                         result ~= T.init;  // Null Nullable
                     } else {
-                        // Extract inner value and wrap in Nullable
-                        static if (isCustomScalar!U) {
-                            // Custom scalar - extract underlying value and wrap
-                            alias DType = U.DType;
-                            static if (is(DType == int) || is(DType == long)) {
-                                if (val.type == JSONType.integer) {
-                                    result ~= T(U(cast(DType) val.integer));
-                                } else if (val.type == JSONType.string) {
-                                    import std.conv : to;
-                                    result ~= T(U(val.str.to!DType));
-                                } else {
-                                    result ~= T.init;
-                                }
-                            } else static if (is(DType == string)) {
-                                if (val.type == JSONType.string) {
-                                    result ~= T(U(val.str));
-                                } else if (val.type == JSONType.integer) {
-                                    import std.conv : to;
-                                    result ~= T(U(val.integer.to!string));
-                                } else {
-                                    result ~= T.init;
-                                }
-                            } else {
-                                result ~= T.init;
-                            }
-                        } else static if (is(U == int) || is(U == long)) {
-                            if (val.type == JSONType.integer) {
-                                result ~= T(cast(U) val.integer);
-                            } else if (val.type == JSONType.string) {
-                                import std.conv : to;
-                                result ~= T(val.str.to!U);
-                            } else {
-                                result ~= T.init;
-                            }
-                        } else static if (is(U == string)) {
-                            if (val.type == JSONType.string) {
-                                result ~= T(val.str);
-                            } else if (val.type == JSONType.integer) {
-                                import std.conv : to;
-                                result ~= T(val.integer.to!string);
-                            } else {
-                                result ~= T.init;
-                            }
-                        } else {
-                            // Fallback for other types
-                            result ~= T.init;
-                        }
+                        result ~= T(extractJsonValue!U(val));
                     }
                 }
                 return result;
@@ -339,6 +419,18 @@ abstract class RelationalSession : DataSession {
                     result ~= cast(int) l;
                 }
                 return result;
+            });
+        } else static if (is(T == bool)) {
+            return fetchColumnJson(table, column, refs).then((JSONValue[] values) {
+                return values.map!(value => extractJsonValue!bool(value)).array;
+            });
+        } else static if (is(T == E[], E)) {
+            return fetchColumnJson(table, column, refs).then((JSONValue[] values) {
+                return values.map!(value => extractJsonValue!T(value)).array;
+            });
+        } else static if (is(T == struct)) {
+            return fetchColumnJson(table, column, refs).then((JSONValue[] values) {
+                return values.map!(value => extractJsonValue!T(value)).array;
             });
         } else {
             static assert(false, "Unsupported column type: " ~ T.stringof);
@@ -616,68 +708,7 @@ class QueryResult {
     }
 
     private T extractValue(T)(JSONValue val) {
-        import std.typecons : Nullable;
-        import dunamis.core.types : isCustomScalar;
-
-        static if (is(T == Nullable!U, U)) {
-            // Nullable type - return null or extract inner value
-            if (val.type == JSONType.null_) {
-                return T.init;
-            }
-            return T(extractValue!U(val));
-        } else if (val.type == JSONType.null_) {
-            return T.init;
-        } else static if (isCustomScalar!T) {
-            // Custom scalar - extract underlying type and wrap
-            return T(extractValue!(T.DType)(val));
-        } else static if (is(T == enum)) {
-            // D enum - extract as string and convert
-            if (val.type == JSONType.string) {
-                return enumFromDbString!T(val.str);
-            }
-            return T.init;
-        } else static if (is(T == string)) {
-            // Handle both string and integer values (for FK columns)
-            if (val.type == JSONType.integer) {
-                return val.integer.to!string;
-            }
-            return val.str;
-        } else static if (is(T == long)) {
-            // Handle both integer and string values
-            if (val.type == JSONType.string) {
-                return val.str.to!long;
-            }
-            return val.integer;
-        } else static if (is(T == int)) {
-            if (val.type == JSONType.string) {
-                return val.str.to!int;
-            }
-            return cast(int)val.integer;
-        } else static if (is(T == bool)) {
-            // Handle different representations of boolean in SQL results:
-            // - JSON boolean (true/false)
-            // - Integer (0/1) - common in SQLite
-            // - String ("true"/"false", "t"/"f", "1"/"0") - common in PostgreSQL
-            if (val.type == JSONType.true_ || val.type == JSONType.false_) {
-                return val.boolean;
-            } else if (val.type == JSONType.integer) {
-                return val.integer != 0;
-            } else if (val.type == JSONType.string) {
-                auto s = val.str;
-                return s == "true" || s == "t" || s == "1" || s == "TRUE" || s == "T";
-            }
-            return false;
-        } else static if (is(T == double)) {
-            if (val.type == JSONType.integer) return cast(double)val.integer;
-            return val.floating;
-        } else static if (is(T == float)) {
-            if (val.type == JSONType.integer) return cast(float)val.integer;
-            return cast(float)val.floating;
-        } else static if (is(T == AnyRef)) {
-            return AnyRef(val.str);
-        } else {
-            static assert(false, "Unsupported type: " ~ T.stringof);
-        }
+        return extractJsonValue!T(val);
     }
 }
 

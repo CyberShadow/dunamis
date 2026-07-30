@@ -200,24 +200,48 @@ class DynamicJsonObjectExpr : Expr!JSONValue {
     override Promise!(JSONValue[]) eval(EvalContext ctx) {
         import ae.utils.promise : Result, toResult;
 
-        // Evaluate all field expressions, capturing errors as Results
-        Promise!(Result!(JSONValue[]))[] resultPromises;
-        foreach (expr; _exprs) {
-            resultPromises ~= evalToJson(expr, ctx).toResult();
+        Result!(JSONValue[])[] results;
+        bool suspendsSession(ExprBase expr) {
+            if (expr.suspendsSession) return true;
+            foreach (dependency; expr.dependencies)
+                if (suspendsSession(dependency)) return true;
+            return false;
+        }
+        Promise!void evalNext(size_t index) {
+            if (index == _exprs.length) return resolve();
+            return evalToJson(_exprs[index], ctx).toResult()
+                .then((Result!(JSONValue[]) result) {
+                    results ~= result;
+                    return evalNext(index + 1);
+                });
+        }
+        Promise!void evaluateFields() {
+            foreach (expr; _exprs)
+                if (suspendsSession(expr))
+                    // A DataSession owns one transaction/connection. Serialize
+                    // only objects containing external work, so suspension
+                    // cannot race a sibling relational field.
+                    return evalNext(0);
+            Promise!(Result!(JSONValue[]))[] promises;
+            foreach (expr; _exprs)
+                promises ~= evalToJson(expr, ctx).toResult();
+            return all(promises).then((Result!(JSONValue[])[] values) {
+                results = values;
+            });
         }
 
         auto names = _names;
         auto pathPrefix = _pathPrefix;
         auto nonNullFields = _nonNullFields;
 
-        return all(resultPromises).then((Result!(JSONValue[])[] results) {
-            // Determine batch size from first successful result
+        return evaluateFields().then(() {
+            // Determine the complete batch size. Constant expressions may
+            // legitimately produce one value before a mapped field exposes
+            // the actual batch size.
             size_t count = 0;
             foreach (r; results) {
-                if (r.error is null && r.value[0].length > 0) {
+                if (r.error is null && r.value[0].length > count)
                     count = r.value[0].length;
-                    break;
-                }
             }
             if (count == 0) count = 1; // Fallback for root fields
 
@@ -226,8 +250,10 @@ class DynamicJsonObjectExpr : Expr!JSONValue {
                 jsonResults[idx] = JSONValue.emptyObject;
                 bool hasNonNullViolation = false;
                 foreach (i, name; names) {
-                    if (results[i].error is null && idx < results[i].value[0].length) {
-                        auto val = results[i].value[0][idx];
+                    auto valueCount = results[i].error is null
+                        ? results[i].value[0].length : 0;
+                    if (valueCount && (idx < valueCount || valueCount == 1)) {
+                        auto val = results[i].value[0][valueCount == 1 ? 0 : idx];
                         jsonResults[idx][name] = val;
                         // Check non-null violation: field is non-null but value is null
                         if (i < nonNullFields.length && nonNullFields[i] && val.isNull)

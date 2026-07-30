@@ -13,6 +13,8 @@ import dunamis.relational.sql_dialect;
 class PostgresDialect : SqlDialect {
     override string binaryOp(string op, string leftSql, string rightSql) {
         auto sqlOp = toSqlOp(op);
+        if (op == "rangeContains")
+            rightSql ~= "::date";
         return "(" ~ leftSql ~ " " ~ sqlOp ~ " " ~ rightSql ~ ")";
     }
 
@@ -108,6 +110,14 @@ class PostgresDialect : SqlDialect {
             case "&&": return "AND"; // Logical and
             case "||": return "OR";  // Logical or
             case "%": return "%";    // Modulo
+            case "rangeContains": return "@>";
+            case "rangeContainedBy": return "<@";
+            case "rangeOverlaps": return "&&";
+            case "rangeStrictlyLeft": return "<<";
+            case "rangeStrictlyRight": return ">>";
+            case "rangeNotExtendsRight": return "&<";
+            case "rangeNotExtendsLeft": return "&>";
+            case "rangeAdjacent": return "-|-";
             default: return op;      // +, -, *, /, <, >, <=, >= are the same
         }
     }

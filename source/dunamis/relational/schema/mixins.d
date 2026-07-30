@@ -57,6 +57,20 @@ mixin template Col(string fieldName, T, string columnName = toSnakeCase(fieldNam
     }
 }
 
+/// Define a scalar FK column without inspecting the referenced entity's
+/// primary key while its declaration is still being completed.  This is
+/// useful for generated schemas containing cyclic relationships.
+mixin template ForeignKeyCol(string fieldName, Parent, T = int, string columnName = toSnakeCase(fieldName)) {
+    import dunamis.relational.schema.attrs : SqlColumn, ForeignKeyRef;
+    import dunamis.relational.schema.expressions : column;
+    import dunamis.core.expr : Expr;
+
+    @SqlColumn(columnName) @ForeignKeyRef!Parent
+    mixin("static Expr!T " ~ fieldName ~ "(Expr!(typeof(this)) e) {\n" ~
+          "    return e.column!(T, typeof(this))(\"" ~ columnName ~ "\");\n" ~
+          "}");
+}
+
 /// Mixin to define a hasMany relationship.
 /// Example: mixin HasMany!("posts", Post, "author_id");
 mixin template HasMany(string fieldName, Child, string fk) {
@@ -79,26 +93,25 @@ mixin template BelongsTo(string fieldName, string fkFieldName) {
     import dunamis.relational.schema.expressions : belongsTo;
     import dunamis.relational.schema.attrs : BelongsToFK, BelongsToParent;
     import dunamis.relational.schema.attrs : extractForeignKeyRef, hasForeignKeyRef, getSqlColumn, hasNullableReturn;
+    import dunamis.graphql.schema : GqlName;
 
     // Verify it's a foreign key column (has @ForeignKeyRef UDA)
     static assert(hasForeignKeyRef!(__traits(getMember, typeof(this), fkFieldName)),
         "Field '" ~ fkFieldName ~ "' must be a ForeignKey column for BelongsTo");
 
-    // Check if FK column returns nullable type (determines relationship nullability)
-    static if (hasNullableReturn!(__traits(getMember, typeof(this), fkFieldName))) {
-        @BelongsToFK(fkFieldName)
-        @BelongsToParent!(extractForeignKeyRef!(__traits(getMember, typeof(this), fkFieldName)))
-        mixin("static Expr!(Nullable!(extractForeignKeyRef!(__traits(getMember, typeof(this), \"" ~ fkFieldName ~ "\")))) " ~ fieldName ~ "(Expr!(typeof(this)) e) {
-            alias Fk = __traits(getMember, typeof(this), \"" ~ fkFieldName ~ "\");
-            return e.belongsTo!(extractForeignKeyRef!Fk, Nullable!(extractForeignKeyRef!Fk), getSqlColumn!Fk, typeof(this))();
-        }");
+    enum _dFieldName = fieldName == "version" ? "version_" : fieldName;
+    alias _Fk = __traits(getMember, typeof(this), fkFieldName);
+    alias _Parent = extractForeignKeyRef!_Fk;
+    static if (hasNullableReturn!_Fk) {
+        @BelongsToFK(fkFieldName) @BelongsToParent!_Parent @GqlName(fieldName)
+        mixin("static Expr!(Nullable!_Parent) " ~ _dFieldName ~ "(Expr!(typeof(this)) e) {\n" ~
+              "    return e.belongsTo!(_Parent, Nullable!_Parent, getSqlColumn!_Fk, typeof(this))();\n" ~
+              "}");
     } else {
-        @BelongsToFK(fkFieldName)
-        @BelongsToParent!(extractForeignKeyRef!(__traits(getMember, typeof(this), fkFieldName)))
-        mixin("static Expr!(extractForeignKeyRef!(__traits(getMember, typeof(this), \"" ~ fkFieldName ~ "\"))) " ~ fieldName ~ "(Expr!(typeof(this)) e) {
-            alias Fk = __traits(getMember, typeof(this), \"" ~ fkFieldName ~ "\");
-            return e.belongsTo!(extractForeignKeyRef!Fk, extractForeignKeyRef!Fk, getSqlColumn!Fk, typeof(this))();
-        }");
+        @BelongsToFK(fkFieldName) @BelongsToParent!_Parent @GqlName(fieldName)
+        mixin("static Expr!_Parent " ~ _dFieldName ~ "(Expr!(typeof(this)) e) {\n" ~
+              "    return e.belongsTo!(_Parent, _Parent, getSqlColumn!_Fk, typeof(this))();\n" ~
+              "}");
     }
 }
 

@@ -25,6 +25,8 @@ interface BelongsToInfo {
     /// Created by the concrete class which knows the Child type at compile time.
     @property ExprBase inputAsAnyRefExpr();
     @property string childTable();
+    @property string childTypeName();
+    @property string[] childPkColumns();
     @property string parentTable();
     @property string parentTypeName();
     @property string fkColumn();

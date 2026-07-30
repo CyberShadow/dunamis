@@ -101,19 +101,48 @@ class SqlOptimizer : ExprOptimizer {
     /// SQL dialect for database-specific SQL generation
     protected SqlDialect _dialect;
 
+    // Optimization is requested through a data-source-wide prototype, while
+    // sessions are request-local. Keep the completed state on the calling
+    // thread until that request creates its session.
+    private static SqlOptimizer _pendingThreadSnapshot;
+
     /// Create a SqlOptimizer with a specific dialect
     this(SqlDialect dialect) {
         _dialect = dialect;
     }
 
+    /// Capture the completed optimizer state for one execution. Data sources
+    /// keep a prototype optimizer for expression discovery, but SQL generation
+    /// happens asynchronously and must not observe that prototype being reset
+    /// by a later request.
+    SqlOptimizer snapshot() {
+        if (_pendingThreadSnapshot !is null) {
+            auto result = _pendingThreadSnapshot;
+            _pendingThreadSnapshot = null;
+            return result;
+        }
+        return copyState();
+    }
+
+    private SqlOptimizer copyState() {
+        auto result = new SqlOptimizer(_dialect);
+        foreach (nodeId, columns; _computedColumns)
+            result._computedColumns[nodeId] = columns.dup;
+        result._nextComputedAlias = _nextComputedAlias;
+        return result;
+    }
+
     /// Optimize an expression tree, applying SQL push-down where possible.
     /// This should be called AFTER the standard optimizer has run.
     override void optimize(ExprBase expr, OptimizeContext ctx) {
-        // Clear per-request state — QueryNodeIds restart from 0 each request,
-        // so stale computed columns from previous requests would collide.
-        _computedColumns.clear();
-        _nextComputedAlias = 0;
-        optimizeRecursive(expr, ctx);
+        synchronized (this) {
+            // Clear per-request state — QueryNodeIds restart from 0 each request,
+            // so stale computed columns from previous requests would collide.
+            _computedColumns.clear();
+            _nextComputedAlias = 0;
+            optimizeRecursive(expr, ctx);
+            _pendingThreadSnapshot = copyState();
+        }
     }
 
     /// Recursively optimize expression and its children
@@ -944,7 +973,11 @@ Nullable!string extractWhereFromExpr(Object expr, Object filterItem) {
         }
 
         // Comparison operators: ==, !=, <, <=, >, >=
-        if (op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=") {
+        if (op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=" ||
+            op == "rangeContains" || op == "rangeContainedBy" || op == "rangeOverlaps" ||
+            op == "rangeStrictlyLeft" || op == "rangeStrictlyRight" ||
+            op == "rangeNotExtendsRight" || op == "rangeNotExtendsLeft" ||
+            op == "rangeAdjacent") {
             // Try to match: column op constant or constant op column
             auto leftColInfo = extractFilterColumnInfo(binOp.left, filterItem);
             auto rightColInfo = extractFilterColumnInfo(binOp.right, filterItem);
@@ -1042,6 +1075,14 @@ string translateComparisonOp(string op, bool columnOnLeft) {
             case "<=": return "<=";
             case ">": return ">";
             case ">=": return ">=";
+            case "rangeContains": return "@>";
+            case "rangeContainedBy": return "<@";
+            case "rangeOverlaps": return "&&";
+            case "rangeStrictlyLeft": return "<<";
+            case "rangeStrictlyRight": return ">>";
+            case "rangeNotExtendsRight": return "&<";
+            case "rangeNotExtendsLeft": return "&>";
+            case "rangeAdjacent": return "-|-";
             default: return op;
         }
     } else {
@@ -1205,4 +1246,3 @@ unittest {
     assert(proj.columnAlias == "computed_0");
     assert(proj.dependencies().length == 2);  // input and prefetch
 }
-
