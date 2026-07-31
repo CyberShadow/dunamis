@@ -13,7 +13,7 @@ buildType "ci" {
 sourcePaths "source"
 
 dependency "graphqld:parser" repository="git+https://github.com/CyberShadow/graphqld.git" version="7b8c9cd0f2482deab6a9ecb3dbf6d9d246860972"
-dependency "ae" version="0.0.3893"
+dependency "ae" repository="git+https://github.com/CyberShadow/ae.git" version="919b1e98dedbe5aee98c826d3f17e79aed78be64"
 
 # Exclude sqlite modules from main package (available via subpackage, requires ae:sqlite)
 excludedSourceFiles "source/dunamis/sqlite/*"
