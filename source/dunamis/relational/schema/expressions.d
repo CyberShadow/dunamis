@@ -487,6 +487,45 @@ auto getByCompositeIds(Entity, IdType)(IdType[][] keyParts) {
     return new GetByIdsExpr!Entity(entities);
 }
 
+/// Convert a dynamically-evaluated primary key into a typed entity reference.
+///
+/// Unlike `getByIds`, this preserves the cardinality and map scope of its input
+/// expression, allowing computed fields to issue ordinary relationship and
+/// column requests for their parent entity without leaving the computation
+/// graph.
+class EntityByIdExpr(Entity, IdType) : Expr!Entity {
+    private Expr!IdType _id;
+
+    this(Expr!IdType id) { _id = id; }
+
+    override ExprBase[] dependencies() { return [_id]; }
+    override void replaceDependency(size_t index, ExprBase value) {
+        assert(index == 0);
+        _id = cast(Expr!IdType) value;
+    }
+    override DataSource[] dataSources() {
+        auto db = EntityID!Entity.db;
+        return db !is null ? [db] : [];
+    }
+    override Expr!Entity optimize(OptimizeContext ctx) {
+        _id = _id.optimize(ctx);
+        return this;
+    }
+    override Promise!(Entity[]) eval(EvalContext ctx) {
+        return evalAs!IdType(_id, ctx).then((IdType[] ids) {
+            Entity[] entities;
+            entities.reserve(ids.length);
+            foreach (id; ids)
+                entities ~= .makeEntity!(Entity, IdType)(id);
+            return entities;
+        });
+    }
+}
+
+auto entityById(Entity, IdType)(Expr!IdType id) {
+    return new EntityByIdExpr!(Entity, IdType)(id);
+}
+
 /// Root expression that fetches all entities of a type.
 class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
     import dunamis.core.optimize : ExprOptimizer, OptimizeContext;
