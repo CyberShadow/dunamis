@@ -61,6 +61,12 @@ JSONValue toJsonValue(T)(T value) {
             arr.array ~= toJsonValue(elem);
         }
         return arr;
+    } else static if (is(T == struct)) {
+        import std.traits : FieldNameTuple;
+        JSONValue object = JSONValue.emptyObject;
+        static foreach (fieldName; FieldNameTuple!T)
+            object[fieldName] = toJsonValue(__traits(getMember, value, fieldName));
+        return object;
     } else {
         static assert(false, "Cannot convert " ~ T.stringof ~ " to JSONValue");
     }
