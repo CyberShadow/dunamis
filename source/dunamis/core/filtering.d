@@ -215,7 +215,7 @@ class FilterByExpr(Entity) : Expr!(Entity[]), FilterByInfo {
 auto filterBy(alias pred, Coll)(Coll collection)
     if (is(Coll : Expr!(E[]), E))
 {
-    alias Entity = E;
+    alias Entity = CollectionEntityType!Coll;
 
     // Create placeholder for the item being filtered
     auto item = new FilterItemExpr!Entity();
@@ -235,6 +235,15 @@ auto filterBy(alias pred, Coll)(Coll collection)
     return filterExpr;
 }
 
+/// Extract the entity type from an expression yielding an entity collection.
+private template CollectionEntityType(Coll) {
+    static if (is(Coll : Expr!(E[]), E)) {
+        alias CollectionEntityType = E;
+    } else {
+        static assert(false, "Expected Expr!(Entity[]), got " ~ Coll.stringof);
+    }
+}
+
 // ============================================================================
 // Unit Tests
 // ============================================================================
@@ -249,4 +258,23 @@ unittest {
     // Test FilterItemInfo interface - verify interface exists and is accessible
     FilterItemInfo info = null;
     assert(info is null);  // Just verify the interface compiles
+}
+
+unittest {
+    struct TestEntity {
+        int id;
+    }
+
+    static class TestCollectionExpr : Expr!(TestEntity[]) {
+        override ExprBase[] dependencies() { return []; }
+        override void replaceDependency(size_t, ExprBase) {}
+        override Promise!(TestEntity[][]) eval(EvalContext) {
+            return resolve([TestEntity[].init]);
+        }
+    }
+
+    // Regression test: the entity type must remain available in the factory
+    // body after template-constraint deduction.
+    auto filtered = filterBy!((item) => item.eq(item))(new TestCollectionExpr());
+    static assert(is(typeof(filtered) == FilterByExpr!TestEntity));
 }
