@@ -18,7 +18,8 @@
             let baseName = baseNameOf path; in
             type == "directory" ||
             pkgs.lib.hasSuffix ".d" baseName ||
-            baseName == "dub.sdl";
+            baseName == "dub.sdl" ||
+            baseName == "dub.selections.json";
         };
 
         # Build the postgres integration test executable
