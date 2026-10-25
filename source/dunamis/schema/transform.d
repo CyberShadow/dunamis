@@ -474,3 +474,54 @@ unittest {
     assert(norm._normalizedSource.x == 42);
     assert(norm._normalizedSource.y == "hello");
 }
+
+// Test entityCastValue across several plugin layers, in both directions
+unittest {
+    import dunamis.schema.entity_cast : entityCastValue, BaseEntityOf, isInChain;
+
+    static struct Raw { int id; string name; }
+    static struct Normalized { int id; Raw _normalizedSource; }
+    static struct Plugin1 { int id; Normalized _normalizedSource; }
+    static struct Plugin2 { int id; Plugin1 _normalizedSource; }
+
+    static assert(is(BaseEntityOf!Plugin2 == Raw));
+    static assert(is(BaseEntityOf!Raw == Raw));
+    static assert(isInChain!(Plugin2, Normalized));
+    static assert(isInChain!(Plugin2, Plugin2));
+    static assert(!isInChain!(Normalized, Plugin2));
+
+    // Up: Raw → Plugin2 builds every intermediate layer
+    auto top = entityCastValue!(Plugin2, Raw)(Raw(7, "Alice"));
+    assert(top.id == 7);
+    assert(top._normalizedSource.id == 7);
+    assert(top._normalizedSource._normalizedSource.id == 7);
+    assert(top._normalizedSource._normalizedSource._normalizedSource.name == "Alice");
+
+    // Up from a middle layer: Normalized → Plugin2
+    auto norm = entityCastValue!(Normalized, Raw)(Raw(8, "Bob"));
+    auto top2 = entityCastValue!(Plugin2, Normalized)(norm);
+    assert(top2._normalizedSource._normalizedSource._normalizedSource.name == "Bob");
+
+    // Down: Plugin2 → Raw and Plugin2 → Normalized extract the stored layers
+    auto raw = entityCastValue!(Raw, Plugin2)(top);
+    assert(raw.id == 7 && raw.name == "Alice");
+    auto mid = entityCastValue!(Normalized, Plugin2)(top);
+    assert(mid._normalizedSource.name == "Alice");
+}
+
+// Test entityCastValue between unrelated chains still only copies matching fields
+unittest {
+    import dunamis.schema.entity_cast : entityCastValue;
+
+    static struct RawA { int id; string name; }
+    static struct WrappedA { int id; RawA _normalizedSource; }
+    static struct RawB { int id; string name; }
+    static struct WrappedB { int id; RawB _normalizedSource; }
+
+    auto a = entityCastValue!(WrappedA, RawA)(RawA(3, "x"));
+    auto b = entityCastValue!(WrappedB, WrappedA)(a);
+    assert(b.id == 3);
+    assert(b._normalizedSource == RawB.init);
+    auto rb = entityCastValue!(RawB, WrappedA)(a);
+    assert(rb.id == 3 && rb.name is null);
+}

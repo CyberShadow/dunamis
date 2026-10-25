@@ -7,15 +7,38 @@ module dunamis.schema.entity_cast;
 
 import dunamis.core.expr : Expr;
 
+/// The user-declared type at the bottom of T's plugin layer chain.
+/// Each plugin wrapper stores its immediate source type in `_normalizedSource`;
+/// types without one (user-declared types, Query/Mutation wrappers) are their own base.
+template BaseEntityOf(T) {
+    static if (is(T == struct) && __traits(hasMember, T, "_normalizedSource"))
+        alias BaseEntityOf = BaseEntityOf!(typeof(T._normalizedSource));
+    else
+        alias BaseEntityOf = T;
+}
+
+/// True if U is T or one of the layers T wraps, transitively.
+template isInChain(T, U) {
+    static if (is(T == U))
+        enum isInChain = true;
+    else static if (is(T == struct) && __traits(hasMember, T, "_normalizedSource"))
+        enum isInChain = isInChain!(typeof(T._normalizedSource), U);
+    else
+        enum isInChain = false;
+}
+
 /// Plugin-aware entity cast value conversion. Handles per-layer _normalizedSource
 /// propagation: each plugin wrapper stores its immediate source type.
+/// A cast may span several layers of the same chain, in either direction.
 To entityCastValue(To, From)(From from) {
     To to;
     static if (is(From == struct) && is(To == struct)) {
-        // Unwrap: From wraps To in _normalizedSource — extract directly
-        static if (__traits(hasMember, From, "_normalizedSource") &&
-                   is(typeof(From._normalizedSource) == To)) {
-            return from._normalizedSource;
+        static if (!is(From == To) && isInChain!(From, To)) {
+            // Unwrap: To is in From's _normalizedSource chain — extract it
+            static if (is(typeof(From._normalizedSource) == To))
+                return from._normalizedSource;
+            else
+                return entityCastValue!(To, typeof(From._normalizedSource))(from._normalizedSource);
         } else {
             import dunamis.core.types : isInternalMember;
 
@@ -40,10 +63,13 @@ To entityCastValue(To, From)(From from) {
                   }
                 }
             }}
-            // Wrap: To stores From as its _normalizedSource (per-layer)
-            static if (__traits(hasMember, To, "_normalizedSource") &&
-                       is(typeof(To._normalizedSource) == From)) {
-                to._normalizedSource = from;
+            // Wrap: To stores its immediate source as _normalizedSource (per-layer);
+            // when From is deeper in To's chain, build the intermediate layers.
+            static if (__traits(hasMember, To, "_normalizedSource")) {
+                static if (is(typeof(To._normalizedSource) == From))
+                    to._normalizedSource = from;
+                else static if (isInChain!(typeof(To._normalizedSource), From))
+                    to._normalizedSource = entityCastValue!(typeof(To._normalizedSource), From)(from);
             }
         }
     }
