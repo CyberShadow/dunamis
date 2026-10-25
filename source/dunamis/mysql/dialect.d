@@ -43,11 +43,15 @@ class MySQLDialect : SqlDialect {
     }
 
     override string likeOp(string operandSql, string pattern, bool caseInsensitive) {
+        // Backslash is also the string-literal escape character in MySQL, so
+        // double it for the pattern's escapes to reach LIKE intact.
+        auto literal = "'" ~ pattern.replace(`\`, `\\`) ~ "'";
         if (caseInsensitive) {
             // Use LOWER() for consistent case-insensitive behavior across collations
-            return "(LOWER(" ~ operandSql ~ ") LIKE LOWER('" ~ pattern ~ `') ESCAPE '\')`;
+            return "(LOWER(" ~ operandSql ~ ") LIKE LOWER(" ~ literal ~ `) ESCAPE '\\')`;
         }
-        return "(" ~ operandSql ~ " LIKE '" ~ pattern ~ `' ESCAPE '\')`;
+        // Default collations compare case-insensitively; force a binary match.
+        return "(" ~ operandSql ~ " LIKE BINARY " ~ literal ~ ` ESCAPE '\\')`;
     }
 
     override string name() { return "MySQL"; }
@@ -169,4 +173,9 @@ unittest {
            "EXISTS (SELECT 1 FROM posts WHERE author_id = users.id)");
     assert(dialect.notExistsSubquery("SELECT 1 FROM posts WHERE author_id = users.id") ==
            "NOT EXISTS (SELECT 1 FROM posts WHERE author_id = users.id)");
+
+    // LIKE escapes survive MySQL's backslash string-literal escaping, and
+    // case-sensitive matching does not depend on the column collation.
+    assert(dialect.likeOp("t.c", `50\%`, false) == `(t.c LIKE BINARY '50\\%' ESCAPE '\\')`);
+    assert(dialect.likeOp("t.c", `%a\\b%`, true) == `(LOWER(t.c) LIKE LOWER('%a\\\\b%') ESCAPE '\\')`);
 }

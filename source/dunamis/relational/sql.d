@@ -114,8 +114,8 @@ private string toCTE(QueryNode node, SqlDialect dialect, SqlOptimizer sqlOpt) {
     }
 
     // Custom WHERE clause from filter predicates
-    if (node.whereClause_.length > 0) {
-        sql ~= format("\n      AND (%s)", node.whereClause_);
+    if (auto where = node.whereClause(dialect)) {
+        sql ~= format("\n      AND (%s)", where);
     }
 
     // ORDER BY
@@ -196,8 +196,8 @@ private string toCTEWithWindowFunction(QueryNode node, SqlDialect dialect, SqlOp
         node.table, node.parentFk, parentPkSelect, node.parent.id.value);
 
     // Custom WHERE clause
-    if (node.whereClause_.length > 0) {
-        sql ~= format("\n        AND (%s)", node.whereClause_);
+    if (auto where = node.whereClause(dialect)) {
+        sql ~= format("\n        AND (%s)", where);
     }
 
     sql ~= "\n    ) _inner\n";

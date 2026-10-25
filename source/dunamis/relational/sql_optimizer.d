@@ -954,7 +954,7 @@ class ProjectComputedExpr(T) : Expr!T, ProjectComputedInfo {
 // ============================================================================
 
 /// Extract WHERE clause SQL from a FilterByInfo by pattern-matching its predicate.
-Nullable!string extractFilterWhereClause(FilterByInfo filterInfo, string table = null) {
+Nullable!DialectSql extractFilterWhereClause(FilterByInfo filterInfo, string table = null) {
     auto predicate = filterInfo.filterPredicate;
     auto filterItem = filterInfo.filterItem;
 
@@ -962,7 +962,7 @@ Nullable!string extractFilterWhereClause(FilterByInfo filterInfo, string table =
 }
 
 /// Recursively extract WHERE SQL from an expression tree.
-Nullable!string extractWhereFromExpr(Object expr, Object filterItem, string table = null) {
+Nullable!DialectSql extractWhereFromExpr(Object expr, Object filterItem, string table = null) {
     // Handle binary operators: AND, OR, comparison operators
     if (auto binOp = cast(BinaryOpInfo) expr) {
         string op = binOp.operator;
@@ -973,9 +973,10 @@ Nullable!string extractWhereFromExpr(Object expr, Object filterItem, string tabl
             auto rightSql = extractWhereFromExpr(binOp.right, filterItem, table);
             if (!leftSql.isNull && !rightSql.isNull) {
                 string sqlOp = (op == "&&") ? "AND" : "OR";
-                return Nullable!string("(" ~ leftSql.get ~ " " ~ sqlOp ~ " " ~ rightSql.get ~ ")");
+                auto l = leftSql.get, r = rightSql.get;
+                return Nullable!DialectSql((SqlDialect d) => "(" ~ l(d) ~ " " ~ sqlOp ~ " " ~ r(d) ~ ")");
             }
-            return Nullable!string.init;
+            return Nullable!DialectSql.init;
         }
 
         // Comparison operators: ==, !=, <, <=, >, >=
@@ -1002,11 +1003,11 @@ Nullable!string extractWhereFromExpr(Object expr, Object filterItem, string tabl
                 value = leftConst.get;
                 isColumnOnLeft = false;
             } else {
-                return Nullable!string.init;
+                return Nullable!DialectSql.init;
             }
 
             string sqlOp = translateComparisonOp(op, isColumnOnLeft);
-            return Nullable!string(column ~ " " ~ sqlOp ~ " " ~ value);
+            return dialectAgnostic(column ~ " " ~ sqlOp ~ " " ~ value);
         }
     }
 
@@ -1015,7 +1016,8 @@ Nullable!string extractWhereFromExpr(Object expr, Object filterItem, string tabl
         if (unaryOp.operator == "!") {
             auto operandSql = extractWhereFromExpr(unaryOp.operand, filterItem, table);
             if (!operandSql.isNull) {
-                return Nullable!string("NOT " ~ operandSql.get);
+                auto operand = operandSql.get;
+                return Nullable!DialectSql((SqlDialect d) => "NOT " ~ operand(d));
             }
         }
     }
@@ -1024,7 +1026,7 @@ Nullable!string extractWhereFromExpr(Object expr, Object filterItem, string tabl
     if (auto constInfo = cast(ConstantInfo) expr) {
         if (constInfo.valueType == typeid(bool)) {
             bool val = constInfo.valueAsString == "true";
-            return Nullable!string(val ? "1=1" : "1=0");
+            return dialectAgnostic(val ? "1=1" : "1=0");
         }
     }
 
@@ -1032,19 +1034,21 @@ Nullable!string extractWhereFromExpr(Object expr, Object filterItem, string tabl
     if (auto likeInfo = cast(LikeInfo) expr) {
         auto colInfo = extractFilterColumnInfo(likeInfo.likeOperand, filterItem, table);
         if (!colInfo.isNull) {
-            // Escape single quotes in pattern and wrap in quotes
-            // The pattern already has % and _ escaped as \% and \_ by escapeLikePattern()
+            // The pattern already has % and _ escaped as \% and \_ by
+            // escapeLikePattern(); the dialect quotes it and picks the
+            // (case-sensitive or -insensitive) matching operator.
+            string column = colInfo.get;
             string escapedPattern = likeInfo.likePattern.replace("'", "''");
-            if (likeInfo.caseInsensitive) {
-                // Case-insensitive: use LOWER() on both sides (works on all databases)
-                return Nullable!string("LOWER(" ~ colInfo.get ~ ") LIKE LOWER('" ~ escapedPattern ~ `') ESCAPE '\'`);
-            } else {
-                return Nullable!string(colInfo.get ~ " LIKE '" ~ escapedPattern ~ `' ESCAPE '\'`);
-            }
+            bool caseInsensitive = likeInfo.caseInsensitive;
+            return Nullable!DialectSql((SqlDialect d) => d.likeOp(column, escapedPattern, caseInsensitive));
         }
     }
 
-    return Nullable!string.init;
+    return Nullable!DialectSql.init;
+}
+
+private Nullable!DialectSql dialectAgnostic(string sql) {
+    return Nullable!DialectSql((SqlDialect) => sql);
 }
 
 /// Try to extract column name from an expression that should be a column access on the filter item.

@@ -42,6 +42,12 @@ interface SqlDialect {
     string notExistsSubquery(string subquery);
 
     /// Generate SQL for LIKE pattern matching.
+    /// `pattern` is a LIKE pattern using backslash as the escape character
+    /// (see escapeLikePattern), with single quotes already doubled; the
+    /// dialect quotes it as a string literal.
+    /// Case-sensitive matching must be case-sensitive regardless of the
+    /// database's default LIKE semantics (SQLite and MySQL's default
+    /// collations match case-insensitively).
     /// For case-insensitive matching:
     ///   - PostgreSQL uses ILIKE
     ///   - MySQL/SQLite use LOWER() wrapper
@@ -107,3 +113,7 @@ interface SqlDialect {
     ///   MySQL: "CAST(expr AS CHAR)"
     string castToText(string sql);
 }
+
+/// SQL text whose rendering depends on the target dialect. Used for
+/// fragments generated during optimization, before the dialect is known.
+alias DialectSql = string delegate(SqlDialect dialect);

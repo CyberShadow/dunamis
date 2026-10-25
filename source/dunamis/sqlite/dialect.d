@@ -42,7 +42,32 @@ class SQLiteDialect : SqlDialect {
             // Use LOWER() for consistent case-insensitive behavior
             return "(LOWER(" ~ operandSql ~ ") LIKE LOWER('" ~ pattern ~ `') ESCAPE '\')`;
         }
-        return "(" ~ operandSql ~ " LIKE '" ~ pattern ~ `' ESCAPE '\')`;
+        // SQLite's LIKE is case-insensitive for ASCII; GLOB is case-sensitive.
+        return "(" ~ operandSql ~ " GLOB '" ~ likeToGlob(pattern) ~ "')";
+    }
+
+    /// Translate a backslash-escaped LIKE pattern to an equivalent GLOB pattern.
+    private static string likeToGlob(string pattern) {
+        string result;
+        for (size_t i = 0; i < pattern.length; i++) {
+            char c = pattern[i];
+            if (c == '\\' && i + 1 < pattern.length) {
+                c = pattern[++i];
+                if (c == '*' || c == '?' || c == '[')
+                    result ~= "[" ~ c ~ "]";
+                else
+                    result ~= c;
+            } else if (c == '%') {
+                result ~= '*';
+            } else if (c == '_') {
+                result ~= '?';
+            } else if (c == '*' || c == '?' || c == '[') {
+                result ~= "[" ~ c ~ "]";
+            } else {
+                result ~= c;
+            }
+        }
+        return result;
     }
 
     override string name() { return "SQLite"; }
