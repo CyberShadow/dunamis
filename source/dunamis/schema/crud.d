@@ -70,12 +70,21 @@ auto _fieldToJson(T)(T val) {
 
 /// Check if a member is a non-PK database column suitable for CRUD input.
 /// Matches Col fields (have @SqlColumn) and plain fields (struct instance fields).
+/// Internal members and aliases of other members (e.g. the `_Fk` alias that
+/// BelongsTo declares for its FK column) are not separate columns: treating
+/// them as such would add a second, default-initialized input for the same
+/// SQL column and overwrite the real value.
 template _isInputColumn(Entity, string member) {
     import dunamis.relational.schema.attrs : hasSqlColumn, hasPrimaryKeyAttr;
-    import dunamis.core.types : isPlainField;
+    import dunamis.core.types : isInternalMember, isPlainField;
 
     enum _isInputColumn = () {
-        static if (!__traits(compiles, __traits(getMember, Entity, member)))
+        static if (isInternalMember!member)
+            return false;
+        else static if (!__traits(compiles, __traits(getMember, Entity, member)))
+            return false;
+        else static if (__traits(compiles, __traits(identifier, __traits(getMember, Entity, member))) &&
+                       __traits(identifier, __traits(getMember, Entity, member)) != member)
             return false;
         else static if (__traits(compiles, hasPrimaryKeyAttr!(Entity, member)) &&
                        hasPrimaryKeyAttr!(Entity, member))
@@ -500,4 +509,57 @@ unittest {
 
     // Should return one entity
     assert(result.length == 1);
+}
+
+// Test: foreign-key and other input columns reach the insert via GraphQL
+unittest {
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core : Executor;
+    import dunamis.graphql.compiler : compileQuery;
+    import dunamis.graphql.schema : Schema;
+    import dunamis.relational.schema : BelongsTo, Col, ForeignKey, Table;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
+    import std.typecons : Nullable;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("name", string);
+    }
+
+    @DemoEntity!(db, "posts")
+    static struct Post {
+        mixin DemoId;
+        mixin Col!("title", string);
+        mixin Col!("authorId", ForeignKey!User);
+        mixin BelongsTo!("author", "authorId");
+        mixin Col!("priority", int);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+        mixin Table!(Post, "posts");
+    }
+
+    alias MySchema = CrudMutationPlugin!(Schema!Query);
+
+    db = new MockDB!();
+    db.setTableData("users", `[{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]`);
+    db.setTableData("posts", `[]`);
+
+    auto executor = new Executor();
+    auto created = awaitSync(executor.execute(compileQuery!MySchema(`mutation {
+        createPost(input: {title: "x", authorId: 2, priority: 7}) { id }
+    }`)));
+    assert(created["createPost"]["id"].integer == 1, created.toString());
+
+    auto result = awaitSync(executor.execute(compileQuery!MySchema(
+        `{ posts { title priority authorId author { name } } }`)));
+    auto post = result["posts"][0];
+    assert(post["title"].str == "x", result.toString());
+    assert(post["priority"].integer == 7, result.toString());
+    assert(post["authorId"].integer == 2, result.toString());
+    assert(post["author"]["name"].str == "Bob", result.toString());
 }
