@@ -385,7 +385,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT posts.id, posts.title
+    SELECT posts.id, posts.title::text AS title
     FROM posts
     WHERE posts.id = ANY($1)
   )
@@ -421,7 +421,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT posts.id, posts.title, posts.body, posts.author_id, j0.id AS j0__id, j0.first_name AS j0__first_name, j0.last_name AS j0__last_name, ((j0.first_name || ' ') || j0.last_name) AS computed_0
+    SELECT posts.id, posts.title::text AS title, posts.body::text AS body, posts.author_id, j0.id AS j0__id, j0.first_name::text AS j0__first_name, j0.last_name::text AS j0__last_name, ((j0.first_name || ' ') || j0.last_name) AS computed_0
     FROM posts
     LEFT JOIN users j0 ON posts.author_id = j0.id
     WHERE posts.id = ANY($1)
@@ -461,13 +461,13 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT posts.id, posts.title, posts.body, posts.author_id, j0.id AS j0__id, j0.first_name AS j0__first_name, j0.last_name AS j0__last_name, ((j0.first_name || ' ') || j0.last_name) AS computed_0
+    SELECT posts.id, posts.title::text AS title, posts.body::text AS body, posts.author_id, j0.id AS j0__id, j0.first_name::text AS j0__first_name, j0.last_name::text AS j0__last_name, ((j0.first_name || ' ') || j0.last_name) AS computed_0
     FROM posts
     LEFT JOIN users j0 ON posts.author_id = j0.id
     WHERE posts.id = ANY($1)
   ),
   layer1 AS (
-    SELECT comments.id, comments.post_id, comments.body, comments.author_id, j0.id AS j0__id, j0.first_name AS j0__first_name, j0.last_name AS j0__last_name, ((j0.first_name || ' ') || j0.last_name) AS computed_1
+    SELECT comments.id, comments.post_id, comments.body::text AS body, comments.author_id, j0.id AS j0__id, j0.first_name::text AS j0__first_name, j0.last_name::text AS j0__last_name, ((j0.first_name || ' ') || j0.last_name) AS computed_1
     FROM comments
     LEFT JOIN users j0 ON comments.author_id = j0.id
     WHERE comments.post_id IN (SELECT id FROM layer0)
@@ -520,12 +520,12 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name
+    SELECT users.id, users.first_name::text AS first_name
     FROM users
     WHERE users.id = ANY($1)
   ),
   layer1 AS (
-    SELECT posts.id, posts.author_id, posts.title
+    SELECT posts.id, posts.author_id, posts.title::text AS title
     FROM posts
     WHERE posts.author_id IN (SELECT id FROM layer0)
   )
@@ -584,17 +584,17 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name
+    SELECT users.id, users.first_name::text AS first_name
     FROM users
     WHERE users.id = ANY($1)
   ),
   layer1 AS (
-    SELECT posts.id, posts.author_id, posts.title
+    SELECT posts.id, posts.author_id, posts.title::text AS title
     FROM posts
     WHERE posts.author_id IN (SELECT id FROM layer0)
   ),
   layer2 AS (
-    SELECT comments.id, comments.author_id, comments.body
+    SELECT comments.id, comments.author_id, comments.body::text AS body
     FROM comments
     WHERE comments.author_id IN (SELECT id FROM layer0)
   )
@@ -648,7 +648,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name, users.last_name, users.email
+    SELECT users.id, users.first_name::text AS first_name, users.last_name::text AS last_name, users.email::text AS email
     FROM users
     WHERE 1=1
   )
@@ -696,12 +696,12 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name, users.last_name, ((first_name || ' ') || last_name) AS computed_0
+    SELECT users.id, users.first_name::text AS first_name, users.last_name::text AS last_name, ((first_name || ' ') || last_name) AS computed_0
     FROM users
     WHERE 1=1
   ),
   layer1 AS (
-    SELECT posts.id, posts.author_id, posts.title
+    SELECT posts.id, posts.author_id, posts.title::text AS title
     FROM posts
     WHERE posts.author_id IN (SELECT id FROM layer0)
   )
@@ -756,17 +756,17 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name, users.last_name, ((first_name || ' ') || last_name) AS computed_0
+    SELECT users.id, users.first_name::text AS first_name, users.last_name::text AS last_name, ((first_name || ' ') || last_name) AS computed_0
     FROM users
     WHERE 1=1
   ),
   layer1 AS (
-    SELECT posts.id, posts.author_id, posts.title
+    SELECT posts.id, posts.author_id, posts.title::text AS title
     FROM posts
     WHERE posts.author_id IN (SELECT id FROM layer0)
   ),
   layer2 AS (
-    SELECT comments.id, comments.post_id, comments.body
+    SELECT comments.id, comments.post_id, comments.body::text AS body
     FROM comments
     WHERE comments.post_id IN (SELECT id FROM layer1)
   )
@@ -813,7 +813,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name, (('Hello ' || first_name) || '!') AS computed_0
+    SELECT users.id, users.first_name::text AS first_name, (('Hello ' || first_name) || '!') AS computed_0
     FROM users
     WHERE 1=1
   )
@@ -862,7 +862,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name, users.last_name, ((first_name || ' ') || last_name) AS computed_0
+    SELECT users.id, users.first_name::text AS first_name, users.last_name::text AS last_name, ((first_name || ' ') || last_name) AS computed_0
     FROM users
     WHERE users.id = ANY($1)
   )
@@ -901,7 +901,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name, (('Hello ' || first_name) || '!') AS computed_0
+    SELECT users.id, users.first_name::text AS first_name, (('Hello ' || first_name) || '!') AS computed_0
     FROM users
     WHERE users.id = ANY($1)
   )
@@ -1182,7 +1182,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name
+    SELECT users.id, users.first_name::text AS first_name
     FROM users
     WHERE 1=1
     ORDER BY users.first_name
@@ -1231,7 +1231,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name
+    SELECT users.id, users.first_name::text AS first_name
     FROM users
     WHERE 1=1
     ORDER BY users.first_name DESC
@@ -1339,7 +1339,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name
+    SELECT users.id, users.first_name::text AS first_name
     FROM users
     WHERE 1=1
     ORDER BY users.first_name
@@ -1401,7 +1401,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name, EXISTS (SELECT 1 FROM posts WHERE posts.author_id = users.id AND (posts.title <> '')) AS computed_0
+    SELECT users.id, users.first_name::text AS first_name, EXISTS (SELECT 1 FROM posts WHERE posts.author_id = users.id AND (posts.title <> '')) AS computed_0
     FROM users
     WHERE users.id = ANY($1)
   )
@@ -1462,7 +1462,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name, EXISTS (SELECT 1 FROM posts WHERE posts.author_id = users.id AND (NOT (posts.title <> ''))) AS computed_0
+    SELECT users.id, users.first_name::text AS first_name, EXISTS (SELECT 1 FROM posts WHERE posts.author_id = users.id AND (NOT (posts.title <> ''))) AS computed_0
     FROM users
     WHERE users.id = ANY($1)
   )
@@ -1554,7 +1554,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT posts.id, posts.title, posts.author_id, j0.id AS j0__id, j0.first_name AS j0__first_name
+    SELECT posts.id, posts.title::text AS title, posts.author_id, j0.id AS j0__id, j0.first_name::text AS j0__first_name
     FROM posts
     LEFT JOIN users j0 ON posts.author_id = j0.id
     WHERE posts.id = ANY($1)
@@ -1590,7 +1590,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT comments.id, comments.body, comments.author_id, j0.id AS j0__id, j0.first_name AS j0__first_name
+    SELECT comments.id, comments.body::text AS body, comments.author_id, j0.id AS j0__id, j0.first_name::text AS j0__first_name
     FROM comments
     LEFT JOIN users j0 ON comments.author_id = j0.id
     WHERE comments.id = ANY($1)
@@ -1627,7 +1627,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT comments.id, comments.body, comments.post_id, j0.id AS j0__id, j0.author_id AS j0__author_id, j1.id AS j1__id, j1.first_name AS j1__first_name
+    SELECT comments.id, comments.body::text AS body, comments.post_id, j0.id AS j0__id, j0.author_id AS j0__author_id, j1.id AS j1__id, j1.first_name::text AS j1__first_name
     FROM comments
     LEFT JOIN posts j0 ON comments.post_id = j0.id
     LEFT JOIN users j1 ON j0.author_id = j1.id
@@ -1707,7 +1707,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name
+    SELECT users.id, users.first_name::text AS first_name
     FROM users
     WHERE 1=1
   )
@@ -1737,7 +1737,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name, (('Hello ' || first_name) || '!') AS computed_0
+    SELECT users.id, users.first_name::text AS first_name, (('Hello ' || first_name) || '!') AS computed_0
     FROM users
     WHERE users.id = ANY($1)
   )
