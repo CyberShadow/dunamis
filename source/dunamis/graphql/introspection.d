@@ -10,7 +10,7 @@ import std.typecons : Nullable;
 
 import dunamis.core.types : isCustomScalar, isAbstractType, getImplementedByMembers;
 import dunamis.core.discovery : getAllAbstractTypes, getAbstractTypeMembers, getImplementedInterfaces,
-    getSchemaFields;
+    getSchemaFields, uniqueTypes;
 import dunamis.core.expr : Expr, ExprResultType, isExpr;
 import dunamis.graphql.schema;
 
@@ -315,11 +315,20 @@ JSONValue buildIntrospectionJson(alias SchemaOrQuery)() {
         struct SubscriptionType {}
     }
 
-    // Discover all types (same pattern as generateSchemaSDL)
+    // Discover all types (same pattern as generateSchemaSDL). A plugin's
+    // AllEntityTypes may be restricted to relational entities, so merge it
+    // with a full walk of the Query type: union/interface marker types and
+    // other non-entity output objects must be introspectable too.
     static if (isSchema!SchemaOrQuery && __traits(hasMember, SchemaOrQuery, "AllEntityTypes")) {
-        alias AllEntityTypes = SchemaOrQuery.AllEntityTypes;
+        alias EntityTypes = SchemaOrQuery.AllEntityTypes;
     } else {
-        alias AllEntityTypes = getAllObjectTypes!QueryType;
+        alias EntityTypes = getAllObjectTypes!QueryType;
+    }
+    static if (isSchema!SchemaOrQuery && __traits(hasMember, SchemaOrQuery, "AdditionalObjectTypes")) {
+        alias AllEntityTypes = uniqueTypes!(EntityTypes, getAllObjectTypes!QueryType,
+            SchemaOrQuery.AdditionalObjectTypes.Types);
+    } else {
+        alias AllEntityTypes = uniqueTypes!(EntityTypes, getAllObjectTypes!QueryType);
     }
 
     alias AllInputTypes_ = getAllInputTypes!QueryType;
@@ -1262,4 +1271,61 @@ unittest {
         }
     }
     assert(foundArgs, "formattedName should have args");
+}
+
+// Abstract types stay introspectable when a plugin restricts AllEntityTypes
+// to relational entities (FilterPlugin does)
+unittest {
+    import dunamis.core;
+    import dunamis.core.expr.combinators : unionOf;
+    import dunamis.core.types : AbstractField, ImplementedBy;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+    import dunamis.schema.filtering : FilterPlugin;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+    }
+
+    @DemoEntity!(db, "posts")
+    static struct Post {
+        mixin DemoId;
+        mixin Col!("title", string);
+    }
+
+    @ImplementedBy!(User, Post)
+    static struct SearchResult {}
+
+    @ImplementedBy!(User, Post)
+    static struct Node {
+        mixin AbstractField!("id", long);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+        mixin Table!(Post, "posts");
+        static auto search(Expr!Query q) { return unionOf!SearchResult(users(q), posts(q)); }
+        static auto nodes(Expr!Query q) { return unionOf!Node(users(q), posts(q)); }
+    }
+
+    alias FilteredSchema = FilterPlugin!(Schema!Query);
+    static assert(__traits(hasMember, FilteredSchema, "AllEntityTypes"));
+
+    JSONValue[string] lookup;
+    foreach (t; buildIntrospectionJson!FilteredSchema()["types"].array)
+        lookup[t["name"].str] = t;
+
+    assert("SearchResult" in lookup, "SearchResult union missing from introspection");
+    assert(lookup["SearchResult"]["kind"].str == "UNION");
+    string[] members;
+    foreach (pt; lookup["SearchResult"]["possibleTypes"].array)
+        members ~= pt["name"].str;
+    assert(members.sort.release == ["Post", "User"], members.to!string);
+
+    assert("Node" in lookup, "Node interface missing from introspection");
+    assert(lookup["Node"]["kind"].str == "INTERFACE");
 }
