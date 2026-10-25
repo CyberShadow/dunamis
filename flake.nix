@@ -86,7 +86,7 @@
             buildPhase = ''
               runHook preBuild
               echo "=== Running D unit tests ==="
-              dub test --compiler=ldc2 --config=library --build=ci
+              dub test --compiler=ldc2 --config=library --build=ci-unittest
               runHook postBuild
             '';
 

@@ -10,6 +10,14 @@ buildType "ci" {
     buildRequirements "disallowDeprecations"
 }
 
+# Same as "ci", plus -unittest. "ci" itself must not compile unittests: it is
+# also used (via `dub build`) for the integration-test executables, whose
+# main() would otherwise be preceded by the whole module unittest suite.
+buildType "ci-unittest" {
+    buildOptions "debugMode" "debugInfo" "unittests"
+    buildRequirements "disallowDeprecations"
+}
+
 sourcePaths "source"
 
 dependency "graphqld:parser" repository="git+https://github.com/CyberShadow/graphqld.git" version="7b8c9cd0f2482deab6a9ecb3dbf6d9d246860972"
