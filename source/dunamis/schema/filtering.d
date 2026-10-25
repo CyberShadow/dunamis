@@ -251,12 +251,16 @@ template isArrayReturningMethod(Entity, string member) {
                 alias retType = ReturnType!method;
                 alias resultType = ExprResultType!retType;
 
-                // Check if return type is Expr!(ElementT[]) for any ElementT
-                // Exclude string (which is immutable(char)[]) - it's a scalar, not an array field
+                // Match on the result type, not on retType itself: the
+                // declared return type of a HasMany accessor is a concrete
+                // Expr subclass (e.g. HasManyExpr, or MapExpr once a plugin
+                // wrapped the entity), not the literal Expr!(T[]).
+                // Exclude strings (immutable(char)[]) - scalars, not array fields
+                import std.traits : isSomeString;
                 import dunamis.core.types : isCustomScalar;
                 static if (!isCustomScalar!resultType &&
-                           is(retType == Expr!(ElementT[]), ElementT) &&
-                           !is(retType == Expr!string)) {
+                           is(resultType : ElementT[], ElementT) &&
+                           !isSomeString!resultType) {
                     enum isArrayReturningMethod = true;
                 } else {
                     enum isArrayReturningMethod = false;
@@ -363,9 +367,11 @@ template getArrayElementType(Entity, string member) {
     import std.traits : ReturnType;
 
     alias method = __traits(getMember, Entity, member);
-    alias retType = ReturnType!method;
-    // retType is Expr!(T[]), extract T
-    static if (is(retType == Expr!(T[]), T)) {
+    // The declared return type may be a concrete Expr subclass rather than
+    // the literal Expr!(T[]), so match on the result type (as
+    // isArrayReturningMethod does).
+    alias resultType = ExprResultType!(ReturnType!method);
+    static if (is(resultType : T[], T)) {
         alias getArrayElementType = T;
     } else {
         static assert(false, "Method " ~ member ~ " does not return Expr!(T[])");
@@ -1636,4 +1642,71 @@ unittest {
     alias BaseSchema = Schema!Query;
     alias FilteredSchema = FilterPlugin!BaseSchema;
     static assert(isSchema!FilteredSchema);
+}
+
+// some/every/none over a HasMany relationship must actually filter, also when
+// earlier plugins have wrapped the entity (its HasMany accessor then returns a
+// concrete Expr subclass rather than a literal Expr!(T[])).
+unittest {
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core : Executor;
+    import dunamis.graphql.compiler : compileQuery;
+    import dunamis.graphql.schema : Schema;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
+    import dunamis.relational.schema : Col, ForeignKey, HasMany, Table;
+    import std.meta : AliasSeq;
+    import dunamis.schema.crud : CrudMutationPlugin;
+    import dunamis.schema.plugin : ApplyPlugins;
+    import dunamis.schema.sorting : SortingPlugin;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "posts")
+    static struct Post {
+        mixin DemoId;
+        mixin Col!("title", string);
+        mixin Col!("authorId", long);
+    }
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+        mixin HasMany!("posts", Post, "author_id");
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[
+        {"id":1,"first_name":"Alice"},
+        {"id":2,"first_name":"Bob"},
+        {"id":3,"first_name":"Carol"}
+    ]`);
+    db.setTableData("posts", `[
+        {"id":1,"title":"Hello World","author_id":1},
+        {"id":2,"title":"Hello Again","author_id":1},
+        {"id":3,"title":"Hello D","author_id":2},
+        {"id":4,"title":"Goodbye","author_id":2}
+    ]`);
+
+    static void check(alias S)(string postsFilter, string[] expected) {
+        auto result = awaitSync(new Executor().execute(compileQuery!S(
+            `{ users(filter: {posts: ` ~ postsFilter ~ `}) { firstName } }`)));
+        string[] found;
+        foreach (user; result["users"].array)
+            found ~= user["firstName"].str;
+        assert(found == expected, postsFilter ~ ": " ~ found.to!string);
+    }
+
+    static foreach (S; AliasSeq!(
+        FilterPlugin!(Schema!Query),
+        ApplyPlugins!(Schema!Query, CrudMutationPlugin, FilterPlugin, SortingPlugin),
+    )) {
+        check!S(`{some: {title: {contains: "Hello"}}}`, ["Alice", "Bob"]);
+        check!S(`{every: {title: {contains: "Hello"}}}`, ["Alice", "Carol"]);
+        check!S(`{none: {title: {contains: "Hello"}}}`, ["Carol"]);
+    }
 }
