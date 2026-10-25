@@ -795,14 +795,25 @@ Expr!bool buildConditionFromScalarFilter(ColExpr, ScalarFilter)(ColExpr colExpr,
 
     enum isNullableColumn = is(ColExpr.ResultType == Nullable!NullableElement, NullableElement);
 
+    // Custom scalar columns are filtered through StringFilter (their wire
+    // representation); parse operands that are not directly assignable to
+    // the scalar's underlying type (e.g. a string for a long-backed scalar)
+    // with the scalar's own deserializer.
+    static S scalarOperand(S, V)(V value) {
+        static if (is(V : S.DType))
+            return S(value);
+        else
+            return S.fromJsonValue(JSONValue(value));
+    }
+
     auto operand(V)(V value) {
         static if (is(ColExpr.ResultType == Nullable!U, U))
             static if (isCustomScalar!U)
-                return constant(Nullable!U(U(value)), lengthSource);
+                return constant(Nullable!U(scalarOperand!U(value)), lengthSource);
             else
                 return constant(Nullable!U(value), lengthSource);
         else static if (isCustomScalar!(ColExpr.ResultType))
-            return constant(ColExpr.ResultType(value), lengthSource);
+            return constant(scalarOperand!(ColExpr.ResultType)(value), lengthSource);
         else
             return constant(value, lengthSource);
     }
@@ -1496,6 +1507,54 @@ unittest {
     auto result = awaitSync(new Executor().execute(expression));
     assert(result["datedRows"].array.length == 1, result.toString());
     assert(result["datedRows"][0]["id"].integer == 2);
+}
+
+// Custom scalars backed by a non-string type are still filtered through
+// StringFilter; operands are parsed with the scalar's deserializer.
+unittest {
+    import std.conv : to;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core : CustomScalar, Executor;
+    import dunamis.graphql.compiler : compileQuery;
+    import dunamis.graphql.schema : Schema;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
+    import dunamis.relational.schema : Col, Table;
+
+    alias TestInt64 = CustomScalar!(long, "TestInt64",
+        (long v) => JSONValue(v),
+        (JSONValue j) => j.type == JSONType.integer ? j.integer : j.str.to!long);
+    static MockDB!() testDb;
+
+    @DemoEntity!(testDb, "big_rows")
+    static struct BigRow {
+        mixin DemoId;
+        mixin Col!("big", TestInt64);
+    }
+    static struct Query { mixin Table!(BigRow, "bigRows"); }
+    alias FilteredSchema = FilterPlugin!(Schema!Query);
+    static assert(is(FilterTypeFor!TestInt64 == StringFilter));
+
+    testDb = new MockDB!();
+    testDb.setTableData("big_rows", `[
+        {"id":1,"big":5000000000},
+        {"id":2,"big":7},
+        {"id":3,"big":8}
+    ]`);
+
+    long[] ids(string filter) {
+        auto result = awaitSync(new Executor().execute(compileQuery!FilteredSchema(
+            `{ bigRows(filter: ` ~ filter ~ `) { id } }`)));
+        long[] found;
+        foreach (row; result["bigRows"].array)
+            found ~= row["id"].integer;
+        return found;
+    }
+
+    assert(ids(`{big: {equalTo: "5000000000"}}`) == [1]);
+    assert(ids(`{big: {notEqualTo: "7"}}`) == [1, 3]);
+    assert(ids(`{big: {in: ["7", "8"]}}`) == [2, 3]);
+    assert(ids(`{big: {notIn: ["7", "8"]}}`) == [1]);
+    assert(ids(`{big: {greaterThan: "7", lessThan: "5000000000"}}`) == [3]);
 }
 
 unittest {
