@@ -752,6 +752,108 @@ NullableObjectExpr!T finalizeNullableObjectExpr(T)(
 }
 
 // ============================================================================
+// Object Expression
+// ============================================================================
+
+/// Expression for the selection set of a non-null object field.
+/// Like NullableObjectExpr, it evaluates the object once and binds it for the
+/// selection set, so that the object is not recomputed for each selected field,
+/// and a failure to produce it is reported once, at the object field.
+///
+/// If, after optimization, no selected field needs the bound object any more
+/// (e.g. all of them were pushed into a join), the selection set is used as is.
+class ObjectExpr(T) : Expr!JSONValue {
+    private ExprBase _input;      // Expr!T
+    private ExprBase _innerExpr;  // Expr!JSONValue (selection set compiled against _bound)
+    private BoundObjectExpr!T _bound;
+
+    this(Expr!T input, Expr!JSONValue innerExpr, BoundObjectExpr!T bound) {
+        _input = input;
+        _innerExpr = innerExpr;
+        _bound = bound;
+    }
+
+    override ExprBase[] dependencies() {
+        return [_input, _innerExpr];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0) _input = newDep;
+        else if (index == 1) _innerExpr = newDep;
+    }
+
+    override Expr!JSONValue optimize(OptimizeContext ctx) {
+        _innerExpr = (cast(Expr!JSONValue) _innerExpr).optimize(ctx);
+        if (!dependsOn(_innerExpr, _bound))
+            return cast(Expr!JSONValue) _innerExpr;
+        _input = optimizeExpr(_input, ctx);
+        return this;
+    }
+
+    override Promise!(JSONValue[]) eval(EvalContext ctx) {
+        auto innerExpr = _innerExpr;
+        auto bound = _bound;
+        return evalAs!T(_input, ctx).then((T[] values) {
+            bound.setValues(values);
+            return evalAs!JSONValue(innerExpr, ctx);
+        });
+    }
+
+    private static bool dependsOn(ExprBase expr, ExprBase target) {
+        bool[ExprBase] visited;
+        bool visit(ExprBase e) {
+            if (e is target) return true;
+            if (e is null || e in visited) return false;
+            visited[e] = true;
+            foreach (dependency; e.dependencies)
+                if (visit(dependency)) return true;
+            return false;
+        }
+        return visit(expr);
+    }
+}
+
+/// The object bound by an ObjectExpr, for compiling its selection set.
+/// Forwards to the object's expression during optimization (so that chain
+/// traversal can continue through it), and evaluates it directly if no
+/// ObjectExpr has bound its values.
+class BoundObjectExpr(T) : Expr!T, UnwrapNullableInfo {
+    private ExprBase _input;  // Expr!T
+    private T[] _values;
+    private bool _hasValues;
+
+    this(Expr!T input) {
+        _input = input;
+    }
+
+    void setValues(T[] values) {
+        _values = values;
+        _hasValues = true;
+    }
+
+    override ExprBase[] dependencies() {
+        return [_input];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0) _input = newDep;
+    }
+
+    override Expr!T optimize(OptimizeContext ctx) {
+        _input = optimizeExpr(_input, ctx);
+        return this;
+    }
+
+    override Promise!(T[]) eval(EvalContext ctx) {
+        if (_hasValues)
+            return resolve(_values);
+        return evalAs!T(_input, ctx);
+    }
+
+    @property ExprBase inputExpr() { return _input; }
+}
+
+// ============================================================================
 // Tests: helpers and field-level error catching
 // ============================================================================
 

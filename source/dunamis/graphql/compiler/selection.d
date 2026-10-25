@@ -375,7 +375,8 @@ DynamicJsonObjectExpr buildDynamicJsonObject(string[] names, ExprBase[] exprs, J
 /// Structs/arrays of structs compile selection sets.
 /// SchemaSource enables abstract type resolution (default void = no abstract types).
 ExprBase compileFieldResult(ResultExpr, alias SchemaSource = void)(ResultExpr resultExpr, SelectionSet ss, JSONValue variables, FragmentMap fragments, JSONValue[] pathPrefix = []) {
-    import dunamis.core.expr : ExprResultType, UnwrapNullableExpr, finalizeNullableObjectExpr;
+    import dunamis.core.expr : BoundObjectExpr, ExprResultType, ObjectExpr, UnwrapNullableExpr,
+        finalizeNullableObjectExpr;
 
     alias ResultType = ExprResultType!ResultExpr;
 
@@ -432,7 +433,10 @@ ExprBase compileFieldResult(ResultExpr, alias SchemaSource = void)(ResultExpr re
             throw new CompilerException(
                 "Field returning " ~ ResultType.stringof ~ " requires a selection set");
         }
-        return compileSelectionSetBody!(ResultType, SchemaSource)(resultExpr, ss, variables, fragments, pathPrefix);
+        // Evaluate the object once for all selected fields (see ObjectExpr)
+        auto bound = new BoundObjectExpr!ResultType(resultExpr);
+        auto innerExpr = compileSelectionSetBody!(ResultType, SchemaSource)(bound, ss, variables, fragments, pathPrefix);
+        return new ObjectExpr!ResultType(resultExpr, innerExpr, bound);
     }
     // Scalars (primitives and CustomScalar) - wrap to JSON
     else {

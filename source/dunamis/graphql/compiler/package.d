@@ -3544,3 +3544,50 @@ unittest {
         // Validation error about no subscription type
     }
 }
+
+// A non-null object field evaluates its object once for all selected fields,
+// and a failure to produce it is reported once, at the object field.
+unittest {
+    import std.conv : to;
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+
+    static MockDB!() db;
+    static int evaluations;
+    static struct Span { int from; int to; }
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("name", string);
+
+        static auto span(Expr!User u) {
+            return use((string name) {
+                evaluations++;
+                if (name == "Bob") throw new Exception("no span");
+                return Span(0, cast(int) name.length);
+            }, name(u));
+        }
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[{"id": 1, "name": "Alice"}]`);
+    auto result = awaitSync(new Executor().execute(compileTestQuery!Query(`{ users { span { from to } } }`)));
+    assert(result["users"][0]["span"]["from"].integer == 0, result.toString());
+    assert(result["users"][0]["span"]["to"].integer == 5, result.toString());
+    assert(evaluations == 1, evaluations.to!string);
+
+    db.setTableData("users", `[{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]`);
+    auto ctx = new EvalContext();
+    awaitSync(new Executor().execute(compileTestQuery!Query(`{ users { name span { from to } } }`), ctx));
+    assert(ctx.errors.length == 1, ctx.errors.to!string);
+    assert(ctx.errors[0].message == "no span");
+    assert(ctx.errors[0].path == [JSONValue("users"), JSONValue("span")], ctx.errors.to!string);
+}
