@@ -17,10 +17,20 @@ starts an HTTP server, and runs GraphQL queries to verify end-to-end functionali
 **Quick iteration** (unit tests only, faster but incomplete):
 
 ```bash
-dub test              # Unit tests only
-dub test -d=sql       # With SQL debug output
-dub test -d=graphql   # Show generated GraphQL schema
-dub test -d=ddl       # Show generated SQL DDL
+dub test --compiler=ldc2              # Unit tests only
+dub test --compiler=ldc2 -d=sql       # With SQL debug output
+dub test --compiler=ldc2 -d=graphql   # Show generated GraphQL schema
+dub test --compiler=ldc2 -d=ddl       # Show generated SQL DDL
 ```
+
+The `unit-tests` flake check runs
+`dub test --compiler=ldc2 --config=library --build=ci-unittest`. Note that
+the `ci` build type does not compile unittests (it is used for the
+integration-test executables), so `dub test --build=ci` runs nothing.
+
+An integration suite can also be run outside Nix: build it with e.g.
+`dub build --compiler=ldc2 --config=postgres-integration --build=ci` and run
+`build/dunamis` with `PGHOST`/`PGPORT`/`PGUSER`/`PGDATABASE` (or the
+`MYSQL_*` variables) pointing at a scratch database; see `flake.nix`.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for high-level architecture details.
