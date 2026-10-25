@@ -175,8 +175,12 @@ private template hasEnumReturn(alias method) {
     }
 }
 
+/// Array results (lists) are not sortable; strings are scalars, not lists.
 private template isArrayResult(T) {
-    static if (is(T == E[], E))
+    import std.traits : isSomeString;
+    static if (isSomeString!T)
+        enum isArrayResult = false;
+    else static if (is(T == E[], E))
         enum isArrayResult = true;
     else
         enum isArrayResult = false;
