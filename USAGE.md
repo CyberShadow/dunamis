@@ -892,6 +892,42 @@ auto result2 = executor.execute(query);  // Uses new EvalContext() internally
 - **No SQL pushdown** — context values are runtime data, correctly opaque to the optimizer
 - **No schema impact** — context fields appear in the schema like any computed field, but the context dependency is invisible to introspection
 
+## Computed Fields from Free Functions
+
+Computed fields do not have to be declared inside the entity struct. `ComputedFieldsPlugin` attaches free functions of the form `auto field(Expr!Entity e, args...)` to the schema type built from `Entity`, so fields can live in modules of their own (for example, one module per field) without the entity module importing them:
+
+```d
+module app.fields.post_titles;
+
+import std.array : join;
+import dunamis.core.expr : Expr, constant, map, use;
+import dunamis.graphql.schema : GqlDescription;
+import app.entities : User, Post;
+
+/// Fields are public; helpers stay private and are not picked up.
+@GqlDescription("Titles of the user's posts")
+auto postTitles(Expr!User u, string separator = ", ") {
+    return use((string[] titles, string sep) => titles.join(sep),
+        map!((Expr!Post p) => p.title)(u.posts), constant(separator, u));
+}
+```
+
+```d
+alias FinalSchema = ApplyPlugins!(Schema!(Query, Mutation),
+    FilterPlugin, SortingPlugin, PaginationPlugin,
+    ComputedFieldsPlugin!(app.fields.post_titles, app.fields.other),
+);
+```
+
+**How it works:**
+
+- Sources are modules and/or function symbols. A module contributes every public function declared in it (not imported into it) whose first parameter is an `Expr`; names starting with `_` are skipped.
+- A function is attached to the schema type whose user-declared type is `Entity`, whatever plugins wrapped it. Inside the function, `Entity` is seen exactly as declared (`u.posts` is `Expr!(Post[])`), and entity or POD results (`Expr!Post`, `Expr!(Post[])`, `Expr!(Nullable!DateRange)`) are mapped to the schema's types, including their own computed fields.
+- The GraphQL field name is the function name; extra parameters become arguments (with defaults), and `@GqlName`, `@GqlDescription`, `@GqlDeprecated` on the function are honoured.
+- A function whose entity is not part of the schema, or whose name collides with an existing field, is a compile error.
+
+**Placement:** apply the plugin after `FilterPlugin` and `SortingPlugin`. Those plugins treat every scalar field as a column: placed earlier, computed fields would appear in `filter`/`orderBy` inputs, and filter conditions on them are currently skipped silently (see TODO.md). The plugin itself works at any position.
+
 ## Field Overrides
 
 `FieldOverridePlugin` enables runtime field overrides without recompilation — useful for feature flags, A/B testing, gradual rollouts, or per-deployment customization. Override delegates receive the batch of default values and can transform or replace them.

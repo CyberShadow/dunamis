@@ -8,6 +8,7 @@ public import dunamis.schema.crud;
 public import dunamis.schema.subscriptions;
 public import dunamis.schema.type_mapping;
 public import dunamis.schema.overrides;
+public import dunamis.schema.computed;
 
 // Schema template bundling Query, optional Mutation, and optional Subscription types.
 // Normalizes entity types so all fields use uniform static Expr methods.
