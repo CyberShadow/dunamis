@@ -98,6 +98,8 @@ class MySQLDialect : SqlDialect {
 
     override string emptyJsonArray() { return "JSON_ARRAY()"; }
 
+    override string castToText(string sql) { return "CAST(" ~ sql ~ " AS CHAR)"; }
+
     override string aggregateLayerJson(int layerId, string orderByClause) {
         if (orderByClause.length > 0) {
             return format("COALESCE((SELECT JSON_ARRAYAGG(row_json ORDER BY %s) FROM layer%d), %s)",

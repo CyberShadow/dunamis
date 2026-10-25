@@ -93,6 +93,8 @@ class SQLiteDialect : SqlDialect {
 
     override string emptyJsonArray() { return "json('[]')"; }
 
+    override string castToText(string sql) { return "CAST(" ~ sql ~ " AS TEXT)"; }
+
     override string aggregateLayerJson(int layerId, string orderByClause) {
         if (orderByClause.length > 0) {
             return format("COALESCE((SELECT json_group_array(json(row_json)) FROM (SELECT * FROM layer%d ORDER BY %s)), %s)",

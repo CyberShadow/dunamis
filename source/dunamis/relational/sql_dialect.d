@@ -98,4 +98,12 @@ interface SqlDialect {
     ///   SQLite: "COALESCE((SELECT json_group_array(json(row_json)) FROM layer0), json('[]'))"
     ///   MySQL: "COALESCE((SELECT JSON_ARRAYAGG(row_json) FROM layer0), JSON_ARRAY())"
     string aggregateLayerJson(int layerId, string orderByClause);
+
+    /// Cast an SQL expression to the dialect's text type, so that columns
+    /// read as D strings (e.g. enum, date or numeric-string columns) are
+    /// projected as text.
+    ///   PostgreSQL: "expr::text"
+    ///   SQLite: "CAST(expr AS TEXT)"
+    ///   MySQL: "CAST(expr AS CHAR)"
+    string castToText(string sql);
 }

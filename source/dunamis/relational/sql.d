@@ -72,7 +72,7 @@ private string toCTE(QueryNode node, SqlDialect dialect, SqlOptimizer sqlOpt) {
 
     sql ~= format("  layer%d AS (\n", node.id.value);
     sql ~= "    SELECT ";
-    sql ~= buildSelectColumns(node, sqlOpt);
+    sql ~= buildSelectColumns(node, dialect, sqlOpt);
 
     // Dialect-specific: add per-row JSON wrapping if needed
     auto rowJsonFunc = dialect.rowJsonFunc();
@@ -164,7 +164,7 @@ private string toCTEWithWindowFunction(QueryNode node, SqlDialect dialect, SqlOp
 
     // Outer SELECT: project needed columns from the windowed subquery
     sql ~= "    SELECT ";
-    sql ~= buildSelectColumns(node, sqlOpt, "_inner");
+    sql ~= buildSelectColumns(node, dialect, sqlOpt, "_inner");
 
     // Add per-row JSON wrapping if needed (for SQLite/MySQL style)
     auto rowJsonFunc = dialect.rowJsonFunc();
@@ -223,7 +223,7 @@ private string toCTEWithWindowFunction(QueryNode node, SqlDialect dialect, SqlOp
 /// Generate SQL SELECT clause including computed columns.
 /// If tableAlias is provided, uses that instead of node.table for column references
 /// (used for window function CTEs where the outer SELECT references the inner subquery).
-string buildSelectColumns(QueryNode node, SqlOptimizer sqlOpt, string tableAlias = null) {
+string buildSelectColumns(QueryNode node, SqlDialect dialect, SqlOptimizer sqlOpt, string tableAlias = null) {
     string[] selectParts;
 
     auto tableName = tableAlias !is null ? tableAlias : node.table;
@@ -231,7 +231,7 @@ string buildSelectColumns(QueryNode node, SqlOptimizer sqlOpt, string tableAlias
     // Regular columns from main table
     foreach (col; node.columns) {
         selectParts ~= col in node.stringColumns
-            ? format("%s.%s::text AS %s", tableName, col, col)
+            ? format("%s AS %s", dialect.castToText(tableName ~ "." ~ col), col)
             : format("%s.%s", tableName, col);
     }
 
@@ -248,8 +248,9 @@ string buildSelectColumns(QueryNode node, SqlOptimizer sqlOpt, string tableAlias
                         tableName, joinInfo.alias_.value, col, joinInfo.alias_.value, col);
                 } else {
                     selectParts ~= isStringColumn
-                        ? format("%s.%s::text AS %s__%s",
-                            joinInfo.alias_.value, col, joinInfo.alias_.value, col)
+                        ? format("%s AS %s__%s",
+                            dialect.castToText(joinInfo.alias_.value ~ "." ~ col),
+                            joinInfo.alias_.value, col)
                         : format("%s.%s AS %s__%s",
                             joinInfo.alias_.value, col, joinInfo.alias_.value, col);
                 }
@@ -308,6 +309,24 @@ string buildJsonObjectArgs(QueryNode node, SqlOptimizer sqlOpt, string tableAlia
 // ============================================================================
 // Unit Tests
 // ============================================================================
+
+unittest {
+    import dunamis.mysql.dialect : mysqlDialect;
+    import dunamis.postgres.dialect : postgresDialect;
+
+    // String columns (own and joined) are cast to text in the dialect's syntax
+    auto node = new QueryNode(QueryNodeId(0), "Post", "posts", ["id"]);
+    node.addColumn("title");
+    node.markStringColumn("title");
+    auto j = node.addJoin("users", "User", "author_id", ["id"]);
+    node.addJoinedColumn(j, "name");
+    node.markJoinedStringColumn(j, "name");
+
+    auto pg = buildSelectColumns(node, postgresDialect(), null);
+    assert(pg == "posts.id, posts.title::text AS title, j0.id AS j0__id, j0.name::text AS j0__name", pg);
+    auto my = buildSelectColumns(node, mysqlDialect(), null);
+    assert(my == "posts.id, CAST(posts.title AS CHAR) AS title, j0.id AS j0__id, CAST(j0.name AS CHAR) AS j0__name", my);
+}
 
 unittest {
     import dunamis.postgres.dialect : postgresDialect;

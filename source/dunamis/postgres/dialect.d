@@ -93,6 +93,8 @@ class PostgresDialect : SqlDialect {
 
     override string emptyJsonArray() { return "'[]'::json"; }
 
+    override string castToText(string sql) { return sql ~ "::text"; }
+
     override string aggregateLayerJson(int layerId, string orderByClause) {
         if (orderByClause.length > 0) {
             return format("(SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (SELECT * FROM layer%d ORDER BY %s) t)",

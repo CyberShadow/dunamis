@@ -1162,6 +1162,7 @@ unittest {
         override string rowJsonFunc() { return ""; }
         override string emptyJsonArray() { return "'[]'::json"; }
         override string aggregateLayerJson(int, string) { return ""; }
+        override string castToText(string sql) { return sql ~ "::text"; }
     }
     auto optimizer = new SqlOptimizer(new TestDialect());
     assert(optimizer !is null);
@@ -1232,6 +1233,7 @@ unittest {
         override string rowJsonFunc() { return ""; }
         override string emptyJsonArray() { return "'[]'::json"; }
         override string aggregateLayerJson(int, string) { return ""; }
+        override string castToText(string sql) { return sql ~ "::text"; }
     }
     auto ctx = new OptimizeContext();
     auto sqlOpt = new SqlOptimizer(new TestDialect());
