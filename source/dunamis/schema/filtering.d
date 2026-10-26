@@ -19,7 +19,7 @@ import std.conv : to;
 import std.algorithm : canFind;
 
 import dunamis.core.expr : Expr, ExprResultType, ExprBase;
-import dunamis.core.types : isCustomScalar;
+import dunamis.core.types : isCustomScalar, isPublicMember;
 import dunamis.core.filtering : filterBy, FilterByExpr, FilterItemExpr, FilterByInfo;
 import dunamis.schema.plugin;
 import dunamis.graphql.schema.udas : GqlName, getGraphQLTypeName;
@@ -159,7 +159,7 @@ template getFilterableColumns(Entity) {
     enum string[] getFilterableColumns = () {
         string[] columns;
         static foreach (member; __traits(allMembers, Entity)) {{
-            static if (!isInternalMember!member && isEntityColumnMethod!(Entity, member)) {
+            static if (isPublicMember!(Entity, member) && isEntityColumnMethod!(Entity, member)) {
                 columns ~= member;
             }
         }}
@@ -176,7 +176,7 @@ template getBelongsToFields(Entity) {
     enum string[] getBelongsToFields = () {
         string[] relationships;
         static foreach (member; __traits(allMembers, Entity)) {{
-            static if (!isInternalMember!member &&
+            static if (isPublicMember!(Entity, member) &&
                        __traits(compiles, typeof(__traits(getMember, Entity, member)))) {
                 alias candidate = __traits(getMember, Entity, member);
                 static if (hasBelongsToParent!candidate)
@@ -214,7 +214,9 @@ template isEntityType(T) {
 template isArrayReturningMethod(Entity, string member) {
     import std.traits : ReturnType, Parameters, isSomeFunction;
 
-    static if (__traits(hasMember, Entity, member)) {
+    // Only members with a type: not type or template members
+    static if (__traits(hasMember, Entity, member) &&
+               __traits(compiles, typeof(__traits(getMember, Entity, member)))) {
         alias memberType = typeof(__traits(getMember, Entity, member));
         // Use isSomeFunction to detect functions, function pointers, and delegates
         static if (isSomeFunction!memberType) {
@@ -295,7 +297,7 @@ template getArrayFields(Entity) {
     enum string[] getArrayFields = () {
         string[] fields;
         static foreach (member; __traits(allMembers, Entity)) {{
-            static if (!isInternalMember!member && isArrayReturningMethod!(Entity, member)) {
+            static if (isPublicMember!(Entity, member) && isArrayReturningMethod!(Entity, member)) {
                 fields ~= member;
             }
         }}
@@ -308,7 +310,7 @@ template getEntityArrayFields(Entity) {
     enum string[] getEntityArrayFields = () {
         string[] fields;
         static foreach (member; __traits(allMembers, Entity)) {{
-            static if (!isInternalMember!member && isEntityArrayField!(Entity, member)) {
+            static if (isPublicMember!(Entity, member) && isEntityArrayField!(Entity, member)) {
                 fields ~= member;
             }
         }}
@@ -321,7 +323,7 @@ template getScalarArrayFields(Entity) {
     enum string[] getScalarArrayFields = () {
         string[] fields;
         static foreach (member; __traits(allMembers, Entity)) {{
-            static if (!isInternalMember!member && isScalarArrayField!(Entity, member)) {
+            static if (isPublicMember!(Entity, member) && isScalarArrayField!(Entity, member)) {
                 fields ~= member;
             }
         }}
@@ -956,7 +958,7 @@ private Expr!bool buildComparisonFromJson(Entity)(FilterItemExpr!Entity item, st
     // Create expressions using string interpolation that reference Entity columns
 
     static foreach (member; __traits(allMembers, Entity)) {{
-        static if (!isInternalMember!member && isEntityColumnMethod!(Entity, member)) {
+        static if (isPublicMember!(Entity, member) && isEntityColumnMethod!(Entity, member)) {
             if (member == columnName) {
                 // Found the column - build the condition
                 alias colMethod = __traits(getMember, Entity, member);

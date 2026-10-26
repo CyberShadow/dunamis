@@ -223,14 +223,14 @@ template SortedArrayFieldCode(SourceQuery, string fieldName, alias TypeMap) {
         // --- OrderBy types and helper functions ---
         static if (sortableFields.length > 0) {
             // Enum
-            result ~= "enum " ~ _enumName ~ " {\n";
+            result ~= "private enum " ~ _enumName ~ " {\n";
             static foreach (f; sortableFields) {
                 result ~= "    " ~ f ~ ",\n";
             }
             result ~= "}\n\n";
 
             // Struct
-            result ~= "struct " ~ _structName ~ " {\n";
+            result ~= "private struct " ~ _structName ~ " {\n";
             result ~= "    " ~ _enumName ~ " field;\n";
             result ~= "    " ~ _SD ~ " direction = " ~ _SD ~ ".ASC;\n";
             result ~= "}\n\n";
@@ -323,10 +323,10 @@ mixin template SortedArrayField(SourceQuery, string fieldName, alias TypeMap) {
     import dunamis.core.discovery : isObjectType;
     import dunamis.schema.plugin : ArrayFieldElementType, ForwardField;
     import std.typecons : Nullable;
-    alias _ElementType = ArrayFieldElementType!(__traits(getMember, SourceQuery, fieldName));
-    static if (is(_ElementType == Nullable!U, U))
+    // No helper declarations: they would leak into the host struct.
+    static if (is(ArrayFieldElementType!(__traits(getMember, SourceQuery, fieldName)) == Nullable!U, U))
         mixin ForwardField!(SourceQuery, fieldName, TypeMap);
-    else static if (isObjectType!_ElementType)
+    else static if (isObjectType!(ArrayFieldElementType!(__traits(getMember, SourceQuery, fieldName))))
         mixin(SortedArrayFieldCode!(SourceQuery, fieldName, TypeMap));
     else
         mixin ForwardField!(SourceQuery, fieldName, TypeMap);

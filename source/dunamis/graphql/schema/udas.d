@@ -6,7 +6,7 @@ import std.traits;
 // Re-export type introspection templates from core for backward compatibility.
 // These were moved to dunamis.core.discovery as they are data-source agnostic.
 public import dunamis.core.discovery : isObjectType, isValidFieldMethodForType;
-public import dunamis.core.types : isInternalMember;
+public import dunamis.core.types : isInternalMember, isPublicMember, isPublicDataField;
 
 // ============================================================================
 // GraphQL UDAs

@@ -12,6 +12,7 @@ import graphql.ast;
 
 import dunamis.core.types : isCustomScalar;
 import dunamis.graphql.schema : isInputType, isInternalMember;
+import dunamis.core.types : isPublicDataField;
 import dunamis.graphql.schema.udas : getGqlName, getGraphQLTypeName;
 
 // ============================================================================
@@ -434,7 +435,7 @@ T extractInputObjectFromJson(T)(JSONValue json) if (isInputType!T) {
     // Set each field from the JSON object
     // We need to check if we can get the type of the member first (skips type aliases)
     static foreach (member; __traits(allMembers, T)) {{
-        static if (!isInternalMember!member) {
+        static if (isPublicDataField!(T, member)) {
             // Check if this member is a valid field (not a type alias or other non-field member)
             static if (__traits(compiles, typeof(__traits(getMember, T.init, member)))) {
                 alias MemberType = typeof(__traits(getMember, T, member));
@@ -587,7 +588,7 @@ T extractInputObject(T)(Value val) if (isInputType!T) {
 void setInputField(T)(ref T obj, string fieldName, Value val) if (isInputType!T) {
     // Use compile-time introspection to find and set the matching field
     static foreach (member; __traits(allMembers, T)) {{
-        static if (!isInternalMember!member) {
+        static if (isPublicDataField!(T, member)) {
             // Check if this member is a valid field (not a type alias or other non-field member)
             static if (__traits(compiles, typeof(__traits(getMember, T.init, member)))) {
                 alias MemberType = typeof(__traits(getMember, T, member));
@@ -642,7 +643,7 @@ void setInputField(T)(ref T obj, string fieldName, Value val) if (isInputType!T)
 /// Whether the input object type T has a field with the GraphQL name `name`.
 bool inputTypeDefinesField(T)(string name) if (isInputType!T) {
     static foreach (member; __traits(allMembers, T)) {{
-        static if (!isInternalMember!member) {
+        static if (isPublicDataField!(T, member)) {
             static if (__traits(compiles, typeof(__traits(getMember, T.init, member)))) {
                 alias MemberType = typeof(__traits(getMember, T, member));
                 static if (!is(MemberType == function) && !is(MemberType == void)) {

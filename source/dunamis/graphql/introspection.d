@@ -8,7 +8,7 @@ import std.meta;
 import std.traits;
 import std.typecons : Nullable;
 
-import dunamis.core.types : isCustomScalar, isAbstractType, getImplementedByMembers;
+import dunamis.core.types : isCustomScalar, isAbstractType, getImplementedByMembers, isPublicDataField;
 import dunamis.core.discovery : getAllAbstractTypes, getAbstractTypeMembers, getImplementedInterfaces,
     getSchemaFields, uniqueTypes;
 import dunamis.core.expr : Expr, ExprResultType, isExpr;
@@ -264,7 +264,7 @@ private RuntimeInputFieldInfo[] buildRuntimeInputFields(T)() {
     RuntimeInputFieldInfo[] fields;
 
     static foreach (member; __traits(allMembers, T)) {{
-        static if (!isInternalMember!member) {
+        static if (isPublicDataField!(T, member)) {
             alias MemberType = typeof(__traits(getMember, T, member));
 
             static if (!is(MemberType == function) && !is(MemberType == void)) {

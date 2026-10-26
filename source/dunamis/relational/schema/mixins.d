@@ -91,36 +91,32 @@ mixin template HasMany(string fieldName, Child, string fk, string[] orderBy = nu
 /// The parent entity type and nullability are derived from the FK column definition.
 /// The FK may also be a plain field (e.g. part of a composite primary key)
 /// carrying `@SqlColumn` and `@ForeignKeyRef!Parent`.
+/// The relationship's value type (`Parent` or `Nullable!Parent`) follows the
+/// FK's nullability.  Injects only the `fieldName` method (see BelongsToCode).
 mixin template BelongsTo(string fieldName, string fkFieldName) {
     import dunamis.core.expr : Expr;
-    import std.typecons : Nullable;
     import dunamis.relational.schema.expressions : belongsTo;
-    import dunamis.relational.schema.attrs : BelongsToFK, BelongsToParent;
-    import dunamis.relational.schema.attrs : extractForeignKeyRef, hasForeignKeyRef, getSqlColumn, hasNullableReturn;
-    import dunamis.graphql.schema : GqlName;
+    import dunamis.relational.schema.attrs : BelongsToFK, BelongsToParent, BelongsToTarget;
+    import dunamis.relational.schema.attrs : extractForeignKeyRef, hasForeignKeyRef, getSqlColumn;
+    import dunamis.relational.schema.mixins : BelongsToCode;
 
     // Verify it's a foreign key column (has @ForeignKeyRef UDA)
     static assert(hasForeignKeyRef!(__traits(getMember, typeof(this), fkFieldName)),
         "Field '" ~ fkFieldName ~ "' must be a ForeignKey column for BelongsTo");
 
-    enum _dFieldName = fieldName == "version" ? "version_" : fieldName;
-    alias _Fk = __traits(getMember, typeof(this), fkFieldName);
-    alias _Parent = extractForeignKeyRef!_Fk;
-    static if (is(typeof(_Fk) == function))
-        enum _nullableFk = hasNullableReturn!_Fk;
-    else
-        enum _nullableFk = is(typeof(_Fk) == Nullable!U, U);
-    static if (_nullableFk) {
-        @BelongsToFK(fkFieldName) @BelongsToParent!_Parent @GqlName(fieldName)
-        mixin("static Expr!(Nullable!_Parent) " ~ _dFieldName ~ "(Expr!(typeof(this)) e) {\n" ~
-              "    return e.belongsTo!(_Parent, Nullable!_Parent, getSqlColumn!_Fk, typeof(this))();\n" ~
-              "}");
-    } else {
-        @BelongsToFK(fkFieldName) @BelongsToParent!_Parent @GqlName(fieldName)
-        mixin("static Expr!_Parent " ~ _dFieldName ~ "(Expr!(typeof(this)) e) {\n" ~
-              "    return e.belongsTo!(_Parent, _Parent, getSqlColumn!_Fk, typeof(this))();\n" ~
-              "}");
-    }
+    mixin(BelongsToCode!(fieldName, fkFieldName));
+}
+
+/// Code template for BelongsTo: the relationship method and its UDAs, with
+/// no helper declarations (which would leak into the host struct).
+template BelongsToCode(string fieldName, string fkFieldName) {
+    enum fk = `__traits(getMember, typeof(this), "` ~ fkFieldName ~ `")`;
+    enum BelongsToCode =
+        `@BelongsToFK("` ~ fkFieldName ~ `") @BelongsToParent!(extractForeignKeyRef!(` ~ fk ~ `))` ~ "\n" ~
+        `static Expr!(BelongsToTarget!(` ~ fk ~ `)) ` ~ fieldName ~ `(Expr!(typeof(this)) e) {` ~ "\n" ~
+        `    return e.belongsTo!(extractForeignKeyRef!(` ~ fk ~ `), BelongsToTarget!(` ~ fk ~ `), ` ~
+                `getSqlColumn!(` ~ fk ~ `), typeof(this))();` ~ "\n" ~
+        `}`;
 }
 
 // ============================================================================

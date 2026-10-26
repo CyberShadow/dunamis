@@ -66,7 +66,7 @@ unittest {
     }();
     static assert(names == ["postCount", "shout", "authorName", "greeting", "commentTexts",
         "visiblePosts", "checkedTitle", "widened", "maybeSpan", "maybeSpans", "initial", "window", "windows",
-        "audit", "likes", "label", "label"], names.stringof);
+        "audit", "likes", "label", "label", "_internal"], names.stringof);
 
     static assert(computedFieldsIn!(fixture.authorName).length == 1);
     // A function symbol contributes its overloads

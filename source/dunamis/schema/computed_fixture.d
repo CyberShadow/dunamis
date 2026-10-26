@@ -139,13 +139,15 @@ auto label(Expr!Post p) {
     return p.title;
 }
 
-// ---- Not fields ----
-
-private auto helper(Expr!User u) {
+// A public function is a field whatever its name (visibility, not naming,
+// tells library internals apart: ARCHITECTURE.md, Principle 8)
+auto _internal(Expr!User u) {
     return u.name;
 }
 
-auto _internal(Expr!User u) {
+// ---- Not fields ----
+
+private auto helper(Expr!User u) {
     return u.name;
 }
 

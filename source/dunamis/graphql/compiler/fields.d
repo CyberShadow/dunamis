@@ -9,6 +9,7 @@ import graphql.ast;
 
 import dunamis.core.expr : Expr, isExpr;
 import dunamis.graphql.schema : isInputType, isInternalMember;
+import dunamis.core.types : isPublicDataField;
 import dunamis.graphql.compiler.values;
 
 // ============================================================================
@@ -39,7 +40,7 @@ template isSupportedArgType(T) {
 template allInputFieldsSupported(T) if (isInputType!T) {
     enum allInputFieldsSupported = () {
         static foreach (member; __traits(allMembers, T)) {{
-            static if (!isInternalMember!member) {
+            static if (isPublicDataField!(T, member)) {
                 // Check if this member is a valid field (not a type alias or other non-field member)
                 static if (__traits(compiles, typeof(__traits(getMember, T.init, member)))) {
                     alias MemberType = typeof(__traits(getMember, T, member));

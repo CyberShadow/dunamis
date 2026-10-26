@@ -70,21 +70,12 @@ auto _fieldToJson(T)(T val) {
 
 /// Check if a member is a non-PK database column suitable for CRUD input.
 /// Matches Col fields (have @SqlColumn) and plain fields (struct instance fields).
-/// Internal members and aliases of other members (e.g. the `_Fk` alias that
-/// BelongsTo declares for its FK column) are not separate columns: treating
-/// them as such would add a second, default-initialized input for the same
-/// SQL column and overwrite the real value.
 template _isInputColumn(Entity, string member) {
     import dunamis.relational.schema.attrs : hasSqlColumn, hasPrimaryKeyAttr;
-    import dunamis.core.types : isInternalMember, isPlainField;
+    import dunamis.core.types : isPlainField;
 
     enum _isInputColumn = () {
-        static if (isInternalMember!member)
-            return false;
-        else static if (!__traits(compiles, __traits(getMember, Entity, member)))
-            return false;
-        else static if (__traits(compiles, __traits(identifier, __traits(getMember, Entity, member))) &&
-                       __traits(identifier, __traits(getMember, Entity, member)) != member)
+        static if (!__traits(compiles, __traits(getMember, Entity, member)))
             return false;
         else static if (__traits(compiles, hasPrimaryKeyAttr!(Entity, member)) &&
                        hasPrimaryKeyAttr!(Entity, member))

@@ -10,7 +10,7 @@ import std.typecons : Nullable;
 import graphql.ast;
 import graphql.tokenmodule : Token;
 
-import dunamis.core.types : isCustomScalar, isGqlResult, isAbstractType, getImplementedByMembers;
+import dunamis.core.types : isCustomScalar, isGqlResult, isAbstractType, getImplementedByMembers, isPublicDataField;
 import dunamis.core.expr : ExprResultType, Expr, isExpr;
 import dunamis.core.discovery : isObjectType, extractObjectFromType, getSchemaFields,
     getAbstractTypeMembers, getAllObjectTypes;
@@ -919,7 +919,7 @@ private template inputFieldMembers(T) {
     enum string[] inputFieldMembers = () {
         string[] members;
         static foreach (member; __traits(allMembers, T)) {
-            static if (!isInternalMember!member &&
+            static if (isPublicDataField!(T, member) &&
                     __traits(compiles, typeof(__traits(getMember, T.init, member)))) {
                 static if (!is(typeof(__traits(getMember, T, member)) == function) &&
                         !is(typeof(__traits(getMember, T, member)) == void))

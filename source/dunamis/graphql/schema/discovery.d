@@ -59,7 +59,7 @@ template getNestedInputTypesImpl(T, size_t idx, Members...) {
         enum member = Members[idx];
         alias Rest = getNestedInputTypesImpl!(T, idx + 1, Members);
 
-        static if (isInternalMember!member) {
+        static if (!isPublicDataField!(T, member)) {
             alias getNestedInputTypesImpl = Rest;
         } else static if (__traits(compiles, typeof(__traits(getMember, T, member)))) {
             alias MemberType = typeof(__traits(getMember, T, member));
@@ -119,7 +119,7 @@ template getInputTypesFromEntityImpl(Entity, size_t idx, Members...) {
         enum member = Members[idx];
         alias Rest = getInputTypesFromEntityImpl!(Entity, idx + 1, Members);
 
-        static if (isInternalMember!member) {
+        static if (!isPublicMember!(Entity, member)) {
             alias getInputTypesFromEntityImpl = Rest;
         } else static if (__traits(compiles, isValidFieldMethod!(Entity, __traits(getMember, Entity, member)))) {
             static if (isValidFieldMethod!(Entity, __traits(getMember, Entity, member))) {
@@ -168,7 +168,7 @@ template getInputTypesFromMutationImpl(Mutation, size_t idx, Members...) {
         enum member = Members[idx];
         alias Rest = getInputTypesFromMutationImpl!(Mutation, idx + 1, Members);
 
-        static if (isInternalMember!member) {
+        static if (!isPublicMember!(Mutation, member)) {
             alias getInputTypesFromMutationImpl = Rest;
         } else static if (is(typeof(__traits(getMember, Mutation, member)) == function)) {
             alias fn = __traits(getMember, Mutation, member);
@@ -215,7 +215,7 @@ template getEnumTypesFromEntityImpl(Entity, size_t idx, Members...) {
         enum member = Members[idx];
         alias Rest = getEnumTypesFromEntityImpl!(Entity, idx + 1, Members);
 
-        static if (isInternalMember!member) {
+        static if (!isPublicMember!(Entity, member)) {
             alias getEnumTypesFromEntityImpl = Rest;
         } else static if (__traits(compiles, isValidFieldMethod!(Entity, __traits(getMember, Entity, member)))) {
             static if (isValidFieldMethod!(Entity, __traits(getMember, Entity, member))) {
@@ -284,7 +284,7 @@ template getEnumTypesFromInputTypeImpl(T, size_t idx, Members...) {
         enum member = Members[idx];
         alias Rest = getEnumTypesFromInputTypeImpl!(T, idx + 1, Members);
 
-        static if (isInternalMember!member) {
+        static if (!isPublicDataField!(T, member)) {
             alias getEnumTypesFromInputTypeImpl = Rest;
         } else static if (__traits(compiles, typeof(__traits(getMember, T, member)))) {
             alias MemberType = typeof(__traits(getMember, T, member));

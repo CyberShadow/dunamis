@@ -5,7 +5,7 @@ import std.meta;
 import std.traits;
 import std.typecons : Nullable;
 
-import dunamis.core.types : isCustomScalar;
+import dunamis.core.types : isCustomScalar, isPublicDataField;
 import dunamis.graphql.schema.udas;
 import dunamis.graphql.schema.fields : graphqlTypeName, graphqlBaseTypeName;
 
@@ -78,7 +78,7 @@ template getInputTypeFields(T) if (isInputType!T) {
         InputFieldInfo[] fields;
 
         static foreach (member; __traits(allMembers, T)) {{
-            static if (!isInternalMember!member) {
+            static if (isPublicDataField!(T, member)) {
                 alias MemberType = typeof(__traits(getMember, T, member));
 
                 // Skip non-field members (functions, etc.)

@@ -184,8 +184,8 @@ mixin template PaginatedArrayField(SourceQuery, string fieldName, alias TypeMap)
     static import dunamis.schema.plugin;
     import dunamis.core.discovery : isObjectType;
     import dunamis.schema.plugin : ArrayFieldElementType, ForwardField;
-    alias _ElementType = ArrayFieldElementType!(__traits(getMember, SourceQuery, fieldName));
-    static if (isObjectType!_ElementType)
+    // No helper declarations: they would leak into the host struct.
+    static if (isObjectType!(ArrayFieldElementType!(__traits(getMember, SourceQuery, fieldName))))
         mixin(PaginatedArrayFieldCode!(SourceQuery, fieldName, TypeMap));
     else
         mixin ForwardField!(SourceQuery, fieldName, TypeMap);

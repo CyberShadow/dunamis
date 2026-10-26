@@ -192,7 +192,7 @@ private template getCustomScalarNames(T) {
     enum getCustomScalarNames = () {
         string[] names;
         static foreach (member; __traits(allMembers, T)) {{
-            static if (!isInternalMember!member &&
+            static if (isPublicMember!(T, member) &&
                        is(typeof(__traits(getMember, T, member)) == function)) {
                 alias fn = __traits(getMember, T, member);
 

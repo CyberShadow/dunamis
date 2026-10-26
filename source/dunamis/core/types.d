@@ -15,8 +15,6 @@ import std.typecons : Nullable;
 /// during type introspection. Filters out D built-in methods and compiler internals.
 template isInternalMember(string name) {
     enum isInternalMember =
-        // Plugin implementation details and compiler-generated helper aliases.
-        (name.length > 0 && name[0] == '_') ||
         // D built-in methods
         name == "toString" ||
         name == "toHash" ||
@@ -31,6 +29,27 @@ template isInternalMember(string name) {
         name == "__xdtor" ||
         name == "__postblit" ||
         name == "__xpostblit";
+}
+
+/// Whether `name` is a public, non-internal member of T. Library helpers
+/// (plugin implementation details, mixin internals) are not public, so this
+/// tells them apart from user-declared members whatever their names
+/// (ARCHITECTURE.md, Principle 8).
+template isPublicMember(T, string name) {
+    static if (isInternalMember!name)
+        enum isPublicMember = false;
+    else static if (__traits(compiles, __traits(getVisibility, __traits(getMember, T, name))))
+        enum isPublicMember = __traits(getVisibility, __traits(getMember, T, name)) == "public";
+    else
+        enum isPublicMember = false;
+}
+
+/// Whether `name` is a public instance data field of the struct T (not a
+/// method, type, alias or manifest constant).
+template isPublicDataField(T, string name) {
+    import std.meta : staticIndexOf;
+    import std.traits : FieldNameTuple;
+    enum isPublicDataField = staticIndexOf!(name, FieldNameTuple!T) >= 0 && isPublicMember!(T, name);
 }
 
 // ============================================================================
