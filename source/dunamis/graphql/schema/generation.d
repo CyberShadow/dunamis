@@ -333,19 +333,9 @@ template generateSchemaSDL(alias SchemaOrQuery) {
     // Use Schema-provided AllEntityTypes if available (for plugins like PaginationPlugin),
     // otherwise discover entity types from Query
     static if (isSchema!SchemaOrQuery && __traits(hasMember, SchemaOrQuery, "AllEntityTypes")) {
-        alias EntityTypes = SchemaOrQuery.AllEntityTypes;
+        alias AllTypes = SchemaOrQuery.AllEntityTypes;
     } else {
-        alias EntityTypes = getAllObjectTypes!QueryType;
-    }
-    // Some database columns are composite GraphQL output objects but are not
-    // relational entities themselves.  A schema generator can register these
-    // explicitly without making filtering/sorting/pagination treat them as
-    // queryable tables.
-    alias DiscoveredOutputTypes = getAllObjectTypes!QueryType;
-    static if (isSchema!SchemaOrQuery && __traits(hasMember, SchemaOrQuery, "AdditionalObjectTypes")) {
-        alias AllTypes = uniqueTypes!(EntityTypes, DiscoveredOutputTypes, SchemaOrQuery.AdditionalObjectTypes.Types);
-    } else {
-        alias AllTypes = uniqueTypes!(EntityTypes, DiscoveredOutputTypes);
+        alias AllTypes = getAllObjectTypes!QueryType;
     }
 
     // Collect input types from entities AND mutations (if any)
@@ -425,16 +415,6 @@ template generateSchemaSDL(alias SchemaOrQuery) {
         static foreach (Entity; AllTypes) {
             static if (!isAbstractType!Entity) {
                 result ~= generateObjectTypeSDL!(Entity, AllAbstractTypes)(getGraphQLTypeName!Entity);
-                result ~= "\n";
-            }
-        }
-
-        // Explicit composite output values are intentionally not relational
-        // entities and can therefore be removed from AllEntityTypes by query
-        // plugins.  Emit them directly from the schema registration as well.
-        static if (isSchema!SchemaOrQuery && __traits(hasMember, SchemaOrQuery, "AdditionalObjectTypes")) {
-            static foreach (ObjectType; SchemaOrQuery.AdditionalObjectTypes.Types) {
-                result ~= generateObjectTypeSDL!ObjectType(getGraphQLTypeName!ObjectType);
                 result ~= "\n";
             }
         }

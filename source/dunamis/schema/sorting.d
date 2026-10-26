@@ -54,18 +54,13 @@ import dunamis.schema.plugin;
 /// // { users(orderBy: [{field: lastName, direction: DESC}]) { posts(orderBy: [{field: title}]) { title } } }
 /// ---
 template SortingPlugin(alias S) if (isSchema!S) {
-    import std.meta : AliasSeq, Filter, staticMap;
+    import std.meta : AliasSeq, staticMap;
     import dunamis.core.discovery : getAllObjectTypes;
-    import dunamis.relational.schema.attrs : hasEntityAttr;
     import dunamis.schema.transform : isTypeInList;
 
     // Get all entity types discovered from the schema
     alias _OriginalQuery = S.Query;
-    alias _AllObjectTypes = getAllObjectTypes!_OriginalQuery;
-    template IsRelationalEntity(T) {
-        enum IsRelationalEntity = hasEntityAttr!T;
-    }
-    alias _AllEntityTypes = Filter!(IsRelationalEntity, _AllObjectTypes);
+    alias _AllEntityTypes = getAllObjectTypes!_OriginalQuery;
 
     // Generate sorted versions of each entity type.
     template SortedEntity(Entity) {

@@ -93,8 +93,10 @@ unittest {
     // typed as the schema's entity
     static assert(sdl.canFind("audit: PostAudit!"), sdl);
     static assert(sdl.canFind("type PostAudit {\n  title: String!\n  author: User!\n}"), sdl);
-    // Likewise an entity type
-    static assert(sdl.canFind("likes: [Like!]!"), sdl);
+    // Likewise an entity type, whose lists the plugins after
+    // ComputedFieldsPlugin extend like any other
+    static assert(sdl.canFind("likes(filter: LikeFilter = null, orderBy: [_OrderByStruct_Post_likes!] = [], " ~
+        "first: Int = null, offset: Int = null): [Like!]!"), sdl);
     static assert(sdl.canFind("type Like {\n  id: Int!\n  postId: Int!\n  post: Post!\n}"), sdl);
     static assert(!sdl.canFind("helper"), sdl);
     static assert(!sdl.canFind("notAField"), sdl);

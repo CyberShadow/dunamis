@@ -167,31 +167,45 @@ template getFilterableColumns(Entity) {
     }();
 }
 
-/// Get singular belongs-to relationship names for an entity.
-/// BelongsTo methods carry @BelongsToParent metadata, which avoids treating
-/// arbitrary computed object-returning fields as database relationships.
-template getBelongsToFields(Entity) {
-    import dunamis.relational.schema.attrs : hasBelongsToParent;
-
-    enum string[] getBelongsToFields = () {
-        string[] relationships;
+/// Get the names of the to-one object fields of an entity: fields taking no
+/// arguments whose values are objects (e.g. `Post.author`, a relationship,
+/// or a field of a value object type). They are filtered by the filter of
+/// their object type; like every plugin, the filter treats all object types
+/// alike, whatever their data source.
+template getObjectFields(Entity) {
+    enum string[] getObjectFields = () {
+        string[] fields;
         static foreach (member; __traits(allMembers, Entity)) {{
-            static if (isPublicMember!(Entity, member) &&
-                       __traits(compiles, typeof(__traits(getMember, Entity, member)))) {
-                alias candidate = __traits(getMember, Entity, member);
-                static if (hasBelongsToParent!candidate)
-                    relationships ~= member;
-            }
+            static if (isPublicMember!(Entity, member) && isObjectFieldMethod!(Entity, member))
+                fields ~= member;
         }}
-        return relationships;
+        return fields;
     }();
 }
 
-/// Extract the parent entity type recorded on a belongs-to method.
-template getBelongsToParentType(Entity, string member) {
-    import dunamis.relational.schema.attrs : extractBelongsToParent;
-    alias getBelongsToParentType = extractBelongsToParent!
-        (__traits(getMember, Entity, member));
+/// Check if a member is a field of `Entity` taking no arguments whose value is
+/// an object (see getObjectFields).
+template isObjectFieldMethod(Entity, string member) {
+    static if (__traits(hasMember, Entity, member) &&
+               __traits(compiles, typeof(__traits(getMember, Entity, member)))) {
+        alias memberType = typeof(__traits(getMember, Entity, member));
+        static if (is(memberType == function)) {
+            alias params = Parameters!memberType;
+            static if (params.length == 1 && is(params[0] == Expr!Entity) &&
+                       is(ReturnType!memberType : Expr!T, T)) {
+                import dunamis.core.types : isAbstractType;
+                alias Target = ObjectFieldTargetType!(Entity, member);
+                enum isObjectFieldMethod = !is(Target == U[], U) && isEntityType!Target &&
+                    !isAbstractType!Target && !isFilterableType!Target;
+            } else {
+                enum isObjectFieldMethod = false;
+            }
+        } else {
+            enum isObjectFieldMethod = false;
+        }
+    } else {
+        enum isObjectFieldMethod = false;
+    }
 }
 
 /// Check if a type is an object type (has fields/methods, not a scalar).
@@ -379,14 +393,14 @@ template ColumnValueType(Entity, string member) {
     alias ColumnValueType = ExprResultType!(ReturnType!(__traits(getMember, Entity, member)));
 }
 
-/// The entity type a belongs-to method of `Entity` leads to (without the
-/// Nullable of an optional relationship).
-template BelongsToTargetType(Entity, string member) {
+/// The object type of a to-one object field of `Entity` (without the
+/// Nullable of an optional one).
+template ObjectFieldTargetType(Entity, string member) {
     alias Result = ExprResultType!(ReturnType!(__traits(getMember, Entity, member)));
     static if (is(Result == Nullable!P, P))
-        alias BelongsToTargetType = P;
+        alias ObjectFieldTargetType = P;
     else
-        alias BelongsToTargetType = Result;
+        alias ObjectFieldTargetType = Result;
 }
 
 /// List filter for scalar array fields with some/every/none operators.
@@ -476,8 +490,8 @@ private template entityFilterFieldsCode(Entity) {
                 member ~ "\"))) " ~ member ~ ";\n";
         }
 
-        static foreach (member; getBelongsToFields!Entity) {
-            code ~= attributes!member ~ "EntityFilter!(BelongsToTargetType!(Entity, \"" ~
+        static foreach (member; getObjectFields!Entity) {
+            code ~= attributes!member ~ "EntityFilter!(ObjectFieldTargetType!(Entity, \"" ~
                 member ~ "\"))* " ~ member ~ ";\n";
         }
 
@@ -529,13 +543,13 @@ Expr!bool buildFilterPredicateFromStruct(Entity)(Expr!Entity item, const ref Ent
         }
     }}
 
-    // Singular belongs-to relationships (e.g. Post.author -> User).
-    static foreach (member; getBelongsToFields!Entity) {{
+    // To-one object fields (e.g. the relationship Post.author -> User).
+    static foreach (member; getObjectFields!Entity) {{
         auto relationshipFilter = __traits(getMember, filter, member);
         if (relationshipFilter !is null) {
             alias relationshipMethod = __traits(getMember, Entity, member);
             auto relationshipExpr = relationshipMethod(item);
-            alias Target = BelongsToTargetType!(Entity, member);
+            alias Target = ObjectFieldTargetType!(Entity, member);
             static if (is(ExprResultType!(typeof(relationshipExpr)) == Nullable!Target)) {
                 // A missing related row matches no relationship filter
                 // (as with an EXISTS / joined-row predicate in SQL).
@@ -1318,18 +1332,13 @@ T extractJsonValue(T)(JSONValue value) {
 /// Into:
 ///   User.posts(filter: PostFilter): [Post!]!
 template FilterPlugin(alias S) if (isSchema!S) {
-    import std.meta : AliasSeq, Filter, staticMap;
+    import std.meta : AliasSeq, staticMap;
     import dunamis.core.discovery : getAllObjectTypes;
-    import dunamis.relational.schema.attrs : hasEntityAttr;
     import dunamis.schema.transform : isTypeInList;
 
     // Get all entity types discovered from the schema
     alias _OriginalQuery = S.Query;
-    alias _AllObjectTypes = getAllObjectTypes!_OriginalQuery;
-    template IsRelationalEntity(T) {
-        enum IsRelationalEntity = hasEntityAttr!T;
-    }
-    alias _AllEntityTypes = Filter!(IsRelationalEntity, _AllObjectTypes);
+    alias _AllEntityTypes = getAllObjectTypes!_OriginalQuery;
 
     // Generate filtered versions of each entity type
     template FilteredEntity(Entity) {
@@ -1754,6 +1763,81 @@ unittest {
     assert(alice == ["Dishes", "Windows"], alice.to!string);
     auto notAlice = titles(`{assignee: {name: {notEqualTo: "Alice"}}}`);
     assert(notAlice == ["Laundry"], notAlice.to!string);
+}
+
+// All object types are filtered alike: a to-one field of a value object type
+// (here a struct-valued column) is filtered by the value type's filter, as a
+// relationship is by the related entity's, and a field of an object type
+// computed in D likewise. Value types are wrapped by the plugins like any
+// other type, and appear in the SDL once.
+unittest {
+    import std.algorithm : canFind, count;
+    import std.typecons : Nullable;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core : Executor;
+    import dunamis.core.expr : use;
+    import dunamis.graphql.compiler : compileQuery;
+    import dunamis.graphql.schema : Schema, generateSchemaSDL;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
+    import dunamis.relational.schema : Col, Table;
+    import dunamis.schema.pagination : PaginationPlugin;
+    import dunamis.schema.plugin : ApplyPlugins;
+    import dunamis.schema.sorting : SortingPlugin;
+
+    static MockDB!() db;
+
+    static struct Period {
+        Nullable!int quantity;
+        Nullable!string unit;
+    }
+
+    static struct Label {
+        string text;
+    }
+
+    @DemoEntity!(db, "terms")
+    static struct Term {
+        mixin DemoId;
+        mixin Col!("name", string);
+        mixin Col!("notice", Period);
+        static auto label(Expr!Term t) {
+            return use((string name) => Label(name ~ "!"), t.name);
+        }
+    }
+
+    static struct Query {
+        mixin Table!(Term, "terms");
+    }
+
+    db = new MockDB!();
+    db.setTableData("terms", `[
+        {"id":1,"name":"a","notice":{"quantity":3,"unit":"months"}},
+        {"id":2,"name":"b","notice":{"quantity":1,"unit":"months"}},
+        {"id":3,"name":"c","notice":{"quantity":3,"unit":"days"}}
+    ]`);
+
+    alias S = ApplyPlugins!(Schema!Query, FilterPlugin, SortingPlugin, PaginationPlugin);
+    enum sdl = generateSchemaSDL!S;
+    static assert(sdl.canFind("input PeriodFilter {"), sdl);
+    static assert(sdl.canFind("  notice: PeriodFilter\n"), sdl);
+    static assert(sdl.canFind("  label: LabelFilter\n"), sdl);
+    static assert(sdl.count("type Period {") == 1, sdl);
+
+    static string[] names(string filter) {
+        auto result = awaitSync(new Executor().execute(compileQuery!S(
+            `{ terms(filter: ` ~ filter ~ `) { name notice { unit } } }`), false));
+        string[] found;
+        foreach (term; result["terms"].array)
+            found ~= term["name"].str;
+        return found;
+    }
+
+    auto three = names(`{notice: {quantity: {equalTo: 3}}}`);
+    assert(three == ["a", "c"], three.to!string);
+    auto threeMonths = names(`{notice: {quantity: {equalTo: 3}, unit: {equalTo: "months"}}}`);
+    assert(threeMonths == ["a"], threeMonths.to!string);
+    auto labelled = names(`{label: {text: {equalTo: "b!"}}}`);
+    assert(labelled == ["b"], labelled.to!string);
 }
 
 // Range filters built from JSON on a range stored as text must also be

@@ -52,18 +52,13 @@ import dunamis.schema.plugin;
 /// //   User.posts(first: Int, offset: Int): [Post!]!
 /// ---
 template PaginationPlugin(alias S) if (isSchema!S) {
-    import std.meta : AliasSeq, Filter, staticMap;
+    import std.meta : AliasSeq, staticMap;
     import dunamis.core.discovery : getAllObjectTypes;
-    import dunamis.relational.schema.attrs : hasEntityAttr;
     import dunamis.schema.transform : isTypeInList;
 
     // Get all entity types discovered from the schema
     alias _OriginalQuery = S.Query;
-    alias _AllObjectTypes = getAllObjectTypes!_OriginalQuery;
-    template IsRelationalEntity(T) {
-        enum IsRelationalEntity = hasEntityAttr!T;
-    }
-    alias _AllEntityTypes = Filter!(IsRelationalEntity, _AllObjectTypes);
+    alias _AllEntityTypes = getAllObjectTypes!_OriginalQuery;
 
     // Generate paginated versions of each entity type.
     template PaginatedEntity(Entity) {

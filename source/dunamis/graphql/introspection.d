@@ -10,7 +10,7 @@ import std.typecons : Nullable;
 
 import dunamis.core.types : isCustomScalar, isAbstractType, getImplementedByMembers, isPublicDataField;
 import dunamis.core.discovery : getAllAbstractTypes, getAbstractTypeMembers, getImplementedInterfaces,
-    getSchemaFields, uniqueTypes;
+    getSchemaFields;
 import dunamis.core.expr : Expr, ExprResultType, isExpr;
 import dunamis.graphql.schema;
 
@@ -315,20 +315,11 @@ JSONValue buildIntrospectionJson(alias SchemaOrQuery)() {
         struct SubscriptionType {}
     }
 
-    // Discover all types (same pattern as generateSchemaSDL). A plugin's
-    // AllEntityTypes may be restricted to relational entities, so merge it
-    // with a full walk of the Query type: union/interface marker types and
-    // other non-entity output objects must be introspectable too.
+    // Discover all types (same pattern as generateSchemaSDL)
     static if (isSchema!SchemaOrQuery && __traits(hasMember, SchemaOrQuery, "AllEntityTypes")) {
-        alias EntityTypes = SchemaOrQuery.AllEntityTypes;
+        alias AllEntityTypes = SchemaOrQuery.AllEntityTypes;
     } else {
-        alias EntityTypes = getAllObjectTypes!QueryType;
-    }
-    static if (isSchema!SchemaOrQuery && __traits(hasMember, SchemaOrQuery, "AdditionalObjectTypes")) {
-        alias AllEntityTypes = uniqueTypes!(EntityTypes, getAllObjectTypes!QueryType,
-            SchemaOrQuery.AdditionalObjectTypes.Types);
-    } else {
-        alias AllEntityTypes = uniqueTypes!(EntityTypes, getAllObjectTypes!QueryType);
+        alias AllEntityTypes = getAllObjectTypes!QueryType;
     }
 
     // (Root Query arguments are not part of getAllObjectTypes!QueryType, as
@@ -1276,8 +1267,7 @@ unittest {
     assert(foundArgs, "formattedName should have args");
 }
 
-// Abstract types stay introspectable when a plugin restricts AllEntityTypes
-// to relational entities (FilterPlugin does)
+// Abstract types are introspectable through a plugin's AllEntityTypes
 unittest {
     import dunamis.core;
     import dunamis.core.expr.combinators : unionOf;
