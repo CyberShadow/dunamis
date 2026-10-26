@@ -605,9 +605,12 @@ Expr!bool buildFilterPredicateFromStruct(Entity, FilterType, ItemExpr)(ItemExpr 
                 alias RelationshipEntity = ExprResultType!(typeof(relationshipExpr));
                 static if (is(RelationshipEntity == Nullable!Parent, Parent)) {
                     import dunamis.core.expr.json : UnwrapNullableExpr;
+                    // A missing related row matches no relationship filter
+                    // (as with an EXISTS / joined-row predicate in SQL).
                     auto unwrapped = new UnwrapNullableExpr!Parent(relationshipExpr);
-                    conditions ~= buildFilterPredicateFromStruct!Parent(
-                        unwrapped, relationshipFilter.get);
+                    conditions ~= relationshipExpr.isNotNull().and(
+                        buildFilterPredicateFromStruct!Parent(
+                            unwrapped, relationshipFilter.get));
                 } else {
                     conditions ~= buildFilterPredicateFromStruct!RelationshipEntity(
                         relationshipExpr, relationshipFilter.get);
@@ -1709,4 +1712,64 @@ unittest {
         check!S(`{every: {title: {contains: "Hello"}}}`, ["Alice", "Carol"]);
         check!S(`{none: {title: {contains: "Hello"}}}`, ["Carol"]);
     }
+}
+
+// A filter on a nullable belongs-to relationship that is evaluated in memory
+// (not pushed into SQL) must test the related row, and must not match rows
+// whose relationship is null.
+unittest {
+    import std.typecons : Nullable;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core : Executor;
+    import dunamis.graphql.compiler : compileQuery;
+    import dunamis.graphql.schema : Schema;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
+    import dunamis.relational.schema : BelongsTo, Col, ForeignKey, Table;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "people")
+    static struct Person {
+        mixin DemoId;
+        mixin Col!("name", string);
+    }
+
+    @DemoEntity!(db, "chores")
+    static struct Chore {
+        mixin DemoId;
+        mixin Col!("title", string);
+        mixin Col!("assigneeId", Nullable!(ForeignKey!Person));
+        mixin BelongsTo!("assignee", "assigneeId");
+    }
+
+    static struct Query {
+        mixin Table!(Chore, "chores");
+    }
+
+    db = new MockDB!();
+    db.setTableData("people", `[
+        {"id":1,"name":"Alice"},
+        {"id":2,"name":"Bob"}
+    ]`);
+    db.setTableData("chores", `[
+        {"id":1,"title":"Dishes","assignee_id":1},
+        {"id":2,"title":"Laundry","assignee_id":2},
+        {"id":3,"title":"Garden","assignee_id":null},
+        {"id":4,"title":"Windows","assignee_id":1}
+    ]`);
+
+    alias FilteredSchema = FilterPlugin!(Schema!Query);
+    static string[] titles(string filter) {
+        auto result = awaitSync(new Executor().execute(compileQuery!FilteredSchema(
+            `{ chores(filter: ` ~ filter ~ `) { title } }`)));
+        string[] found;
+        foreach (chore; result["chores"].array)
+            found ~= chore["title"].str;
+        return found;
+    }
+
+    auto alice = titles(`{assignee: {name: {equalTo: "Alice"}}}`);
+    assert(alice == ["Dishes", "Windows"], alice.to!string);
+    auto notAlice = titles(`{assignee: {name: {notEqualTo: "Alice"}}}`);
+    assert(notAlice == ["Laundry"], notAlice.to!string);
 }

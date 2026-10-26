@@ -146,6 +146,19 @@ class EvalContext {
         return [];
     }
 
+    /// Get the values bound for an expression, distinguishing "bound to an
+    /// empty batch" from "not bound". Returns false (leaving `vals` empty) if
+    /// no values of type T are bound to `key`.
+    bool tryGetValues(T)(Object key, out T[] vals) {
+        if (auto p = cast(void*) key in _valueMap) {
+            if (p.hasType!T) {
+                vals = p.get!T();
+                return true;
+            }
+        }
+        return false;
+    }
+
     /// Get cached Promise for an expression, or null if types don't match.
     /// Uses runtime type checking via SealedArray — asserts on type mismatch
     /// rather than silently returning null.

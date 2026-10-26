@@ -692,15 +692,7 @@ class NullableObjectExpr(T) : Expr!JSONValue {
             // The inner expression (ProjectJoinedColumnExpr) doesn't actually use
             // the unwrapper values - it uses the parent refs from baseInput.
             // But we set values in case any expression needs them.
-            T[] allVals;
-            allVals.length = nullableVals.length;
-            foreach (i, nval; nullableVals) {
-                if (!nval.isNull) {
-                    allVals[i] = nval.get;
-                }
-                // else: keep T.init
-            }
-            unwrapper.setValues(allVals);
+            unwrapper.bind(ctx, unwrapNullables(nullableVals));
 
             // Evaluate inner expression for ALL entities
             // The optimized ProjectJoinedColumnExpr uses parent refs (e.g., Task refs)
@@ -721,43 +713,78 @@ class NullableObjectExpr(T) : Expr!JSONValue {
     }
 }
 
-/// Helper expression that unwraps Nullable!T to T for selection set compilation.
-/// This expression forwards to its nullable input during optimization so the
-/// chain traversal (findMapExprFromChain) can reach the BelongsToAccessExpr.
+/// A value that an enclosing expression evaluates once and binds for the
+/// sub-expression compiled against this placeholder (e.g. the object whose
+/// selection set is being evaluated).
 ///
-/// At evaluation time, it returns values set by NullableObjectExpr.
-class UnwrapNullableExpr(T) : Expr!T, UnwrapNullableInfo {
-    private ExprBase _nullableInput;  // The actual Expr!(Nullable!T) to forward to
-    private T[] _values;  // Set by NullableObjectExpr during eval
+/// The binding is per evaluation: it is stored in the EvalContext, keyed by
+/// this node, so that the expression tree itself stays immutable after
+/// optimization and can be evaluated by several requests concurrently.
+/// If nothing has bound values in the current context (e.g. the placeholder
+/// was used outside of its binding expression), the input is evaluated.
+///
+/// During optimization the placeholder forwards to its input, so that chain
+/// traversal (findMapExprFromChain) can continue through it.
+abstract class BoundValueExpr(T) : Expr!T, UnwrapNullableInfo {
+    protected ExprBase _input;
 
-    this(Expr!(Nullable!T) nullableInput) {
-        _nullableInput = nullableInput;
+    this(ExprBase input) {
+        _input = input;
     }
 
-    void setValues(T[] values) {
-        _values = values;
+    /// Bind the values this placeholder evaluates to in `ctx`.
+    final void bind(EvalContext ctx, T[] values) {
+        ctx.setValues!T(this, values);
     }
 
     override ExprBase[] dependencies() {
-        return [_nullableInput];
+        return [_input];
     }
 
     override void replaceDependency(size_t index, ExprBase newDep) {
-        if (index == 0) _nullableInput = newDep;
+        if (index == 0) _input = newDep;
     }
 
     override Expr!T optimize(OptimizeContext ctx) {
-        _nullableInput = optimizeExpr(_nullableInput, ctx);
+        _input = optimizeExpr(_input, ctx);
         return this;
     }
 
     override Promise!(T[]) eval(EvalContext ctx) {
-        return resolve(_values);
+        T[] values;
+        if (ctx.tryGetValues!T(this, values))
+            return resolve(values);
+        return evalUnbound(ctx);
     }
 
-    // UnwrapNullableInfo implementation - allows chain traversal to continue
-    @property ExprBase inputExpr() { return _nullableInput; }
+    /// Evaluate the placeholder's values from its input.
+    protected abstract Promise!(T[]) evalUnbound(EvalContext ctx);
 
+    // UnwrapNullableInfo implementation - allows chain traversal to continue
+    @property ExprBase inputExpr() { return _input; }
+}
+
+/// Unwrap nullable values, using T.init for nulls.
+private T[] unwrapNullables(T)(Nullable!T[] nullableVals) {
+    T[] values = new T[nullableVals.length];
+    foreach (i, nval; nullableVals)
+        if (!nval.isNull)
+            values[i] = nval.get;
+    return values;
+}
+
+/// Helper expression that unwraps Nullable!T to T for selection set compilation.
+/// At evaluation time, it returns the values bound by NullableObjectExpr
+/// (T.init where the input is null); unbound, it unwraps its input itself.
+class UnwrapNullableExpr(T) : BoundValueExpr!T {
+    this(Expr!(Nullable!T) nullableInput) {
+        super(nullableInput);
+    }
+
+    protected override Promise!(T[]) evalUnbound(EvalContext ctx) {
+        return evalAs!(Nullable!T)(_input, ctx).then((Nullable!T[] nullableVals) =>
+            unwrapNullables(nullableVals));
+    }
 }
 
 /// Finalize a nullable object expression after the selection set has been compiled.
@@ -812,7 +839,7 @@ class ObjectExpr(T) : Expr!JSONValue {
         auto innerExpr = _innerExpr;
         auto bound = _bound;
         return evalAs!T(_input, ctx).then((T[] values) {
-            bound.setValues(values);
+            bound.bind(ctx, values);
             return evalAs!JSONValue(innerExpr, ctx);
         });
     }
@@ -832,43 +859,16 @@ class ObjectExpr(T) : Expr!JSONValue {
 }
 
 /// The object bound by an ObjectExpr, for compiling its selection set.
-/// Forwards to the object's expression during optimization (so that chain
-/// traversal can continue through it), and evaluates it directly if no
-/// ObjectExpr has bound its values.
-class BoundObjectExpr(T) : Expr!T, UnwrapNullableInfo {
-    private ExprBase _input;  // Expr!T
-    private T[] _values;
-    private bool _hasValues;
-
+/// Returns the values bound by the ObjectExpr in the current evaluation, or
+/// evaluates the object's expression directly if none were bound.
+class BoundObjectExpr(T) : BoundValueExpr!T {
     this(Expr!T input) {
-        _input = input;
+        super(input);
     }
 
-    void setValues(T[] values) {
-        _values = values;
-        _hasValues = true;
-    }
-
-    override ExprBase[] dependencies() {
-        return [_input];
-    }
-
-    override void replaceDependency(size_t index, ExprBase newDep) {
-        if (index == 0) _input = newDep;
-    }
-
-    override Expr!T optimize(OptimizeContext ctx) {
-        _input = optimizeExpr(_input, ctx);
-        return this;
-    }
-
-    override Promise!(T[]) eval(EvalContext ctx) {
-        if (_hasValues)
-            return resolve(_values);
+    protected override Promise!(T[]) evalUnbound(EvalContext ctx) {
         return evalAs!T(_input, ctx);
     }
-
-    @property ExprBase inputExpr() { return _input; }
 }
 
 // ============================================================================
