@@ -903,9 +903,11 @@ private Expr!bool buildColumnFilter(Entity)(FilterItemExpr!Entity item, string c
 
     foreach (string opName, JSONValue opValue; operators.object) {
         auto cond = buildColumnCondition!Entity(item, columnName, opName, opValue);
-        if (cond !is null) {
-            conditions ~= cond;
-        }
+        // A condition this builder cannot express is rejected, not skipped.
+        if (cond is null)
+            throw new Exception("Filter operator '" ~ opName ~ "' is not supported on field '" ~
+                columnName ~ "'");
+        conditions ~= cond;
     }
 
     if (conditions.length == 0) {
@@ -970,7 +972,7 @@ private Expr!bool buildComparisonFromJson(Entity)(FilterItemExpr!Entity item, st
         }
     }}
 
-    // Column not found - return null (skip this condition)
+    // Not a column (buildColumnFilter rejects the condition)
     return null;
 }
 
@@ -1773,4 +1775,9 @@ unittest {
     assert(ids(`{"period": {"overlaps": {"start": "2020-12-01", "end": "2021-02-01"}}}`) == [1, 2, 3]);
     assert(ids(`{"period": {"strictlyLeftOf": {"start": "2021-01-01", "end": null}}}`) == [1]);
     assert(ids(`{"period": {"adjacentTo": {"start": "2019-01-01", "end": "2020-01-01"}}}`) == [1]);
+
+    // Conditions the builder cannot express are rejected, not skipped
+    import std.exception : assertThrown;
+    assertThrown(ids(`{"periodd": {"containsElement": "2020-07-01"}}`));
+    assertThrown(ids(`{"period": {"frobnicates": "x"}}`));
 }

@@ -2116,6 +2116,53 @@ void testFilteredWindowSameTableTwice() {
         `{"a": [], "b": [{"firstName": "Alice"}], "c": [{"firstName": "Alice"}, {"firstName": "Charlie"}]}`);
 }
 
+private enum seededUsers = `lastName: {in: ["Smith", "Jones", "Brown"]}`;
+private enum seededPosts = `title: {in: ["Hello World", "GraphQL Rocks", "D Programming"]}`;
+
+/// Filters and orderings on computed fields (ComputedFieldsPlugin, applied
+/// before the query plugins), combined with the window: evaluated in memory
+/// where SQL cannot express them, never skipped, and with the window never
+/// pushed beneath an in-memory filter or sort.  Seeded users: Alice Smith
+/// (25, two posts), Bob Jones (15, one post), Charlie Brown (8, none).
+void testFilteredWindowComputedInMemory() {
+    // postCount: only computable in memory
+    checkFilteredWindow(`{ users(first: 1, ` ~ byId ~ `, filter: {postCount: {equalTo: 1}}) { firstName } }`,
+        `{"users": [{"firstName": "Bob"}]}`, `{"users": []}`);
+    checkFilteredWindow(`{ users(first: 1, offset: 1, ` ~ byId ~ `, filter: {postCount: {greaterThan: 0}}) { firstName } }`,
+        `{"users": [{"firstName": "Bob"}]}`, `{"users": [{"firstName": "Bob"}]}`);
+    checkFilteredWindow(`{ users(first: 2, orderBy: [{field: postCount, direction: DESC}, {field: id, direction: ASC}]) { firstName } }`,
+        `{"users": [{"firstName": "Alice"}, {"firstName": "Bob"}]}`,
+        `{"users": [{"firstName": "Alice"}, {"firstName": "Bob"}]}`);
+    checkFilteredWindow(`{ users(first: 1, offset: 1, filter: {` ~ seededUsers ~ `, postCount: {lessThan: 2}}, ` ~
+            `orderBy: [{field: postCount, direction: ASC}]) { firstName } }`,
+        `{"users": [{"firstName": "Bob"}]}`, null);
+
+    // surnameFirst: an expression on columns, compared in memory
+    checkFilteredWindow(`{ users(first: 1, ` ~ byId ~ `, filter: {surnameFirst: {startsWith: "Brown"}}) { firstName surnameFirst } }`,
+        `{"users": [{"firstName": "Charlie", "surnameFirst": "Brown, Charlie"}]}`, `{"users": []}`);
+    checkFilteredWindow(`{ users(first: 2, filter: {` ~ seededUsers ~ `}, orderBy: [{field: surnameFirst, direction: ASC}]) { firstName } }`,
+        `{"users": [{"firstName": "Charlie"}, {"firstName": "Bob"}]}`, null);
+}
+
+/// The same with computed fields SQL can filter on (or sort by).
+void testFilteredWindowComputedInSql() {
+    // years: a column
+    checkFilteredWindow(`{ users(first: 1, ` ~ byId ~ `, filter: {years: {lessThan: 10}}) { firstName } }`,
+        `{"users": [{"firstName": "Charlie"}]}`, `{"users": []}`);
+    checkFilteredWindow(`{ users(first: 2, filter: {` ~ seededUsers ~ `, years: {greaterThan: 10}}, ` ~
+            `orderBy: [{field: years, direction: ASC}]) { firstName years } }`,
+        `{"users": [{"firstName": "Bob", "years": 15}, {"firstName": "Alice", "years": 25}]}`, null);
+
+    // authorAge: a related row's column (filtered in SQL, sorted in memory)
+    checkFilteredWindow(`{ posts(first: 1, ` ~ byId ~ `, filter: {authorAge: {lessThan: 20}}) { title } }`,
+        `{"posts": [{"title": "D Programming"}]}`, `{"posts": []}`);
+    checkFilteredWindow(`{ posts(first: 2, filter: {` ~ seededPosts ~ `}, ` ~
+            `orderBy: [{field: authorAge, direction: ASC}, {field: id, direction: DESC}]) { title authorAge } }`,
+        `{"posts": [{"title": "D Programming", "authorAge": 15}, {"title": "GraphQL Rocks", "authorAge": 25}]}`, null);
+    checkFilteredWindow(`{ posts(first: 1, offset: 1, filter: {` ~ seededPosts ~ `, authorAge: {greaterThan: 20}}, ` ~ byId ~ `) { title } }`,
+        `{"posts": [{"title": "GraphQL Rocks"}]}`, null);
+}
+
 void testFilteredWindowNested() {
     checkFilteredWindow(`{ users(first: 1, ` ~ byId ~ `) { posts(first: 1, ` ~ byId ~ `, filter: {title: {contains: "Rocks"}}) { title } } }`,
         `{"users": [{"posts": [{"title": "GraphQL Rocks"}]}]}`, `{"users": [{"posts": []}]}`);
@@ -2568,6 +2615,8 @@ static this() {
     registerTest("Filtered window: scalar and relationship filter", "tests", &testFilteredWindowScalarAndRelationship);
     registerTest("Filtered window: same table twice", "tests", &testFilteredWindowSameTableTwice);
     registerTest("Filtered window: nested field", "tests", &testFilteredWindowNested);
+    registerTest("Filtered window: computed fields in memory", "tests", &testFilteredWindowComputedInMemory);
+    registerTest("Filtered window: computed fields in SQL", "tests", &testFilteredWindowComputedInSql);
     registerTest("Nested filters: belongs-to within belongs-to", "tests", &testNestedBelongsToFilters);
     registerTest("Nested filters: to-many within to-many", "tests", &testNestedToManyFilters);
     registerTest("Nested filters: belongs-to and to-many mixed", "tests", &testNestedMixedFilters);

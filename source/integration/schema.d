@@ -566,10 +566,40 @@ mixin template TestSchema(alias db) {
         }
     }
 
+    // Computed fields from free functions (ComputedFieldsPlugin), which the
+    // query plugins applied after it filter and sort on: in SQL where the
+    // condition or ordering can be expressed there, in memory otherwise.
+    // CrudMutationPlugin, which leaves the entity types as Schema made them,
+    // goes before it: it casts the rows it writes to those types directly.
+
+    /// The number of the user's posts (only computable in memory)
+    auto postCount(Expr!User u) {
+        import dunamis.core.expr : map;
+        return use((string[] titles) => cast(int) titles.length, map!((Expr!Post p) => p.title)(u.posts));
+    }
+
+    /// "Last, First" (an expression on columns, compared in memory)
+    auto surnameFirst(Expr!User u) {
+        return u.lastName ~ ", " ~ u.firstName;
+    }
+
+    /// The user's age (a column, filtered and sorted in SQL)
+    auto years(Expr!User u) {
+        return u.age;
+    }
+
+    /// The age of the post's author (a related row's column: filtered in SQL)
+    auto authorAge(Expr!Post p) {
+        return p.author.age;
+    }
+
+    import dunamis.schema.computed : ComputedFieldsPlugin;
+    alias TestComputedFields = ComputedFieldsPlugin!(postCount, surnameFirst, years, authorAge);
+
     alias BaseSchema = Schema!(Query, Mutation, Subscription);
-    alias MySchema = ApplyPlugins!(BaseSchema, CrudMutationPlugin, FilterPlugin, SortingPlugin, PaginationPlugin);
+    alias MySchema = ApplyPlugins!(BaseSchema, CrudMutationPlugin, TestComputedFields, FilterPlugin, SortingPlugin, PaginationPlugin);
     /// The same with FilterPlugin last (filters apply to the requested
     /// window), served for requests with an `X-Plugin-Order: filter-last`
     /// header.
-    alias FilterLastSchema = ApplyPlugins!(BaseSchema, CrudMutationPlugin, SortingPlugin, PaginationPlugin, FilterPlugin);
+    alias FilterLastSchema = ApplyPlugins!(BaseSchema, CrudMutationPlugin, TestComputedFields, SortingPlugin, PaginationPlugin, FilterPlugin);
 }

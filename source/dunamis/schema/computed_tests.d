@@ -30,7 +30,8 @@ private void seedFixture() {
     fixtureDb = new MockDB!();
     fixtureDb.setTableData("users", `[
         {"id": 1, "name": "Alice"},
-        {"id": 2, "name": "Bob"}
+        {"id": 2, "name": "Bob"},
+        {"id": 3, "name": "Carol"}
     ]`);
     fixtureDb.setTableData("posts", `[
         {"id": 10, "title": "Hello", "author_id": 1},
@@ -261,3 +262,72 @@ unittest {
     static assert(is(C.EntityTypeMap!W == C.WithComputed!W));
 }
 
+private long[] fixtureIds(string field, string args, bool optimize) {
+    auto ctx = new EvalContext();
+    ctx.setRequestContext(Greeting("Hi"));
+    auto result = awaitSync(new Executor().execute(
+        compileQuery!FinalSchema(`{ ` ~ field ~ `(` ~ args ~ `) { id } }`), ctx, optimize));
+    long[] found;
+    foreach (row; result[field].array)
+        found ~= row["id"].integer;
+    return found;
+}
+
+// Filters and orderings on computed fields: evaluated in memory where they
+// cannot be expressed in SQL, never skipped, and in the documented order
+// (filter, then orderBy, then the first/offset window) in both execution modes.
+// MockDB applies a root ORDER BY / OFFSET / LIMIT pushed into SQL (but not
+// WHERE clauses), so a window pushed beneath an in-memory filter or sort
+// would show here.
+unittest {
+    import std.conv : to;
+
+    foreach (optimize; [false, true]) {
+        seedFixture();
+        void check(string field, string args, long[] expected) {
+            auto found = fixtureIds(field, args, optimize);
+            assert(found == expected, (optimize ? "(optimized) " : "(naive) ") ~
+                field ~ "(" ~ args ~ "): expected " ~ expected.to!string ~ ", got " ~ found.to!string);
+        }
+
+        // postCount: Alice 2, Bob 1, Carol 0
+        check("users", `filter: {postCount: {equalTo: 1}}`, [2]);
+        check("users", `filter: {postCount: {greaterThan: 0}}`, [1, 2]);
+        check("users", `filter: {not: {postCount: {greaterThan: 0}}}`, [3]);
+        check("users", `filter: {or: [{postCount: {equalTo: 0}}, {name: {equalTo: "Alice"}}]}`, [1, 3]);
+        check("users", `filter: {initial: {isNull: true}}`, [2]);
+        check("users", `filter: {initial: {equalTo: "C"}}`, [3]);
+        check("users", `orderBy: [{field: postCount, direction: ASC}]`, [3, 2, 1]);
+        check("users", `orderBy: [{field: postCount, direction: DESC}]`, [1, 2, 3]);
+        check("users", `orderBy: [{field: shout, direction: DESC}]`, [3, 2, 1]);
+
+        // With the window: filter, then sort, then first/offset
+        check("users", `filter: {postCount: {lessThan: 2}}, first: 1`, [2]);
+        check("users", `orderBy: [{field: postCount, direction: ASC}], first: 2`, [3, 2]);
+        check("users", `orderBy: [{field: postCount, direction: ASC}], first: 1, offset: 1`, [2]);
+        check("users", `filter: {postCount: {greaterThan: 0}}, orderBy: [{field: postCount, direction: ASC}], first: 1`, [2]);
+        check("users", `filter: {name: {notEqualTo: "Bob"}}, orderBy: [{field: postCount, direction: ASC}], first: 1`, [3]);
+        // A column ordering beneath an in-memory one
+        check("users", `orderBy: [{field: postCount, direction: DESC}, {field: id, direction: DESC}], first: 2`, [1, 2]);
+
+        // Computed fields reaching through relationships, on posts
+        check("posts", `filter: {authorName: {equalTo: "Bob"}}`, [12]);
+        check("posts", `orderBy: [{field: authorName, direction: DESC}, {field: id, direction: ASC}]`, [12, 10, 11]);
+        check("posts", `orderBy: [{field: authorName, direction: DESC}, {field: id, direction: DESC}], first: 2`, [12, 11]);
+        check("posts", `filter: {label: {startsWith: "H"}}, orderBy: [{field: label, direction: DESC}], first: 1`, [10]);
+    }
+}
+
+// Nested (HasMany) fields filter and sort on computed fields too
+unittest {
+    foreach (optimize; [false, true]) {
+        seedFixture();
+        auto result = awaitSync(new Executor().execute(compileQuery!FinalSchema(`{
+            users(orderBy: [{field: id, direction: ASC}], first: 1) {
+                posts(filter: {authorName: {equalTo: "Alice"}}, orderBy: [{field: label, direction: DESC}], first: 1) { id }
+            }
+        }`), optimize));
+        auto posts = result["users"][0]["posts"].array;
+        assert(posts.length == 1 && posts[0]["id"].integer == 11, result.toString());
+    }
+}
