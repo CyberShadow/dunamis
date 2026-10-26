@@ -278,6 +278,8 @@ Presentation-specific concerns live exclusively in their respective layers:
 - `@GqlName` renames a field in GraphQL but the D name is canonical everywhere else
 - `@GqlDescription`, `@GqlDeprecated` add metadata consumed only by GraphQL SDL generation and introspection
 
+The schema layer names the types it generates with D-level names only: plugin wrappers record the D name of the type they stand for (`@OriginalName`), and types derived from another type, such as the filter input type of an entity, record that type (`@NamedAfter!Entity("Filter")`) rather than a finished name. The GraphQL layer derives the presentation names from these (e.g. the filter of an entity named `Post` in GraphQL is `PostFilter`).
+
 **Why this design?**
 
 1. **Multiple consumers** — Business logic within the application can query the graph directly using D's type system, without constructing GraphQL strings. The same schema serves both external API clients (via GraphQL) and internal application code (via direct D calls).

@@ -34,8 +34,7 @@ import std.traits : Parameters;
 import dunamis.core.discovery : extractObjectFromType, getAllObjectTypes;
 import dunamis.core.expr : Expr, ExprResultType, isExpr;
 import dunamis.core.types : isAbstractType, isInternalMember;
-import dunamis.graphql.schema.udas : getGraphQLTypeName;
-import dunamis.schema.plugin : isSchema, NormalizeFields, OriginalName, RemapTypeAttributes, RootTypeNameAttributes, WrapFields, ForwardField;
+import dunamis.schema.plugin : isSchema, NormalizeFields, OriginalName, getOriginalTypeName, RemapTypeAttributes, RootTypeNameAttributes, WrapFields, ForwardField;
 import dunamis.schema.transform : isTypeInList;
 
 // Fully qualified in generated code, so that entity field names cannot shadow them.
@@ -193,11 +192,11 @@ template ComputedFieldsPlugin(Sources...) {
             static foreach (fn; _ownFields) {
                 static assert(!__traits(hasMember, T, __traits(identifier, fn)),
                     "Computed field " ~ __traits(identifier, fn) ~ " collides with an existing field of " ~
-                    getGraphQLTypeName!T);
+                    getOriginalTypeName!T);
             }
 
             @(RemapTypeAttributes!(EntityTypeMap, __traits(getAttributes, T)))
-            @OriginalName(getGraphQLTypeName!T)
+            @OriginalName(__traits(identifier, T))
             struct WithComputed {
                 mixin WrapFields!(T, EntityTypeMap, ForwardField);
                 static foreach (i, fn; _ownFields) {
@@ -235,7 +234,7 @@ template ComputedFieldsPlugin(Sources...) {
 
         template _ResultOnlyType(R) {
             @(RemapTypeAttributes!(FieldTypeMap, __traits(getAttributes, R)))
-            @OriginalName(getGraphQLTypeName!R)
+            @OriginalName(__traits(identifier, R))
             struct _ResultOnlyType {
                 mixin NormalizeFields!(R, FieldTypeMap);
             }

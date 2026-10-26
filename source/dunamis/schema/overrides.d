@@ -33,7 +33,7 @@ import dunamis.core.eval : EvalContext;
 import dunamis.core.optimize : OptimizeContext;
 import dunamis.core.expr.base : ExprBase, Expr, ExprResultType;
 import dunamis.core.expr.primitives : EntityCastInfo;
-import dunamis.schema.plugin : isSchema, OriginalName, RemapTypeAttributes;
+import dunamis.schema.plugin : isSchema, OriginalName, RemapTypeAttributes, getOriginalTypeName;
 
 // ============================================================================
 // Override Expression
@@ -155,20 +155,6 @@ class FieldOverrides {
     /// Check if an override exists for the given key.
     bool has(string key) {
         return (key in _overrides) !is null;
-    }
-}
-
-// ============================================================================
-// Type Name Resolution
-// ============================================================================
-
-/// Get the original type name, resolving through @OriginalName UDA chain.
-/// Returns the first @OriginalName value if present, otherwise __traits(identifier).
-template getOriginalTypeName(T) {
-    static if (hasUDA!(T, OriginalName)) {
-        enum getOriginalTypeName = getUDAs!(T, OriginalName)[0].name;
-    } else {
-        enum getOriginalTypeName = __traits(identifier, T);
     }
 }
 

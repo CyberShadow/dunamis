@@ -22,7 +22,6 @@ import dunamis.core.expr : Expr, ExprResultType, ExprBase;
 import dunamis.core.types : isCustomScalar, isPublicMember;
 import dunamis.core.filtering : filterBy, FilterByExpr, FilterItemExpr, FilterByInfo;
 import dunamis.schema.plugin;
-import dunamis.graphql.schema.udas : GqlName, getGraphQLTypeName;
 // isSchema imported via dunamis.schema.plugin wildcard import above
 
 // ============================================================================
@@ -34,7 +33,7 @@ import dunamis.graphql.schema.udas : GqlName, getGraphQLTypeName;
 struct StringFilter {
     Nullable!string equalTo;
     Nullable!string notEqualTo;
-    @GqlName("in") Nullable!(string[]) in_;
+    Nullable!(string[]) in_;
     Nullable!(string[]) notIn;
     Nullable!string lessThan;
     Nullable!string lessThanOrEqualTo;
@@ -58,7 +57,7 @@ struct StringFilter {
 struct IntFilter {
     Nullable!int equalTo;
     Nullable!int notEqualTo;
-    @GqlName("in") Nullable!(int[]) in_;
+    Nullable!(int[]) in_;
     Nullable!(int[]) notIn;
     Nullable!int lessThan;
     Nullable!int lessThanOrEqualTo;
@@ -72,7 +71,7 @@ struct IntFilter {
 struct LongFilter {
     Nullable!long equalTo;
     Nullable!long notEqualTo;
-    @GqlName("in") Nullable!(long[]) in_;
+    Nullable!(long[]) in_;
     Nullable!(long[]) notIn;
     Nullable!long lessThan;
     Nullable!long lessThanOrEqualTo;
@@ -86,7 +85,7 @@ struct LongFilter {
 struct FloatFilter {
     Nullable!double equalTo;
     Nullable!double notEqualTo;
-    @GqlName("in") Nullable!(double[]) in_;
+    Nullable!(double[]) in_;
     Nullable!(double[]) notIn;
     Nullable!double lessThan;
     Nullable!double lessThanOrEqualTo;
@@ -105,13 +104,15 @@ struct BooleanFilter {
 
 /// Enum filter input type template.
 /// Generates a filter type for any D enum with equality and set membership operations.
-struct EnumFilter(E) if (is(E == enum)) {
-    enum __gqlTypeName = getGraphQLTypeName!E ~ "Filter";
-    Nullable!E equalTo;
-    Nullable!E notEqualTo;
-    @GqlName("in") Nullable!(E[]) in_;
-    Nullable!(E[]) notIn;
-    Nullable!bool isNull;
+template EnumFilter(E) if (is(E == enum)) {
+    @NamedAfter!E("Filter")
+    struct EnumFilter {
+        Nullable!E equalTo;
+        Nullable!E notEqualTo;
+        Nullable!(E[]) in_;
+        Nullable!(E[]) notIn;
+        Nullable!bool isNull;
+    }
 }
 
 template isDateRangeType(T) {
@@ -142,7 +143,6 @@ template dateRangeEndpoint(Range) if (isDateRangeType!Range) {
 /// containment predicate; a compatibility schema may advertise
 /// a wider range vocabulary for extension handling.
 struct DateRangeFilter(Range) if (isDateRangeType!Range) {
-    enum __gqlTypeName = "DateRangeFilter";
     Nullable!(dateRangeEndpoint!Range) containsElement;
     Nullable!bool isNull;
 }
@@ -391,14 +391,16 @@ template BelongsToTargetType(Entity, string member) {
 
 /// List filter for scalar array fields with some/every/none operators.
 /// Uses pointers to avoid Nullable initialization issues with complex nested types.
-struct ListFilter(ChildFilter) {
-    enum __gqlTypeName = getGraphQLTypeName!ChildFilter ~ "ListFilter";
-    /// At least one element matches the filter
-    ChildFilter* some;
-    /// All elements match the filter
-    ChildFilter* every;
-    /// No element matches the filter (equivalent to not(some(...)))
-    ChildFilter* none;
+template ListFilter(ChildFilter) {
+    @NamedAfter!ChildFilter("ListFilter")
+    struct ListFilter {
+        /// At least one element matches the filter
+        ChildFilter* some;
+        /// All elements match the filter
+        ChildFilter* every;
+        /// No element matches the filter (equivalent to not(some(...)))
+        ChildFilter* none;
+    }
 }
 
 /// List filter for to-many relationships (entity array fields): which of the
@@ -406,14 +408,16 @@ struct ListFilter(ChildFilter) {
 ///
 /// Named after `Entity` rather than after `EntityFilter!Entity`, so that the
 /// name is known without completing the (possibly cyclic) filter types.
-struct EntityListFilter(Entity) {
-    enum __gqlTypeName = getGraphQLTypeName!Entity ~ "FilterListFilter";
-    /// At least one related entity matches the filter
-    EntityFilter!Entity* some;
-    /// All related entities match the filter
-    EntityFilter!Entity* every;
-    /// No related entity matches the filter (equivalent to not(some(...)))
-    EntityFilter!Entity* none;
+template EntityListFilter(Entity) {
+    @NamedAfter!Entity("FilterListFilter")
+    struct EntityListFilter {
+        /// At least one related entity matches the filter
+        EntityFilter!Entity* some;
+        /// All related entities match the filter
+        EntityFilter!Entity* every;
+        /// No related entity matches the filter (equivalent to not(some(...)))
+        EntityFilter!Entity* none;
+    }
 }
 
 /// The filter input type of an entity: its filterable columns, its
@@ -436,20 +440,22 @@ struct EntityListFilter(Entity) {
 /// Nullable!(EntityFilter!User[]) and, or;
 /// EntityFilter!User* not;
 /// ```
-struct EntityFilter(Entity) {
-    enum __gqlTypeName = getGraphQLTypeName!Entity ~ "Filter";
+template EntityFilter(Entity) {
+    @NamedAfter!Entity("Filter")
+    struct EntityFilter {
+        mixin(entityFilterFieldsCode!Entity);
 
-    mixin(entityFilterFieldsCode!Entity);
+        Nullable!(typeof(this)[]) and;
+        Nullable!(typeof(this)[]) or;
+        typeof(this)* not;
 
-    Nullable!(typeof(this)[]) and;
-    Nullable!(typeof(this)[]) or;
-    typeof(this)* not;
-
-    /// Formats as the filter type's name. Phobos compiles `toString` of
-    /// every `Nullable!T` (e.g. of `and`), which would otherwise compile the
-    /// formatting of every field of every filter type.
-    void toString(scope void delegate(const(char)[]) sink) const {
-        sink(__gqlTypeName);
+        /// Formats as the filter type's name. Phobos compiles `toString` of
+        /// every `Nullable!T` (e.g. of `and`), which would otherwise compile the
+        /// formatting of every field of every filter type.
+        void toString(scope void delegate(const(char)[]) sink) const {
+            enum name = getOriginalTypeName!(typeof(this));
+            sink(name);
+        }
     }
 }
 
@@ -461,22 +467,22 @@ private template entityFilterFieldsCode(Entity) {
         string code;
         // A filter field carries the attributes of the entity field it
         // filters (e.g. a presentation name).
-        string gqlName(string member)() {
+        string attributes(string member)() {
             return "@(__traits(getAttributes, __traits(getMember, Entity, \"" ~ member ~ "\"))) ";
         }
 
         static foreach (member; getFilterableColumns!Entity) {
-            code ~= gqlName!member ~ "Nullable!(ColumnFilterType!(ColumnValueType!(Entity, \"" ~
+            code ~= attributes!member ~ "Nullable!(ColumnFilterType!(ColumnValueType!(Entity, \"" ~
                 member ~ "\"))) " ~ member ~ ";\n";
         }
 
         static foreach (member; getBelongsToFields!Entity) {
-            code ~= gqlName!member ~ "EntityFilter!(BelongsToTargetType!(Entity, \"" ~
+            code ~= attributes!member ~ "EntityFilter!(BelongsToTargetType!(Entity, \"" ~
                 member ~ "\"))* " ~ member ~ ";\n";
         }
 
         static foreach (member; getEntityArrayFields!Entity) {
-            code ~= gqlName!member ~ "EntityListFilter!(getArrayElementType!(Entity, \"" ~
+            code ~= attributes!member ~ "EntityListFilter!(getArrayElementType!(Entity, \"" ~
                 member ~ "\"))* " ~ member ~ ";\n";
         }
 
@@ -486,7 +492,7 @@ private template entityFilterFieldsCode(Entity) {
             // that predicate is available, keep the field queryable but do not
             // advertise a type-incorrect filter for it.
             static if (!is(ElemType == enum) && !is(ColumnFilterType!ElemType == void))
-                code ~= gqlName!member ~ "Nullable!(ListFilter!(ColumnFilterType!(getArrayElementType!(Entity, \"" ~
+                code ~= attributes!member ~ "Nullable!(ListFilter!(ColumnFilterType!(getArrayElementType!(Entity, \"" ~
                     member ~ "\")))) " ~ member ~ ";\n";
         }}
         return code;
@@ -1328,7 +1334,7 @@ template FilterPlugin(alias S) if (isSchema!S) {
     // Generate filtered versions of each entity type
     template FilteredEntity(Entity) {
         @(RemapTypeAttributes!(EntityTypeMap, __traits(getAttributes, Entity)))
-        @OriginalName(getGraphQLTypeName!Entity)
+        @OriginalName(__traits(identifier, Entity))
         struct FilteredEntity {
             mixin WrapFields!(Entity, EntityTypeMap, FilteredArrayField);
         }

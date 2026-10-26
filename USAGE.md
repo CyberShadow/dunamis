@@ -166,6 +166,11 @@ When a column name conflicts with a D keyword, use a different D name and map it
 mixin Col!("body_", string, "body");  // D name: body_, SQL column: body
 ```
 
+A D keyword followed by an underscore (D's convention for names that are
+keywords) is presented as the keyword even without `@GqlName`, so
+`mixin Col!("body_", string, "body")` alone is also exposed as `body` (and the
+`in_` operator of the filter input types as `in`).
+
 ### HasMany (One-to-Many)
 
 ```d

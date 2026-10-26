@@ -74,7 +74,7 @@ private JSONValue buildBaseTypeRefJson(T)() {
     }
     // Enum
     else static if (is(T == enum)) {
-        return namedType("ENUM", __traits(identifier, T));
+        return namedType("ENUM", getGraphQLTypeName!T);
     }
     // Abstract type: interface (has schema fields)
     else static if (isAbstractType!T && getSchemaFields!T.length > 0) {
@@ -90,7 +90,7 @@ private JSONValue buildBaseTypeRefJson(T)() {
     }
     // Input type
     else static if (isInputType!T) {
-        return namedType("INPUT_OBJECT", T.stringof);
+        return namedType("INPUT_OBJECT", getGraphQLTypeName!T);
     }
     // Fallback
     else {
@@ -284,7 +284,7 @@ private RuntimeInputFieldInfo[] buildRuntimeInputFields(T)() {
                         enum typeJson = nonNullOf(buildBaseTypeRefJson!MemberType());
                     }
 
-                    fields ~= RuntimeInputFieldInfo(member, typeJson, "");
+                    fields ~= RuntimeInputFieldInfo(getGqlName!(__traits(getMember, T, member), member), typeJson, "");
                 }
             }
         }
@@ -331,7 +331,10 @@ JSONValue buildIntrospectionJson(alias SchemaOrQuery)() {
         alias AllEntityTypes = uniqueTypes!(EntityTypes, getAllObjectTypes!QueryType);
     }
 
-    alias AllInputTypes_ = getAllInputTypes!QueryType;
+    // (Root Query arguments are not part of getAllObjectTypes!QueryType, as
+    // in generateSchemaSDL.)
+    alias AllInputTypes_ = uniqueTypesForExpand!(AliasSeq!(getAllInputTypes!QueryType,
+        expandAllInputTypes!(uniqueTypesForExpand!(getInputTypesFromEntity!QueryType))));
     static if (getFields!MutationType.length > 0) {
         alias MutationDirectTypes = getInputTypesFromMutation!MutationType;
         alias MutationInputTypes = expandAllInputTypes!(uniqueTypesForExpand!MutationDirectTypes);
@@ -663,7 +666,7 @@ private JSONValue buildEnumTypeJson(E)() {
 
     return JSONValue([
         "kind": JSONValue("ENUM"),
-        "name": JSONValue(__traits(identifier, E)),
+        "name": JSONValue(getGraphQLTypeName!E),
         "description": JSONValue(null),
         "fields": JSONValue(null),
         "inputFields": JSONValue(null),
@@ -681,7 +684,7 @@ private JSONValue buildInputObjectTypeJson(T)() {
 
     return JSONValue([
         "kind": JSONValue("INPUT_OBJECT"),
-        "name": JSONValue(T.stringof),
+        "name": JSONValue(getGraphQLTypeName!T),
         "description": JSONValue(null),
         "fields": JSONValue(null),
         "inputFields": JSONValue(inputFields),
@@ -1328,4 +1331,46 @@ unittest {
 
     assert("Node" in lookup, "Node interface missing from introspection");
     assert(lookup["Node"]["kind"].str == "INTERFACE");
+}
+
+// Filter input types are introspected under their SDL names, with their
+// fields' GraphQL names
+unittest {
+    import dunamis.core;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+    import dunamis.schema.filtering : FilterPlugin;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "posts")
+    static struct Post {
+        mixin DemoId;
+        mixin Col!("title", string);
+    }
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+        mixin HasMany!("posts", Post, "author_id");
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    alias FilteredSchema = FilterPlugin!(Schema!Query);
+    JSONValue[string] lookup;
+    foreach (t; buildIntrospectionJson!FilteredSchema()["types"].array)
+        lookup[t["name"].str] = t;
+
+    foreach (name; ["UserFilter", "PostFilter", "PostFilterListFilter", "StringFilter"])
+        assert(name in lookup && lookup[name]["kind"].str == "INPUT_OBJECT", name);
+    string[] stringFilterFields;
+    foreach (f; lookup["StringFilter"]["inputFields"].array)
+        stringFilterFields ~= f["name"].str;
+    assert(stringFilterFields.canFind("in") && !stringFilterFields.canFind("in_"), stringFilterFields.to!string);
+    auto postsArg = lookup["User"]["fields"].array.find!(f => f["name"].str == "posts").front["args"].array;
+    assert(postsArg[0]["type"]["name"].str == "PostFilter", postsArg.to!string);
 }

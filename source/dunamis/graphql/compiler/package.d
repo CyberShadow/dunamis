@@ -1996,6 +1996,7 @@ unittest {
     static struct Post {
         mixin DemoId;
         mixin Col!("title", string);
+        // A D keyword followed by an underscore is presented as the keyword
         mixin Col!("body_", string, "body");
     }
 
@@ -2021,7 +2022,7 @@ unittest {
         auto query = compileTestQuery!Query(`{
             users {
                 firstName
-                posts { title @skip(if: true) body_ }
+                posts { title @skip(if: true) body }
             }
         }`);
         auto result = awaitSync(executor.execute(query));
@@ -2030,7 +2031,7 @@ unittest {
         auto posts = users[0]["posts"].array;
         assert(posts.length == 1);
         assert("title" !in posts[0], "Nested field with @skip should be excluded");
-        assert(posts[0]["body_"].str == "World");
+        assert(posts[0]["body"].str == "World");
     }
 }
 

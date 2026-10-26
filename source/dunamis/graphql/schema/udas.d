@@ -51,26 +51,26 @@ struct GqlDeprecated {
 // ============================================================================
 
 /// Get GraphQL type name for any D type.
-/// 1. Check for @GqlName UDA on the type
-/// 2. If absent, use __traits(identifier) for the D type name
+/// 1. The name given by a @GqlName UDA on the type
+/// 2. For a type the schema layer names after another type (@NamedAfter,
+///    e.g. the filter input type of an entity), the GraphQL name of that
+///    type followed by the suffix
+/// 3. The original D name of the type a plugin wrapper stands for
+///    (the first @OriginalName UDA)
+/// 4. The D type's identifier
 template getGraphQLTypeName(T) {
-    enum getGraphQLTypeName = () {
-        // Check for @GqlName UDA on the type (user-applied, presentation layer)
-        static if (hasUDA!(T, GqlName)) {
-            return getUDAs!(T, GqlName)[0].name;
-        } else static if (__traits(hasMember, T, "__gqlTypeName")) {
-            return T.__gqlTypeName;
-        } else {
-            // Check for @OriginalName UDA (applied by plugin wrappers)
-            import dunamis.schema.plugin : OriginalName;
-            static if (hasUDA!(T, OriginalName)) {
-                return getUDAs!(T, OriginalName)[0].name;
-            } else {
-                // Use D type name
-                return __traits(identifier, T);
-            }
-        }
-    }();
+    import dunamis.schema.plugin : OriginalName, NamedAfter, NamedAfterBase;
+
+    static if (hasUDA!(T, GqlName)) {
+        enum string getGraphQLTypeName = getUDAs!(T, GqlName)[0].name;
+    } else static if (hasUDA!(T, NamedAfter)) {
+        enum string getGraphQLTypeName = getGraphQLTypeName!(NamedAfterBase!T) ~
+            getUDAs!(T, NamedAfter)[0].suffix;
+    } else static if (hasUDA!(T, OriginalName)) {
+        enum string getGraphQLTypeName = getUDAs!(T, OriginalName)[0].name;
+    } else {
+        enum string getGraphQLTypeName = __traits(identifier, T);
+    }
 }
 
 // ============================================================================
@@ -82,7 +82,10 @@ template hasGqlHidden(alias member) {
     enum hasGqlHidden = staticIndexOf!(GqlHidden, __traits(getAttributes, member)) >= 0;
 }
 
-/// Get the @GqlName value if present, otherwise return the default name
+/// The GraphQL name of a member whose D name is `defaultName`: the name
+/// given by its @GqlName UDA if present; otherwise a D keyword followed by an
+/// underscore (D's convention for names which are keywords, e.g. `in_`)
+/// stands for the keyword; otherwise the D name.
 template getGqlName(alias member, string defaultName) {
     enum getGqlName = () {
         alias attrs = __traits(getAttributes, member);
@@ -91,8 +94,40 @@ template getGqlName(alias member, string defaultName) {
                 return attr.name;
             }
         }
-        return defaultName;
+        return presentedMemberName(defaultName);
     }();
+}
+
+/// The GraphQL name of a D member name `name` without @GqlName: a D keyword
+/// followed by an underscore stands for the keyword.
+string presentedMemberName(string name) pure nothrow @safe {
+    import std.algorithm.searching : canFind;
+    if (name.length > 1 && name[$ - 1] == '_' && dKeywords.canFind(name[0 .. $ - 1]))
+        return name[0 .. $ - 1];
+    return name;
+}
+
+/// D keywords, which cannot name a member.
+private immutable string[] dKeywords = [
+    "abstract", "alias", "align", "asm", "assert", "auto", "body", "bool", "break", "byte",
+    "case", "cast", "catch", "cdouble", "cent", "cfloat", "char", "class", "const", "continue",
+    "creal", "dchar", "debug", "default", "delegate", "delete", "deprecated", "do", "double",
+    "else", "enum", "export", "extern", "false", "final", "finally", "float", "for", "foreach",
+    "foreach_reverse", "function", "goto", "idouble", "if", "ifloat", "immutable", "import",
+    "in", "inout", "int", "interface", "invariant", "ireal", "is", "lazy", "long", "macro",
+    "mixin", "module", "new", "nothrow", "null", "out", "override", "package", "pragma",
+    "private", "protected", "public", "pure", "real", "ref", "return", "scope", "shared",
+    "short", "static", "struct", "super", "switch", "synchronized", "template", "this",
+    "throw", "true", "try", "typeid", "typeof", "ubyte", "ucent", "uint", "ulong", "union",
+    "unittest", "ushort", "version", "void", "wchar", "while", "with",
+];
+
+unittest {
+    static assert(presentedMemberName("in_") == "in");
+    static assert(presentedMemberName("version_") == "version");
+    static assert(presentedMemberName("name_") == "name_");
+    static assert(presentedMemberName("_") == "_");
+    static assert(presentedMemberName("in") == "in");
 }
 
 /// Get the @GqlDescription text if present, otherwise return empty string

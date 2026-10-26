@@ -114,6 +114,39 @@ template ArrayFieldElementType(alias fn) {
 /// Applied by every wrapper template; the first in the UDA list is canonical.
 struct OriginalName { string name; }
 
+/// UDA on a type the schema layer derives from the type `Base` (e.g. the
+/// filter input type of an entity), which is named after `Base`: its name is
+/// `Base`'s name followed by `suffix`. Recording the base type rather than a
+/// finished name lets each consumer name the derived type after its own name
+/// of `Base` (`getOriginalTypeName` here; e.g. the GraphQL layer after the
+/// GraphQL name of `Base`).
+struct NamedAfter(Base) { string suffix; }
+
+/// The D-level name of a schema type: the name recorded by the first
+/// `@OriginalName` (the name of the user-declared type a wrapper stands
+/// for), the name of a `@NamedAfter` type's base type followed by its
+/// suffix, or else the type's own identifier.
+template getOriginalTypeName(T) {
+    import std.traits : getUDAs;
+    static if (hasUDA!(T, OriginalName)) {
+        enum string getOriginalTypeName = getUDAs!(T, OriginalName)[0].name;
+    } else static if (hasUDA!(T, NamedAfter)) {
+        enum string getOriginalTypeName = getOriginalTypeName!(NamedAfterBase!T) ~
+            getUDAs!(T, NamedAfter)[0].suffix;
+    } else {
+        enum string getOriginalTypeName = __traits(identifier, T);
+    }
+}
+
+/// The base type of a type with a `@NamedAfter` attribute.
+template NamedAfterBase(T) {
+    import std.traits : getUDAs;
+    static if (is(typeof(getUDAs!(T, NamedAfter)[0]) == NamedAfter!Base, Base))
+        alias NamedAfterBase = Base;
+    else
+        static assert(false, T.stringof ~ " has no @NamedAfter attribute");
+}
+
 /// The UDAs giving a plugin's wrapper of the root operation type `Root`
 /// (e.g. `FilteredQuery` for `Query`) `Root`'s original D name (as entity
 /// wrappers have), so that names derived from the root type (e.g. of
@@ -241,7 +274,8 @@ mixin template CopyFields(SourceType, alias TypeMap = IdentityTypeMap) {
 /// Example:
 /// ---
 /// template SortedEntity(Entity) {
-///     @GqlName(getGraphQLTypeName!Entity)
+///     @(RemapTypeAttributes!(EntityTypeMap, __traits(getAttributes, Entity)))
+///     @OriginalName(__traits(identifier, Entity))
 ///     struct SortedEntity {
 ///         mixin WrapFields!(Entity, EntityTypeMap, SortedArrayField);
 ///     }

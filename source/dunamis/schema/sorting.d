@@ -17,7 +17,6 @@ import std.typecons : Nullable;
 
 import dunamis.core.expr : Expr, ExprResultType;
 import dunamis.core.sorting : SortDirection;
-import dunamis.graphql.schema.udas : getGraphQLTypeName;
 import dunamis.schema.plugin;
 
 // ============================================================================
@@ -71,7 +70,7 @@ template SortingPlugin(alias S) if (isSchema!S) {
     // Generate sorted versions of each entity type.
     template SortedEntity(Entity) {
         @(RemapTypeAttributes!(EntityTypeMap, __traits(getAttributes, Entity)))
-        @OriginalName(getGraphQLTypeName!Entity)
+        @OriginalName(__traits(identifier, Entity))
         struct SortedEntity {
             mixin WrapFields!(Entity, EntityTypeMap, SortedArrayField);
         }
@@ -209,7 +208,7 @@ template SortedArrayFieldCode(SourceQuery, string fieldName, alias TypeMap) {
     private enum string _wrap = "dunamis.schema.transform.wrapEntityResult";
 
     // Field-specific names to avoid conflicts when multiple array fields coexist
-    private enum string _scopeName = getGraphQLTypeName!SourceQuery;
+    private enum string _scopeName = getOriginalTypeName!SourceQuery;
     private enum string _enumName = "_OrderByFieldEnum_" ~ _scopeName ~ "_" ~ fieldName;
     private enum string _structName = "_OrderByStruct_" ~ _scopeName ~ "_" ~ fieldName;
     private enum string _singleSort = "_applySingleSort_" ~ fieldName;
