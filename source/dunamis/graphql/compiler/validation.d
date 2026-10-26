@@ -22,8 +22,6 @@ import dunamis.graphql.compiler.extensions : extensionFieldExists;
 // Types
 // ============================================================================
 
-package(dunamis.graphql):
-
 private template isScalarElement(T) {
     static if (is(T == Nullable!U, U))
         enum isScalarElement = isScalarElement!U;
@@ -70,6 +68,8 @@ class ValidationException : CompilerException {
 // Entry Point
 // ============================================================================
 
+package(dunamis.graphql):
+
 /// Validate a parsed GraphQL document against a schema.
 /// Returns an empty array if valid, or a list of ValidationErrors.
 ///
@@ -78,7 +78,8 @@ class ValidationException : CompilerException {
 ValidationError[] validateQuery(alias SchemaType)(
     Document doc,
     OperationDefinition op,
-    FragmentMap fragments
+    FragmentMap fragments,
+    JSONValue variables = JSONValue.emptyObject
 ) if (isSchema!SchemaType) {
     alias QueryType = SchemaType.Query;
     alias MutationType = SchemaType.Mutation;
@@ -98,16 +99,16 @@ ValidationError[] validateQuery(alias SchemaType)(
     if (op.ss !is null) {
         if (isSubscription) {
             static if (getFields!SubscriptionType.length > 0) {
-                errors ~= validateSubscriptionSelectionSet!(SubscriptionType, SchemaType)(op.ss, fragments);
+                errors ~= validateSubscriptionSelectionSet!(SubscriptionType, SchemaType)(op.ss, fragments, variables);
             } else {
                 errors ~= ValidationError("Subscription operations require a Schema with Subscription type");
             }
         } else if (isMutation) {
             static if (getFields!MutationType.length > 0) {
-                errors ~= validateRootSelectionSet!(MutationType, SchemaType)(op.ss, fragments);
+                errors ~= validateRootSelectionSet!(MutationType, SchemaType)(op.ss, fragments, null, variables);
             }
         } else {
-            errors ~= validateRootSelectionSet!(QueryType, SchemaType)(op.ss, fragments);
+            errors ~= validateRootSelectionSet!(QueryType, SchemaType)(op.ss, fragments, null, variables);
         }
     }
 
@@ -367,10 +368,10 @@ private void collectVariableRefsFromDirectives(Directives dirs, ref Token[string
 /// Validate a subscription selection set.
 /// Enforces the GraphQL spec requirement of exactly one root field.
 private ValidationError[] validateSubscriptionSelectionSet(Subscription, alias SchemaSource)(
-    SelectionSet ss, FragmentMap fragments
+    SelectionSet ss, FragmentMap fragments, JSONValue variables
 ) {
     // First, validate fields the same way as any root selection set
-    auto errors = validateRootSelectionSet!(Subscription, SchemaSource)(ss, fragments);
+    auto errors = validateRootSelectionSet!(Subscription, SchemaSource)(ss, fragments, null, variables);
 
     // Count root fields to enforce single-field rule
     auto selections = iterateSelections(ss);
@@ -403,7 +404,7 @@ private ValidationError[] validateSubscriptionSelectionSet(Subscription, alias S
 
 /// Validate a root selection set against a Query/Mutation type.
 private ValidationError[] validateRootSelectionSet(Query, alias SchemaSource)(
-    SelectionSet ss, FragmentMap fragments, bool[string] visited = null
+    SelectionSet ss, FragmentMap fragments, bool[string] visited, JSONValue variables
 ) {
     ValidationError[] errors;
     auto selections = iterateSelections(ss);
@@ -412,7 +413,7 @@ private ValidationError[] validateRootSelectionSet(Query, alias SchemaSource)(
         if (sel.ruleSelection == SelectionEnum.Field) {
             auto field = sel.field;
             if (field is null) continue;
-            errors ~= validateRootField!(Query, SchemaSource)(field, fragments, visited);
+            errors ~= validateRootField!(Query, SchemaSource)(field, fragments, visited, variables);
         } else if (sel.ruleSelection == SelectionEnum.Spread) {
             auto spread = sel.frag;
             if (spread is null) continue;
@@ -423,14 +424,14 @@ private ValidationError[] validateRootSelectionSet(Query, alias SchemaSource)(
                 auto fragDef = *fragDefPtr;
                 if (fragDef.tc.value is null || fragDef.tc.value == getGraphQLTypeName!Query) {
                     visited[fragName] = true;
-                    errors ~= validateRootSelectionSet!(Query, SchemaSource)(fragDef.ss, fragments, visited);
+                    errors ~= validateRootSelectionSet!(Query, SchemaSource)(fragDef.ss, fragments, visited, variables);
                 }
             }
         } else if (sel.ruleSelection == SelectionEnum.IFrag) {
             auto ifrag = sel.ifrag;
             if (ifrag is null) continue;
             if (ifrag.tc.value is null || ifrag.tc.value == getGraphQLTypeName!Query) {
-                errors ~= validateRootSelectionSet!(Query, SchemaSource)(ifrag.ss, fragments, visited);
+                errors ~= validateRootSelectionSet!(Query, SchemaSource)(ifrag.ss, fragments, visited, variables);
             }
         }
     }
@@ -439,7 +440,7 @@ private ValidationError[] validateRootSelectionSet(Query, alias SchemaSource)(
 }
 
 /// Validate a single root field against the Query/Mutation type.
-private ValidationError[] validateRootField(Parent, alias SchemaSource)(Field field, FragmentMap fragments, bool[string] visited) {
+private ValidationError[] validateRootField(Parent, alias SchemaSource)(Field field, FragmentMap fragments, bool[string] visited, JSONValue variables) {
     auto fieldName = getFieldName(field);
     if (fieldName is null) return [];
 
@@ -454,8 +455,8 @@ private ValidationError[] validateRootField(Parent, alias SchemaSource)(Field fi
         enum gqlName = getGqlName!(memberSym, member);
         if (fieldName == gqlName) {
             ValidationError[] errors;
-            errors ~= validateFieldArguments!(memberSym)(field);
-            errors ~= validateFieldResult!(ReturnType!(typeof(memberSym)), SchemaSource)(field, fragments, visited);
+            errors ~= validateFieldArguments!(memberSym)(field, variables);
+            errors ~= validateFieldResult!(ReturnType!(typeof(memberSym)), SchemaSource)(field, fragments, visited, variables);
             return errors;
         }
     }}
@@ -466,7 +467,7 @@ private ValidationError[] validateRootField(Parent, alias SchemaSource)(Field fi
 }
 
 /// Validate a selection set against an entity/object type.
-private ValidationError[] validateSelectionSet(T, alias SchemaSource)(SelectionSet ss, FragmentMap fragments, bool[string] visited) {
+private ValidationError[] validateSelectionSet(T, alias SchemaSource)(SelectionSet ss, FragmentMap fragments, bool[string] visited, JSONValue variables) {
     ValidationError[] errors;
     if (ss is null) return errors;
     auto selections = iterateSelections(ss);
@@ -475,7 +476,7 @@ private ValidationError[] validateSelectionSet(T, alias SchemaSource)(SelectionS
         if (sel.ruleSelection == SelectionEnum.Field) {
             auto field = sel.field;
             if (field is null) continue;
-            errors ~= validateFieldAccess!(T, SchemaSource)(field, fragments, visited);
+            errors ~= validateFieldAccess!(T, SchemaSource)(field, fragments, visited, variables);
         } else if (sel.ruleSelection == SelectionEnum.Spread) {
             auto spread = sel.frag;
             if (spread is null) continue;
@@ -486,14 +487,14 @@ private ValidationError[] validateSelectionSet(T, alias SchemaSource)(SelectionS
                 auto fragDef = *fragDefPtr;
                 if (fragDef.tc.value is null || fragDef.tc.value == getGraphQLTypeName!T) {
                     visited[fragName] = true;
-                    errors ~= validateSelectionSet!(T, SchemaSource)(fragDef.ss, fragments, visited);
+                    errors ~= validateSelectionSet!(T, SchemaSource)(fragDef.ss, fragments, visited, variables);
                 }
             }
         } else if (sel.ruleSelection == SelectionEnum.IFrag) {
             auto ifrag = sel.ifrag;
             if (ifrag is null) continue;
             if (ifrag.tc.value is null || ifrag.tc.value == getGraphQLTypeName!T) {
-                errors ~= validateSelectionSet!(T, SchemaSource)(ifrag.ss, fragments, visited);
+                errors ~= validateSelectionSet!(T, SchemaSource)(ifrag.ss, fragments, visited, variables);
             }
         }
     }
@@ -503,7 +504,7 @@ private ValidationError[] validateSelectionSet(T, alias SchemaSource)(SelectionS
 
 /// Validate a single field access against type T.
 /// Uses the Schema Protocol to discover computed fields.
-private ValidationError[] validateFieldAccess(T, alias SchemaSource)(Field field, FragmentMap fragments, bool[string] visited) {
+private ValidationError[] validateFieldAccess(T, alias SchemaSource)(Field field, FragmentMap fragments, bool[string] visited, JSONValue variables) {
     auto fieldName = getFieldName(field);
     if (fieldName is null) return [];
 
@@ -517,8 +518,8 @@ private ValidationError[] validateFieldAccess(T, alias SchemaSource)(Field field
             enum gqlName = getGqlName!(memberSym, member);
             if (fieldName == gqlName) {
                 ValidationError[] errors;
-                errors ~= validateFieldArguments!(memberSym)(field);
-                errors ~= validateFieldResult!(ReturnType!(typeof(memberSym)), SchemaSource)(field, fragments, visited);
+                errors ~= validateFieldArguments!(memberSym)(field, variables);
+                errors ~= validateFieldResult!(ReturnType!(typeof(memberSym)), SchemaSource)(field, fragments, visited, variables);
                 return errors;
             }
         }
@@ -530,7 +531,7 @@ private ValidationError[] validateFieldAccess(T, alias SchemaSource)(Field field
 }
 
 /// Validate arguments for a computed field.
-private ValidationError[] validateFieldArguments(alias fn)(Field field) {
+private ValidationError[] validateFieldArguments(alias fn)(Field field, JSONValue variables) {
     import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
 
     ValidationError[] errors;
@@ -575,6 +576,14 @@ private ValidationError[] validateFieldArguments(alias fn)(Field field) {
             }
         }
 
+        // Check the values of input object arguments
+        foreach (arg; iterateArguments(args)) {
+            static foreach (i; 1 .. Params.length) {
+                if (arg.name.value == paramNames[i])
+                    validateInputValueOrVariable!(Params[i])(arg.vv, variables, errors);
+            }
+        }
+
         // Check for missing required arguments
         static foreach (i; 1 .. Params.length) {{
             enum isNullableType = is(Params[i] == Nullable!U, U);
@@ -613,25 +622,25 @@ private ValidationError[] validateFieldArguments(alias fn)(Field field) {
 }
 
 /// Validate the result of a field that returns an Expr type.
-private ValidationError[] validateFieldResult(ResultExpr, alias SchemaSource)(Field field, FragmentMap fragments, bool[string] visited) {
+private ValidationError[] validateFieldResult(ResultExpr, alias SchemaSource)(Field field, FragmentMap fragments, bool[string] visited, JSONValue variables) {
     static if (isExpr!ResultExpr) {
         alias ResultType = ExprResultType!ResultExpr;
-        return validateFieldResultType!(ResultType, SchemaSource)(field, fragments, visited);
+        return validateFieldResultType!(ResultType, SchemaSource)(field, fragments, visited, variables);
     } else {
         return [];
     }
 }
 
 /// Validate selection set requirements based on a field's result type.
-private ValidationError[] validateFieldResultType(ResultType, alias SchemaSource)(Field field, FragmentMap fragments, bool[string] visited) {
+private ValidationError[] validateFieldResultType(ResultType, alias SchemaSource)(Field field, FragmentMap fragments, bool[string] visited, JSONValue variables) {
     // Unwrap GqlResult
     static if (isGqlResult!ResultType) {
         alias Inner = typeof(ResultType.init.value);
-        return validateFieldResultType!(Inner, SchemaSource)(field, fragments, visited);
+        return validateFieldResultType!(Inner, SchemaSource)(field, fragments, visited, variables);
     }
     // Unwrap Nullable
     else static if (is(ResultType == Nullable!U, U)) {
-        return validateFieldResultType!(U, SchemaSource)(field, fragments, visited);
+        return validateFieldResultType!(U, SchemaSource)(field, fragments, visited, variables);
     }
     // Arrays: check element type
     else static if (is(ResultType == E[], E)) {
@@ -643,7 +652,7 @@ private ValidationError[] validateFieldResultType(ResultType, alias SchemaSource
                     field
                 )];
             }
-            return validateAbstractSelectionSet!(E, SchemaSource)(field.ss, fragments, visited);
+            return validateAbstractSelectionSet!(E, SchemaSource)(field.ss, fragments, visited, variables);
         }
         else static if (isScalarElement!E) {
             // Array of scalars — no selection set allowed
@@ -662,7 +671,7 @@ private ValidationError[] validateFieldResultType(ResultType, alias SchemaSource
                     field
                 )];
             }
-            return validateSelectionSet!(E, SchemaSource)(field.ss, fragments, visited);
+            return validateSelectionSet!(E, SchemaSource)(field.ss, fragments, visited, variables);
         }
     }
     // Object types (non-scalar structs) — requires selection set
@@ -673,7 +682,7 @@ private ValidationError[] validateFieldResultType(ResultType, alias SchemaSource
                 field
             )];
         }
-        return validateSelectionSet!(ResultType, SchemaSource)(field.ss, fragments, visited);
+        return validateSelectionSet!(ResultType, SchemaSource)(field.ss, fragments, visited, variables);
     }
     // Scalars — no selection set allowed
     else {
@@ -699,7 +708,7 @@ private ValidationError[] validateFieldResultType(ResultType, alias SchemaSource
 ///
 /// Type conditions are validated against the abstract type's member types.
 private ValidationError[] validateAbstractSelectionSet(AbstractT, alias SchemaSource)(
-    SelectionSet ss, FragmentMap fragments, bool[string] visited
+    SelectionSet ss, FragmentMap fragments, bool[string] visited, JSONValue variables
 ) {
     ValidationError[] errors;
     if (ss is null) return errors;
@@ -721,7 +730,7 @@ private ValidationError[] validateAbstractSelectionSet(AbstractT, alias SchemaSo
 
             // For interfaces, bare fields must exist on the interface type
             static if (isInterface) {
-                errors ~= validateFieldAccess!(AbstractT, SchemaSource)(field, fragments, visited);
+                errors ~= validateFieldAccess!(AbstractT, SchemaSource)(field, fragments, visited, variables);
             } else {
                 // For unions, no bare fields except __typename
                 errors ~= fieldError(
@@ -743,14 +752,14 @@ private ValidationError[] validateAbstractSelectionSet(AbstractT, alias SchemaSo
             if (fragDef.tc.value is null) {
                 static if (isInterface) {
                     visited[fragName] = true;
-                    errors ~= validateAbstractSelectionSet!(AbstractT, SchemaSource)(fragDef.ss, fragments, visited);
+                    errors ~= validateAbstractSelectionSet!(AbstractT, SchemaSource)(fragDef.ss, fragments, visited, variables);
                 }
                 continue;
             }
 
             // Validate type condition against member types
             errors ~= validateTypeCondition!(AbstractT, SchemaSource, Members)(
-                fragDef.tc.value, fragDef.tc.line, fragDef.tc.column, fragDef.ss, fragments, visited);
+                fragDef.tc.value, fragDef.tc.line, fragDef.tc.column, fragDef.ss, fragments, visited, variables);
         } else if (sel.ruleSelection == SelectionEnum.IFrag) {
             auto ifrag = sel.ifrag;
             if (ifrag is null) continue;
@@ -758,14 +767,14 @@ private ValidationError[] validateAbstractSelectionSet(AbstractT, alias SchemaSo
             // Inline fragment without type condition — same as bare fields
             if (ifrag.tc.value is null) {
                 static if (isInterface) {
-                    errors ~= validateAbstractSelectionSet!(AbstractT, SchemaSource)(ifrag.ss, fragments, visited);
+                    errors ~= validateAbstractSelectionSet!(AbstractT, SchemaSource)(ifrag.ss, fragments, visited, variables);
                 }
                 continue;
             }
 
             // Validate type condition against member types
             errors ~= validateTypeCondition!(AbstractT, SchemaSource, Members)(
-                ifrag.tc.value, ifrag.tc.line, ifrag.tc.column, ifrag.ss, fragments, visited);
+                ifrag.tc.value, ifrag.tc.line, ifrag.tc.column, ifrag.ss, fragments, visited, variables);
         }
     }
 
@@ -775,7 +784,7 @@ private ValidationError[] validateAbstractSelectionSet(AbstractT, alias SchemaSo
 /// Validate a type condition against the members of an abstract type.
 /// If the type condition matches a member, validate the fragment's selection set against that member.
 private ValidationError[] validateTypeCondition(AbstractT, alias SchemaSource, Members...)(
-    string tcValue, uint tcLine, ushort tcCol, SelectionSet ss, FragmentMap fragments, bool[string] visited
+    string tcValue, uint tcLine, ushort tcCol, SelectionSet ss, FragmentMap fragments, bool[string] visited, JSONValue variables
 ) {
     enum abstractName = getGraphQLTypeName!AbstractT;
 
@@ -783,13 +792,13 @@ private ValidationError[] validateTypeCondition(AbstractT, alias SchemaSource, M
     static foreach (Member; Members) {{
         if (tcValue == getGraphQLTypeName!Member) {
             // Valid type condition — validate the fragment's fields against this member type
-            return validateSelectionSet!(Member, SchemaSource)(ss, fragments, visited);
+            return validateSelectionSet!(Member, SchemaSource)(ss, fragments, visited, variables);
         }
     }}
 
     // Also allow the abstract type name itself as type condition
     if (tcValue == abstractName) {
-        return validateAbstractSelectionSet!(AbstractT, SchemaSource)(ss, fragments, visited);
+        return validateAbstractSelectionSet!(AbstractT, SchemaSource)(ss, fragments, visited, variables);
     }
 
     // Type condition doesn't match any member
@@ -798,6 +807,127 @@ private ValidationError[] validateTypeCondition(AbstractT, alias SchemaSource, M
         (getSchemaFields!AbstractT.length > 0 ? "interface" : "union") ~ " '" ~ abstractName ~ "'",
         tcLine, tcCol
     )];
+}
+
+// ============================================================================
+// Input Values
+// ============================================================================
+
+/// Validate an argument or input object field value (a literal or a
+/// variable) of D type T: every field of an input object it contains must be
+/// a field of that input object's type. (Other errors in input values are
+/// reported when they are coerced to T.)
+private void validateInputValueOrVariable(T)(ValueOrVariable vov, JSONValue variables,
+        ref ValidationError[] errors) {
+    if (vov is null) return;
+    if (vov.ruleSelection == ValueOrVariableEnum.Var && vov.var !is null) {
+        auto name = vov.var.name.value;
+        if (variables.type == JSONType.object)
+            if (auto value = name in variables.object)
+                validateInputJson!T(*value, "$" ~ name, "", vov.var.name, errors);
+        return;
+    }
+    validateInputValue!T(vov.val, variables, errors);
+}
+
+/// ditto
+private void validateInputValue(T)(Value val, JSONValue variables, ref ValidationError[] errors) {
+    import std.traits : isSomeString;
+
+    if (val is null || val.ruleSelection == ValueEnum.N) return;
+    static if (is(T == Nullable!U, U)) {
+        validateInputValue!U(val, variables, errors);
+    } else static if (is(T == U*, U)) {
+        validateInputValue!U(val, variables, errors);
+    } else static if (isInputType!T) {
+        if (val.ruleSelection != ValueEnum.O || val.obj is null) return;
+        for (auto field = val.obj.vals; field !is null; field = field.follow) {
+            auto name = field.name.value;
+            bool known;
+            static foreach (member; inputFieldMembers!T) {
+                if (name == getGqlName!(__traits(getMember, T, member), member)) {
+                    known = true;
+                    validateInputValueOrVariable!(typeof(__traits(getMember, T, member)))(
+                        field.val, variables, errors);
+                }
+            }
+            if (!known)
+                errors ~= ValidationError(unknownInputFieldMessage!T(name),
+                    field.name.line, startColumn(field.name));
+        }
+    } else static if (is(T : U[], U) && !isSomeString!T) {
+        if (val.ruleSelection == ValueEnum.ARR) {
+            for (auto element = val.arr is null ? null : val.arr.vals; element !is null; element = element.follow)
+                validateInputValue!U(element.val, variables, errors);
+        } else {
+            // A single value is coerced to a list of it.
+            validateInputValue!U(val, variables, errors);
+        }
+    }
+}
+
+/// Validate the JSON value of a variable (at `path` within it) used where a
+/// value of D type T is expected, as validateInputValue does for literals.
+/// Errors are reported at the variable's use, `location`.
+private void validateInputJson(T)(JSONValue value, string variable, string path, Token location,
+        ref ValidationError[] errors) {
+    import std.traits : isSomeString;
+
+    if (value.type == JSONType.null_) return;
+    static if (is(T == Nullable!U, U)) {
+        validateInputJson!U(value, variable, path, location, errors);
+    } else static if (is(T == U*, U)) {
+        validateInputJson!U(value, variable, path, location, errors);
+    } else static if (isInputType!T) {
+        if (value.type != JSONType.object) return;
+        foreach (name, fieldValue; value.object) {
+            bool known;
+            static foreach (member; inputFieldMembers!T) {
+                if (name == getGqlName!(__traits(getMember, T, member), member)) {
+                    known = true;
+                    validateInputJson!(typeof(__traits(getMember, T, member)))(
+                        fieldValue, variable, path ~ (path.length ? "." : "") ~ name, location, errors);
+                }
+            }
+            if (!known)
+                errors ~= ValidationError("Variable \"" ~ variable ~ "\" got invalid value" ~
+                    (path.length ? " at \"" ~ path ~ "\"" : "") ~ "; " ~
+                    unknownInputFieldMessage!T(name), location.line,
+                    cast(ushort)(startColumn(location) - 1));  // at the `$`
+        }
+    } else static if (is(T : U[], U) && !isSomeString!T) {
+        if (value.type == JSONType.array) {
+            foreach (i, element; value.array)
+                validateInputJson!U(element, variable, path ~ "[" ~ i.to!string ~ "]", location, errors);
+        } else {
+            validateInputJson!U(value, variable, path, location, errors);
+        }
+    }
+}
+
+/// The column a name token starts at (the lexer records where it ends).
+private ushort startColumn(Token name) {
+    return cast(ushort)(name.column - name.value.length);
+}
+
+private string unknownInputFieldMessage(T)(string name) {
+    return "Field \"" ~ name ~ "\" is not defined by type \"" ~ getGraphQLTypeName!T ~ "\".";
+}
+
+/// The D names of the fields of an input object type.
+private template inputFieldMembers(T) {
+    enum string[] inputFieldMembers = () {
+        string[] members;
+        static foreach (member; __traits(allMembers, T)) {
+            static if (!isInternalMember!member &&
+                    __traits(compiles, typeof(__traits(getMember, T.init, member)))) {
+                static if (!is(typeof(__traits(getMember, T, member)) == function) &&
+                        !is(typeof(__traits(getMember, T, member)) == void))
+                    members ~= member;
+            }
+        }
+        return members;
+    }();
 }
 
 // ============================================================================

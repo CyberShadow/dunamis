@@ -707,10 +707,16 @@ auto result = executor.execute(query);
 
 | Type | Operators |
 |------|-----------|
-| String | `equalTo`, `notEqualTo`, `in`, `notIn`, `isNull`, `contains`, `startsWith`, `endsWith`, `containsInsensitive`, `startsWithInsensitive`, `endsWithInsensitive` |
+| String | `equalTo`, `notEqualTo`, `in`, `notIn`, `isNull`, `lessThan`, `lessThanOrEqualTo`, `greaterThan`, `greaterThanOrEqualTo`, `contains`, `startsWith`, `endsWith`, `containsInsensitive` (alias `includesInsensitive`), `startsWithInsensitive`, `endsWithInsensitive`, `like` (SQL `LIKE` pattern: `%`, `_`, `\` escapes) |
 | Int/Float | `equalTo`, `notEqualTo`, `in`, `notIn`, `isNull`, `lessThan`, `lessThanOrEqualTo`, `greaterThan`, `greaterThanOrEqualTo` |
 | Boolean | `equalTo`, `notEqualTo`, `isNull` |
 | Enum | `equalTo`, `notEqualTo`, `in`, `notIn`, `isNull` |
+
+Nullable columns have the filter of their values' type. `isNull` tests for
+null; the other operators only match non-null values (as SQL comparisons do),
+so e.g. `notEqualTo` does not match null. Columns of custom scalar types are
+filtered through `StringFilter`; operators that do not apply to a column's
+type (e.g. `contains` on a date) are rejected.
 
 **Case-insensitive string matching:**
 
@@ -759,6 +765,39 @@ users(filter: {posts: {every: {title: {contains: "Draft"}}}}) { ... }
 
 # Users with NO posts containing "Spam"
 users(filter: {posts: {none: {title: {contains: "Spam"}}}}) { ... }
+```
+
+Relationship filters take the related entity's own filter, so they nest to
+any depth, also through cycles in the schema: each entity has one filter type
+(`PostFilter`), which refers to the filters of related entities. A to-one
+(belongs-to) relationship is filtered by its target's filter, and matches
+nothing where the relationship is null; a to-many relationship is filtered by
+`some`/`every`/`none` over the related entities' filter
+(`PostFilterListFilter`).
+
+```graphql
+# Comments on posts by authors in the "R&D" department
+comments(filter: {post: {author: {department: {name: {equalTo: "R&D"}}}}}) { ... }
+
+# Orders with an item whose product's supplier is in a country
+orders(filter: {items: {some: {product: {supplier: {country: {equalTo: "DE"}}}}}}) { ... }
+
+# Users with a post commented on by Bob
+users(filter: {posts: {some: {comments: {some: {author: {firstName: {equalTo: "Bob"}}}}}}}) { ... }
+```
+
+On root fields, relationship filters are pushed into SQL as subqueries
+(`fk IN (SELECT pk FROM parent WHERE ...)` for to-one relationships, `EXISTS`
+for `some` and its negations); filters which cannot be expressed in SQL (e.g.
+over computed fields) are evaluated in memory.
+
+**Unknown filter fields:** like all input objects, filters must only contain
+fields their type defines (in literals and in variables); anything else is a
+validation error, reported with its location before the query is executed:
+
+```json
+{"errors": [{"message": "Field \"titel\" is not defined by type \"PostFilter\".",
+             "locations": [{"line": 1, "column": 18}]}]}
 ```
 
 **Filtering and pagination:** plugins apply their arguments in the order the
@@ -1073,6 +1112,7 @@ try {
 - **Unknown arguments** — argument not accepted by the computed field
 - **Missing required arguments** — non-optional, non-nullable argument not provided
 - **Duplicate arguments** — same argument name provided twice
+- **Unknown input object fields** — a field an input object type (e.g. a filter) does not define, at any depth of an argument's value: in literals (reported at the field) and in variables' values (reported at the variable's use, with the field's path within the value, e.g. `Variable "$f" got invalid value at "author.posts.some"; Field "titel" is not defined by type "PostFilter".`). Variables the operation does not declare are ignored, as the GraphQL spec requires.
 - **Selection set on scalar** — `{ subfields }` on a field that returns a scalar type
 - **Missing selection set on object** — no `{ subfields }` on a field that returns an object or array of objects
 

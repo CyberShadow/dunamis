@@ -12,7 +12,7 @@ import graphql.ast;
 
 import dunamis.core.types : isCustomScalar;
 import dunamis.graphql.schema : isInputType, isInternalMember;
-import dunamis.graphql.schema.udas : getGqlName;
+import dunamis.graphql.schema.udas : getGqlName, getGraphQLTypeName;
 
 // ============================================================================
 // Internal: AST Navigation
@@ -429,6 +429,7 @@ T extractInputObjectFromJson(T)(JSONValue json) if (isInputType!T) {
     }
 
     T result;
+    size_t knownFields;
 
     // Set each field from the JSON object
     // We need to check if we can get the type of the member first (skips type aliases)
@@ -440,12 +441,21 @@ T extractInputObjectFromJson(T)(JSONValue json) if (isInputType!T) {
                 static if (!is(MemberType == function) && !is(MemberType == void)) {
                     enum gqlName = getGqlName!(__traits(getMember, T, member), member);
                     if (gqlName in json.object) {
+                        knownFields++;
                         __traits(getMember, result, member) = extractValueFromJson!MemberType(json.object[gqlName]);
                     }
                 }
             }
         }
     }}
+
+    // Input objects must not have fields their type does not define (they
+    // are reported with their location by validation; this is a safeguard).
+    if (knownFields != json.object.length)
+        foreach (name, _; json.object)
+            if (!inputTypeDefinesField!T(name))
+                throw new CompilerException("Field \"" ~ name ~ "\" is not defined by type \"" ~
+                    getGraphQLTypeName!T ~ "\".");
 
     return result;
 }
@@ -625,7 +635,24 @@ void setInputField(T)(ref T obj, string fieldName, Value val) if (isInputType!T)
             }
         }
     }}
-    // Unknown field - ignore (GraphQL validation should catch this)
+    throw new CompilerException("Field \"" ~ fieldName ~ "\" is not defined by type \"" ~
+        getGraphQLTypeName!T ~ "\".");
+}
+
+/// Whether the input object type T has a field with the GraphQL name `name`.
+bool inputTypeDefinesField(T)(string name) if (isInputType!T) {
+    static foreach (member; __traits(allMembers, T)) {{
+        static if (!isInternalMember!member) {
+            static if (__traits(compiles, typeof(__traits(getMember, T.init, member)))) {
+                alias MemberType = typeof(__traits(getMember, T, member));
+                static if (!is(MemberType == function) && !is(MemberType == void)) {
+                    if (name == getGqlName!(__traits(getMember, T, member), member))
+                        return true;
+                }
+            }
+        }
+    }}
+    return false;
 }
 
 // ============================================================================
@@ -689,6 +716,8 @@ bool shouldIncludeField(Directives dirs, JSONValue variables) {
 // ============================================================================
 // CompilerException (needed here for the package(dunamis.graphql) scope)
 // ============================================================================
+
+public:
 
 /// Exception thrown during query compilation
 class CompilerException : Exception {

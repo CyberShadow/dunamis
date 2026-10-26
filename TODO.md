@@ -42,7 +42,9 @@
   - String operators: `equalTo`, `contains`, `startsWith`, `endsWith` (and case-insensitive variants)
   - Numeric operators: `lessThan`, `greaterThan`, `equalTo`, `in`, etc.
   - Logical combinators: `and`, `or`, `not`
-  - Relationship filters: `some`, `every`, `none`
+  - Relationship filters: `some`, `every`, `none` (to-many) and the target's filter (to-one), nested to any depth, pushed into SQL subqueries on root fields
+  - Nullable column filters (`isNull`), `like` patterns
+  - Unknown input object fields are validation errors (literals and variables)
 - Sorting with `SortingPlugin`:
   - `orderBy` argument with `asc`/`desc` direction
   - Nested sorting for HasMany relationships
@@ -62,7 +64,7 @@
 - Subscriptions — `Schema!(Query, Mutation, Subscription)` third type parameter. `DataSource`/`DataSession` split (singleton from per-request state). `SetupMode { query, listen, respond }` for lifecycle phases. `EventSourceExpr!T` core expression for event-driven data. `SubscriptionExecutor!T` manages event delivery and per-event evaluation. `RdbmsSubscriptionPlugin` auto-generates `<entity>Created`/`Updated`/`Deleted` subscription fields from entities. GraphQL compilation, validation (single root field rule), introspection, and SDL for subscription operations.
 
 ## Known Bugs
-- **Filters on non-column fields are skipped silently** — `FilterPlugin` offers a filter for every one-argument scalar field, but conditions on fields it cannot lower to a column are dropped ("Column not found - return null (skip this condition)" in `schema/filtering.d`). `SortingPlugin` likewise offers `orderBy` on any comparable zero-argument field. Placing `ComputedFieldsPlugin` after both avoids exposing computed fields there; the skip itself should become an error or an in-memory filter.
+- **`SortingPlugin` offers `orderBy` on any comparable zero-argument field**, including computed ones it cannot sort by in SQL. Placing `ComputedFieldsPlugin` after `FilterPlugin` and `SortingPlugin` avoids exposing computed fields there. (`FilterPlugin` evaluates conditions on computed fields in memory; the legacy JSON filter builder `buildFilterPredicate` still skips fields that are not columns.)
 
 ## Future Directions
 - **Expression deduplication** — Grafast-style peer analysis

@@ -2107,11 +2107,110 @@ void testFilteredWindowSameTableTwice() {
         b: users(first: 1, ` ~ byId ~ `) { firstName }
     }`, `{"a": [{"firstName": "Bob"}], "b": [{"firstName": "Alice"}]}`,
         `{"a": [], "b": [{"firstName": "Alice"}]}`);
+    // Each root field reads the rows of its own SQL query.
+    checkFilteredWindow(`{
+        a: users(first: 1, ` ~ byId ~ `, filter: {firstName: {equalTo: "Bob"}}) { firstName }
+        b: users(first: 1, ` ~ byId ~ `) { firstName }
+        c: users(` ~ byId ~ `, filter: {lastName: {in: ["Smith", "Brown"]}}) { firstName }
+    }`, `{"a": [{"firstName": "Bob"}], "b": [{"firstName": "Alice"}], "c": [{"firstName": "Alice"}, {"firstName": "Charlie"}]}`,
+        `{"a": [], "b": [{"firstName": "Alice"}], "c": [{"firstName": "Alice"}, {"firstName": "Charlie"}]}`);
 }
 
 void testFilteredWindowNested() {
     checkFilteredWindow(`{ users(first: 1, ` ~ byId ~ `) { posts(first: 1, ` ~ byId ~ `, filter: {title: {contains: "Rocks"}}) { title } } }`,
         `{"users": [{"posts": [{"title": "GraphQL Rocks"}]}]}`, `{"users": [{"posts": []}]}`);
+}
+
+// ============================================================================
+// Nested Relationship Filters
+// ============================================================================
+
+/// Seeded rows: users Alice Smith (25), Bob Jones (15), Charlie Brown (8);
+/// posts "Hello World" and "GraphQL Rocks" by Alice, "D Programming" by Bob;
+/// comments "Great post!" by Bob on "Hello World" and "Thanks for sharing"
+/// by Charlie on "GraphQL Rocks"; tasks "Write tests" and "Review PR"
+/// assigned to Alice, "Deploy app" to Bob.  Filters are restricted to the
+/// seeded rows where other tests may add more.
+private void checkNestedFilter(string query, string expectedDataJson) {
+    foreach (order; ["default", "filter-last"]) {
+        auto response = graphql(query, JSONValue.emptyObject, ["X-Plugin-Order": order]);
+        assertNoErrors(response);
+        assertEqual(response["data"], parseJSON(expectedDataJson), order ~ ": " ~ query);
+    }
+}
+
+void testNestedBelongsToFilters() {
+    checkNestedFilter(`{ comments(` ~ byId ~ `, filter: {post: {author: {firstName: {equalTo: "Alice"}}}}) { body } }`,
+        `{"comments": [{"body": "Great post!"}, {"body": "Thanks for sharing"}]}`);
+    checkNestedFilter(`{ comments(` ~ byId ~ `, filter: {post: {author: {age: {lessThan: 18}}}}) { body } }`,
+        `{"comments": []}`);
+    checkNestedFilter(`{ comments(` ~ byId ~ `, filter: {post: {title: {startsWith: "Hello"}}, author: {lastName: {equalTo: "Jones"}}}) { body } }`,
+        `{"comments": [{"body": "Great post!"}]}`);
+}
+
+void testNestedToManyFilters() {
+    checkNestedFilter(`{ users(` ~ byId ~ `, filter: {posts: {some: {comments: {some: {author: {firstName: {equalTo: "Bob"}}}}}}}) { firstName } }`,
+        `{"users": [{"firstName": "Alice"}]}`);
+    checkNestedFilter(`{ users(` ~ byId ~ `, filter: {posts: {some: {comments: {some: {body: {contains: "Thanks"}}}}}}) { firstName } }`,
+        `{"users": [{"firstName": "Alice"}]}`);
+    checkNestedFilter(`{ users(` ~ byId ~ `, filter: {lastName: {in: ["Smith", "Jones", "Brown"]}, ` ~
+            `posts: {every: {comments: {some: {id: {isNull: false}}}}}}) { firstName } }`,
+        `{"users": [{"firstName": "Alice"}, {"firstName": "Charlie"}]}`);
+}
+
+void testNestedMixedFilters() {
+    // A belongs-to filter within a to-many filter, and the other way round.
+    checkNestedFilter(`{ users(` ~ byId ~ `, filter: {posts: {some: {author: {age: {lessThan: 18}}}}}) { firstName } }`,
+        `{"users": [{"firstName": "Bob"}]}`);
+    checkNestedFilter(`{ comments(` ~ byId ~ `, filter: {post: {comments: {some: {author: {firstName: {equalTo: "Charlie"}}}}}}) { body } }`,
+        `{"comments": [{"body": "Thanks for sharing"}]}`);
+    checkNestedFilter(`{ posts(` ~ byId ~ `, filter: {title: {in: ["Hello World", "GraphQL Rocks", "D Programming"]}, ` ~
+            `author: {posts: {some: {title: {like: "D%"}}}}}) { title } }`,
+        `{"posts": [{"title": "D Programming"}]}`);
+    // Through a nullable belongs-to: tasks without an assignee match nothing.
+    checkNestedFilter(`{ tasks(` ~ byId ~ `, filter: {title: {in: ["Write tests", "Review PR", "Deploy app"]}, ` ~
+            `assignee: {posts: {some: {title: {contains: "Rocks"}}}}}) { title } }`,
+        `{"tasks": [{"title": "Write tests"}, {"title": "Review PR"}]}`);
+    checkNestedFilter(`{ tasks(` ~ byId ~ `, filter: {title: {in: ["Write tests", "Review PR", "Deploy app"]}, ` ~
+            `not: {assignee: {posts: {some: {title: {contains: "Rocks"}}}}}}) { title } }`,
+        `{"tasks": [{"title": "Deploy app"}]}`);
+    // Within a nested field's filter
+    checkNestedFilter(`{ users(` ~ byId ~ `, filter: {firstName: {equalTo: "Alice"}}) { posts(` ~ byId ~
+            `, filter: {comments: {some: {author: {age: {lessThan: 10}}}}}) { title } } }`,
+        `{"users": [{"posts": [{"title": "GraphQL Rocks"}]}]}`);
+}
+
+void testLikeFilter() {
+    checkNestedFilter(`{ posts(` ~ byId ~ `, filter: {title: {like: "%o_ld"}}) { title } }`,
+        `{"posts": [{"title": "Hello World"}]}`);
+    checkNestedFilter(`{ posts(` ~ byId ~ `, filter: {title: {like: "graphql%"}}) { title } }`,
+        `{"posts": []}`);
+}
+
+// ============================================================================
+// Unknown Input Object Fields
+// ============================================================================
+
+/// Input object fields their type does not define are validation errors,
+/// with their locations, in literals and in variables.
+void testUnknownInputFieldsRejected() {
+    auto literal = graphql("{\n  posts(filter: {author: {firstNam: {equalTo: \"Alice\"}}}) { title }\n}");
+    assertTrue("data" !in literal, "No data expected: " ~ literal.toString());
+    assertEqual(literal["errors"], parseJSON(`[{"message": "Field \"firstNam\" is not defined by type \"UserFilter\".", ` ~
+        `"locations": [{"line": 2, "column": 27}]}]`));
+
+    auto variable = graphql("query($f: PostFilter) {\n  posts(filter: $f) { title }\n}",
+        parseJSON(`{"f": {"author": {"posts": {"some": {"titel": {"equalTo": "x"}}}}}}`));
+    assertTrue("data" !in variable, "No data expected: " ~ variable.toString());
+    assertEqual(variable["errors"], parseJSON(`[{"message": "Variable \"$f\" got invalid value at ` ~
+        `\"author.posts.some\"; Field \"titel\" is not defined by type \"PostFilter\".", ` ~
+        `"locations": [{"line": 2, "column": 17}]}]`));
+
+    // Mutation inputs too.
+    auto mutation = graphql(`mutation { createPost(input: {title: "x", authorId: 1, published: true}) { id } }`);
+    assertTrue("data" !in mutation, "No data expected: " ~ mutation.toString());
+    assertTrue(mutation["errors"][0]["message"].str == `Field "published" is not defined by type "CreatePostInput".`,
+        mutation.toString());
 }
 
 // ============================================================================
@@ -2415,6 +2514,11 @@ static this() {
     registerTest("Filtered window: scalar and relationship filter", "tests", &testFilteredWindowScalarAndRelationship);
     registerTest("Filtered window: same table twice", "tests", &testFilteredWindowSameTableTwice);
     registerTest("Filtered window: nested field", "tests", &testFilteredWindowNested);
+    registerTest("Nested filters: belongs-to within belongs-to", "tests", &testNestedBelongsToFilters);
+    registerTest("Nested filters: to-many within to-many", "tests", &testNestedToManyFilters);
+    registerTest("Nested filters: belongs-to and to-many mixed", "tests", &testNestedMixedFilters);
+    registerTest("Filter: like", "tests", &testLikeFilter);
+    registerTest("Unknown input object fields are rejected", "tests", &testUnknownInputFieldsRejected);
 
     // Union / Interface (abstract type) tests
     registerTest("Union query with typed fragments", "tests", &testUnionQueryWithTypedFragments);

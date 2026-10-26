@@ -32,6 +32,7 @@ import dunamis.core : EvalContext, Executor;
 import dunamis.core.expr.combinators : SubscriptionResultExpr;
 import dunamis.core.executor : SubscriptionExecutor, SubscriptionManager;
 import dunamis.graphql : compileQuery, GraphQLResult;
+import dunamis.graphql.compiler.validation : ValidationException;
 import dunamis.relational.eval_context : RelationalSession;
 import dunamis.relational.subscription : createSubscriptionHandler;
 
@@ -138,6 +139,17 @@ abstract class IntegrationTestRunner(alias db, alias Schema, SubEntityType, alia
             }).except((Exception e) {
                 sendError(conn, e.msg);
             });
+        } catch (ValidationException e) {
+            // Validation errors are a GraphQL response, with their locations.
+            JSONValue[] errors;
+            foreach (error; e.errors)
+                errors ~= error.toJson();
+            auto response = new HttpResponseEx();
+            response.status = HttpStatusCode.OK;
+            response.headers["Content-Type"] = "application/json";
+            response.data = DataVec(Data(cast(immutable(ubyte)[])
+                JSONValue(["errors": JSONValue(errors)]).toString()));
+            conn.sendResponse(response);
         } catch (Exception e) {
             sendError(conn, e.msg);
         }

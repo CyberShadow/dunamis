@@ -81,7 +81,7 @@ GraphQLResult compileQuery(alias SchemaType)(string queryString, JSONValue varia
     auto fragments = collectFragments(doc);
 
     // Validation phase — collect all errors before compilation
-    auto validationErrors = validateQuery!SchemaType(doc, op, fragments);
+    auto validationErrors = validateQuery!SchemaType(doc, op, fragments, variables);
     if (validationErrors.length > 0) {
         throw new ValidationException(validationErrors);
     }
