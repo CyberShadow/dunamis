@@ -491,6 +491,22 @@ interface MapExprInfo {
     ExprBase bodyExpr();
 }
 
+/// Whether a map yields each element of its collection itself, possibly
+/// through entity casts (as plugin layers do).  Such a map preserves its
+/// collection's rows and their order, so optimizers may see through it; any
+/// other map yields different values, which are not its collection's rows.
+bool preservesElements(MapExprInfo map) {
+    import dunamis.core.expr.primitives : EntityCastInfo;
+
+    Object item = map.bodyExpr;
+    while (auto entityCast = cast(EntityCastInfo) item) {
+        if (entityCast.inputExpr is item) return false;
+        item = entityCast.inputExpr;
+    }
+    auto every = cast(EveryItemOfExprInfo) item;
+    return every !is null && every.parentMap is cast(Object) map;
+}
+
 /// Iteration over a collection. This IS the layer boundary.
 /// MapExpr is data-source agnostic — it only knows about map semantics.
 ///

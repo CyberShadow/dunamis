@@ -106,8 +106,9 @@ private Promise!(Entity[]) populatePlainFields(Entity)(RelationalSession session
 /// expression tree; the rest stay in the tree and are applied in memory.
 ///
 /// `mapExpr`'s collection is a chain of wrappers over the root expression:
-/// filters, sorts, limits and offsets, and element-wise maps and entity casts
-/// (which preserve rows and their order, so they are transparent here).  The
+/// filters, sorts, limits and offsets, and maps yielding each element itself
+/// or an entity cast of it (`preservesElements`) and entity casts (which
+/// preserve rows and their order, so they are transparent here).  The
 /// SQL query applies WHERE, then ORDER BY, then OFFSET/LIMIT, all before the
 /// in-memory wrappers; so going from the root up, a wrapper is pushed only if
 /// that does not move it across anything it does not commute with:
@@ -132,7 +133,9 @@ private void pushDownRootCollection(QueryNode node, Object mapExpr) {
         else if (auto o = cast(OffsetInfo) link) next = o.offsetSource;
         else if (auto s = cast(SortByInfo) link) next = s.sortSource;
         else if (auto f = cast(FilterByInfo) link) next = f.filterSource;
-        else if (auto m = cast(MapExprInfo) link) next = m.collection;
+        else if (auto m = cast(MapExprInfo) link) {
+            if (preservesElements(m)) next = m.collection;
+        }
         else if (auto c = cast(EntityCastInfo) link) next = c.inputExpr;
         if (next is null || next is link)
             break;
@@ -275,7 +278,10 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
                         if (auto o = cast(OffsetInfo) peek) { peek = o.offsetSource; continue; }
                         if (auto s = cast(SortByInfo) peek) { peek = s.sortSource; continue; }
                         if (auto f = cast(FilterByInfo) peek) { peek = f.filterSource; continue; }
+                        // Only maps that preserve the rows: the elements
+                        // of any other map are not the root's rows.
                         if (auto m = cast(MapExprInfo) peek) {
+                            if (!preservesElements(m)) break;
                             auto inner = m.collection;
                             if (inner is peek) break;
                             peek = inner;
@@ -1226,4 +1232,43 @@ unittest {
     // Composite key decoding via AnyRef
     assert(decodeCompositeKey(AnyRef("OrderItem:100,200").localId) == ["100", "200"]);
     assert(decodeCompositeKey(AnyRef("OrderItem:order-1,prod-2").localId) == ["order-1", "prod-2"]);
+}
+
+// A filter above a map that does not preserve the root rows (here: each
+// user's manager) is about the mapped entities, not the root rows, so it must
+// not be pushed into the root query.
+version (unittest) {
+    import dunamis.relational.demo : MockDB;
+
+    private MockDB!() staffDb;
+
+    // Module-level: a self-referencing entity cannot be declared in a function.
+    @Entity!(staffDb, "staff")
+    private struct Staff {
+        @PrimaryKey long id;
+        mixin Col!("name", string);
+        mixin ForeignKeyCol!("managerId", Staff, long);
+        mixin BelongsTo!("manager", "managerId");
+    }
+}
+
+unittest {
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core.filtering : filterBy;
+
+    foreach (optimize; [false, true]) {
+        auto db = staffDb = new MockDB!();
+        db.setTableData("staff", `[
+            {"id": 1, "name": "Alice", "manager_id": 2},
+            {"id": 2, "name": "Bob", "manager_id": 3},
+            {"id": 3, "name": "Carol", "manager_id": 3}
+        ]`);
+
+        auto query = map!((Expr!Staff m) => m.name)(
+            filterBy!((Expr!Staff m) => m.name.eq("Bob"))(
+                map!((Expr!Staff s) => s.manager)(getAll!Staff())));
+
+        auto result = awaitSync(new Executor().execute(query, optimize));
+        assert(result == ["Bob"], (optimize ? "optimized" : "naive") ~ ": " ~ result.to!string);
+    }
 }

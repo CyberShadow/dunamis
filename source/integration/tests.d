@@ -2387,6 +2387,40 @@ void testSubscriptionUserCreated() {
         JSONValue(firstName));
 }
 
+/// A filter over a mapped collection (each post's author) selects mapped
+/// elements; it is not a condition on the root rows (the posts) even where
+/// both have a column of that name.
+void testFilterOverNonRowPreservingMap() {
+    auto posts = graphql(`{ posts { id author { id firstName } } }`);
+    assertNoErrors(posts);
+    size_t[string] authoredBy;
+    string[string] nameOf;
+    foreach (post; posts["data"]["posts"].array) {
+        auto id = post["author"]["id"];
+        auto authorId = JSONValue(id.type == JSONType.string ? id.str : id.toString()).toString();
+        authoredBy[authorId]++;
+        nameOf[authorId] = post["author"]["firstName"].str;
+    }
+    assertTrue(authoredBy.length >= 2, "Expected posts by at least 2 authors");
+    foreach (authorId, count; authoredBy) {
+        auto response = graphql(`{ postAuthors(filter: {id: {equalTo: ` ~ authorId ~ `}}) { id firstName } }`);
+        assertNoErrors(response);
+        auto authors = response["data"]["postAuthors"].array;
+        assertEqual(JSONValue(authors.length), JSONValue(count),
+            "Number of post authors with id " ~ authorId ~ ": " ~ authors.to!string);
+        foreach (author; authors)
+            assertEqual(author["firstName"], JSONValue(nameOf[authorId]));
+
+        auto byName = graphql(`{ postAuthors(filter: {firstName: {equalTo: "` ~ nameOf[authorId] ~ `"}}) { id firstName } }`);
+        assertNoErrors(byName);
+        auto named = byName["data"]["postAuthors"].array;
+        assertEqual(JSONValue(named.length), JSONValue(count),
+            "Number of post authors named " ~ nameOf[authorId] ~ ": " ~ named.to!string);
+        foreach (author; named)
+            assertEqual(author["firstName"], JSONValue(nameOf[authorId]));
+    }
+}
+
 // ============================================================================
 // Test Registration
 // ============================================================================
@@ -2396,6 +2430,7 @@ static this() {
     registerTest("Query all users", "tests", &testQueryAllUsers);
     registerTest("Query users with posts (HasMany)", "tests", &testQueryUserWithPosts);
     registerTest("Query posts with author (BelongsTo)", "tests", &testQueryPostWithAuthor);
+    registerTest("Filter over a map of each post's author", "tests", &testFilterOverNonRowPreservingMap);
     registerTest("Query computed field (fullName)", "tests", &testQueryComputedField);
     registerTest("Mutation: create user", "tests", &testCreateUser);
     registerTest("Mutation persistence", "tests", &testMutationPersistence);

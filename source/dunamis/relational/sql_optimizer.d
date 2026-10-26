@@ -1089,7 +1089,7 @@ private struct WhereContext {
                     if (entityCast.inputExpr is collection) break;
                     collection = entityCast.inputExpr;
                 } else if (auto map = cast(MapExprInfo) collection) {
-                    if (map.collection is collection || !isElementCast(map)) break;
+                    if (map.collection is collection || !preservesElements(map)) break;
                     collection = map.collection;
                 } else
                     break;
@@ -1142,17 +1142,6 @@ private struct WhereContext {
         }
 
         return Nullable!DialectSql.init;
-    }
-
-    /// Whether a MapExpr only casts each element to another entity type
-    /// (as plugins wrapping an entity's relationships do).
-    static bool isElementCast(MapExprInfo map) {
-        auto body_ = map.bodyExpr;
-        auto entityCast = cast(EntityCastInfo) body_;
-        if (entityCast is null)
-            return false;
-        auto item = cast(EveryItemOfExprInfo) entityCast.inputExpr;
-        return item !is null && item.parentMap is cast(Object) map;
     }
 }
 

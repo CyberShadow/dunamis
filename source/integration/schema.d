@@ -494,6 +494,12 @@ mixin template TestSchema(alias db) {
             return unionOf!ContentNode(users(q), posts(q));
         }
 
+        /// Each post's author: a map whose elements are not the root rows
+        static auto postAuthors(Expr!Query q) {
+            import dunamis.core.expr : map;
+            return map!((Expr!Post p) => p.author)(posts(q));
+        }
+
         /// The user a request is about (a non-null object)
         static auto viewer(Expr!Query q) {
             return use((.Viewing v) => User(Int64(v.userId)), context!(.Viewing)(q));
