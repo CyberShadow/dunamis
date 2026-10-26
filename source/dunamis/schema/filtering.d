@@ -709,19 +709,27 @@ private Expr!bool buildValueCondition(T, ColumnFilter)(Expr!T colExpr, const Col
     static if (isDateRangeType!T) {
         if (!filter.containsElement.isNull) {
             alias Range = T;
-            conditions ~= sqlBinaryBool(colExpr, "rangeContains",
-                constant(filter.containsElement.get.to!string, lengthSource),
-                (Range range, string element) {
-                    // PostgreSQL's canonical date ranges are half-open: [start, end).
-                    // Nullable endpoints represent unbounded sides.
-                    static if (__traits(hasMember, Range, "_normalizedSource"))
-                        auto raw = range._normalizedSource;
-                    else
-                        auto raw = range;
-                    bool afterStart = raw.start.isNull || raw.start.get.value <= element;
-                    bool beforeEnd = raw.end.isNull || element < raw.end.get.value;
-                    return afterStart && beforeEnd;
-                });
+            auto element = constant(filter.containsElement.get.to!string, lengthSource);
+            // PostgreSQL's canonical date ranges are half-open: [start, end).
+            // Nullable endpoints represent unbounded sides.
+            static bool contains(S, E)(S start, E end, string element) {
+                bool afterStart = start.isNull || start.get.value <= element;
+                bool beforeEnd = end.isNull || element < end.get.value;
+                return afterStart && beforeEnd;
+            }
+            static if (is(typeof(__traits(getMember, Range, "start")) == function)) {
+                // A schema type: test its endpoint fields (in memory).
+                import dunamis.core.expr : use;
+                auto start = __traits(getMember, Range, "start")(colExpr);
+                auto end = __traits(getMember, Range, "end")(colExpr);
+                conditions ~= use(&contains!(ExprResultType!(typeof(start)), ExprResultType!(typeof(end))),
+                    start, end, element);
+            } else {
+                // A range value with endpoint members (e.g. a column of
+                // the range type itself), which SQL can test too.
+                conditions ~= sqlBinaryBool(colExpr, "rangeContains", element,
+                    (Range range, string e) => contains(range.start, range.end, e));
+            }
         }
     } else {
         static if (__traits(hasMember, ColumnFilter, "equalTo")) {

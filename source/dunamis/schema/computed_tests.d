@@ -4,6 +4,7 @@ module dunamis.schema.computed_tests;
 version (unittest):
 
 import std.json : JSONValue;
+import std.typecons : Nullable;
 
 import ae.utils.promise.await : awaitSync;
 
@@ -12,6 +13,7 @@ import dunamis.core.expr : Expr, use;
 import dunamis.graphql.compiler : compileQuery;
 import dunamis.graphql.schema : Schema, generateSchemaSDL;
 import dunamis.relational.demo : MockDB;
+import dunamis.relational.schema : Col, Entity, PrimaryKey, Table;
 import dunamis.schema.computed : ComputedFieldsPlugin, ComputedFieldEntity, computedFieldsIn;
 import dunamis.schema.filtering : FilterPlugin;
 import dunamis.schema.pagination : PaginationPlugin;
@@ -355,5 +357,57 @@ unittest {
         assert(users.length == 3, result.toString());
         foreach (user; users)
             assert(user["firstPostTitles"] == JSONValue(["Hello", "hidden"]), result.toString());
+    }
+}
+
+// Range filters (`containsElement`) on a range-valued computed field, whose
+// result type is only returned by computed fields: the range is tested
+// through its own endpoint fields at the filter's level.
+JSONValue dayToJson(string v) { return JSONValue(v); }
+/// ditto
+string dayFromJson(JSONValue j) { return j.str; }
+import dunamis.core.types : CustomScalar;
+alias Day = CustomScalar!(string, "Day", dayToJson, dayFromJson);
+struct Period { Nullable!Day start; Nullable!Day end; }
+
+private MockDB!() termDb;
+
+@Entity!(termDb, "terms")
+struct Term {
+    @PrimaryKey int id;
+    mixin Col!("label", string);
+}
+
+struct TermQuery {
+    mixin Table!(Term, "terms");
+}
+
+auto period(Expr!Term t) {
+    return use((string label) => label == "open"
+        ? Period(Nullable!Day(Day("2020-06-01")), Nullable!Day.init)
+        : Period(Nullable!Day(Day("2020-01-01")), Nullable!Day(Day("2021-01-01"))), t.label);
+}
+
+private alias TermSchema = ApplyPlugins!(Schema!TermQuery,
+    ComputedFieldsPlugin!period, FilterPlugin, SortingPlugin, PaginationPlugin);
+
+unittest {
+    import std.conv : to;
+
+    foreach (optimize; [false, true]) {
+        termDb = new MockDB!();
+        termDb.setTableData("terms", `[{"id": 1, "label": "closed"}, {"id": 2, "label": "open"}]`);
+        long[] ids(string day) {
+            auto result = awaitSync(new Executor().execute(compileQuery!TermSchema(
+                `{ terms(filter: {period: {containsElement: "` ~ day ~ `"}}) { id } }`), optimize));
+            long[] found;
+            foreach (row; result["terms"].array)
+                found ~= row["id"].integer;
+            return found;
+        }
+        assert(ids("2020-03-01") == [1], ids("2020-03-01").to!string);
+        assert(ids("2021-03-01") == [2], ids("2021-03-01").to!string);
+        assert(ids("2020-07-01") == [1, 2], ids("2020-07-01").to!string);
+        assert(ids("2019-07-01") == [], ids("2019-07-01").to!string);
     }
 }
