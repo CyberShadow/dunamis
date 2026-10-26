@@ -266,6 +266,12 @@ abstract class RelationalSession : DataSession {
         return resolve();
     }
 
+    /// Record the PK columns of a table, for naive-path fetches of refs that
+    /// did not come from a root fetch (e.g. children with a composite key).
+    void notePkColumns(string table, string[] pkColumns) {
+        _pkColumnsByTable[table] = pkColumns;
+    }
+
     /// Get the PK columns for a table (defaults to ["id"] if not cached)
     protected string[] getPkColumnsForTable(string table) {
         return _pkColumnsByTable.get(table, ["id"]);
@@ -454,9 +460,11 @@ abstract class RelationalSession : DataSession {
     /// Fetch all IDs from a table as strings (supports any ID type including composite keys)
     abstract Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns);
 
-    /// Fetch children for parent refs (hasMany)
+    /// Fetch children for parent refs (hasMany), each parent's children
+    /// ordered by the `orderBy` child columns (unordered if empty).
     /// Returns AnyRef[][] - one AnyRef[] per parent
-    abstract Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs);
+    abstract Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs,
+        string[] orderBy = null);
 
     /// Fetch parent refs for child refs (belongsTo)
     /// Returns one AnyRef per child (or AnyRef.init for NULL FKs)

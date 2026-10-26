@@ -146,6 +146,17 @@ mixin Col!("editorId", Nullable!(ForeignKey!User));  // Nullable FK column
 mixin BelongsTo!("editor", "editorId");              // Automatically nullable
 ```
 
+The FK may also be a plain field, e.g. part of a composite primary key, carrying its column and target as UDAs:
+
+```d
+@DemoEntity!(db, "user_badges")
+struct UserBadge {
+    @PrimaryKey @SqlColumn("user_id") @ForeignKeyRef!User long userId;
+    @PrimaryKey @SqlColumn("badge_name") string badgeName;
+    mixin BelongsTo!("user", "userId");
+}
+```
+
 **`@GqlName` for D keyword conflicts:**
 
 When a column name conflicts with a D keyword, use a different D name and map it:
@@ -192,6 +203,12 @@ layer1 AS (
 )
 SELECT * FROM layer0;
 SELECT * FROM layer1;
+```
+
+Children are unordered unless the relationship names child columns to order each parent's children by. The FK may be part of the children's (composite) primary key:
+
+```d
+mixin HasMany!("badges", UserBadge, "user_id", ["badge_name"]);
 ```
 
 ## Plain Fields vs Col Mixins

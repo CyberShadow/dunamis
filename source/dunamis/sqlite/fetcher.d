@@ -279,7 +279,8 @@ class SQLiteSession : RelationalSession {
         return resolve(result);
     }
 
-    override Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs) {
+    override Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs,
+            string[] orderBy = null) {
         // Use a CTE child layer if one holds exactly these children
         if (auto result = findChildLayer(_cachedResults, childType, fk, parentRefs)) {
             return resolve(result.getChildRefs(parentRefs));
@@ -305,6 +306,8 @@ class SQLiteSession : RelationalSession {
             auto idList = validIds.join(",");
             auto sql = format("SELECT %s, %s FROM %s WHERE %s IN (%s)",
                 childPkColumns.join(", "), fk, childTable, fk, idList);
+            if (orderBy.length)
+                sql ~= " ORDER BY " ~ orderBy.join(", ");
 
             // Group children by parent FK
             foreach (cells, columns; _db.query(sql)) {

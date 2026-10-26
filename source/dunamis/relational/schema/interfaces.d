@@ -53,6 +53,9 @@ interface HasManyInfo {
 
     /// Parent entity type name (for ref encoding)
     @property string parentTypeName();
+
+    /// Child columns that order each parent's children (empty: unordered)
+    @property string[] orderColumns();
 }
 
 // ============================================================================

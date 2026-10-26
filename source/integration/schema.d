@@ -164,6 +164,8 @@ mixin template TestSchema(alias db) {
         mixin Col!("lastName", string);
         mixin Col!("age", int);
         mixin HasMany!("posts", Post, "author_id");
+        /// Children with a composite key, keyed on part of it and ordered by the rest
+        mixin HasMany!("badges", UserBadge, "user_id", ["badge_name"]);
 
         /// Plain field: populated when entity is fetched (not via lazy column access)
         Nullable!string nickname;
@@ -320,11 +322,12 @@ mixin template TestSchema(alias db) {
     /// PK is (user_id, badge_name), and user_id is also an FK to User
     @DemoEntity!(db, "user_badges")
     struct UserBadge {
-        import dunamis.relational.schema.attrs : PrimaryKey, SqlColumn;
+        import dunamis.relational.schema.attrs : ForeignKeyRef, PrimaryKey, SqlColumn;
 
-        @PrimaryKey @SqlColumn("user_id") long userId;
+        @PrimaryKey @SqlColumn("user_id") @ForeignKeyRef!User long userId;
         @PrimaryKey @SqlColumn("badge_name") string badgeName;
-        string description;
+        mixin Col!("description", string);
+        mixin BelongsTo!("user", "userId");
     }
 
     /// Union type: SearchResult = User | Post

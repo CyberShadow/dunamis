@@ -40,9 +40,10 @@ Expr!T column(T, Entity)(Expr!Entity input, string name) {
 }
 
 /// HasMany relationship - returns collection of child entities for each parent.
-/// Takes typed Expr!Parent and returns Expr!(Child[]).
-Expr!(Child[]) hasMany(Child, string fk, Parent)(Expr!Parent input) {
-    return new HasManyAccessExpr!(Parent, Child, fk)(input);
+/// Takes typed Expr!Parent and returns Expr!(Child[]), each parent's children
+/// ordered by the `orderBy` child columns (unordered if empty).
+Expr!(Child[]) hasMany(Child, string fk, Parent, string[] orderBy = null)(Expr!Parent input) {
+    return new HasManyAccessExpr!(Parent, Child, fk, orderBy)(input);
 }
 
 /// BelongsTo relationship - returns parent entity for each child.
@@ -74,6 +75,9 @@ private Promise!(Entity[]) populatePlainFields(Entity)(RelationalSession session
         // No plain fields to populate
         return resolve(entities);
     } else {
+        // The refs need not come from a root fetch that recorded the key
+        session.notePkColumns(table, getPkColumns!Entity);
+
         // Fetch all plain fields in parallel
         Promise!void[] fetches;
         static foreach (fieldName; plainFields) {{
@@ -311,6 +315,10 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
                             }
                             node.setParent(parentNode, hasManyExpr.fkColumn,
                                 hasManyExpr.parentTypeName, parentLinkColumns);
+                            foreach (column; hasManyExpr.orderColumns) {
+                                node.addColumn(column);
+                                node.addOrderBy(column);
+                            }
                         }
                     }
                 }
@@ -643,7 +651,8 @@ auto getAll(Entity)() {
 // ============================================================================
 
 /// Expression representing a one-to-many relationship.
-class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Child[]), HasManyInfo {
+/// Each parent's children are ordered by the `orderBy` child columns, if any.
+class HasManyAccessExpr(Parent, Child, string fk, string[] orderBy = null) : Expr!(Child[]), HasManyInfo {
     private ExprBase _input;
 
     static if (!is(Parent == void)) {
@@ -700,7 +709,8 @@ class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Child[]), HasManyInfo 
                 stdout.flush();
             }
             if (session !is null) {
-                return session.fetchChildren(EntityID!Child.table, EntityID!Child.typeName, fk, parentRefs)
+                session.notePkColumns(EntityID!Child.table, getPkColumns!Child);
+                return session.fetchChildren(EntityID!Child.table, EntityID!Child.typeName, fk, parentRefs, orderBy)
                     .then((AnyRef[][] children) {
                         debug(filter) {
                             import std.stdio : writefln, stdout;
@@ -736,6 +746,7 @@ class HasManyAccessExpr(Parent, Child, string fk) : Expr!(Child[]), HasManyInfo 
     } else {
         @property string parentTypeName() { return ""; }
     }
+    @property string[] orderColumns() { return orderBy.dup; }
 }
 
 // ============================================================================

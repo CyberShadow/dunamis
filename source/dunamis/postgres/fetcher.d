@@ -439,7 +439,8 @@ class PostgresSession : RelationalSession {
         });
     }
 
-    override Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs) {
+    override Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs,
+            string[] orderBy = null) {
         // Use a CTE child layer if one holds exactly these children
         if (auto result = findChildLayer(_cachedResults, childType, fk, parentRefs)) {
             return resolve(result.getChildRefs(parentRefs));
@@ -467,6 +468,8 @@ class PostgresSession : RelationalSession {
         auto childPkCount = childPkColumns.length;
         auto sql = "SELECT " ~ childPkColumns.join(", ") ~ ", " ~ fk ~ " FROM " ~ childTable ~
                    " WHERE " ~ fk ~ " IN (" ~ validIds.join(",") ~ ")";
+        if (orderBy.length)
+            sql ~= " ORDER BY " ~ orderBy.join(", ");
 
         return _conn.query(sql).array().then((PgSqlConnection.Row[] rows) {
             // Group children by parent

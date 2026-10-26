@@ -71,9 +71,11 @@ mixin template ForeignKeyCol(string fieldName, Parent, T = int, string columnNam
           "}");
 }
 
-/// Mixin to define a hasMany relationship.
+/// Mixin to define a hasMany relationship. Each parent's children are
+/// ordered by the `orderBy` child columns, if given.
 /// Example: mixin HasMany!("posts", Post, "author_id");
-mixin template HasMany(string fieldName, Child, string fk) {
+///          mixin HasMany!("badges", UserBadge, "user_id", ["badge_name"]);
+mixin template HasMany(string fieldName, Child, string fk, string[] orderBy = null) {
     import dunamis.core.expr : Expr;
     import dunamis.relational.schema.attrs : HasManyFK, HasManyChild;
     import dunamis.relational.schema.expressions : hasMany;
@@ -81,12 +83,14 @@ mixin template HasMany(string fieldName, Child, string fk) {
     // Method with UDAs - takes Expr!Parent, returns Expr!(Child[])
     @HasManyFK(fk) @HasManyChild!Child
     mixin("static Expr!(Child[]) " ~ fieldName ~ "(Expr!(typeof(this)) e) {
-        return hasMany!(Child, fk, typeof(this))(e);
+        return hasMany!(Child, fk, typeof(this), orderBy)(e);
     }");
 }
 
 /// Mixin to define a belongsTo relationship by referencing a FK column.
 /// The parent entity type and nullability are derived from the FK column definition.
+/// The FK may also be a plain field (e.g. part of a composite primary key)
+/// carrying `@SqlColumn` and `@ForeignKeyRef!Parent`.
 mixin template BelongsTo(string fieldName, string fkFieldName) {
     import dunamis.core.expr : Expr;
     import std.typecons : Nullable;
@@ -102,7 +106,11 @@ mixin template BelongsTo(string fieldName, string fkFieldName) {
     enum _dFieldName = fieldName == "version" ? "version_" : fieldName;
     alias _Fk = __traits(getMember, typeof(this), fkFieldName);
     alias _Parent = extractForeignKeyRef!_Fk;
-    static if (hasNullableReturn!_Fk) {
+    static if (is(typeof(_Fk) == function))
+        enum _nullableFk = hasNullableReturn!_Fk;
+    else
+        enum _nullableFk = is(typeof(_Fk) == Nullable!U, U);
+    static if (_nullableFk) {
         @BelongsToFK(fkFieldName) @BelongsToParent!_Parent @GqlName(fieldName)
         mixin("static Expr!(Nullable!_Parent) " ~ _dFieldName ~ "(Expr!(typeof(this)) e) {\n" ~
               "    return e.belongsTo!(_Parent, Nullable!_Parent, getSqlColumn!_Fk, typeof(this))();\n" ~

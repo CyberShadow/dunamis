@@ -1886,6 +1886,37 @@ void testQueryUserBadgeValues() {
     assertTrue(contributorCount >= 2, "Expected at least 2 contributor badges");
 }
 
+void testUserBadgesRelation() {
+    import std.algorithm.searching : canFind;
+    import std.algorithm.sorting : isSorted;
+
+    // HasMany keyed on part of the children's composite key, ordered by the
+    // rest of it, and BelongsTo through a key field. The new badge is
+    // inserted after Bob's "contributor" badge, but sorts before it.
+    auto badgeName = "a-" ~ modeSuffix();
+    assertNoErrors(graphql(`mutation {
+        createUserBadge(userId: 2, badgeName: "` ~ badgeName ~ `", description: "Early") { userId }
+    }`));
+
+    auto response = graphql(`{
+        users(filter: {firstName: {equalTo: "Bob"}}) {
+            firstName
+            badges { badgeName description user { firstName } }
+        }
+    }`);
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    assertTrue(users.length == 1, "Expected Bob: " ~ response.toString());
+    string[] names;
+    foreach (badge; users[0]["badges"].array) {
+        names ~= badge["badgeName"].str;
+        assertTrue(badge["user"]["firstName"].str == "Bob", "Expected the badge's user: " ~ response.toString());
+    }
+    assertTrue(names.canFind(badgeName) && names.canFind("contributor"), "Expected Bob's badges: " ~ response.toString());
+    assertTrue(names.isSorted, "Expected badges ordered by name: " ~ response.toString());
+    assertTrue(users[0]["badges"][0]["description"].str == "Early", "Expected the badge's columns: " ~ response.toString());
+}
+
 void testCreateUserBadgeMutation() {
     // Test creating a new user badge with composite PK (use mode suffix for uniqueness)
     auto suffix = modeSuffix();
@@ -2263,6 +2294,7 @@ static this() {
     registerTest("Query all user badges (composite PK)", "tests", &testQueryAllUserBadges);
     registerTest("Query user badge values", "tests", &testQueryUserBadgeValues);
     registerTest("Create user badge mutation (composite PK)", "tests", &testCreateUserBadgeMutation);
+    registerTest("HasMany and BelongsTo with composite-key children", "tests", &testUserBadgesRelation);
     registerTest("Composite PK persistence", "tests", &testCompositePkPersistence);
     registerTest("Sort tags by name (composite PK)", "tests", &testSortTagsByName);
     registerTest("Filter tags by category (composite PK)", "tests", &testFilterTagsByCategory);

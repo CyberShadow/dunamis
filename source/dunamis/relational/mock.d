@@ -231,7 +231,9 @@ class MockDBImpl : RelationalSession {
         return _tableData[table].array.map!(row => buildKeyFromRow(table, row)).array;
     }
 
-    override Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs) {
+    // Like WHERE clauses, ordering is not emulated: children keep table order.
+    override Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs,
+            string[] orderBy = null) {
         return resolve(fetchChildrenSync(childTable, childType, fk, parentRefs));
     }
 
@@ -732,8 +734,9 @@ private class DebugSqlSession : RelationalSession {
         return _inner.fetchAllIdsString(table, pkColumns);
     }
 
-    override Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs) {
-        return _inner.fetchChildren(childTable, childType, fk, parentRefs);
+    override Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs,
+            string[] orderBy = null) {
+        return _inner.fetchChildren(childTable, childType, fk, parentRefs, orderBy);
     }
 
     override Promise!(AnyRef[]) fetchBelongsTo(string childTable, string fk, string parentType, AnyRef[] childRefs) {
