@@ -1621,19 +1621,21 @@ void testRequestContextSpanishLocale() {
 void testFieldErrorPartialResult() {
     // Query a mix of good and failing fields — should get partial result.
     // failingField is String! (non-null) and always throws, so null bubbling
-    // causes each user object to become null.
-    auto response = graphql(`{ users { firstName failingField } }`);
+    // makes each assignee null; Task.assignee is nullable, so bubbling stops
+    // there and the tasks themselves survive.
+    auto response = graphql(`{ tasks { title assignee { firstName failingField } } }`);
 
     // Should have both data and errors
     assertPartialResult(response);
 
-    // All user objects should be null due to null bubbling
-    // (failingField is String! but errors → null violates non-null → parent becomes null)
-    auto users = response["data"]["users"].array;
-    assertTrue(users.length >= 2, "Expected at least 2 users");
-    foreach (user; users) {
-        assertTrue(user.isNull, "User should be null due to non-null field error");
+    auto tasks = response["data"]["tasks"].array;
+    assertTrue(tasks.length >= 3, "Expected at least 3 tasks");
+    foreach (task; tasks) {
+        assertTrue(task.type == JSONType.object, "Task should survive (assignee is nullable)");
+        assertTrue(task["title"].type == JSONType.string, "Task title should be present");
+        assertTrue(task["assignee"].isNull, "Assignee should be null due to non-null field error");
     }
+    assertErrorPath(response, [JSONValue("tasks"), JSONValue("assignee"), JSONValue("failingField")]);
 }
 
 void testFieldErrorPath() {
@@ -1644,22 +1646,15 @@ void testFieldErrorPath() {
     assertErrorPath(response, [JSONValue("users"), JSONValue("failingField")]);
 }
 
-void testNonFailingFieldsUnaffected() {
-    // When a non-null field (failingField: String!) errors, null bubbling makes
-    // the entire user object null. Verify that the data array still has the right
-    // length and that errors are recorded, even though individual user objects are null.
-    auto response = graphql(`{ users(orderBy: [{field: firstName, direction: ASC}]) { firstName lastName failingField } }`);
+void testNonNullFieldErrorNullsData() {
+    // failingField is String!, users is [User!]! and non-null: the error nulls
+    // each User, the null items null the list, and the non-null root field
+    // nulls the whole response data — including sibling root fields.
+    auto response = graphql(`{ tasks { title } users(orderBy: [{field: firstName, direction: ASC}]) { firstName lastName failingField } }`);
 
     assertPartialResult(response);
-
-    auto users = response["data"]["users"].array;
-    assertTrue(users.length >= 3, "Expected at least 3 users");
-
-    // All user objects should be null due to null bubbling
-    // (failingField is String! but errors → null violates non-null → parent becomes null)
-    foreach (user; users) {
-        assertTrue(user.isNull, "User should be null due to non-null field error");
-    }
+    assertTrue(response["data"].isNull, "data should be null due to non-null field error");
+    assertErrorPath(response, [JSONValue("users"), JSONValue("failingField")]);
 }
 
 // ============================================================================
@@ -2134,7 +2129,7 @@ static this() {
     // Error path tracking tests
     registerTest("Field error returns partial result", "tests", &testFieldErrorPartialResult);
     registerTest("Field error has correct path", "tests", &testFieldErrorPath);
-    registerTest("Non-failing fields unaffected by failing sibling", "tests", &testNonFailingFieldsUnaffected);
+    registerTest("Non-null field error nulls the whole response data", "tests", &testNonNullFieldErrorNullsData);
 
     // Composite primary key tests
     registerTest("Query all tags (composite PK)", "tests", &testQueryAllTags);

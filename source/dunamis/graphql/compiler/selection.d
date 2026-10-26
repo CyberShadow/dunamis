@@ -270,13 +270,22 @@ DynamicJsonObjectExpr compileRootSelectionSet(Query, alias IntrospectionSource =
 
     string[] fieldNames;
     ExprBase[] fieldExprs;
+    string[] schemaFieldNames;
 
     processSelections!(getGraphQLTypeName!Query)(
         selections, variables, fragments, fieldNames, fieldExprs,
-        (field) => compileRootField!(Query, IntrospectionSource)(field, variables, fragments)
+        (field) {
+            schemaFieldNames ~= getFieldName(field);
+            return compileRootField!(Query, IntrospectionSource)(field, variables, fragments);
+        }
     );
+    assert(schemaFieldNames.length == fieldNames.length);
 
-    return buildDynamicJsonObject(fieldNames, fieldExprs);
+    // Null bubbling: a null in a non-null root field makes the whole result
+    // (the response's `data`) null.
+    return buildDynamicJsonObject(fieldNames, fieldExprs, [],
+        resolveNonNullFlags!Query(schemaFieldNames),
+        resolveNonNullItemFlags!Query(schemaFieldNames));
 }
 
 // ============================================================================
@@ -329,9 +338,10 @@ DynamicJsonObjectExpr compileFieldsToJsonObject(T, alias SchemaSource = void)(Ex
     // Determine non-null flags for null bubbling. Nullability is a property
     // of the schema field, so look it up by field name, not by alias.
     bool[] nonNullFlags = resolveNonNullFlags!T(schemaFieldNames);
+    bool[] nonNullItemFlags = resolveNonNullItemFlags!T(schemaFieldNames);
 
     // Build a dynamic JSON object using runtime construction
-    return buildDynamicJsonObject(fieldNames, fieldExprs, pathPrefix, nonNullFlags);
+    return buildDynamicJsonObject(fieldNames, fieldExprs, pathPrefix, nonNullFlags, nonNullItemFlags);
 }
 
 /// Determine which fields are non-nullable based on compile-time D type info.
@@ -357,6 +367,42 @@ bool[] resolveNonNullFlags(T)(string[] fieldNames) {
     return flags;
 }
 
+/// Determine which fields are lists of non-null objects ([T!]), so that a
+/// null item (e.g. from null bubbling) can be propagated to the list.
+bool[] resolveNonNullItemFlags(T)(string[] fieldNames) {
+    bool[] flags = new bool[fieldNames.length];
+    foreach (i, name; fieldNames) {
+        static foreach (member; getSchemaFields!T) {{
+            alias memberSym = __traits(getMember, T, member);
+            static if (!hasGqlHidden!memberSym) {
+                enum gqlName = getGqlName!(memberSym, member);
+                if (name == gqlName) {
+                    flags[i] = isNonNullObjectListType!(fieldResultType!(T, member));
+                }
+            }
+        }}
+    }
+    return flags;
+}
+
+/// Check if a D type maps to a GraphQL list whose items are non-null objects.
+/// Only object items are considered: scalar items cannot become null through
+/// null bubbling, and array-valued scalars must not be inspected.
+private template isNonNullObjectListType(T) {
+    import std.traits : isSomeString;
+    import std.typecons : Nullable;
+    static if (isGqlResult!T) {
+        enum isNonNullObjectListType = isNonNullObjectListType!(typeof(T.init.value));
+    } else static if (is(T == Nullable!U, U)) {
+        enum isNonNullObjectListType = isNonNullObjectListType!U;
+    } else static if (is(T == E[], E) && !isSomeString!T && !isCustomScalar!T) {
+        enum isNonNullObjectListType = is(E == struct) && !isCustomScalar!E &&
+            !is(E == Nullable!V, V) && !isGqlResult!E;
+    } else {
+        enum isNonNullObjectListType = false;
+    }
+}
+
 /// Check if a D type maps to a non-nullable GraphQL type.
 /// Nullable!T and pointer types are nullable; GqlResult!T uses inner type's nullability.
 private template isNonNullResultType(T) {
@@ -373,8 +419,9 @@ private template isNonNullResultType(T) {
 }
 
 /// Build a JSON object from runtime field names and expressions
-DynamicJsonObjectExpr buildDynamicJsonObject(string[] names, ExprBase[] exprs, JSONValue[] pathPrefix = [], bool[] nonNullFields = []) {
-    return new DynamicJsonObjectExpr(names, exprs, pathPrefix, nonNullFields);
+DynamicJsonObjectExpr buildDynamicJsonObject(string[] names, ExprBase[] exprs, JSONValue[] pathPrefix = [],
+    bool[] nonNullFields = [], bool[] nonNullItemFields = []) {
+    return new DynamicJsonObjectExpr(names, exprs, pathPrefix, nonNullFields, nonNullItemFields);
 }
 
 /// Compile the result of a field method based on its return type.

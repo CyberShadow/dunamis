@@ -176,13 +176,20 @@ class DynamicJsonObjectExpr : Expr!JSONValue {
     private ExprBase[] _exprs;
     private JSONValue[] _pathPrefix;
     private bool[] _nonNullFields;
+    private bool[] _nonNullItemFields;
 
-    this(string[] names, ExprBase[] exprs, JSONValue[] pathPrefix = [], bool[] nonNullFields = []) {
+    /// nonNullFields[i]: field i has a non-null type; a null value in it
+    /// makes the whole object null (null bubbling).
+    /// nonNullItemFields[i]: field i is a list with non-null items; a null
+    /// item makes the whole list null (which may then bubble further).
+    this(string[] names, ExprBase[] exprs, JSONValue[] pathPrefix = [], bool[] nonNullFields = [],
+        bool[] nonNullItemFields = []) {
         assert(names.length == exprs.length, "Names and exprs must have same length");
         _names = names;
         _exprs = exprs;
         _pathPrefix = pathPrefix;
         _nonNullFields = nonNullFields;
+        _nonNullItemFields = nonNullItemFields;
     }
 
     override ExprBase[] dependencies() {
@@ -239,6 +246,7 @@ class DynamicJsonObjectExpr : Expr!JSONValue {
         auto names = _names;
         auto pathPrefix = _pathPrefix;
         auto nonNullFields = _nonNullFields;
+        auto nonNullItemFields = _nonNullItemFields;
 
         return evaluateFields().then(() {
             // Determine the complete batch size. Constant expressions may
@@ -260,6 +268,15 @@ class DynamicJsonObjectExpr : Expr!JSONValue {
                         ? results[i].value[0].length : 0;
                     if (valueCount && (idx < valueCount || valueCount == 1)) {
                         auto val = results[i].value[0][valueCount == 1 ? 0 : idx];
+                        // Null bubbling through lists: a null item in a list
+                        // of non-null items makes the list itself null
+                        if (i < nonNullItemFields.length && nonNullItemFields[i] &&
+                            val.type == JSONType.array)
+                            foreach (item; val.array)
+                                if (item.isNull) {
+                                    val = JSONValue(null);
+                                    break;
+                                }
                         jsonResults[idx][name] = val;
                         // Check non-null violation: field is non-null but value is null
                         if (i < nonNullFields.length && nonNullFields[i] && val.isNull)
@@ -925,6 +942,40 @@ unittest {
     assert(ctx.errors.length == 1);
     assert(ctx.errors[0].message == "field failed");
     assert(ctx.errors[0].path == [JSONValue("users"), JSONValue("broken")]);
+}
+
+unittest {
+    import ae.utils.promise.await : awaitSync;
+
+    // Test DynamicJsonObjectExpr: null bubbling through lists of non-null items
+    auto ctx = new EvalContext();
+    auto name = new FixedJsonExpr([JSONValue("a"), JSONValue("b")]);
+    JSONValue withNull = JSONValue([JSONValue(1), JSONValue(null)]);
+    JSONValue withoutNull = JSONValue([JSONValue(1), JSONValue(2)]);
+    // [T!]! - a null item nulls the list, which nulls the object
+    auto strict = new FixedJsonExpr([withoutNull, withNull]);
+    // [T!] - a null item nulls the list only
+    auto nullableList = new FixedJsonExpr([withNull, withoutNull]);
+    // [T]! - null items are allowed
+    auto nullableItems = new FixedJsonExpr([withNull, withNull]);
+
+    auto expr = new DynamicJsonObjectExpr(
+        ["name", "strict", "nullableList", "nullableItems"],
+        [cast(ExprBase) name, cast(ExprBase) strict, cast(ExprBase) nullableList,
+            cast(ExprBase) nullableItems],
+        [],
+        [false, true, false, true],
+        [false, true, true, false],
+    );
+
+    auto result = awaitSync(expr.eval(ctx));
+    assert(result.length == 2);
+    assert(result[0]["name"].str == "a");
+    assert(result[0]["strict"] == withoutNull);
+    assert(result[0]["nullableList"].isNull);
+    assert(result[0]["nullableItems"] == withNull);
+    assert(result[1].isNull);
+    assert(!ctx.hasErrors);
 }
 
 unittest {

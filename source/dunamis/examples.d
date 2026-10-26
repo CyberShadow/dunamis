@@ -1980,7 +1980,8 @@ unittest {
 
     // validatedName uses tryUse: "Bob" and "Carol" contain 'o' so they error.
     // Since validatedName is String! (non-null), the error causes null bubbling:
-    // the entire parent user object becomes null.
+    // the parent User becomes null; users is [User!]!, so the null item makes
+    // the list null, and users being non-null makes the whole result null.
     auto query = compileQuery!(Schema!Query)(`{
         users {
             firstName
@@ -1991,18 +1992,7 @@ unittest {
     auto evalCtx = new EvalContext();
     auto result = awaitSync(executor.execute(query, evalCtx));
 
-    auto users = result["users"].array;
-    assert(users.length == 3);
-
-    // Alice: no 'o' in name, succeeds — full object returned
-    assert(users[0]["firstName"].str == "Alice");
-    assert(users[0]["validatedName"].str == "Alice");
-
-    // Bob: 'o' in name, error → entire user object is null (null bubbling)
-    assert(users[1].isNull, "Bob should be null due to non-null field error");
-
-    // Carol: 'o' in name, error → entire user object is null (null bubbling)
-    assert(users[2].isNull, "Carol should be null due to non-null field error");
+    assert(result.isNull, "Non-null field errors should bubble up to the result");
 
     // Errors should have been recorded with paths
     assert(evalCtx.hasErrors);
@@ -2030,15 +2020,9 @@ unittest {
     auto evalCtx = new EvalContext();
     auto result = awaitSync(executor.execute(query, evalCtx));
 
-    auto users = result["users"].array;
-    assert(users.length == 3);
-
-    assert(users[0]["name"].str == "Alice");
-    assert(users[0]["checked"].str == "Alice");
-
-    // validatedName is String!, so its error nulls the whole user even when aliased
-    assert(users[1].isNull, "Bob should be null due to aliased non-null field error");
-    assert(users[2].isNull, "Carol should be null due to aliased non-null field error");
+    // validatedName is String!, so its error nulls the user (and, through
+    // [User!]! and the non-null root field, the whole result) even when aliased
+    assert(result.isNull, "Aliased non-null field errors should bubble up to the result");
 
     assert(evalCtx.errors.length == 2);
     assert(evalCtx.errors[0].message == "Name contains 'o'");

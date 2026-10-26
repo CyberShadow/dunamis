@@ -1123,6 +1123,9 @@ struct User {
 
 When a non-null `GqlResult` field errors, null bubbling applies: the error is recorded,
 the field becomes null, and the entire parent object becomes null (per the GraphQL spec).
+The null keeps propagating up to the nearest nullable ancestor: through a list of
+non-null objects (`[T!]`, i.e. `T[]`) to the list itself, through non-null fields to their
+parent objects, and from a non-null root field to the whole response `data`.
 Use `GqlResult!(Nullable!T)` if you want errors to stay at the field level without bubbling.
 
 #### Manual Materialization
