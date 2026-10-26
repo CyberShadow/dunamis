@@ -42,6 +42,10 @@ interface BinaryOpInfo {
 /// This is useful for database-native predicates (for example PostgreSQL
 /// range operators) which are not D operators and therefore cannot use the
 /// compile-time `BinaryOpExpr` template.
+///
+/// When the operation is not pushed down to SQL, it is evaluated in memory
+/// by `fallback`; without one, evaluating it is an error (rather than
+/// silently yielding false).
 class SqlBinaryBoolExpr(L, R) : Expr!bool, BinaryOpInfo {
     private ExprBase _left;
     private ExprBase _right;
@@ -66,12 +70,14 @@ class SqlBinaryBoolExpr(L, R) : Expr!bool, BinaryOpInfo {
         return this;
     }
     override Promise!(bool[]) eval(EvalContext ctx) {
+        if (_fallback is null)
+            throw new Exception("SQL operator " ~ _operator ~
+                " cannot be evaluated in memory; it must be pushed down to SQL");
         return joinAll(evalAs!L(_left, ctx), evalAs!R(_right, ctx))
             .dmd21804workaround.then((values) {
                 bool[] result = new bool[values[0].length];
                 foreach (i; 0 .. result.length)
-                    result[i] = _fallback is null ? false :
-                        _fallback(values[0][i], values[1][i]);
+                    result[i] = _fallback(values[0][i], values[1][i]);
                 return result;
             });
     }

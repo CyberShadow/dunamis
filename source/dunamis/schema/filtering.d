@@ -1192,6 +1192,125 @@ template isEntityColumnMethod(Entity, string member) {
     }
 }
 
+/// A date range in its PostgreSQL text form (e.g. `[2020-01-01,2021-01-01)`),
+/// normalized to the half-open day interval [lower, upper).
+private struct DayRange {
+    bool empty;
+    long lower = long.min;  // long.min: unbounded
+    long upper = long.max;  // long.max: unbounded
+}
+
+/// Parse a date range literal, or (if `elementAllowed`) a single date, which
+/// stands for the range containing just that day. Throws on other input.
+private DayRange parseDayRange(string text, bool elementAllowed) {
+    import std.datetime.date : Date;
+    import std.string : strip, toLower;
+    import std.algorithm : countUntil;
+
+    static long day(string s) {
+        return Date.fromISOExtString(s).dayOfGregorianCal;
+    }
+    static string boundText(string s) {
+        s = s.strip;
+        if (s.length >= 2 && s[0] == '"' && s[$ - 1] == '"')
+            s = s[1 .. $ - 1];
+        return s;
+    }
+    static bool unbounded(string s) {
+        return s.length == 0 || s.toLower == "infinity" || s.toLower == "-infinity";
+    }
+
+    text = text.strip;
+    if (text.toLower == "empty")
+        return DayRange(true);
+    if (text.length && (text[0] == '[' || text[0] == '(')) {
+        auto comma = text.countUntil(',');
+        if (comma < 0 || text.length < 3 || (text[$ - 1] != ']' && text[$ - 1] != ')'))
+            throw new Exception("Invalid date range: " ~ text);
+        DayRange range;
+        auto lower = boundText(text[1 .. comma]);
+        auto upper = boundText(text[comma + 1 .. $ - 1]);
+        if (!unbounded(lower))
+            range.lower = day(lower) + (text[0] == '(' ? 1 : 0);
+        if (!unbounded(upper))
+            range.upper = day(upper) + (text[$ - 1] == ']' ? 1 : 0);
+        range.empty = range.lower >= range.upper;
+        return range;
+    }
+    if (!elementAllowed)
+        throw new Exception("Invalid date range: " ~ text);
+    auto d = day(text);
+    return DayRange(false, d, d + 1);
+}
+
+/// In-memory semantics of the PostgreSQL range operators used by range
+/// filters, for date ranges stored as text, matching PostgreSQL's
+/// `daterange` operators. The operand is a range literal, or for
+/// `rangeContains` also a single date (containment of an element).
+/// A null (empty-text) column matches nothing, as NULL does in SQL.
+bool delegate(string, string) dateRangeTextPredicate(string op) {
+    return (string column, string operand) {
+        if (column.length == 0)
+            return false;
+        auto a = parseDayRange(column, false);
+        auto b = parseDayRange(operand, op == "rangeContains");
+        static bool contains(DayRange outer, DayRange inner) {
+            if (inner.empty) return true;
+            if (outer.empty) return false;
+            return outer.lower <= inner.lower && inner.upper <= outer.upper;
+        }
+        switch (op) {
+            case "rangeContains": return contains(a, b);
+            case "rangeContainedBy": return contains(b, a);
+            default: break;
+        }
+        if (a.empty || b.empty)
+            return false;
+        switch (op) {
+            case "rangeOverlaps": return a.lower < b.upper && b.lower < a.upper;
+            case "rangeStrictlyLeft": return a.upper <= b.lower;
+            case "rangeStrictlyRight": return a.lower >= b.upper;
+            case "rangeNotExtendsRight": return a.upper <= b.upper;
+            case "rangeNotExtendsLeft": return a.lower >= b.lower;
+            case "rangeAdjacent": return a.upper == b.lower || b.upper == a.lower;
+            default:
+                throw new Exception("Range operator " ~ op ~ " cannot be evaluated in memory");
+        }
+    };
+}
+
+unittest {
+    auto p(string op) { return dateRangeTextPredicate(op); }
+    enum y2020 = "[2020-01-01,2021-01-01)";
+    assert(p("rangeContains")(y2020, "2020-06-01"));
+    assert(p("rangeContains")(y2020, "2020-01-01"));
+    assert(!p("rangeContains")(y2020, "2021-01-01"));
+    assert(p("rangeContains")("[2020-01-01,)", "2999-01-01"));
+    assert(p("rangeContains")(y2020, "[2020-03-01,2020-04-01)"));
+    assert(p("rangeContains")("[2020-01-01,2020-12-31]", "2020-12-31"));
+    assert(!p("rangeContains")("(2020-01-01,2020-12-31]", "2020-01-01"));
+    assert(!p("rangeContains")(y2020, "[2020-03-01,)"));
+    assert(p("rangeContainedBy")("[2020-03-01,2020-04-01)", y2020));
+    assert(p("rangeOverlaps")(y2020, "[2020-12-31,2022-01-01)"));
+    assert(!p("rangeOverlaps")(y2020, "[2021-01-01,2022-01-01)"));
+    assert(p("rangeStrictlyLeft")(y2020, "[2021-01-01,)"));
+    assert(!p("rangeStrictlyLeft")(y2020, "[2020-12-31,)"));
+    assert(p("rangeStrictlyRight")("[2021-01-01,)", y2020));
+    assert(p("rangeNotExtendsRight")(y2020, "[2019-01-01,2021-01-01)"));
+    assert(!p("rangeNotExtendsRight")("[2020-01-01,)", y2020));
+    assert(p("rangeNotExtendsLeft")(y2020, "[2020-01-01,2020-02-01)"));
+    assert(p("rangeAdjacent")(y2020, "[2021-01-01,2022-01-01)"));
+    assert(p("rangeAdjacent")(y2020, "[2019-01-01,2019-12-31]"));
+    assert(!p("rangeAdjacent")(y2020, "[2021-01-02,2022-01-01)"));
+    assert(!p("rangeOverlaps")("empty", y2020));
+    assert(p("rangeContains")(y2020, "empty"));
+    assert(!p("rangeContains")("", "2020-06-01"));
+    bool threw;
+    try p("rangeContains")("[2020-01-01,2021-01-01)", "soon");
+    catch (Exception) threw = true;
+    assert(threw);
+}
+
 /// Build a typed condition for a specific column type.
 private Expr!bool buildTypedCondition(ColType)(Expr!ColType colExpr, string op, JSONValue value, ExprBase lengthSource) {
     import dunamis.core.expr : constant;
@@ -1230,7 +1349,7 @@ private Expr!bool buildTypedCondition(ColType)(Expr!ColType colExpr, string op, 
         }
         if (rangeOperator.length)
             return sqlBinaryBool(colExpr, rangeOperator,
-                constant(operand, lengthSource));
+                constant(operand, lengthSource), dateRangeTextPredicate(rangeOperator));
     }
 
     switch (op) {
@@ -1772,4 +1891,46 @@ unittest {
     assert(alice == ["Dishes", "Windows"], alice.to!string);
     auto notAlice = titles(`{assignee: {name: {notEqualTo: "Alice"}}}`);
     assert(notAlice == ["Laundry"], notAlice.to!string);
+}
+
+// Range filters built from JSON on a range stored as text must also be
+// evaluated correctly when they are not pushed down to SQL.
+unittest {
+    import std.json : parseJSON;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core : Executor;
+    import dunamis.core.expr : map, use;
+    import dunamis.core.filtering : FilterByExpr, FilterItemExpr;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
+    import dunamis.relational.schema : Col, getAll;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "terms")
+    static struct Term {
+        mixin DemoId;
+        mixin Col!("period", string);
+    }
+
+    db = new MockDB!();
+    db.setTableData("terms", `[
+        {"id":1,"period":"[2020-01-01,2021-01-01)"},
+        {"id":2,"period":"[2021-01-01,2022-01-01)"},
+        {"id":3,"period":"[2020-06-01,)"}
+    ]`);
+
+    static long[] ids(string filter) {
+        auto item = new FilterItemExpr!Term();
+        auto predicate = buildFilterPredicate!Term(item, parseJSON(filter));
+        auto filtered = new FilterByExpr!Term(getAll!Term(), item, predicate);
+        item._parentFilter = filtered;
+        auto query = map!((Expr!Term t) => use((Term term) => term.id.value, t))(filtered);
+        return awaitSync(new Executor().execute(query, false));
+    }
+
+    assert(ids(`{"period": {"containsElement": "2020-07-01"}}`) == [1, 3]);
+    assert(ids(`{"period": {"containsElement": "2021-03-01"}}`) == [2, 3]);
+    assert(ids(`{"period": {"overlaps": {"start": "2020-12-01", "end": "2021-02-01"}}}`) == [1, 2, 3]);
+    assert(ids(`{"period": {"strictlyLeftOf": {"start": "2021-01-01", "end": null}}}`) == [1]);
+    assert(ids(`{"period": {"adjacentTo": {"start": "2019-01-01", "end": "2020-01-01"}}}`) == [1]);
 }
