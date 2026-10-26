@@ -204,15 +204,40 @@ template getAllObjectTypes(Query) {
     alias getAllObjectTypes = expandObjectFixpoint!(uniqueTypes!(getRootTypes!Query));
 }
 
+// The type list helpers below are used on lists of hundreds of types (all
+// object or input types of a schema). They iterate (static foreach, alias
+// reassignment) and compare types by their mangled names in CTFE rather than
+// recursing on the rest of the list: a recursive helper instantiates itself
+// once per element with the rest of the list as arguments, which costs the
+// compiler memory quadratic (or, nested, cubic) in the list's length.
+
+/// The mangled names of Types (identical types have identical mangled names).
+private template _mangles(Types...) {
+    enum string[] _mangles = () {
+        string[] result;
+        static foreach (T; Types)
+            result ~= T.mangleof;
+        return result;
+    }();
+}
+
+/// The types Types[i] for which keep[i] is true, in order.
+private template _select(alias keep, Types...) {
+    alias _select = AliasSeq!();
+    static foreach (i; 0 .. Types.length)
+        static if (keep[i])
+            _select = AliasSeq!(_select, Types[i]);
+}
+
 /// Check if a type is already in an AliasSeq
 template staticContains(T, Types...) {
-    static if (Types.length == 0) {
-        enum staticContains = false;
-    } else static if (is(T == Types[0])) {
-        enum staticContains = true;
-    } else {
-        enum staticContains = staticContains!(T, Types[1..$]);
-    }
+    enum staticContains = () {
+        bool found;
+        static foreach (U; Types)
+            static if (is(T == U))
+                found = true;
+        return found;
+    }();
 }
 
 /// Filter a type list to exclude types present in a known set.
@@ -220,13 +245,16 @@ template staticContains(T, Types...) {
 /// Usage: ExcludeTypes!(Known...).From!(Candidates...)
 template ExcludeTypes(Known...) {
     template From(Candidates...) {
-        static if (Candidates.length == 0) {
-            alias From = AliasSeq!();
-        } else static if (staticContains!(Candidates[0], Known)) {
-            alias From = From!(Candidates[1..$]);
-        } else {
-            alias From = AliasSeq!(Candidates[0], From!(Candidates[1..$]));
-        }
+        private enum bool[] _keep = () {
+            bool[string] known;
+            foreach (m; _mangles!Known)
+                known[m] = true;
+            bool[] keep;
+            foreach (m; _mangles!Candidates)
+                keep ~= (m in known) is null;
+            return keep;
+        }();
+        alias From = _select!(_keep, Candidates);
     }
 }
 
@@ -271,26 +299,38 @@ template getRootTypes(Query) {
     alias getRootTypes = getRootTypesImpl!(Query, 0, __traits(allMembers, Query));
 }
 
-/// Remove duplicates from a type list
+/// Whether each of Types is its last occurrence in Types.
+private template _lastOccurrences(Types...) {
+    enum bool[] _lastOccurrences = () {
+        enum mangles = _mangles!Types;
+        bool[string] seen;
+        auto keep = new bool[mangles.length];
+        foreach_reverse (i, m; mangles) {
+            keep[i] = (m in seen) is null;
+            seen[m] = true;
+        }
+        return keep;
+    }();
+}
+
+/// Remove duplicates from a type list (keeping each type's last occurrence)
 template uniqueTypes(Types...) {
-    static if (Types.length == 0) {
-        alias uniqueTypes = AliasSeq!();
-    } else static if (staticContains!(Types[0], Types[1..$])) {
-        alias uniqueTypes = uniqueTypes!(Types[1..$]);
-    } else {
-        alias uniqueTypes = AliasSeq!(Types[0], uniqueTypes!(Types[1..$]));
-    }
+    alias uniqueTypes = _select!(_lastOccurrences!Types, Types);
 }
 
 /// Forward declaration helper for uniqueTypes
 template uniqueTypesForExpand(Types...) {
-    static if (Types.length == 0) {
-        alias uniqueTypesForExpand = AliasSeq!();
-    } else static if (staticContains!(Types[0], Types[1..$])) {
-        alias uniqueTypesForExpand = uniqueTypesForExpand!(Types[1..$]);
-    } else {
-        alias uniqueTypesForExpand = AliasSeq!(Types[0], uniqueTypesForExpand!(Types[1..$]));
-    }
+    alias uniqueTypesForExpand = _select!(_lastOccurrences!Types, Types);
+}
+
+unittest {
+    static struct A {}
+    static struct B {}
+    static struct C {}
+    static assert(is(uniqueTypes!(A, B, A, C, B) == AliasSeq!(A, C, B)));
+    static assert(is(uniqueTypes!() == AliasSeq!()));
+    static assert(is(ExcludeTypes!(A, C).From!(A, B, C, B) == AliasSeq!(B, B)));
+    static assert(staticContains!(B, A, B) && !staticContains!(C, A, B) && !staticContains!(A));
 }
 
 // ============================================================================
@@ -339,44 +379,27 @@ template getImplementedInterfaces(T, AllAbstractTypes...) {
 
 /// Collect types from AllTypes that declare @Implements for AbstractT
 private template _collectImplementors(AbstractT, AllTypes...) {
-    static if (AllTypes.length == 0) {
-        alias _collectImplementors = AliasSeq!();
-    } else {
-        static if (implementsAbstractType!(AllTypes[0], AbstractT)) {
-            alias _collectImplementors = AliasSeq!(AllTypes[0], _collectImplementors!(AbstractT, AllTypes[1..$]));
-        } else {
-            alias _collectImplementors = _collectImplementors!(AbstractT, AllTypes[1..$]);
-        }
-    }
+    alias _collectImplementors = AliasSeq!();
+    static foreach (T; AllTypes)
+        static if (implementsAbstractType!(T, AbstractT))
+            _collectImplementors = AliasSeq!(_collectImplementors, T);
 }
 
 /// Filter a type list to only abstract types
 private template _filterAbstractTypes(Types...) {
-    static if (Types.length == 0) {
-        alias _filterAbstractTypes = AliasSeq!();
-    } else {
-        static if (isAbstractType!(Types[0])) {
-            alias _filterAbstractTypes = AliasSeq!(Types[0], _filterAbstractTypes!(Types[1..$]));
-        } else {
-            alias _filterAbstractTypes = _filterAbstractTypes!(Types[1..$]);
-        }
-    }
+    alias _filterAbstractTypes = AliasSeq!();
+    static foreach (T; Types)
+        static if (isAbstractType!T)
+            _filterAbstractTypes = AliasSeq!(_filterAbstractTypes, T);
 }
 
 /// Filter abstract types to those that T is a member of AND that have schema fields (interfaces)
 private template _filterImplementedInterfaces(T, AllAbstractTypes...) {
-    static if (AllAbstractTypes.length == 0) {
-        alias _filterImplementedInterfaces = AliasSeq!();
-    } else {
-        alias AbstractT = AllAbstractTypes[0];
-        alias Rest = _filterImplementedInterfaces!(T, AllAbstractTypes[1..$]);
-        // Check: is T a member of this abstract type, and does the abstract type have schema fields?
-        static if (_isMemberOf!(T, AbstractT) && getSchemaFields!AbstractT.length > 0) {
-            alias _filterImplementedInterfaces = AliasSeq!(AbstractT, Rest);
-        } else {
-            alias _filterImplementedInterfaces = Rest;
-        }
-    }
+    alias _filterImplementedInterfaces = AliasSeq!();
+    static foreach (AbstractT; AllAbstractTypes)
+        // Is T a member of this abstract type, and does the abstract type have schema fields?
+        static if (_isMemberOf!(T, AbstractT) && getSchemaFields!AbstractT.length > 0)
+            _filterImplementedInterfaces = AliasSeq!(_filterImplementedInterfaces, AbstractT);
 }
 
 /// Check if T is a member of abstract type AbstractT (via @ImplementedBy on AbstractT)
@@ -432,110 +455,69 @@ private template hasAnyPlainMethod(T) {
     }();
 }
 
-/// Helper to get related types from a type by iterating over members.
-private template getRelatedTypesImpl(T, size_t idx, Members...) {
-    static if (idx >= Members.length) {
-        alias getRelatedTypesImpl = AliasSeq!();
-    } else {
-        enum member = Members[idx];
-        alias Rest = getRelatedTypesImpl!(T, idx + 1, Members);
-
-        static if (!isInternalMember!member) {
-            // 1. Check computed fields (static methods returning Expr!T)
-            static if (is(typeof(__traits(getMember, T, member)) == function)) {
-                alias fn = __traits(getMember, T, member);
-
-                static if (isValidFieldMethod!(T, fn)) {
-                    alias RetType = ReturnType!fn;
-                    alias ResultT = ExprResultType!RetType;
-
-                    // Extract object type from return type
-                    alias ObjectFromReturn = extractObjectFromType!ResultT;
-
-                    static if (!is(ObjectFromReturn == void)) {
-                        alias getRelatedTypesImpl = AliasSeq!(ObjectFromReturn, Rest);
-                    } else {
-                        alias getRelatedTypesImpl = Rest;
-                    }
-                }
-                // 2. Check plain methods (instance methods returning non-Expr types)
-                else static if (isPlainMethod!(T, member)) {
-                    alias RetType = ReturnType!fn;
-                    alias ObjectFromReturn = extractObjectFromType!RetType;
-
-                    static if (!is(ObjectFromReturn == void)) {
-                        alias getRelatedTypesImpl = AliasSeq!(ObjectFromReturn, Rest);
-                    } else {
-                        alias getRelatedTypesImpl = Rest;
-                    }
-                } else {
-                    alias getRelatedTypesImpl = Rest;
-                }
-            }
-            // 3. Check plain fields (struct instance fields)
-            else static if (isPlainField!(T, member)) {
-                alias FieldType = typeof(__traits(getMember, T.init, member));
-                alias ObjectFromField = extractObjectFromType!FieldType;
-
-                static if (!is(ObjectFromField == void)) {
-                    alias getRelatedTypesImpl = AliasSeq!(ObjectFromField, Rest);
-                } else {
-                    alias getRelatedTypesImpl = Rest;
-                }
-            } else {
-                alias getRelatedTypesImpl = Rest;
-            }
+/// The object type a member of T leads to (as a one-element AliasSeq), if any.
+private template _RelatedOf(T) {
+    template of(string member) {
+        static if (isInternalMember!member) {
+            alias of = AliasSeq!();
+        }
+        // 1. Computed fields (static methods returning Expr!T)
+        else static if (is(typeof(__traits(getMember, T, member)) == function)) {
+            alias fn = __traits(getMember, T, member);
+            static if (isValidFieldMethod!(T, fn))
+                alias of = _objectOrNothing!(extractObjectFromType!(ExprResultType!(ReturnType!fn)));
+            // 2. Plain methods (instance methods returning non-Expr types)
+            else static if (isPlainMethod!(T, member))
+                alias of = _objectOrNothing!(extractObjectFromType!(ReturnType!fn));
+            else
+                alias of = AliasSeq!();
+        }
+        // 3. Plain fields (struct instance fields)
+        else static if (isPlainField!(T, member)) {
+            alias of = _objectOrNothing!(extractObjectFromType!(typeof(__traits(getMember, T.init, member))));
         } else {
-            alias getRelatedTypesImpl = Rest;
+            alias of = AliasSeq!();
         }
     }
+}
+
+/// The object type a root field of Query leads to (as a one-element AliasSeq), if any.
+private template _RootOf(Query) {
+    template of(string member) {
+        static if (!isInternalMember!member &&
+                   is(typeof(__traits(getMember, Query, member)) == function)) {
+            alias fn = __traits(getMember, Query, member);
+            static if (isValidFieldMethod!(Query, fn))
+                alias of = _objectOrNothing!(extractObjectFromType!(ExprResultType!(ReturnType!fn)));
+            else
+                alias of = AliasSeq!();
+        } else {
+            alias of = AliasSeq!();
+        }
+    }
+}
+
+private template _objectOrNothing(T) {
+    static if (is(T == void))
+        alias _objectOrNothing = AliasSeq!();
+    else
+        alias _objectOrNothing = T;
+}
+
+/// Helper to get related types from a type by iterating over members.
+private template getRelatedTypesImpl(T, size_t idx, Members...) {
+    alias getRelatedTypesImpl = staticMap!(_RelatedOf!T.of, Members[idx .. $]);
 }
 
 /// Helper to get root types from Query by iterating over members.
 private template getRootTypesImpl(Query, size_t idx, Members...) {
-    static if (idx >= Members.length) {
-        alias getRootTypesImpl = AliasSeq!();
-    } else {
-        enum member = Members[idx];
-        alias Rest = getRootTypesImpl!(Query, idx + 1, Members);
-
-        static if (!isInternalMember!member &&
-                   is(typeof(__traits(getMember, Query, member)) == function)) {
-            alias fn = __traits(getMember, Query, member);
-
-            // Check if it's a valid field method
-            static if (isValidFieldMethod!(Query, fn)) {
-                alias RetType = ReturnType!fn;
-                alias ResultT = ExprResultType!RetType;
-
-                // Extract object type from return type
-                alias ObjectFromReturn = extractObjectFromType!ResultT;
-
-                static if (!is(ObjectFromReturn == void)) {
-                    alias getRootTypesImpl = AliasSeq!(ObjectFromReturn, Rest);
-                } else {
-                    alias getRootTypesImpl = Rest;
-                }
-            } else {
-                alias getRootTypesImpl = Rest;
-            }
-        } else {
-            alias getRootTypesImpl = Rest;
-        }
-    }
+    alias getRootTypesImpl = staticMap!(_RootOf!Query.of, Members[idx .. $]);
 }
 
 /// Expand one level: get all related types from a set of types
 private template expandOneLevel(Types...) {
-    static if (Types.length == 0) {
-        alias expandOneLevel = AliasSeq!();
-    } else {
-        alias First = getRelatedTypes!(Types[0]);
-        alias Rest = expandOneLevel!(Types[1..$]);
-        alias expandOneLevel = AliasSeq!(First, Rest);
-    }
+    alias expandOneLevel = staticMap!(getRelatedTypes, Types);
 }
-
 private template expandObjectFixpoint(PrevTypes...) {
     alias NewOnly = uniqueTypes!(ExcludeTypes!(PrevTypes).From!(expandOneLevel!PrevTypes));
 

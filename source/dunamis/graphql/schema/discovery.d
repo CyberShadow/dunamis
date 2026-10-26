@@ -88,13 +88,8 @@ template getNestedInputTypes(T) if (isInputType!T) {
 
 /// Expand one level: get all nested input types from a set of input types
 template expandInputOneLevel(Types...) {
-    static if (Types.length == 0) {
-        alias expandInputOneLevel = AliasSeq!();
-    } else {
-        alias First = getNestedInputTypes!(Types[0]);
-        alias Rest = expandInputOneLevel!(Types[1..$]);
-        alias expandInputOneLevel = AliasSeq!(First, Rest);
-    }
+    // (Iterative: see the type list helpers in dunamis.core.discovery.)
+    alias expandInputOneLevel = staticMap!(getNestedInputTypes, Types);
 }
 
 /// Fixpoint input type discovery - expands nested input types until no new types are found.
@@ -142,13 +137,7 @@ template getInputTypesFromEntity(Entity) {
 
 /// Helper to collect input types from multiple entities
 template getInputTypesFromEntitiesImpl(Entities...) {
-    static if (Entities.length == 0) {
-        alias getInputTypesFromEntitiesImpl = AliasSeq!();
-    } else {
-        alias First = getInputTypesFromEntity!(Entities[0]);
-        alias Rest = getInputTypesFromEntitiesImpl!(Entities[1..$]);
-        alias getInputTypesFromEntitiesImpl = AliasSeq!(First, Rest);
-    }
+    alias getInputTypesFromEntitiesImpl = staticMap!(getInputTypesFromEntity, Entities);
 }
 
 /// Collect all input types from all entities in the schema.
@@ -318,13 +307,7 @@ template getEnumTypesFromEntity(Entity) {
 
 /// Helper to collect enum types from multiple entities
 template getEnumTypesFromEntitiesImpl(Entities...) {
-    static if (Entities.length == 0) {
-        alias getEnumTypesFromEntitiesImpl = AliasSeq!();
-    } else {
-        alias First = getEnumTypesFromEntity!(Entities[0]);
-        alias Rest = getEnumTypesFromEntitiesImpl!(Entities[1..$]);
-        alias getEnumTypesFromEntitiesImpl = AliasSeq!(First, Rest);
-    }
+    alias getEnumTypesFromEntitiesImpl = staticMap!(getEnumTypesFromEntity, Entities);
 }
 
 /// Collect all enum types from all entities in the schema
