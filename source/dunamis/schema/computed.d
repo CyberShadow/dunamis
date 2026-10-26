@@ -26,12 +26,12 @@ module dunamis.schema.computed;
 import std.meta : AliasSeq, Filter, staticMap;
 import std.traits : Parameters;
 
-import dunamis.core.discovery : getAllObjectTypes;
+import dunamis.core.discovery : extractObjectFromType, getAllObjectTypes;
 import dunamis.core.expr : ExprResultType, isExpr;
-import dunamis.core.types : isInternalMember;
+import dunamis.core.types : isAbstractType, isInternalMember;
 import dunamis.graphql.schema.udas : getGraphQLTypeName;
 import dunamis.schema.entity_cast : BaseEntityOf;
-import dunamis.schema.plugin : isSchema, OriginalName, RemapTypeAttributes, WrapFields, ForwardField;
+import dunamis.schema.plugin : isSchema, NormalizeFields, OriginalName, RemapTypeAttributes, WrapFields, ForwardField;
 import dunamis.schema.transform : isTypeInList;
 
 // Fully qualified in generated code, so that entity field names cannot shadow them.
@@ -185,13 +185,25 @@ template ComputedFieldsPlugin(Sources...) {
 
         /// Maps a computed field's result type (at any layer of a schema type's
         /// chain, typically the user-declared one) to the extended version.
-        /// Other types pass through unchanged.
+        /// Object types that are not part of the schema (POD types that only
+        /// computed fields return) are normalized here, as Schema normalizes
+        /// the types it discovers. Other types pass through unchanged.
         template ResultTypeMap(R) {
             alias _matches = Filter!(_isLayerOf!(BaseEntityOf!R), _AllTypes);
             static if (_matches.length > 0)
                 alias ResultTypeMap = EntityTypeMap!(_matches[0]);
+            else static if (is(extractObjectFromType!R == R) && !isAbstractType!R)
+                alias ResultTypeMap = _ResultOnlyType!R;
             else
                 alias ResultTypeMap = R;
+        }
+
+        template _ResultOnlyType(R) {
+            @(RemapTypeAttributes!(ResultTypeMap, __traits(getAttributes, R)))
+            @OriginalName(getGraphQLTypeName!R)
+            struct _ResultOnlyType {
+                mixin NormalizeFields!(R, ResultTypeMap);
+            }
         }
 
         static if (__traits(hasMember, S, "AllEntityTypes"))

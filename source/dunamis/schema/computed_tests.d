@@ -60,7 +60,7 @@ unittest {
         return result;
     }();
     static assert(names == ["postCount", "shout", "authorName", "greeting", "commentTexts",
-        "visiblePosts", "checkedTitle", "widened", "maybeSpan", "maybeSpans", "initial"], names.stringof);
+        "visiblePosts", "checkedTitle", "widened", "maybeSpan", "maybeSpans", "initial", "window", "windows"], names.stringof);
 
     static assert(computedFieldsIn!(fixture.authorName).length == 1);
     static assert(is(ComputedFieldEntity!(fixture.authorName) == Post));
@@ -106,6 +106,8 @@ unittest {
             widened { from to }
             maybeSpan { from }
             maybeSpans { from last: to }
+            window { label span { to } }
+            windows { label span { from } }
             visiblePosts { title authorName }
             posts(filter: {title: {equalTo: "Hello"}}) { title authorName }
         }
@@ -127,6 +129,8 @@ unittest {
     assert(alice["maybeSpans"].array.length == 2, result.toString());
     assert(alice["maybeSpans"][1]["from"].integer == 3 && alice["maybeSpans"][1]["last"].integer == 4, result.toString());
     assert("to" !in alice["maybeSpans"][0].object, result.toString());
+    assert(alice["window"]["label"].str == "Alice" && alice["window"]["span"]["to"].integer == 5, result.toString());
+    assert(alice["windows"][0]["label"].str == "a" && alice["windows"][0]["span"]["from"].integer == 1, result.toString());
     assert(alice["visiblePosts"].array.length == 1, result.toString());
     assert(alice["visiblePosts"][0]["title"].str == "Hello");
     assert(alice["visiblePosts"][0]["authorName"].str == "Alice");

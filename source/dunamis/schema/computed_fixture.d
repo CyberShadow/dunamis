@@ -18,6 +18,7 @@ MockDB!() fixtureDb;
 
 struct Greeting { string word; }
 struct Span { int from; int to; }
+struct Window { string label; Span span; } // Only returned by computed fields
 
 @Entity!(fixtureDb, "comments")
 struct Comment {
@@ -101,6 +102,14 @@ auto maybeSpans(Expr!User u) {
 
 auto initial(Expr!User u) {
     return use((string name) => name == "Bob" ? Nullable!string.init : Nullable!string(name[0 .. 1]), u.name);
+}
+
+auto window(Expr!User u) {
+    return use((string name) => Window(name, Span(0, cast(int) name.length)), u.name);
+}
+
+auto windows(Expr!User u) {
+    return use((string name) => name == "Bob" ? Nullable!(Window[]).init : Nullable!(Window[])([Window("a", Span(1, 2))]), u.name);
 }
 
 // ---- Not fields ----
