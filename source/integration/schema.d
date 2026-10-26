@@ -23,6 +23,100 @@ struct RequestContext {
     string locale;
 }
 
+/// Request context: what an interleaved evaluation is about (see `viewer`).
+struct Viewing {
+    long userId;
+    long taskId;
+}
+
+/// A POD returned in a nullable list
+struct Label {
+    string text;
+}
+
+// ============================================================================
+// Interleaving (for evaluating one optimized tree for several requests)
+// ============================================================================
+
+import dunamis.core.expr : Expr, ExprBase, evalAs;
+import dunamis.core.optimize : OptimizeContext;
+import ae.utils.promise : Promise;
+
+/// Lets several evaluations ("participants") of the same tree interleave
+/// deterministically: a gated expression of a participant waits until every
+/// participant that has not finished is waiting at a gate, and is then
+/// released together with all of them. So each participant evaluates past a
+/// gate only once all of them have evaluated everything before their gates —
+/// e.g. bound the objects whose fields the gates guard.
+final class InterleaveBarrier {
+    private Promise!void[][] _waiting;
+    private bool[] _finished;
+
+    this(size_t participants) {
+        _waiting.length = participants;
+        _finished.length = participants;
+    }
+
+    /// A gate for `participant`.
+    Promise!void wait(size_t participant) {
+        auto gate = new Promise!void;
+        _waiting[participant] ~= gate;
+        check();
+        return gate;
+    }
+
+    /// Record that `participant` finished its evaluation.
+    void finish(size_t participant) {
+        _finished[participant] = true;
+        check();
+    }
+
+    private void check() {
+        foreach (i, waiting; _waiting)
+            if (!_finished[i] && waiting.length == 0)
+                return;
+        foreach (ref waiting; _waiting) {
+            auto gates = waiting;
+            waiting = null;
+            foreach (gate; gates)
+                gate.fulfill();
+        }
+    }
+}
+
+/// Request context identifying a participant of an InterleaveBarrier.
+struct InterleaveGate {
+    InterleaveBarrier barrier;
+    size_t participant;
+}
+
+/// Evaluates its input once the participant's gate opens (immediately when
+/// not evaluated as a participant).
+final class GatedExpr(T) : Expr!T {
+    import dunamis.core.eval : EvalContext;
+
+    private ExprBase _input;
+
+    this(Expr!T input) { _input = input; }
+
+    override ExprBase[] dependencies() { return [_input]; }
+    override void replaceDependency(size_t index, ExprBase dep) { _input = dep; }
+    override Expr!T optimize(OptimizeContext ctx) {
+        _input = (cast(Expr!T) _input).optimize(ctx);
+        return this;
+    }
+
+    override Promise!(T[]) eval(EvalContext ctx) {
+        auto input = _input;
+        if (!ctx.hasRequestContext!InterleaveGate)
+            return evalAs!T(input, ctx);
+        auto gate = ctx.getRequestContext!InterleaveGate;
+        return gate.barrier.wait(gate.participant).then(() => evalAs!T(input, ctx));
+    }
+}
+
+Expr!T gated(T)(Expr!T input) { return new GatedExpr!T(input); }
+
 /// Task status enum for testing enum support
 enum TaskStatus {
     pending,
@@ -266,6 +360,28 @@ mixin template TestSchema(alias db) {
         static auto traverseList(Expr!User u, NodeInput* head) {
             return u.firstName;
         }
+
+        // Fields evaluated past an interleaving gate (see InterleaveBarrier)
+        static auto gatedId(Expr!User u) { return gated(use((User x) => x.id.value, u)); }
+        static auto gatedFirstName(Expr!User u) { return gated(u.firstName); }
+
+        /// A nullable list of objects: null for users without posts
+        static auto gatedPostLabels(Expr!User u) {
+            import std.conv : to;
+            import dunamis.core.expr : map;
+            return gated(use((string name, string[] titles) => titles.length == 0
+                    ? Nullable!(.Label[]).init
+                    : Nullable!(.Label[])([.Label(name ~ ": " ~ titles.length.to!string)]),
+                u.firstName, map!((Expr!Post p) => p.title)(u.posts)));
+        }
+
+        /// Every user's full name (a root collection with an SQL computed
+        /// column), for a single user.
+        static auto everyonesFullName(Expr!User u) {
+            import dunamis.core.expr : map;
+            return use((string[] names, string _) => names,
+                map!((Expr!User x) => x.fullName)(getAll!User()), u.firstName);
+        }
     }
 
     @DemoEntity!(db, "posts")
@@ -321,6 +437,11 @@ mixin template TestSchema(alias db) {
         static auto isAssigned(Expr!Task t) {
             return t.assigneeId.isNotNull();
         }
+
+        // Fields evaluated past an interleaving gate (see InterleaveBarrier)
+        static auto gatedTitle(Expr!Task t) { return gated(t.title); }
+        /// A nullable object
+        static auto gatedAssignee(Expr!Task t) { return gated(t.assignee); }
     }
 
     /// Composite primary key entity: Tag with (category, name) PK
@@ -371,6 +492,16 @@ mixin template TestSchema(alias db) {
         /// Returns all users and posts as an interface
         static auto contentNodes(Expr!Query q) {
             return unionOf!ContentNode(users(q), posts(q));
+        }
+
+        /// The user a request is about (a non-null object)
+        static auto viewer(Expr!Query q) {
+            return use((.Viewing v) => User(Int64(v.userId)), context!(.Viewing)(q));
+        }
+
+        /// The task a request is about
+        static auto viewerTask(Expr!Query q) {
+            return use((.Viewing v) => Task(Int64(v.taskId)), context!(.Viewing)(q));
         }
     }
 

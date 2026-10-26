@@ -761,6 +761,20 @@ private class DebugSqlSession : RelationalSession {
     override Promise!(JSONValue[]) fetchColumnJson(string table, string column, AnyRef[] refs) {
         return _inner.fetchColumnJson(table, column, refs);
     }
+
+    override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input,
+            string[] pkColumns, bool isAutoIncrement) {
+        return _inner.executeInsert(table, typeName, input, pkColumns, isAutoIncrement);
+    }
+
+    override Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input,
+            string[] pkColumns) {
+        return _inner.executeUpdate(table, typeName, input, pkColumns);
+    }
+
+    override Promise!int executeDelete(string table, string[] ids, string[] pkColumns) {
+        return _inner.executeDelete(table, ids, pkColumns);
+    }
 }
 
 

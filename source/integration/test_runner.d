@@ -14,8 +14,11 @@ module integration.test_runner;
 import core.thread : Thread;
 import core.time : msecs;
 
+import std.conv : to;
 import std.json;
 import std.stdio;
+
+import ae.utils.promise : Promise;
 
 import ae.net.asockets : socketManager;
 import ae.net.sync : ThreadAnchor;
@@ -33,7 +36,7 @@ import dunamis.relational.eval_context : RelationalSession;
 import dunamis.relational.subscription : createSubscriptionHandler;
 
 import integration.test_framework : runAllTests;
-import integration.schema : RequestContext, seedDatabase;
+import integration.schema : InterleaveBarrier, InterleaveGate, RequestContext, Viewing, seedDatabase;
 
 /**
  * Abstract base class for integration test runners.
@@ -135,6 +138,77 @@ abstract class IntegrationTestRunner(alias db, alias Schema, SubEntityType) {
         }
     }
 
+    /// Handle an interleaved evaluation: compile and optimize the query once,
+    /// optimize the "distractor" query (as another request would), then
+    /// evaluate the same tree for each of the "viewings" (or, for a
+    /// subscription, deliver each of the "events" user IDs to one
+    /// SubscriptionExecutor) concurrently, interleaved by an
+    /// InterleaveBarrier. Responds with one {data, errors} per evaluation.
+    protected void handleInterleaved(HttpRequest request, HttpServerConnection conn) {
+        import dunamis.core.types : AnyRef;
+        import dunamis.relational.schema : EntityID, makeEntityFromRef;
+
+        try {
+            auto json = std.json.parseJSON(cast(string) request.data[].joinToGC());
+            JSONValue variables = "variables" in json ? json["variables"] : JSONValue.emptyObject;
+            bool optimize = true;
+            if (auto optHeader = "X-Optimize" in request.headers)
+                optimize = (*optHeader != "false");
+
+            auto executor = new Executor();
+            auto compiled = compileQuery!Schema(json["query"].str, variables);
+            SubscriptionExecutor!SubEntityType subExec;
+            GraphQLResult tree = compiled;
+            if (cast(SubscriptionResultExpr) compiled)
+                subExec = new SubscriptionExecutor!SubEntityType(executor, compiled);
+            else if (optimize)
+                tree = executor.optimize(compiled);
+            if ("distractor" in json)
+                executor.optimize(compileQuery!Schema(json["distractor"].str));
+
+            auto inputs = (subExec !is null ? json["events"] : json["viewings"]).array;
+            auto barrier = new InterleaveBarrier(inputs.length);
+            auto results = new JSONValue[inputs.length];
+            size_t pending = inputs.length;
+
+            void finish(size_t i, EvalContext ctx, JSONValue data, string failure) {
+                JSONValue[] errors;
+                foreach (err; ctx.errors)
+                    errors ~= err.toJson();
+                if (failure !is null)
+                    errors ~= JSONValue(["message": JSONValue(failure)]);
+                results[i] = JSONValue(["data": data, "errors": JSONValue(errors)]);
+                barrier.finish(i);
+                if (--pending == 0)
+                    sendJsonResponse(conn, JSONValue(["results": JSONValue(results)]));
+            }
+
+            void start(size_t i) {
+                auto ctx = new EvalContext();
+                ctx.setRequestContext(RequestContext("en"));
+                ctx.setRequestContext(InterleaveGate(barrier, i));
+                Promise!JSONValue evaluation;
+                if (subExec !is null) {
+                    auto id = inputs[i].integer.to!string;
+                    evaluation = subExec.execute(makeEntityFromRef!SubEntityType(
+                        AnyRef(EntityID!SubEntityType.typeName ~ ":" ~ id)), ctx);
+                } else {
+                    ctx.setRequestContext(Viewing(inputs[i]["userId"].integer, inputs[i]["taskId"].integer));
+                    evaluation = executor.execute(tree, ctx, false);
+                }
+                evaluation.then((JSONValue data) {
+                    finish(i, ctx, data, null);
+                }).except((Exception e) {
+                    finish(i, ctx, JSONValue(null), e.msg);
+                });
+            }
+            foreach (i; 0 .. inputs.length)
+                start(i);
+        } catch (Exception e) {
+            sendError(conn, e.msg);
+        }
+    }
+
     /// Handle a subscription operation: create executor, register with manager
     private void handleSubscription(GraphQLResult query, HttpServerConnection conn) {
         auto executor = new Executor();
@@ -178,6 +252,8 @@ abstract class IntegrationTestRunner(alias db, alias Schema, SubEntityType) {
         s.handleRequest = (HttpRequest request, HttpServerConnection conn) {
             if (request.resource == "/graphql" && request.method == "POST") {
                 handleGraphQL(request, conn);
+            } else if (request.resource == "/interleaved" && request.method == "POST") {
+                handleInterleaved(request, conn);
             } else if (request.resource == "/health") {
                 auto response = new HttpResponseEx();
                 response.status = HttpStatusCode.OK;

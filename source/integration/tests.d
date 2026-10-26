@@ -2328,3 +2328,123 @@ static this() {
     // Subscription tests
     registerTest("Subscription: userCreated fires on mutation", "tests", &testSubscriptionUserCreated);
 }
+
+// ============================================================================
+// Evaluating one optimized tree for interleaved requests
+// ============================================================================
+
+/// The server compiles and optimizes each query once, optimizes another
+/// query in between (as a concurrent request would), and evaluates the same
+/// tree for several requests concurrently, interleaved so that every request
+/// has bound its objects before any reads them. Each request must see only
+/// its own data. Covers non-null and nullable objects, nullable lists, SQL
+/// computed columns, mutation-returned entities and SubscriptionExecutor
+/// redeliveries. (Needs concurrent sessions, so only registered for
+/// PostgreSQL.)
+void testInterleavedEvaluationsOfOneTree() {
+    import std.algorithm : sort;
+    import std.array : array;
+
+    static string[] sorted(JSONValue[] values) {
+        string[] result;
+        foreach (v; values)
+            result ~= v.str;
+        return result.sort.array;
+    }
+    static void assertClean(JSONValue result) {
+        assertTrue(result["errors"].array.length == 0, "Errors: " ~ result["errors"].toString());
+    }
+
+    auto known = graphql(`{
+        users { id firstName fullName posts { id } }
+        tasks { id title assignee { firstName } }
+    }`);
+    assertNoErrors(known);
+    JSONValue[string] userByName, taskByTitle;
+    JSONValue[] fullNames;
+    foreach (user; known["data"]["users"].array) {
+        userByName[user["firstName"].str] = user;
+        fullNames ~= user["fullName"];
+    }
+    foreach (task; known["data"]["tasks"].array)
+        taskByTitle[task["title"].str] = task;
+
+    // Queries
+    auto viewings = [
+        ["Alice", "Write tests"],
+        ["Bob", "Deploy app"],
+        ["Charlie", "Review PR"],
+    ];
+    JSONValue[] viewingInputs;
+    foreach (v; viewings)
+        viewingInputs ~= JSONValue([
+            "userId": userByName[v[0]]["id"],
+            "taskId": taskByTitle[v[1]]["id"],
+        ]);
+    foreach (round; 0 .. 2) {
+        auto results = graphqlInterleaved(JSONValue([
+            "query": JSONValue(`{
+                viewer { gatedId gatedFirstName gatedPostLabels { text } }
+                viewerTask { gatedTitle gatedAssignee { gatedFirstName } }
+                users { fullName }
+            }`),
+            "distractor": JSONValue(`{ users { isAdult } }`),
+            "viewings": JSONValue(viewingInputs),
+        ]));
+        assertTrue(results.length == viewings.length, "Expected one result per viewing");
+        foreach (i, v; viewings) {
+            assertClean(results[i]);
+            auto data = results[i]["data"];
+            auto user = userByName[v[0]], task = taskByTitle[v[1]];
+            auto postCount = user["posts"].array.length;
+            assertEqual(data["viewer"], JSONValue([
+                "gatedId": user["id"],
+                "gatedFirstName": JSONValue(v[0]),
+                "gatedPostLabels": postCount == 0 ? JSONValue(null) :
+                    JSONValue([JSONValue(["text": JSONValue(v[0] ~ ": " ~ postCount.to!string)])]),
+            ]), "viewer of " ~ v[0]);
+            assertEqual(data["viewerTask"], JSONValue([
+                "gatedTitle": JSONValue(v[1]),
+                "gatedAssignee": task["assignee"].type == JSONType.null_ ? JSONValue(null) :
+                    JSONValue(["gatedFirstName": task["assignee"]["firstName"]]),
+            ]), "viewerTask " ~ v[1]);
+            JSONValue[] gotFullNames;
+            foreach (u; data["users"].array)
+                gotFullNames ~= u["fullName"];
+            assertTrue(sorted(gotFullNames) == sorted(fullNames),
+                "users { fullName }: " ~ data["users"].toString());
+        }
+    }
+
+    // Subscription redeliveries
+    auto subscriptionResults = graphqlInterleaved(JSONValue([
+        "query": JSONValue(`subscription { userCreated { gatedId gatedFirstName everyonesFullName } }`),
+        "distractor": JSONValue(`{ users { isAdult } }`),
+        "events": JSONValue([userByName["Alice"]["id"], userByName["Bob"]["id"]]),
+    ]));
+    foreach (i, name; ["Alice", "Bob"]) {
+        assertClean(subscriptionResults[i]);
+        auto event = subscriptionResults[i]["data"]["userCreated"];
+        assertEqual(event["gatedId"], userByName[name]["id"], "event " ~ name);
+        assertEqual(event["gatedFirstName"], JSONValue(name), "event " ~ name);
+        assertTrue(sorted(event["everyonesFullName"].array) == sorted(fullNames),
+            "everyonesFullName: " ~ event["everyonesFullName"].toString());
+    }
+
+    // Mutation-returned entities
+    auto firstName = "Interleaved" ~ modeSuffix();
+    auto mutationResults = graphqlInterleaved(JSONValue([
+        "query": JSONValue(`mutation { createUserWithName(firstName: "` ~ firstName ~
+            `", lastName: "Twice") { gatedId gatedFirstName } }`),
+        "viewings": JSONValue(viewingInputs[0 .. 2]),
+    ]));
+    JSONValue[] createdIds;
+    foreach (result; mutationResults) {
+        assertClean(result);
+        auto created = result["data"]["createUserWithName"];
+        assertEqual(created["gatedFirstName"], JSONValue(firstName));
+        createdIds ~= created["gatedId"];
+    }
+    assertTrue(createdIds[0] != createdIds[1],
+        "Both evaluations returned the same created user: " ~ createdIds[0].toString());
+}

@@ -669,6 +669,21 @@ auto result = executor.execute(query);
 // Returns: {"users": [...], "posts": [...]}
 ```
 
+**Optimize once, evaluate many times:**
+
+Evaluation never modifies an optimized expression tree (per-evaluation state
+lives in the `EvalContext` and the data sessions), so a tree can be optimized
+once and then evaluated any number of times, also concurrently, each time
+with a fresh `EvalContext`:
+
+```d
+auto optimized = executor.optimize(compileQuery!Query(`{ users { firstName } }`));
+auto result1 = executor.execute(optimized, new EvalContext(), false);
+auto result2 = executor.execute(optimized, new EvalContext(), false);
+```
+
+Note that argument values (including variables) are part of the compiled tree.
+
 ## Filtering
 
 Use the `FilterPlugin` to add filtering support to your schema. Filter types are auto-generated for each entity:
@@ -1217,7 +1232,14 @@ auto subExec = new SubscriptionExecutor!User(new Executor(), query);
 
 // For each change event, construct the entity and evaluate:
 auto result = subExec.execute(someUser);  // Returns Promise!JSONValue
+
+// Or evaluate in a context of your own (e.g. with request contexts set):
+auto ctx = new EvalContext();
+ctx.setRequestContext(AuthCtx("user-1"));
+auto result2 = subExec.execute(someUser, ctx);
 ```
+
+Deliveries may be evaluated concurrently.
 
 ### SubscriptionManager
 

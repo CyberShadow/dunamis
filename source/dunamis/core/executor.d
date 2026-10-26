@@ -41,17 +41,7 @@ class Executor {
     /// auto result = executor.execute(query, ctx);
     /// ---
     Promise!T execute(E, T = E.ResultType)(E expr, EvalContext evalCtx, bool optimize = true) {
-        E toEval = expr;
-
-        if (optimize) {
-            auto optCtx = new OptimizeContext();
-            toEval = cast(E) expr.optimize(optCtx);
-
-            // Walk tree to collect and run optimizers
-            foreach (optimizer; collectOptimizers(toEval)) {
-                optimizer.optimize(toEval, optCtx);
-            }
-        }
+        E toEval = optimize ? this.optimize(expr) : expr;
 
         // Collect data sources for lifecycle management
         auto sources = collectDataSources(toEval);
@@ -88,6 +78,23 @@ class Executor {
                 p = p.then(() => s.teardown(SetupMode.query, false));
             return p.then(() { throw e; return T.init; });
         });
+    }
+
+    /// Optimize an expression tree (standard optimization, then the
+    /// optimizers its data sources request), without evaluating it.
+    ///
+    /// The optimized tree is not modified by evaluation, so it may be
+    /// evaluated any number of times, also concurrently, with
+    /// `execute(optimized, evalCtx, false)`.
+    E optimize(E)(E expr) {
+        auto optCtx = new OptimizeContext();
+        E optimized = cast(E) expr.optimize(optCtx);
+
+        // Walk tree to collect and run optimizers
+        foreach (optimizer; collectOptimizers(optimized)) {
+            optimizer.optimize(optimized, optCtx);
+        }
+        return optimized;
     }
 
     /// Walk expression tree and collect optimizers, deduplicated by instance.
@@ -187,9 +194,14 @@ class SubscriptionExecutor(T) {
     /// Deliver an event and evaluate the subscription query.
     /// Creates a fresh EvalContext for each event.
     Promise!JSONValue execute(T value) {
+        return execute(value, new EvalContext());
+    }
+
+    /// Deliver an event and evaluate the subscription query in `evalCtx`,
+    /// a fresh context for this delivery (e.g. with request contexts set).
+    Promise!JSONValue execute(T value, EvalContext evalCtx) {
         import std.json : JSONValue;
 
-        auto evalCtx = new EvalContext();
         _eventSource.deliver(evalCtx, value);
         evalCtx.setValues!AnyRef(null, [queryRoot]);
 

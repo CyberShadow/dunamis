@@ -202,10 +202,29 @@ void setGraphQLEndpoint(string url) {
 /// Uses the current optimization mode set by runAllTests
 JSONValue graphql(string query, JSONValue variables = JSONValue.emptyObject,
                   string[string] extraHeaders = null) {
+    auto requestBody = JSONValue([
+        "query": JSONValue(query),
+        "variables": variables
+    ]);
+    return postJson(graphqlEndpoint, requestBody, extraHeaders);
+}
+
+/// Compile and optimize a query once on the server, then evaluate that one
+/// tree for several requests concurrently and interleaved (see
+/// IntegrationTestRunner.handleInterleaved for the request format).
+/// Returns one {data, errors} object per evaluation.
+JSONValue[] graphqlInterleaved(JSONValue request) {
+    import std.string : replace;
+    auto response = postJson(graphqlEndpoint.replace("/graphql", "/interleaved"), request);
+    return response["results"].array;
+}
+
+/// POST a JSON body and return the parsed JSON response
+private JSONValue postJson(string url, JSONValue requestBody, string[string] extraHeaders = null) {
     import std.net.curl : HTTP, CurlException;
     import std.exception : enforce;
 
-    auto http = HTTP(graphqlEndpoint);
+    auto http = HTTP(url);
     http.addRequestHeader("Content-Type", "application/json");
     http.addRequestHeader("X-Optimize", currentOptimizeMode ? "true" : "false");
 
@@ -215,11 +234,6 @@ JSONValue graphql(string query, JSONValue variables = JSONValue.emptyObject,
             http.addRequestHeader(name, value);
         }
     }
-
-    auto requestBody = JSONValue([
-        "query": JSONValue(query),
-        "variables": variables
-    ]);
 
     http.setPostData(requestBody.toString(), "application/json");
 

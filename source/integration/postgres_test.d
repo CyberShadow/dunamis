@@ -85,7 +85,10 @@ class PostgresTestRunner : IntegrationTestRunner!(db, MySchema, User) {
             writeln("Connected.");
             writeln();
 
-            db = new PostgresDB!()(pgConn);
+            // Each request session gets a connection of its own, so that
+            // requests can be evaluated concurrently (as in production).
+            db = new PostgresDB!()(() => connect(host, port, database, user, password),
+                true, 8);
 
             setupDatabase();
             onDatabaseReady();
@@ -96,6 +99,14 @@ class PostgresTestRunner : IntegrationTestRunner!(db, MySchema, User) {
 
         runEventLoop(testThread);
     }
+}
+
+// Tests needing concurrent request sessions
+static this() {
+    import integration.test_framework : registerTest;
+    import integration.tests : testInterleavedEvaluationsOfOneTree;
+    registerTest("Interleaved evaluations of one optimized tree", "postgres",
+        &testInterleavedEvaluationsOfOneTree);
 }
 
 // ============================================================================
