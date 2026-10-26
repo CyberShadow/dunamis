@@ -464,6 +464,18 @@ ExprBase compileFieldResult(ResultExpr, alias SchemaSource = void)(ResultExpr re
         auto materialized = materializeResult!Inner(resultExpr, pathPrefix);
         return compileFieldResult!(typeof(materialized), SchemaSource)(materialized, ss, variables, fragments, pathPrefix);
     }
+    // Nullable lists of objects - like nullable objects, with the selection
+    // set compiled for each element of the unwrapped list
+    else static if (is(ResultType == Nullable!(E[]), E) && !isScalarElement!E && !isAbstractType!E) {
+        if (ss is null) {
+            throw new CompilerException(
+                "Field returning [" ~ E.stringof ~ "] requires a selection set");
+        }
+        auto unwrapper = new UnwrapNullableExpr!(E[])(resultExpr);
+        auto items = compileMapExpr!(E, SchemaSource)(unwrapper, ss, variables, fragments, pathPrefix);
+        auto innerExpr = use((JSONValue[] values) => JSONValue(values), items);
+        return finalizeNullableObjectExpr!(E[])(resultExpr, unwrapper, innerExpr);
+    }
     // Nullable structs (entities) - handle null case specially
     else static if (is(ResultType == Nullable!T, T) && is(T == struct) && !isCustomScalar!T) {
         if (ss is null) {

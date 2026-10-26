@@ -282,6 +282,13 @@ auto wrapEntityResult(alias TypeMap, R)(R result)
         }
     } else static if (is(ResultT == Nullable!UCustom, UCustom) && isCustomScalar!UCustom) {
         return result;
+    } else static if (is(ResultT == Nullable!(EObject[]), EObject) && isObjectType!EObject && !isAbstractType!EObject) {
+        alias MappedE = TypeMap!EObject;
+        static if (is(MappedE == EObject)) {
+            return result;
+        } else {
+            return use(&nullableArrayEntityCastValue!(MappedE, EObject), result);
+        }
     } else static if (is(ResultT == Nullable!UObject, UObject) && isObjectType!UObject) {
         alias MappedU = TypeMap!UObject;
         static if (is(MappedU == UObject)) {
@@ -313,6 +320,15 @@ Nullable!To nullableEntityCastValue(To, From)(Nullable!From val) {
 // ============================================================================
 // Unit Tests
 // ============================================================================
+/// Value-level entity cast of a nullable list, element by element.
+Nullable!(To[]) nullableArrayEntityCastValue(To, From)(Nullable!(From[]) val) {
+    import dunamis.schema.entity_cast : entityCastValue;
+    if (val.isNull) return Nullable!(To[]).init;
+    auto result = new To[val.get.length];
+    foreach (i, item; val.get)
+        result[i] = entityCastValue!(To, From)(item);
+    return Nullable!(To[])(result);
+}
 
 version (unittest) {
     import dunamis.relational.schema : Entity, Col, HasMany, BelongsTo, ForeignKey, Table, PrimaryKey;

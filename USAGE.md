@@ -922,7 +922,7 @@ alias FinalSchema = ApplyPlugins!(Schema!(Query, Mutation),
 **How it works:**
 
 - Sources are modules and/or function symbols. A module contributes every public function declared in it (not imported into it) whose first parameter is an `Expr`; names starting with `_` are skipped.
-- A function is attached to the schema type whose user-declared type is `Entity`, whatever plugins wrapped it. Inside the function, `Entity` is seen exactly as declared (`u.posts` is `Expr!(Post[])`), and entity or POD results (`Expr!Post`, `Expr!(Post[])`, `Expr!(Nullable!DateRange)`) are mapped to the schema's types, including their own computed fields.
+- A function is attached to the schema type whose user-declared type is `Entity`, whatever plugins wrapped it. Inside the function, `Entity` is seen exactly as declared (`u.posts` is `Expr!(Post[])`), and entity or POD results (`Expr!Post`, `Expr!(Post[])`, `Expr!(Nullable!DateRange)`, `Expr!(Nullable!(DateRange[]))` for a nullable list `[DateRange!]`) are mapped to the schema's types, including their own computed fields.
 - The GraphQL field name is the function name; extra parameters become arguments (with defaults), and `@GqlName`, `@GqlDescription`, `@GqlDeprecated` on the function are honoured.
 - A function whose entity is not part of the schema, or whose name collides with an existing field, is a compile error.
 

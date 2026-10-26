@@ -95,6 +95,10 @@ auto maybeSpan(Expr!User u) {
     return use((string name) => name == "Bob" ? Nullable!Span.init : Nullable!Span(Span(1, 2)), u.name);
 }
 
+auto maybeSpans(Expr!User u) {
+    return use((string name) => name == "Bob" ? Nullable!(Span[]).init : Nullable!(Span[])([Span(1, 2), Span(3, 4)]), u.name);
+}
+
 auto initial(Expr!User u) {
     return use((string name) => name == "Bob" ? Nullable!string.init : Nullable!string(name[0 .. 1]), u.name);
 }

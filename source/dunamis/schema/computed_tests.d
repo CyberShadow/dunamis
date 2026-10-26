@@ -60,7 +60,7 @@ unittest {
         return result;
     }();
     static assert(names == ["postCount", "shout", "authorName", "greeting", "commentTexts",
-        "visiblePosts", "checkedTitle", "widened", "maybeSpan", "initial"], names.stringof);
+        "visiblePosts", "checkedTitle", "widened", "maybeSpan", "maybeSpans", "initial"], names.stringof);
 
     static assert(computedFieldsIn!(fixture.authorName).length == 1);
     static assert(is(ComputedFieldEntity!(fixture.authorName) == Post));
@@ -76,6 +76,7 @@ unittest {
     static assert(sdl.canFind("authorName: String!"), sdl);
     static assert(sdl.canFind("widened: Span!"), sdl);
     static assert(sdl.canFind("maybeSpan: Span\n"), sdl);
+    static assert(sdl.canFind("maybeSpans: [Span!]\n"), sdl);
     static assert(sdl.canFind("initial: String\n"), sdl);
     static assert(sdl.canFind("visiblePosts"), sdl);
     static assert(!sdl.canFind("helper"), sdl);
@@ -104,6 +105,7 @@ unittest {
             initial
             widened { from to }
             maybeSpan { from }
+            maybeSpans { from last: to }
             visiblePosts { title authorName }
             posts(filter: {title: {equalTo: "Hello"}}) { title authorName }
         }
@@ -122,6 +124,9 @@ unittest {
     assert(alice["initial"].str == "A");
     assert(alice["widened"]["from"].integer == -1 && alice["widened"]["to"].integer == 6, result.toString());
     assert(alice["maybeSpan"]["from"].integer == 1);
+    assert(alice["maybeSpans"].array.length == 2, result.toString());
+    assert(alice["maybeSpans"][1]["from"].integer == 3 && alice["maybeSpans"][1]["last"].integer == 4, result.toString());
+    assert("to" !in alice["maybeSpans"][0].object, result.toString());
     assert(alice["visiblePosts"].array.length == 1, result.toString());
     assert(alice["visiblePosts"][0]["title"].str == "Hello");
     assert(alice["visiblePosts"][0]["authorName"].str == "Alice");
@@ -137,12 +142,13 @@ unittest {
 unittest {
     seedFixture();
     auto result = executeFixture(compileQuery!PluginFirst(`{
-        users(first: 1, offset: 1) { postCount initial maybeSpan { from } posts { authorName } }
+        users(first: 1, offset: 1) { postCount initial maybeSpan { from } maybeSpans { from } posts { authorName } }
     }`));
     auto bob = result["users"][0];
     assert(bob["postCount"].integer == 1, result.toString());
     assert(bob["initial"].isNull, result.toString());
     assert(bob["maybeSpan"].isNull, result.toString());
+    assert(bob["maybeSpans"].isNull, result.toString());
     assert(bob["posts"][0]["authorName"].str == "Bob");
 }
 
