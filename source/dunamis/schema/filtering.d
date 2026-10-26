@@ -45,6 +45,9 @@ struct StringFilter {
     Nullable!string endsWith;
     Nullable!string containsInsensitive;
     Nullable!string includesInsensitive;
+    /// SQL LIKE pattern: `%` matches any characters, `_` any one character,
+    /// and `\` escapes the next character.
+    Nullable!string like;
     Nullable!string startsWithInsensitive;
     Nullable!string endsWithInsensitive;
     Nullable!bool isNull;
@@ -142,32 +145,6 @@ struct DateRangeFilter(Range) if (isDateRangeType!Range) {
     enum __gqlTypeName = "DateRangeFilter";
     Nullable!(dateRangeEndpoint!Range) containsElement;
     Nullable!bool isNull;
-}
-
-// ============================================================================
-// Type Mapping
-// ============================================================================
-
-/// Map D types to their corresponding filter types.
-template FilterTypeFor(T) {
-    static if (isCustomScalar!T) {
-        alias FilterTypeFor = StringFilter;
-    } else static if (is(T == string)) {
-        alias FilterTypeFor = StringFilter;
-    } else static if (is(T == int)) {
-        alias FilterTypeFor = IntFilter;
-    } else static if (is(T == long)) {
-        alias FilterTypeFor = LongFilter;
-    } else static if (is(T == float) || is(T == double)) {
-        alias FilterTypeFor = FloatFilter;
-    } else static if (is(T == bool)) {
-        alias FilterTypeFor = BooleanFilter;
-    } else static if (isDateRangeType!T) {
-        alias FilterTypeFor = DateRangeFilter!T;
-    } else {
-        // Default to StringFilter for unknown types
-        alias FilterTypeFor = StringFilter;
-    }
 }
 
 // ============================================================================
@@ -352,26 +329,6 @@ template getScalarArrayFields(Entity) {
     }();
 }
 
-/// Map a scalar type to its filter type name.
-template scalarFilterTypeName(T) {
-    import std.typecons : Nullable;
-    static if (is(T == Nullable!U, U)) {
-        enum scalarFilterTypeName = scalarFilterTypeName!U;
-    } else static if (is(T == string)) {
-        enum scalarFilterTypeName = "StringFilter";
-    } else static if (is(T == int)) {
-        enum scalarFilterTypeName = "IntFilter";
-    } else static if (is(T == long)) {
-        enum scalarFilterTypeName = "LongFilter";
-    } else static if (is(T == float) || is(T == double)) {
-        enum scalarFilterTypeName = "FloatFilter";
-    } else static if (is(T == bool)) {
-        enum scalarFilterTypeName = "BooleanFilter";
-    } else {
-        enum scalarFilterTypeName = "StringFilter";  // fallback
-    }
-}
-
 /// Extract the element entity type from an array-returning method.
 template getArrayElementType(Entity, string member) {
     import std.traits : ReturnType;
@@ -388,408 +345,276 @@ template getArrayElementType(Entity, string member) {
     }
 }
 
-/// List filter for array fields with some/every/none operators.
-/// Used to filter parent entities based on their related children.
+/// The filter input type of a column whose values are of type `T`, or void if
+/// such columns cannot be filtered. A nullable column shares the filter type
+/// of its values; its `isNull` operator tests for null.
+template ColumnFilterType(T) {
+    static if (is(T == Nullable!U, U)) {
+        alias ColumnFilterType = ColumnFilterType!U;
+    } else static if (isDateRangeType!T) {
+        alias ColumnFilterType = DateRangeFilter!T;
+    } else static if (isCustomScalar!T) {
+        alias ColumnFilterType = StringFilter;
+    } else static if (is(T == enum)) {
+        alias ColumnFilterType = EnumFilter!T;
+    } else static if (is(T == string)) {
+        alias ColumnFilterType = StringFilter;
+    } else static if (is(T == int)) {
+        alias ColumnFilterType = IntFilter;
+    } else static if (is(T == long)) {
+        alias ColumnFilterType = LongFilter;
+    } else static if (is(T == float) || is(T == double)) {
+        alias ColumnFilterType = FloatFilter;
+    } else static if (is(T == bool)) {
+        alias ColumnFilterType = BooleanFilter;
+    } else {
+        alias ColumnFilterType = void;
+    }
+}
+
+/// The value type of a column method of `Entity`.
+template ColumnValueType(Entity, string member) {
+    alias ColumnValueType = ExprResultType!(ReturnType!(__traits(getMember, Entity, member)));
+}
+
+/// The entity type a belongs-to method of `Entity` leads to (without the
+/// Nullable of an optional relationship).
+template BelongsToTargetType(Entity, string member) {
+    alias Result = ExprResultType!(ReturnType!(__traits(getMember, Entity, member)));
+    static if (is(Result == Nullable!P, P))
+        alias BelongsToTargetType = P;
+    else
+        alias BelongsToTargetType = Result;
+}
+
+/// List filter for scalar array fields with some/every/none operators.
 /// Uses pointers to avoid Nullable initialization issues with complex nested types.
 struct ListFilter(ChildFilter) {
     enum __gqlTypeName = getGraphQLTypeName!ChildFilter ~ "ListFilter";
-    /// At least one child matches the filter
+    /// At least one element matches the filter
     ChildFilter* some;
-    /// All children match the filter
+    /// All elements match the filter
     ChildFilter* every;
-    /// No children match the filter (equivalent to not(some(...)))
+    /// No element matches the filter (equivalent to not(some(...)))
     ChildFilter* none;
 }
 
-/// Module-level shallow filter type generation.
-/// Encapsulates helper templates so they don't leak into host structs.
-/// Produces a filter struct with only scalar column fields (no nested entity arrays),
-/// used for child entity filters in ListFilter to avoid circular type references.
-template _ShallowFilterFor(Entity) {
-    import std.typecons : Nullable;
-    import std.traits : ReturnType;
-
-    template _ColTypeFor(string member) {
-        alias _colMethod = __traits(getMember, Entity, member);
-        alias _ColTypeFor = ReturnType!_colMethod.ResultType;
-    }
-
-    static foreach (member; getFilterableColumns!Entity) {
-        static if (is(_ColTypeFor!member == enum)) {
-            mixin("alias _EnumType_" ~ member ~ " = _ColTypeFor!\"" ~ member ~ "\";");
-        }
-    }
-
-    mixin(() {
-        string result = "@GqlName(\"" ~ getGraphQLTypeName!Entity ~ "ShallowFilter\")\n";
-        result ~= "struct _ShallowFilter {\n";
-
-        static foreach (member; getFilterableColumns!Entity) {{
-            alias ColType = _ColTypeFor!member;
-
-            static if (isDateRangeType!ColType) {
-                result ~= "    Nullable!(DateRangeFilter!(_ColTypeFor!\"" ~ member ~ "\")) " ~ member ~ ";\n";
-            } else static if (isCustomScalar!ColType) {
-                result ~= "    Nullable!(FilterTypeFor!(_ColTypeFor!\"" ~ member ~ "\")) " ~ member ~ ";\n";
-            } else static if (is(ColType == string)) {
-                result ~= "    Nullable!StringFilter " ~ member ~ ";\n";
-            } else static if (is(ColType == int)) {
-                result ~= "    Nullable!IntFilter " ~ member ~ ";\n";
-            } else static if (is(ColType == long)) {
-                result ~= "    Nullable!LongFilter " ~ member ~ ";\n";
-            } else static if (is(ColType == float) || is(ColType == double)) {
-                result ~= "    Nullable!FloatFilter " ~ member ~ ";\n";
-            } else static if (is(ColType == bool)) {
-                result ~= "    Nullable!BooleanFilter " ~ member ~ ";\n";
-            } else static if (is(ColType == enum)) {
-                result ~= "    Nullable!(EnumFilter!(_EnumType_" ~ member ~ ")) " ~ member ~ ";\n";
-            } else static if (is(ColType == Nullable!U, U)) {
-                static if (is(U == int))
-                    result ~= "    Nullable!IntFilter " ~ member ~ ";\n";
-                else static if (is(U == long))
-                    result ~= "    Nullable!LongFilter " ~ member ~ ";\n";
-            }
-        }}
-
-        result ~= "    Nullable!(typeof(this)[]) and;\n";
-        result ~= "    Nullable!(typeof(this)[]) or;\n";
-        result ~= "    typeof(this)* not;\n";
-
-        result ~= "}\n";
-
-        return result;
-    }());
+/// List filter for to-many relationships (entity array fields): which of the
+/// related entities must match the related entity's filter.
+///
+/// Named after `Entity` rather than after `EntityFilter!Entity`, so that the
+/// name is known without completing the (possibly cyclic) filter types.
+struct EntityListFilter(Entity) {
+    enum __gqlTypeName = getGraphQLTypeName!Entity ~ "FilterListFilter";
+    /// At least one related entity matches the filter
+    EntityFilter!Entity* some;
+    /// All related entities match the filter
+    EntityFilter!Entity* every;
+    /// No related entity matches the filter (equivalent to not(some(...)))
+    EntityFilter!Entity* none;
 }
 
-/// Module-level entity filter type generation.
-/// Encapsulates helper templates so they don't leak into host structs.
-/// Generates a full filter struct with scalar column fields, entity array fields
-/// (via _ShallowFilterFor), scalar array fields, and logical combinators.
+/// The filter input type of an entity: its filterable columns, its
+/// relationships (to-one relationships by the related entity's own filter,
+/// to-many relationships by an `EntityListFilter`), its scalar array fields,
+/// and the logical combinators `and`, `or` and `not`.
 ///
-/// Example: _FilterTypesFor!User._EntityFilter produces:
+/// Relationship filters refer to the related entities' `EntityFilter`s, to
+/// any depth. Cycles in the schema (e.g. `User.posts` / `Post.author`) are
+/// fine: relationships are referenced through pointers, and each entity has
+/// exactly one filter type, which is only instantiated when first used.
+///
+/// Example: EntityFilter!User has the fields
 /// ```
-/// struct _EntityFilter {
-///     Nullable!StringFilter firstName;
-///     Nullable!IntFilter age;
-///     Nullable!EnumFilter!Role role;
-///     Nullable!(ListFilter!(_ShallowFilterFor!Post._ShallowFilter)) posts;
-///     Nullable!(ListFilter!StringFilter) tags;
-///     typeof(this)[] and;
-///     typeof(this)[] or;
-///     typeof(this)* not;
-/// }
+/// Nullable!StringFilter firstName;
+/// Nullable!(EnumFilter!Role) role;
+/// EntityFilter!Department* department;          // belongs-to
+/// EntityListFilter!Post* posts;                 // has-many
+/// Nullable!(ListFilter!StringFilter) tags;      // scalar array
+/// Nullable!(EntityFilter!User[]) and, or;
+/// EntityFilter!User* not;
 /// ```
-template _FilterTypesFor(Entity) {
-    import std.typecons : Nullable;
-    import std.traits : ReturnType;
+struct EntityFilter(Entity) {
+    enum __gqlTypeName = getGraphQLTypeName!Entity ~ "Filter";
 
-    template _ColTypeFor(string member) {
-        alias _colMethod = __traits(getMember, Entity, member);
-        alias _ColTypeFor = ReturnType!_colMethod.ResultType;
-    }
+    mixin(entityFilterFieldsCode!Entity);
 
-    static foreach (member; getFilterableColumns!Entity) {
-        static if (is(_ColTypeFor!member == enum)) {
-            mixin("alias _EnumType_" ~ member ~ " = _ColTypeFor!\"" ~ member ~ "\";");
+    Nullable!(typeof(this)[]) and;
+    Nullable!(typeof(this)[]) or;
+    typeof(this)* not;
+}
+
+/// The declarations of the column, relationship and scalar array fields of
+/// `EntityFilter!Entity`. Fields are named like the entity's fields, and
+/// carry their attributes.
+private template entityFilterFieldsCode(Entity) {
+    enum entityFilterFieldsCode = () {
+        string code;
+        // A filter field carries the attributes of the entity field it
+        // filters (e.g. a presentation name).
+        string gqlName(string member)() {
+            return "@(__traits(getAttributes, __traits(getMember, Entity, \"" ~ member ~ "\"))) ";
         }
-    }
 
-    mixin(() {
-        string result = "";
+        static foreach (member; getFilterableColumns!Entity) {
+            code ~= gqlName!member ~ "Nullable!(ColumnFilterType!(ColumnValueType!(Entity, \"" ~
+                member ~ "\"))) " ~ member ~ ";\n";
+        }
 
-        result ~= "@GqlName(\"" ~ getGraphQLTypeName!Entity ~ "Filter\")\n";
-        result ~= "struct _EntityFilter {\n";
-
-        // Filterable column fields
-        static foreach (member; getFilterableColumns!Entity) {{
-            alias ColType = _ColTypeFor!member;
-
-            static if (isDateRangeType!ColType) {
-                result ~= "    Nullable!(DateRangeFilter!(_ColTypeFor!\"" ~ member ~ "\")) " ~ member ~ ";\n";
-            } else static if (isCustomScalar!ColType) {
-                result ~= "    Nullable!(FilterTypeFor!(_ColTypeFor!\"" ~ member ~ "\")) " ~ member ~ ";\n";
-            } else static if (is(ColType == string)) {
-                result ~= "    Nullable!StringFilter " ~ member ~ ";\n";
-            } else static if (is(ColType == int)) {
-                result ~= "    Nullable!IntFilter " ~ member ~ ";\n";
-            } else static if (is(ColType == long)) {
-                result ~= "    Nullable!LongFilter " ~ member ~ ";\n";
-            } else static if (is(ColType == float) || is(ColType == double)) {
-                result ~= "    Nullable!FloatFilter " ~ member ~ ";\n";
-            } else static if (is(ColType == bool)) {
-                result ~= "    Nullable!BooleanFilter " ~ member ~ ";\n";
-            } else static if (is(ColType == enum)) {
-                result ~= "    Nullable!(EnumFilter!(_EnumType_" ~ member ~ ")) " ~ member ~ ";\n";
-            } else static if (is(ColType == Nullable!U, U)) {
-                static if (is(U == int))
-                    result ~= "    Nullable!IntFilter " ~ member ~ ";\n";
-                else static if (is(U == long))
-                    result ~= "    Nullable!LongFilter " ~ member ~ ";\n";
-            } else static if (isEntityType!ColType && !isDateRangeType!ColType) {
-                // Belongs-to / foreign-key relationship. Use the shallow
-                // target filter so relationship predicates do not create
-                // recursive filter type cycles.
-                result ~= "    Nullable!(_ShallowFilterFor!(_ColTypeFor!\"" ~
-                    member ~ "\")._ShallowFilter) " ~ member ~ ";\n";
-            }
-        }}
-
-        // Singular belongs-to relationships use a shallow target filter to
-        // prevent recursive input-type cycles (for example User.manager).
         static foreach (member; getBelongsToFields!Entity) {
-            result ~= "    Nullable!(_ShallowFilterFor!(getBelongsToParentType!(Entity, \"" ~
-                member ~ "\"))._ShallowFilter) " ~ member ~ ";\n";
+            code ~= gqlName!member ~ "EntityFilter!(BelongsToTargetType!(Entity, \"" ~
+                member ~ "\"))* " ~ member ~ ";\n";
         }
 
-        // Entity array fields — reference shallow filter via module-level template
         static foreach (member; getEntityArrayFields!Entity) {
-            result ~= "    Nullable!(ListFilter!(_ShallowFilterFor!(getArrayElementType!(Entity, \"" ~ member ~ "\"))._ShallowFilter)) " ~ member ~ ";\n";
+            code ~= gqlName!member ~ "EntityListFilter!(getArrayElementType!(Entity, \"" ~
+                member ~ "\"))* " ~ member ~ ";\n";
         }
 
-        // Scalar array fields
         static foreach (member; getScalarArrayFields!Entity) {{
             alias ElemType = getArrayElementType!(Entity, member);
             // Enum arrays need an EnumFilter-aware collection predicate. Until
             // that predicate is available, keep the field queryable but do not
-            // advertise a type-incorrect StringFilter for it.
-            static if (!is(ElemType == enum))
-                result ~= "    Nullable!(ListFilter!" ~ scalarFilterTypeName!ElemType ~ ") " ~ member ~ ";\n";
+            // advertise a type-incorrect filter for it.
+            static if (!is(ElemType == enum) && !is(ColumnFilterType!ElemType == void))
+                code ~= gqlName!member ~ "Nullable!(ListFilter!(ColumnFilterType!(getArrayElementType!(Entity, \"" ~
+                    member ~ "\")))) " ~ member ~ ";\n";
         }}
-
-        // Logical combinators (self-referential)
-        result ~= "    Nullable!(typeof(this)[]) and;\n";
-        result ~= "    Nullable!(typeof(this)[]) or;\n";
-        result ~= "    typeof(this)* not;\n";
-
-        result ~= "}\n";
-
-        return result;
-    }());
+        return code;
+    }();
 }
 
 // ============================================================================
 // Filter Predicate Building (Typed Filter -> Expr!bool)
 // ============================================================================
 
-/// Build an Expr!bool predicate from a typed entity filter struct.
+/// Build an Expr!bool predicate from an entity filter.
 /// This converts the PostGraphile-style nested filter to an expression tree.
-/// The item parameter can be any Expr!Entity (FilterItemExpr, EveryItemOfExpr, etc.)
-Expr!bool buildFilterPredicateFromStruct(Entity, FilterType, ItemExpr)(ItemExpr item, FilterType filter)
-    if (is(ItemExpr : Expr!Entity))
-{
+/// The item can be any Expr!Entity (FilterItemExpr, EveryItemOfExpr, a
+/// relationship of another item, etc.).
+///
+/// Relationship filters become predicates over the related entities: a
+/// belongs-to filter tests the related entity (and does not match if there
+/// is none), and a to-many filter becomes `some` (or its negations) over the
+/// related entities.
+Expr!bool buildFilterPredicateFromStruct(Entity)(Expr!Entity item, const ref EntityFilter!Entity filter) {
     import dunamis.core.expr : constant, EveryItemOfExpr, SomeExpr;
+    import dunamis.core.expr.json : UnwrapNullableExpr;
 
     Expr!bool[] conditions;
 
-    // Process each filterable column
+    // Columns
     static foreach (member; getFilterableColumns!Entity) {{
-        // Check if this filter field is set
-        static if (__traits(hasMember, FilterType, member)) {
-            // Use runtime check for the filter field value
-            if (!__traits(getMember, filter, member).isNull) {
-                // Use alias for the column method (required for calling static methods)
-                alias colMethod = __traits(getMember, Entity, member);
-                auto colExpr = colMethod(item);
-                alias ColType = ExprResultType!(ReturnType!colMethod);
-                static if (isEntityType!ColType && !isDateRangeType!ColType)
-                    auto cond = buildFilterPredicateFromStruct(colExpr,
-                        __traits(getMember, filter, member).get);
-                else
-                    auto cond = buildConditionFromScalarFilter(colExpr,
-                        __traits(getMember, filter, member).get, item);
-                if (cond !is null) {
-                    conditions ~= cond;
-                }
-            }
+        if (!__traits(getMember, filter, member).isNull) {
+            alias colMethod = __traits(getMember, Entity, member);
+            auto cond = buildColumnCondition(colMethod(item),
+                __traits(getMember, filter, member).get, item, member);
+            if (cond !is null)
+                conditions ~= cond;
         }
     }}
 
-
-    // Process singular belongs-to relationships (e.g. Post.author -> User).
+    // Singular belongs-to relationships (e.g. Post.author -> User).
     static foreach (member; getBelongsToFields!Entity) {{
-        static if (__traits(hasMember, FilterType, member)) {
-            auto relationshipFilter = __traits(getMember, filter, member);
-            if (!relationshipFilter.isNull) {
-                alias relationshipMethod = __traits(getMember, Entity, member);
-                auto relationshipExpr = relationshipMethod(item);
-                alias RelationshipEntity = ExprResultType!(typeof(relationshipExpr));
-                static if (is(RelationshipEntity == Nullable!Parent, Parent)) {
-                    import dunamis.core.expr.json : UnwrapNullableExpr;
-                    // A missing related row matches no relationship filter
-                    // (as with an EXISTS / joined-row predicate in SQL).
-                    auto unwrapped = new UnwrapNullableExpr!Parent(relationshipExpr);
-                    conditions ~= relationshipExpr.isNotNull().and(
-                        buildFilterPredicateFromStruct!Parent(
-                            unwrapped, relationshipFilter.get));
-                } else {
-                    conditions ~= buildFilterPredicateFromStruct!RelationshipEntity(
-                        relationshipExpr, relationshipFilter.get);
-                }
+        auto relationshipFilter = __traits(getMember, filter, member);
+        if (relationshipFilter !is null) {
+            alias relationshipMethod = __traits(getMember, Entity, member);
+            auto relationshipExpr = relationshipMethod(item);
+            alias Target = BelongsToTargetType!(Entity, member);
+            static if (is(ExprResultType!(typeof(relationshipExpr)) == Nullable!Target)) {
+                // A missing related row matches no relationship filter
+                // (as with an EXISTS / joined-row predicate in SQL).
+                Expr!(Nullable!Target) nullable = relationshipExpr;
+                auto unwrapped = new UnwrapNullableExpr!Target(nullable);
+                conditions ~= nullable.isNotNull().and(
+                    buildFilterPredicateFromStruct!Target(unwrapped, *relationshipFilter));
+            } else {
+                Expr!Target related = relationshipExpr;
+                conditions ~= buildFilterPredicateFromStruct!Target(related, *relationshipFilter);
             }
         }
     }}
 
-    // Process each entity array field (e.g., User.posts -> Post[])
-    debug(filter) {
-        import std.stdio : writefln, stdout;
-        writefln("  buildFilterPredicateFromStruct: entityArrayFields for %s = %s", Entity.stringof, getEntityArrayFields!Entity);
-        stdout.flush();
-    }
+    // To-many relationships (e.g. User.posts -> Post[]).
     static foreach (member; getEntityArrayFields!Entity) {{
-        static if (__traits(hasMember, FilterType, member)) {
-            // Access the filter field at runtime
-            auto listFilterField = __traits(getMember, filter, member);
-            debug(filter) {
-                import std.stdio : writefln, stdout;
-                writefln("  buildFilterPredicateFromStruct: checking entity array %s, isNull=%s", member, listFilterField.isNull);
-                stdout.flush();
+        auto listFilterField = __traits(getMember, filter, member);
+        if (listFilterField !is null) {
+            auto listFilter = *listFilterField;
+            alias ChildEntity = getArrayElementType!(Entity, member);
+            alias arrayMethod = __traits(getMember, Entity, member);
+
+            // Whether some child matches `childFilter` (or its negation).
+            Expr!bool someChild(const ref EntityFilter!ChildEntity childFilter, bool negate) {
+                Expr!(ChildEntity[]) collectionExpr = arrayMethod(item);
+                auto childItem = new EveryItemOfExpr!ChildEntity();
+                auto childPred = buildFilterPredicateFromStruct!ChildEntity(childItem, childFilter);
+                if (negate)
+                    childPred = childPred.not();
+                auto someExpr = new SomeExpr!(ChildEntity, Expr!bool)(collectionExpr, childItem, childPred);
+                childItem._parentMap = someExpr;
+                return someExpr;
             }
-            if (!listFilterField.isNull) {
-                auto listFilter = listFilterField.get;
-                alias ChildEntity = getArrayElementType!(Entity, member);
 
-                // Get the collection expression
-                alias arrayMethod = __traits(getMember, Entity, member);
-                auto collectionExpr = arrayMethod(item);
-
-                // Handle 'some' - at least one child matches
-                if (listFilter.some !is null) {
-                    debug(filter) {
-                        import std.stdio : writefln, stdout;
-                        writefln("  buildFilterPredicateFromStruct: creating SomeExpr for entity array field %s", member);
-                        stdout.flush();
-                    }
-                    auto childItem = new EveryItemOfExpr!ChildEntity();
-                    auto childPred = buildFilterPredicateFromStruct!ChildEntity(childItem, *listFilter.some);
-                    auto someExpr = new SomeExpr!(ChildEntity, typeof(childPred))(collectionExpr, childItem, childPred);
-                    childItem._parentMap = someExpr;
-                    conditions ~= someExpr;
-                    debug(filter) {
-                        import std.stdio : writefln, stdout;
-                        writefln("  buildFilterPredicateFromStruct: someExpr created, class=%s", typeid(someExpr).name);
-                        stdout.flush();
-                    }
-                }
-
-                // Handle 'every' - all children match (= not(some(not(pred))))
-                if (listFilter.every !is null) {
-                    auto childItem = new EveryItemOfExpr!ChildEntity();
-                    auto childPred = buildFilterPredicateFromStruct!ChildEntity(childItem, *listFilter.every);
-                    auto negPred = childPred.not();
-                    auto someExpr = new SomeExpr!(ChildEntity, typeof(negPred))(collectionExpr, childItem, negPred);
-                    childItem._parentMap = someExpr;
-                    conditions ~= someExpr.not();
-                }
-
-                // Handle 'none' - no children match (= not(some(...)))
-                if (listFilter.none !is null) {
-                    auto childItem = new EveryItemOfExpr!ChildEntity();
-                    auto childPred = buildFilterPredicateFromStruct!ChildEntity(childItem, *listFilter.none);
-                    auto someExpr = new SomeExpr!(ChildEntity, typeof(childPred))(collectionExpr, childItem, childPred);
-                    childItem._parentMap = someExpr;
-                    conditions ~= someExpr.not();  // none = not(some)
-                }
-            }
+            if (listFilter.some !is null)
+                conditions ~= someChild(*listFilter.some, false);
+            // every = not(some(not(pred)))
+            if (listFilter.every !is null)
+                conditions ~= someChild(*listFilter.every, true).not();
+            // none = not(some(pred))
+            if (listFilter.none !is null)
+                conditions ~= someChild(*listFilter.none, false).not();
         }
     }}
 
-    // Process each scalar array field (e.g., User.tags -> string[])
-    debug(filter) {
-        import std.stdio : writefln, stdout;
-        writefln("  buildFilterPredicateFromStruct: scalarArrayFields for %s = %s", Entity.stringof, getScalarArrayFields!Entity);
-        stdout.flush();
-    }
+    // Scalar array fields (e.g. User.tags -> string[])
     static foreach (member; getScalarArrayFields!Entity) {{
-        static if (__traits(hasMember, FilterType, member)) {
-            // Access the filter field at runtime
+        static if (__traits(hasMember, EntityFilter!Entity, member)) {
             auto listFilterField = __traits(getMember, filter, member);
-            debug(filter) {
-                import std.stdio : writefln, stdout;
-                writefln("  buildFilterPredicateFromStruct: checking scalar array %s, isNull=%s", member, listFilterField.isNull);
-                stdout.flush();
-            }
             if (!listFilterField.isNull) {
                 auto listFilter = listFilterField.get;
                 alias ElemType = getArrayElementType!(Entity, member);
-
-                // Get the collection expression
                 alias arrayMethod = __traits(getMember, Entity, member);
-                auto collectionExpr = arrayMethod(item);
 
-                // Handle 'some' - at least one element matches the scalar filter
-                // Uses unified SomeExpr/EveryItemOfExpr which now handles both entities and scalars
-                if (listFilter.some !is null) {
-                    debug(filter) {
-                        import std.stdio : writefln, stdout;
-                        writefln("  buildFilterPredicateFromStruct: creating SomeExpr for scalar array field %s", member);
-                        stdout.flush();
-                    }
+                Expr!bool someElement(F)(const ref F elementFilter, bool negate) {
+                    Expr!(ElemType[]) collectionExpr = arrayMethod(item);
                     auto elemItem = new EveryItemOfExpr!ElemType();
-                    auto elemPred = buildConditionFromScalarFilter(elemItem, *listFilter.some, item);
-                    if (elemPred !is null) {
-                        auto someExpr = new SomeExpr!(ElemType, typeof(elemPred))(collectionExpr, elemItem, elemPred);
-                        elemItem._parentMap = someExpr;
-                        conditions ~= someExpr;
-                    }
+                    Expr!bool elemPred = buildColumnCondition(cast(Expr!ElemType) elemItem,
+                        elementFilter, elemItem, member);
+                    if (elemPred is null)
+                        elemPred = constant(true, elemItem);
+                    if (negate)
+                        elemPred = elemPred.not();
+                    auto someExpr = new SomeExpr!(ElemType, Expr!bool)(collectionExpr, elemItem, elemPred);
+                    elemItem._parentMap = someExpr;
+                    return someExpr;
                 }
 
-                // Handle 'every' - all elements match the scalar filter (= not(some(not(pred))))
-                if (listFilter.every !is null) {
-                    auto elemItem = new EveryItemOfExpr!ElemType();
-                    auto elemPred = buildConditionFromScalarFilter(elemItem, *listFilter.every, item);
-                    if (elemPred !is null) {
-                        auto negPred = elemPred.not();
-                        auto someExpr = new SomeExpr!(ElemType, typeof(negPred))(collectionExpr, elemItem, negPred);
-                        elemItem._parentMap = someExpr;
-                        conditions ~= someExpr.not();
-                    }
-                }
-
-                // Handle 'none' - no elements match (= not(some(...)))
-                if (listFilter.none !is null) {
-                    auto elemItem = new EveryItemOfExpr!ElemType();
-                    auto elemPred = buildConditionFromScalarFilter(elemItem, *listFilter.none, item);
-                    if (elemPred !is null) {
-                        auto someExpr = new SomeExpr!(ElemType, typeof(elemPred))(collectionExpr, elemItem, elemPred);
-                        elemItem._parentMap = someExpr;
-                        conditions ~= someExpr.not();  // none = not(some)
-                    }
-                }
+                if (listFilter.some !is null)
+                    conditions ~= someElement(*listFilter.some, false);
+                if (listFilter.every !is null)
+                    conditions ~= someElement(*listFilter.every, true).not();
+                if (listFilter.none !is null)
+                    conditions ~= someElement(*listFilter.none, false).not();
             }
         }
     }}
 
-    // Handle 'and' combinator
-    if (!filter.and.isNull && filter.and.get.length > 0) {
-        Expr!bool[] andPreds;
-        foreach (ref subFilter; filter.and.get) {
-            andPreds ~= buildFilterPredicateFromStruct!Entity(item, subFilter);
-        }
-        if (andPreds.length > 0) {
-            auto combined = andPreds[0];
-            foreach (p; andPreds[1 .. $]) {
-                combined = combined.and(p);
-            }
-            conditions ~= combined;
-        }
+    // Logical combinators
+    if (!filter.and.isNull) {
+        foreach (ref subFilter; filter.and.get)
+            conditions ~= buildFilterPredicateFromStruct!Entity(item, subFilter);
     }
 
-    // Handle 'or' combinator
+    // (An empty `or`, like an empty `and`, puts no condition.)
     if (!filter.or.isNull && filter.or.get.length > 0) {
-        Expr!bool[] orPreds;
+        Expr!bool combined;
         foreach (ref subFilter; filter.or.get) {
-            orPreds ~= buildFilterPredicateFromStruct!Entity(item, subFilter);
+            auto p = buildFilterPredicateFromStruct!Entity(item, subFilter);
+            combined = combined is null ? p : combined.or(p);
         }
-        if (orPreds.length > 0) {
-            auto combined = orPreds[0];
-            foreach (p; orPreds[1 .. $]) {
-                combined = combined.or(p);
-            }
-            conditions ~= combined;
-        }
+        conditions ~= combined;
     }
 
-    // Handle 'not' combinator
     if (filter.not !is null) {
         conditions ~= buildFilterPredicateFromStruct!Entity(item, *filter.not).not();
     }
@@ -806,13 +631,51 @@ Expr!bool buildFilterPredicateFromStruct(Entity, FilterType, ItemExpr)(ItemExpr 
     return result;
 }
 
-/// Build a condition from a scalar filter (StringFilter, IntFilter, etc.)
-Expr!bool buildConditionFromScalarFilter(ColExpr, ScalarFilter)(ColExpr colExpr, ScalarFilter filter, ExprBase lengthSource) {
+/// Build the condition a column filter (StringFilter, IntFilter, etc.) puts
+/// on a column, or null if it puts none. `fieldName` names the column in
+/// error messages.
+///
+/// On a nullable column, the operators other than `isNull` only match
+/// non-null values (as SQL comparisons do).
+Expr!bool buildColumnCondition(ColExpr, ColumnFilter)(ColExpr colExpr, const ColumnFilter filter,
+        ExprBase lengthSource, string fieldName) {
+    import dunamis.core.expr : constant;
+    import dunamis.core.expr.json : UnwrapNullableExpr;
+
+    alias T = ColExpr.ResultType;
+    Expr!bool[] conditions;
+    static if (is(T == Nullable!U, U)) {
+        Expr!(Nullable!U) nullable = colExpr;
+        if (!filter.isNull.isNull)
+            conditions ~= filter.isNull.get ? nullable.isNull() : nullable.isNotNull();
+        auto valueCondition = buildValueCondition(
+            cast(Expr!U) new UnwrapNullableExpr!U(nullable), filter, lengthSource, fieldName);
+        if (valueCondition !is null)
+            conditions ~= nullable.isNotNull().and(valueCondition);
+    } else {
+        // A non-null column is never null.
+        if (!filter.isNull.isNull)
+            conditions ~= constant(!filter.isNull.get, lengthSource);
+        auto valueCondition = buildValueCondition(cast(Expr!T) colExpr, filter, lengthSource, fieldName);
+        if (valueCondition !is null)
+            conditions ~= valueCondition;
+    }
+
+    if (conditions.length == 0)
+        return null;
+    auto result = conditions[0];
+    foreach (c; conditions[1 .. $])
+        result = result.and(c);
+    return result;
+}
+
+/// Build the condition the value operators of a column filter (all but
+/// `isNull`) put on non-null column values, or null if they put none.
+private Expr!bool buildValueCondition(T, ColumnFilter)(Expr!T colExpr, const ColumnFilter filter,
+        ExprBase lengthSource, string fieldName) {
     import dunamis.core.expr : constant;
     import dunamis.core.expr.operators : sqlBinaryBool;
     import dunamis.core.types : isCustomScalar;
-
-    enum isNullableColumn = is(ColExpr.ResultType == Nullable!NullableElement, NullableElement);
 
     // Custom scalar columns are filtered through StringFilter (their wire
     // representation); parse operands that are not directly assignable to
@@ -826,22 +689,24 @@ Expr!bool buildConditionFromScalarFilter(ColExpr, ScalarFilter)(ColExpr colExpr,
     }
 
     auto operand(V)(V value) {
-        static if (is(ColExpr.ResultType == Nullable!U, U))
-            static if (isCustomScalar!U)
-                return constant(Nullable!U(scalarOperand!U(value)), lengthSource);
-            else
-                return constant(Nullable!U(value), lengthSource);
-        else static if (isCustomScalar!(ColExpr.ResultType))
-            return constant(scalarOperand!(ColExpr.ResultType)(value), lengthSource);
+        static if (isCustomScalar!T)
+            return constant(scalarOperand!T(value), lengthSource);
         else
-            return constant(value, lengthSource);
+            return constant(cast(T) value, lengthSource);
     }
 
     Expr!bool[] conditions;
 
-    static if (isDateRangeType!(ColExpr.ResultType)) {
+    // Operators which do not apply to the column's type are rejected rather
+    // than ignored.
+    void unsupported(string operator) {
+        throw new Exception("Filter operator '" ~ operator ~ "' is not supported on field '" ~
+            fieldName ~ "' of type " ~ T.stringof);
+    }
+
+    static if (isDateRangeType!T) {
         if (!filter.containsElement.isNull) {
-            alias Range = ColExpr.ResultType;
+            alias Range = T;
             conditions ~= sqlBinaryBool(colExpr, "rangeContains",
                 constant(filter.containsElement.get.to!string, lengthSource),
                 (Range range, string element) {
@@ -857,124 +722,79 @@ Expr!bool buildConditionFromScalarFilter(ColExpr, ScalarFilter)(ColExpr colExpr,
                 });
         }
     } else {
-
-    // Check each operator in the scalar filter
-    static if (__traits(hasMember, ScalarFilter, "equalTo")) {
-        if (!filter.equalTo.isNull) {
-            conditions ~= colExpr.eq(operand(filter.equalTo.get));
+        static if (__traits(hasMember, ColumnFilter, "equalTo")) {
+            if (!filter.equalTo.isNull)
+                conditions ~= colExpr.eq(operand(filter.equalTo.get));
         }
-    }
 
-    static if (__traits(hasMember, ScalarFilter, "notEqualTo")) {
-        if (!filter.notEqualTo.isNull) {
-            conditions ~= colExpr.ne(operand(filter.notEqualTo.get));
+        static if (__traits(hasMember, ColumnFilter, "notEqualTo")) {
+            if (!filter.notEqualTo.isNull)
+                conditions ~= colExpr.ne(operand(filter.notEqualTo.get));
         }
-    }
 
-    static if (__traits(hasMember, ScalarFilter, "in_")) {
-        if (!filter.in_.isNull) {
-            auto values = filter.in_.get;
-            Expr!bool membership = constant(false, lengthSource);
-            foreach (value; values)
-                membership = membership.or(colExpr.eq(operand(value)));
-            conditions ~= membership;
+        static if (__traits(hasMember, ColumnFilter, "in_")) {
+            if (!filter.in_.isNull) {
+                Expr!bool membership = constant(false, lengthSource);
+                foreach (value; filter.in_.get)
+                    membership = membership.or(colExpr.eq(operand(value)));
+                conditions ~= membership;
+            }
         }
-    }
 
-    static if (__traits(hasMember, ScalarFilter, "notIn")) {
-        if (!filter.notIn.isNull) {
-            auto values = filter.notIn.get;
-            Expr!bool membership = constant(true, lengthSource);
-            foreach (value; values)
-                membership = membership.and(colExpr.ne(operand(value)));
-            conditions ~= membership;
+        static if (__traits(hasMember, ColumnFilter, "notIn")) {
+            if (!filter.notIn.isNull) {
+                Expr!bool membership = constant(true, lengthSource);
+                foreach (value; filter.notIn.get)
+                    membership = membership.and(colExpr.ne(operand(value)));
+                conditions ~= membership;
+            }
         }
-    }
 
-    static if (__traits(hasMember, ScalarFilter, "lessThan")) {
-        static if (!isNullableColumn) {
-            if (!filter.lessThan.isNull) {
-                conditions ~= colExpr.lt(operand(filter.lessThan.get));
+        static foreach (op; ["lessThan", "lessThanOrEqualTo", "greaterThan", "greaterThanOrEqualTo"]) {
+            static if (__traits(hasMember, ColumnFilter, op)) {
+                if (!__traits(getMember, filter, op).isNull) {
+                    auto value = operand(__traits(getMember, filter, op).get);
+                    static if (op == "lessThan")
+                        conditions ~= colExpr.lt(value);
+                    else static if (op == "lessThanOrEqualTo")
+                        conditions ~= colExpr.le(value);
+                    else static if (op == "greaterThan")
+                        conditions ~= colExpr.gt(value);
+                    else
+                        conditions ~= colExpr.ge(value);
+                }
+            }
+        }
+
+        // String-specific operators
+        static foreach (op; ["contains", "startsWith", "endsWith", "containsInsensitive",
+                "includesInsensitive", "startsWithInsensitive", "endsWithInsensitive", "like"]) {
+            static if (__traits(hasMember, ColumnFilter, op)) {
+                if (!__traits(getMember, filter, op).isNull) {
+                    static if (is(T == string)) {
+                        auto value = __traits(getMember, filter, op).get;
+                        static if (op == "contains")
+                            conditions ~= colExpr.contains(value);
+                        else static if (op == "startsWith")
+                            conditions ~= colExpr.startsWith(value);
+                        else static if (op == "endsWith")
+                            conditions ~= colExpr.endsWith(value);
+                        else static if (op == "containsInsensitive" || op == "includesInsensitive")
+                            conditions ~= colExpr.containsInsensitive(value);
+                        else static if (op == "startsWithInsensitive")
+                            conditions ~= colExpr.startsWithInsensitive(value);
+                        else static if (op == "endsWithInsensitive")
+                            conditions ~= colExpr.endsWithInsensitive(value);
+                        else
+                            conditions ~= colExpr.like(value);
+                    } else {
+                        unsupported(op);
+                    }
+                }
             }
         }
     }
 
-    static if (__traits(hasMember, ScalarFilter, "lessThanOrEqualTo")) {
-        static if (!isNullableColumn) {
-            if (!filter.lessThanOrEqualTo.isNull) {
-                conditions ~= colExpr.le(operand(filter.lessThanOrEqualTo.get));
-            }
-        }
-    }
-
-    static if (__traits(hasMember, ScalarFilter, "greaterThan")) {
-        static if (!isNullableColumn) {
-            if (!filter.greaterThan.isNull) {
-                conditions ~= colExpr.gt(operand(filter.greaterThan.get));
-            }
-        }
-    }
-
-    static if (__traits(hasMember, ScalarFilter, "greaterThanOrEqualTo")) {
-        static if (!isNullableColumn) {
-            if (!filter.greaterThanOrEqualTo.isNull) {
-                conditions ~= colExpr.ge(operand(filter.greaterThanOrEqualTo.get));
-            }
-        }
-    }
-
-    // String-specific operators
-    static if (__traits(hasMember, ScalarFilter, "contains") &&
-               is(ColExpr.ResultType == string)) {
-        if (!filter.contains.isNull) {
-            conditions ~= colExpr.contains(filter.contains.get);
-        }
-    }
-
-    static if (__traits(hasMember, ScalarFilter, "startsWith") &&
-               is(ColExpr.ResultType == string)) {
-        if (!filter.startsWith.isNull) {
-            conditions ~= colExpr.startsWith(filter.startsWith.get);
-        }
-    }
-
-    static if (__traits(hasMember, ScalarFilter, "endsWith") &&
-               is(ColExpr.ResultType == string)) {
-        if (!filter.endsWith.isNull) {
-            conditions ~= colExpr.endsWith(filter.endsWith.get);
-        }
-    }
-
-    // Case-insensitive string operators
-    static if (__traits(hasMember, ScalarFilter, "containsInsensitive") &&
-               is(ColExpr.ResultType == string)) {
-        if (!filter.containsInsensitive.isNull) {
-            conditions ~= colExpr.containsInsensitive(filter.containsInsensitive.get);
-        }
-    }
-    static if (__traits(hasMember, ScalarFilter, "includesInsensitive") &&
-               is(ColExpr.ResultType == string)) {
-        if (!filter.includesInsensitive.isNull) {
-            conditions ~= colExpr.containsInsensitive(filter.includesInsensitive.get);
-        }
-    }
-
-    static if (__traits(hasMember, ScalarFilter, "startsWithInsensitive") &&
-               is(ColExpr.ResultType == string)) {
-        if (!filter.startsWithInsensitive.isNull) {
-            conditions ~= colExpr.startsWithInsensitive(filter.startsWithInsensitive.get);
-        }
-    }
-
-    static if (__traits(hasMember, ScalarFilter, "endsWithInsensitive") &&
-               is(ColExpr.ResultType == string)) {
-        if (!filter.endsWithInsensitive.isNull) {
-            conditions ~= colExpr.endsWithInsensitive(filter.endsWithInsensitive.get);
-        }
-    }
-    }
-
-    // Combine conditions with AND
     if (conditions.length == 0) {
         return null;
     }
@@ -1533,10 +1353,9 @@ template FilterPlugin(alias S) if (isSchema!S) {
 
 /// Mixin template to create a filtered version of an array-returning field.
 ///
-/// Uses module-level _FilterTypesFor and _ShallowFilterFor templates for filter
-/// type generation, so the filter struct and its helper templates (_ColTypeFor,
-/// _EnumType_*, _ShallowFilter) stay encapsulated and don't leak into the host
-/// struct. The mixin template itself still leaks a few type aliases (_SrcParams,
+/// Uses the module-level EntityFilter template for the filter type, so the
+/// filter type and its helpers don't leak into the host struct. The mixin
+/// template itself still leaks a few type aliases (_SrcParams,
 /// _SrcDefaults, _SrcEntity, _ElementType, _FilterType) and a private method
 /// (_applyFilter), but these are harmless — filtered out by getSchemaFields.
 ///
@@ -1562,9 +1381,7 @@ mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) 
         mixin ForwardField!(SourceQuery, fieldName, TypeMap);
     } else {
 
-    // Filter type from module-level template — doesn't leak _ColTypeFor,
-    // _EnumType_*, _EntityFilter, _ShallowFilter, or _*ChildFilter into the host struct.
-    alias _FilterType = _FilterTypesFor!_ElementType._EntityFilter;
+    alias _FilterType = EntityFilter!_ElementType;
 
     // The filter wraps the field's collection as the previous plugins left
     // it: with an earlier PaginationPlugin, it filters the requested window.
@@ -1610,12 +1427,14 @@ mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) 
 // ============================================================================
 
 unittest {
-    // Test FilterTypeFor template
-    static assert(is(FilterTypeFor!string == StringFilter));
-    static assert(is(FilterTypeFor!int == IntFilter));
-    static assert(is(FilterTypeFor!long == LongFilter));
-    static assert(is(FilterTypeFor!double == FloatFilter));
-    static assert(is(FilterTypeFor!bool == BooleanFilter));
+    // Test ColumnFilterType template
+    static assert(is(ColumnFilterType!string == StringFilter));
+    static assert(is(ColumnFilterType!int == IntFilter));
+    static assert(is(ColumnFilterType!long == LongFilter));
+    static assert(is(ColumnFilterType!double == FloatFilter));
+    static assert(is(ColumnFilterType!bool == BooleanFilter));
+    static assert(is(ColumnFilterType!(Nullable!string) == StringFilter));
+    static assert(is(ColumnFilterType!(Nullable!bool) == BooleanFilter));
 }
 
 unittest {
@@ -1676,7 +1495,7 @@ unittest {
     }
     static struct Query { mixin Table!(BigRow, "bigRows"); }
     alias FilteredSchema = FilterPlugin!(Schema!Query);
-    static assert(is(FilterTypeFor!TestInt64 == StringFilter));
+    static assert(is(ColumnFilterType!TestInt64 == StringFilter));
 
     testDb = new MockDB!();
     testDb.setTableData("big_rows", `[
@@ -1830,9 +1649,11 @@ unittest {
         {"id":4,"title":"Goodbye","author_id":2}
     ]`);
 
+    // Naive evaluation: MockDB ignores the SQL WHERE clauses these filters
+    // are pushed into when optimizing (see the Postgres integration suite).
     static void check(alias S)(string postsFilter, string[] expected) {
         auto result = awaitSync(new Executor().execute(compileQuery!S(
-            `{ users(filter: {posts: ` ~ postsFilter ~ `}) { firstName } }`)));
+            `{ users(filter: {posts: ` ~ postsFilter ~ `}) { firstName } }`), false));
         string[] found;
         foreach (user; result["users"].array)
             found ~= user["firstName"].str;
@@ -1894,9 +1715,10 @@ unittest {
     ]`);
 
     alias FilteredSchema = FilterPlugin!(Schema!Query);
+    // Naive evaluation: see above.
     static string[] titles(string filter) {
         auto result = awaitSync(new Executor().execute(compileQuery!FilteredSchema(
-            `{ chores(filter: ` ~ filter ~ `) { title } }`)));
+            `{ chores(filter: ` ~ filter ~ `) { title } }`), false));
         string[] found;
         foreach (chore; result["chores"].array)
             found ~= chore["title"].str;

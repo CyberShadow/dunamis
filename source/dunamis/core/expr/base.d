@@ -331,6 +331,13 @@ abstract class Expr(T) : ExprBase {
             import dunamis.core.expr.operators : LikeExpr, escapeLikePattern;
             return new LikeExpr(this, "%" ~ escapeLikePattern(suffix), true);
         }
+
+        /// Check if this string matches the SQL LIKE `pattern` (`%` matches
+        /// any characters, `_` any one character, `\` escapes the next one).
+        auto like(string pattern) {
+            import dunamis.core.expr.operators : LikeExpr;
+            return new LikeExpr(this, pattern);
+        }
     }
 
     // =========================================================================

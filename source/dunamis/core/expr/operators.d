@@ -327,6 +327,70 @@ unittest {
     }
 }
 
+/// Whether `value` matches the SQL LIKE `pattern`, in which `%` matches any
+/// (possibly empty) sequence of characters, `_` any one character, and `\`
+/// makes the next character match itself (the `ESCAPE '\'` used when LIKE
+/// patterns are rendered to SQL).
+bool likeMatch(string value, string pattern) {
+    import std.utf : decode;
+
+    // Positions to resume from when the last `%` has to match more.
+    size_t starPattern = size_t.max, starValue;
+    size_t p, v;
+    while (v < value.length) {
+        if (p < pattern.length && pattern[p] == '%') {
+            starPattern = ++p;
+            starValue = v;
+            continue;
+        }
+        if (p < pattern.length) {
+            size_t nextP = p;
+            bool any = pattern[p] == '_';
+            if (pattern[p] == '\\' && p + 1 < pattern.length)
+                nextP++;
+            size_t vEnd = v;
+            dchar vc = decode(value, vEnd);
+            size_t pEnd = nextP;
+            dchar pc = decode(pattern, pEnd);
+            if (any || pc == vc) {
+                p = pEnd;
+                v = vEnd;
+                continue;
+            }
+        }
+        if (starPattern == size_t.max)
+            return false;
+        // Let the last `%` match one more character.
+        decode(value, starValue);
+        v = starValue;
+        p = starPattern;
+    }
+    while (p < pattern.length && pattern[p] == '%')
+        p++;
+    return p == pattern.length;
+}
+
+unittest {
+    assert(likeMatch("Widgets", "Widgets"));
+    assert(!likeMatch("Widgets", "widgets"));
+    assert(likeMatch("Widgets", "W%"));
+    assert(likeMatch("Widgets", "%gets"));
+    assert(likeMatch("Widgets", "%dg%"));
+    assert(likeMatch("Widgets", "W_dg_ts"));
+    assert(!likeMatch("Widgets", "W_dg_t"));
+    assert(likeMatch("", "%"));
+    assert(!likeMatch("", "_"));
+    assert(likeMatch("a%b", `a\%b`));
+    assert(!likeMatch("axb", `a\%b`));
+    assert(likeMatch("a_b", `a\_b`));
+    assert(likeMatch(`a\b`, `a\\b`));
+    assert(likeMatch("abcabd", "%ab_"));
+    assert(likeMatch("ab", "%%b"));
+    assert(likeMatch("éclair", "_clair"));
+    assert(likeMatch("ABC-001-X", "ABC-%-_"));
+    assert(!likeMatch("ABC-001", "ABC-%-_"));
+}
+
 /// Interface for LIKE expressions - allows optimizer to inspect and transform
 interface LikeInfo {
     /// The string expression being matched
@@ -398,44 +462,9 @@ class LikeExpr : Expr!bool, LikeInfo {
                 writefln("    LikeExpr: pattern='%s', caseInsensitive=%s, vals=%s", pattern, caseInsens, vals);
             }
 
-            // Parse pattern to determine match type
-            bool startsWild = pattern.length > 0 && pattern[0] == '%';
-            bool endsWild = pattern.length > 0 && pattern[$-1] == '%';
-
-            string searchStr;
-            if (startsWild && endsWild && pattern.length >= 2) {
-                // %pattern% - contains
-                searchStr = unescapeLikePattern(pattern[1..$-1]);
-                if (caseInsens) searchStr = toLower(searchStr);
-                foreach (i, v; vals) {
-                    string val = caseInsens ? toLower(v) : v;
-                    result[i] = val.indexOf(searchStr) >= 0;
-                }
-            } else if (startsWild) {
-                // %pattern - endsWith
-                searchStr = unescapeLikePattern(pattern[1..$]);
-                if (caseInsens) searchStr = toLower(searchStr);
-                foreach (i, v; vals) {
-                    string val = caseInsens ? toLower(v) : v;
-                    result[i] = val.endsWith(searchStr);
-                }
-            } else if (endsWild) {
-                // pattern% - startsWith
-                searchStr = unescapeLikePattern(pattern[0..$-1]);
-                if (caseInsens) searchStr = toLower(searchStr);
-                foreach (i, v; vals) {
-                    string val = caseInsens ? toLower(v) : v;
-                    result[i] = val.startsWith(searchStr);
-                }
-            } else {
-                // Exact match
-                searchStr = unescapeLikePattern(pattern);
-                if (caseInsens) searchStr = toLower(searchStr);
-                foreach (i, v; vals) {
-                    string val = caseInsens ? toLower(v) : v;
-                    result[i] = val == searchStr;
-                }
-            }
+            auto lowerPattern = caseInsens ? toLower(pattern) : pattern;
+            foreach (i, v; vals)
+                result[i] = likeMatch(caseInsens ? toLower(v) : v, lowerPattern);
 
             debug(filter) {
                 import std.stdio : writefln;
