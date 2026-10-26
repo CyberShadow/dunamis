@@ -33,7 +33,6 @@ class MySQLSession : RelationalSession {
     private QueryNode[] _executedNodes;
     private string _cachedSQL;
     private QueryResult[QueryNode] _cachedResults;
-    private QueryResult[string] _cachedResultsByType;
 
     /// Create with a connection factory. The factory is called in setup().
     this(Promise!MySqlConnection delegate() connFactory, SqlOptimizer sqlOptimizer) {
@@ -133,32 +132,9 @@ class MySQLSession : RelationalSession {
         auto jsonStr = rows[0].column!string(0);
         auto jsonData = parseJSON(jsonStr);
 
-        // Parse each layer and cache results
-        QueryResult rootResult;
-        foreach (node; nodes) {
-            auto layerKey = "layer" ~ node.id.value.to!string;
-            if (layerKey in jsonData) {
-                auto layerRows = jsonData[layerKey].array;
-                auto result = new QueryResult();
-
-                if (node.isRoot) {
-                    result.loadFromRows(layerRows, node.typeName, node.pkColumns);
-                    rootResult = result;
-                    // Also cache root result so fetchBelongsTo can find FK columns
-                    _cachedResults[node] = result;
-                    _cachedResultsByType[node.typeName] = result;
-                } else {
-                    result.loadFromRows(layerRows, node.typeName, node.pkColumns,
-                                                 node.parentFk, node.parentTypeName);
-                    // Cache child results for later retrieval (by node ID and type name)
-                    _cachedResults[node] = result;
-                    _cachedResultsByType[node.typeName] = result;
-                }
-            }
-        }
-
-        // Return the root result
-        return rootResult !is null ? rootResult : new QueryResult();
+        // Parse each layer and cache results (root results too, so that
+        // fetchBelongsTo can find FK columns)
+        return loadLayerResults(jsonData, nodes, _cachedResults);
     }
 
     // =========================================================================
@@ -296,9 +272,9 @@ class MySQLSession : RelationalSession {
     }
 
     override Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs) {
-        // Check if we have cached results for this child type from CTE execution
-        if (auto result = childType in _cachedResultsByType) {
-            return resolve((*result).getChildRefs(parentRefs));
+        // Use a CTE child layer if one holds exactly these children
+        if (auto result = findChildLayer(_cachedResults, childType, fk, parentRefs)) {
+            return resolve(result.getChildRefs(parentRefs));
         }
 
         if (parentRefs.length == 0) {
@@ -344,7 +320,7 @@ class MySQLSession : RelationalSession {
 
         // Try to get FK values from cached query results first
         foreach (result; _cachedResults.byValue) {
-            if (result.hasColumn(fk) && result.containsAnyRef(childRefs)) {
+            if (result.hasColumn(fk) && result.containsAllRefs(childRefs)) {
                 // Found the FK column in a result that actually contains our refs
                 auto fkValues = result.getColumnRaw(fk, childRefs);
                 AnyRef[] refs;

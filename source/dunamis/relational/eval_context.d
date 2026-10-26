@@ -511,6 +511,14 @@ class QueryResult {
 
         /// For child layers: groups of child refs by parent ref id
         AnyRef[][string] _childRefsByParent;
+
+        /// For child layers: the FK column and parent type the rows are grouped by
+        string _parentFk, _parentType;
+
+        /// For child layers: the parent ref ids whose children this layer holds
+        /// completely (the rows of the parent layer it was selected against).
+        /// A parent absent from this set is *unknown* to the layer, not childless.
+        bool[string] _coveredParents;
     }
 
     /// Initialize with refs (call before loadColumn)
@@ -526,6 +534,8 @@ class QueryResult {
 
         _typeName = typeName;
         _allRefs = [];
+        _parentFk = parentFk;
+        _parentType = parentType;
 
         // Helper to extract ID value as string from JSON
         static string jsonValToString(JSONValue val) {
@@ -573,11 +583,50 @@ class QueryResult {
         }
     }
 
+    /// Record which parents this child layer holds the complete children of:
+    /// every row of `parentLayer`, identified by its `linkColumns` values
+    /// (the values the child layer's FK was matched against).
+    void recordCoveredParents(QueryResult parentLayer, string[] linkColumns) {
+        import dunamis.core.types : encodeCompositeKey;
+        foreach (parentRef; parentLayer._allRefs) {
+            string[] parts;
+            foreach (col; linkColumns) {
+                auto colData = parentLayer._columns.get(col, null);
+                auto valPtr = colData is null ? null : parentRef.id in colData;
+                if (valPtr is null || valPtr.type == JSONType.null_) {
+                    parts = null;
+                    break;
+                }
+                parts ~= valPtr.type == JSONType.string ? valPtr.str : valPtr.toString();
+            }
+            if (parts.length)
+                _coveredParents[_parentType ~ ":" ~ encodeCompositeKey(parts)] = true;
+        }
+    }
+
+    /// Whether this is a child layer of `childType` rows grouped by `fk` that
+    /// holds the complete children of every (valid) parent in `parentRefs`,
+    /// so that `getChildRefs(parentRefs)` faithfully answers the hasMany
+    /// relationship for them.
+    bool holdsChildrenOf(string childType, string fk, AnyRef[] parentRefs) {
+        if (_parentFk.length == 0 || _typeName != childType || _parentFk != fk)
+            return false;
+        foreach (p; parentRefs)
+            if (p.isValid && (p.id in _coveredParents) is null)
+                return false;
+        return true;
+    }
+
     /// Initialize as child result with parent grouping
     void initializeAsChild(string typeName, AnyRef[] refs, AnyRef[] parentRefs,
                            string fkColumn, JSONValue[] fkValues) {
         _typeName = typeName;
         _allRefs = refs;
+        _parentFk = fkColumn;
+        _parentType = parentRefs.length > 0 ? parentRefs[0].typeName : "";
+        foreach (p; parentRefs)
+            if (p.isValid)
+                _coveredParents[p.id] = true;
 
         // Build parent grouping from FK values
         foreach (i, r; refs) {
@@ -690,21 +739,24 @@ class QueryResult {
         return false;
     }
 
-    /// Check if any of the given refs exist in this result.
-    /// Used by fetchBelongsTo to disambiguate cached results that share
-    /// the same FK column name (e.g., author_id on both Comment and Post).
-    bool containsAnyRef(AnyRef[] refs) {
-        if (_allRefs.length == 0 || refs.length == 0) return false;
-
-        // Build a set for O(1) lookup
+    /// Check if every valid ref in `refs` exists in this result (and at least
+    /// one does). Used by fetchBelongsTo to pick a cached result to read FK
+    /// values from: refs carry their type, which disambiguates results that
+    /// share an FK column name (e.g., author_id on both Comment and Post), and
+    /// a result holding only some of the refs would report the others'
+    /// parents as NULL.
+    bool containsAllRefs(AnyRef[] refs) {
+        if (_allRefs.length == 0) return false;
         bool[string] refSet;
-        foreach (r; _allRefs) {
+        foreach (r; _allRefs)
             refSet[r.id] = true;
-        }
+        bool any;
         foreach (r; refs) {
-            if (r.id in refSet) return true;
+            if (!r.isValid) continue;
+            if ((r.id in refSet) is null) return false;
+            any = true;
         }
-        return false;
+        return any;
     }
 
     private T extractValue(T)(JSONValue val) {
@@ -712,6 +764,50 @@ class QueryResult {
     }
 }
 
+/// Load the layers of one batched CTE execution (`{"layer0": [rows], ...}`)
+/// into per-node QueryResults, storing each in `cache`. Child layers record
+/// which parents they hold the complete children of, so a later hasMany
+/// lookup can tell a childless parent from one the layer never covered.
+/// Returns the root node's result (or an empty result if absent).
+QueryResult loadLayerResults(JSONValue layers, QueryNode[] nodes,
+        ref QueryResult[QueryNode] cache) {
+    QueryResult rootResult;
+    QueryResult[QueryNode] loaded;
+    foreach (node; nodes) {
+        auto layerKey = "layer" ~ node.id.value.to!string;
+        auto layerRows = layerKey in layers;
+        if (layerRows is null)
+            continue;
+        auto result = new QueryResult();
+        if (node.isRoot) {
+            result.loadFromRows(layerRows.array, node.typeName, node.pkColumns);
+            rootResult = result;
+        } else {
+            result.loadFromRows(layerRows.array, node.typeName, node.pkColumns,
+                node.parentFk, node.parentTypeName);
+        }
+        loaded[node] = result;
+        cache[node] = result;
+    }
+    foreach (node, result; loaded)
+        if (!node.isRoot)
+            if (auto parentResult = node.parent in loaded)
+                result.recordCoveredParents(*parentResult, node.parentLinkColumns);
+    return rootResult !is null ? rootResult : new QueryResult();
+}
+
+/// Find a cached child layer that faithfully answers the hasMany relationship
+/// `childType`.`fk` for every parent in `parentRefs`, or null if none does
+/// (the caller must then fetch the children itself). A layer of the same
+/// child type is not enough: it may be grouped by another FK, be a root layer,
+/// or have been selected for a different set of parents.
+QueryResult findChildLayer(QueryResult[QueryNode] cache, string childType,
+        string fk, AnyRef[] parentRefs) {
+    foreach (result; cache.byValue)
+        if (result.holdsChildrenOf(childType, fk, parentRefs))
+            return result;
+    return null;
+}
 
 // ============================================================================
 // Tests
@@ -750,6 +846,46 @@ unittest {
     assert(childRefs[0].length == 2);  // Post:1 has 2 comments
     assert(childRefs[1].length == 1);  // Post:2 has 1 comment
     assert(childRefs[2].length == 0);  // Post:3 has no comments
+}
+
+unittest {
+    // A hasMany lookup must only be answered by the child layer that was
+    // selected for exactly that relationship and those parents. Shape:
+    // comments(root) -> post (joined as j0) -> comments(child layer), so the
+    // root and child layers share the child type.
+    auto rootNode = new QueryNode(QueryNodeId(0), "Comment", "comments", ["id"]);
+    auto childNode = new QueryNode(QueryNodeId(1), "Comment", "comments", ["id"]);
+    childNode.setParent(rootNode, "post_id", "Post", ["j0__id"]);
+
+    QueryResult[QueryNode] cache;
+    auto root = loadLayerResults(parseJSON(`{
+        "layer0": [{"id": 1, "post_id": 1, "j0__id": 1}, {"id": 2, "post_id": 2, "j0__id": 2}],
+        "layer1": [{"id": 1, "post_id": 1}, {"id": 2, "post_id": 2}, {"id": 3, "post_id": 2}]
+    }`), [rootNode, childNode], cache);
+    assert(root is cache[rootNode]);
+
+    auto posts = [AnyRef("Post:1"), AnyRef("Post:2")];
+    auto layer = findChildLayer(cache, "Comment", "post_id", posts);
+    assert(layer is cache[childNode]);
+    assert(layer.getChildRefs(posts) ==
+        [[AnyRef("Comment:1")], [AnyRef("Comment:2"), AnyRef("Comment:3")]]);
+
+    // A parent the child layer was not selected for is unknown, not childless
+    assert(findChildLayer(cache, "Comment", "post_id", [AnyRef("Post:3")]) is null);
+    // Same child type, different relationship
+    assert(findChildLayer(cache, "Comment", "author_id", posts) is null);
+    // Different child type
+    assert(findChildLayer(cache, "Post", "post_id", posts) is null);
+
+    // A root layer never answers hasMany lookups, even when its type matches
+    QueryResult[QueryNode] rootOnly;
+    rootOnly[rootNode] = cache[rootNode];
+    assert(findChildLayer(rootOnly, "Comment", "post_id", posts) is null);
+
+    // fetchBelongsTo may only read FKs from a result holding all its refs
+    assert(root.containsAllRefs([AnyRef("Comment:1"), AnyRef("Comment:2")]));
+    assert(!root.containsAllRefs([AnyRef("Comment:1"), AnyRef("Comment:3")]));
+    assert(!root.containsAllRefs([AnyRef("Post:1")]));
 }
 
 unittest {

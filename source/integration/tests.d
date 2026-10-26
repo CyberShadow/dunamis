@@ -1083,6 +1083,125 @@ void testQueryMultiHopBelongsTo() {
     }
 }
 
+// ============================================================================
+// HasMany nested under BelongsTo
+// ============================================================================
+
+/// Ground truth for a FK: child id -> parent id, and parent id -> sorted child ids.
+private struct FkTruth {
+    string[string] parentOf;
+    string[][string] childrenOf;
+
+    string[] children(string parentId) {
+        auto p = parentId in childrenOf;
+        return p ? *p : null;
+    }
+}
+
+/// Fetch `{ <root> { id <fkField> } }` and index it as ground truth.
+private FkTruth fkTruth(string root, string fkField) {
+    import std.algorithm : sort;
+    auto response = graphql(`{ ` ~ root ~ ` { id ` ~ fkField ~ ` } }`);
+    assertNoErrors(response);
+    FkTruth t;
+    foreach (row; response["data"][root].array) {
+        auto id = row["id"].toString(), parentId = row[fkField].toString();
+        t.parentOf[id] = parentId;
+        t.childrenOf[parentId] ~= id;
+    }
+    foreach (parentId, ref ids; t.childrenOf)
+        sort(ids);
+    return t;
+}
+
+/// Sorted string forms of the `id` values of a JSON array of objects.
+private string[] sortedIds(JSONValue arr) {
+    import std.algorithm : map, sort;
+    import std.array : array;
+    auto r = arr.array.map!(o => o["id"].toString()).array;
+    sort(r);
+    return r;
+}
+
+/// Check a `{ <root> { id <belongsTo> { <hasMany> { id ... } } } }` response:
+/// every root row's `<belongsTo>.<hasMany>` must list exactly the children of
+/// that row's parent. `rootTruth` maps root row ids to the belongsTo target's
+/// id; `childTruth` maps the hasMany's child ids to their parent ids.
+private void checkHasManyUnderBelongsTo(string query, string root, string belongsTo,
+        string hasMany, FkTruth rootTruth, FkTruth childTruth, size_t minRows) {
+    auto response = graphql(query);
+    assertNoErrors(response);
+    auto rows = response["data"][root].array;
+    assertTrue(rows.length >= minRows,
+        query ~ ": expected at least " ~ minRows.to!string ~ " rows, got " ~ rows.length.to!string);
+    foreach (row; rows) {
+        auto id = row["id"].toString();
+        auto parentId = rootTruth.parentOf[id];
+        auto expected = childTruth.children(parentId);
+        auto got = sortedIds(row[belongsTo][hasMany]);
+        assertTrue(expected.length > 0, query ~ ": test data must give " ~ root ~ " " ~ id ~ " siblings");
+        assertTrue(got == expected,
+            query ~ ": " ~ root ~ " " ~ id ~ " " ~ belongsTo ~ "." ~ hasMany ~ " ids: expected " ~
+            expected.to!string ~ ", got " ~ got.to!string);
+    }
+}
+
+/// root list -> BelongsTo -> HasMany, where the HasMany's child type is the
+/// root's own type (comment.post.comments) and where it is not
+/// (post.author.posts is the same shape over Post/User), selecting only `id`
+/// or also a non-key column, with and without the BelongsTo target's own id.
+void testHasManyUnderBelongsTo() {
+    auto commentPost = fkTruth("comments", "postId");
+    auto postAuthor = fkTruth("posts", "authorId");
+    foreach (sel; ["id", "id authorId"]) {
+        foreach (targetSel; ["", "id "]) {
+            checkHasManyUnderBelongsTo(
+                `{ comments { id post { ` ~ targetSel ~ `comments { ` ~ sel ~ ` } } } }`,
+                "comments", "post", "comments", commentPost, commentPost, 2);
+            checkHasManyUnderBelongsTo(
+                `{ posts { id author { ` ~ targetSel ~ `posts { ` ~ sel ~ ` } } } }`,
+                "posts", "author", "posts", postAuthor, postAuthor, 3);
+        }
+    }
+}
+
+/// Same shapes, with the root list restricted by a filter on its ids.
+void testHasManyUnderBelongsToFilteredRoot() {
+    auto commentPost = fkTruth("comments", "postId");
+    auto postAuthor = fkTruth("posts", "authorId");
+    string idList(FkTruth t) {
+        string ids;
+        foreach (id, _; t.parentOf)
+            ids ~= (ids.length ? ", " : "") ~ `"` ~ id ~ `"`;
+        return ids;
+    }
+    foreach (sel; ["id", "id authorId"]) {
+        checkHasManyUnderBelongsTo(
+            `{ comments(filter: {id: {in: [` ~ idList(commentPost) ~ `]}}) { id post { id comments { ` ~ sel ~ ` } } } }`,
+            "comments", "post", "comments", commentPost, commentPost, commentPost.parentOf.length);
+        checkHasManyUnderBelongsTo(
+            `{ posts(filter: {id: {in: [` ~ idList(postAuthor) ~ `]}}) { id author { id posts { ` ~ sel ~ ` } } } }`,
+            "posts", "author", "posts", postAuthor, postAuthor, postAuthor.parentOf.length);
+    }
+}
+
+/// HasMany directly under the root list, selecting only `id` or also a column.
+void testHasManyUnderRoot() {
+    auto commentPost = fkTruth("comments", "postId");
+    foreach (sel; ["id", "id authorId"]) {
+        auto query = `{ posts { id comments { ` ~ sel ~ ` } } }`;
+        auto response = graphql(query);
+        assertNoErrors(response);
+        foreach (p; response["data"]["posts"].array) {
+            auto pid = p["id"].toString();
+            auto expected = commentPost.children(pid);
+            auto got = sortedIds(p["comments"]);
+            assertTrue(got == expected, query ~ ": post " ~ pid ~ " comments ids: expected " ~
+                expected.to!string ~ ", got " ~ got.to!string);
+        }
+    }
+}
+
 void testQueryMultiHopBelongsToValues() {
     // Test specific values from seed data:
     // Both comments are on Alice's posts, so postAuthorName should be "Alice Smith"
@@ -2095,6 +2214,11 @@ static this() {
     // Multi-hop belongsTo tests
     registerTest("Multi-hop belongsTo (comment.post.author)", "tests", &testQueryMultiHopBelongsTo);
     registerTest("Multi-hop belongsTo values", "tests", &testQueryMultiHopBelongsToValues);
+
+    // HasMany nested under BelongsTo
+    registerTest("HasMany under BelongsTo (id only / with column)", "tests", &testHasManyUnderBelongsTo);
+    registerTest("HasMany under BelongsTo with filtered root", "tests", &testHasManyUnderBelongsToFilteredRoot);
+    registerTest("HasMany under root (id only / with column)", "tests", &testHasManyUnderRoot);
 
     // Recursive input type tests
     registerTest("Recursive filter input", "tests", &testRecursiveFilterInput);

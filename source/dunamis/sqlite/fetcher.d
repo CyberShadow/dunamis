@@ -33,7 +33,6 @@ class SQLiteSession : RelationalSession {
     private QueryNode[] _executedNodes;
     private string _cachedSQL;
     private QueryResult[QueryNode] _cachedResults;
-    private QueryResult[string] _cachedResultsByType;
 
     this(SQLite db, SqlOptimizer sqlOptimizer) {
         _db = db;
@@ -127,30 +126,9 @@ class SQLiteSession : RelationalSession {
 
         auto jsonData = parseJSON(jsonStr);
 
-        // Parse each layer and cache results
-        QueryResult rootResult;
-        foreach (node; nodes) {
-            auto layerKey = "layer" ~ node.id.value.to!string;
-            if (layerKey in jsonData) {
-                auto layerRows = jsonData[layerKey].array;
-                auto result = new QueryResult();
-
-                if (node.isRoot) {
-                    result.loadFromRows(layerRows, node.typeName, node.pkColumns);
-                    rootResult = result;
-                    // Also cache root result so fetchBelongsTo can find FK columns
-                    _cachedResults[node] = result;
-                    _cachedResultsByType[node.typeName] = result;
-                } else {
-                    result.loadFromRows(layerRows, node.typeName, node.pkColumns,
-                                                 node.parentFk, node.parentTypeName);
-                    _cachedResults[node] = result;
-                    _cachedResultsByType[node.typeName] = result;
-                }
-            }
-        }
-
-        return rootResult !is null ? rootResult : new QueryResult();
+        // Parse each layer and cache results (root results too, so that
+        // fetchBelongsTo can find FK columns)
+        return loadLayerResults(jsonData, nodes, _cachedResults);
     }
 
     // =========================================================================
@@ -302,9 +280,9 @@ class SQLiteSession : RelationalSession {
     }
 
     override Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs) {
-        // Try cached results first (from optimized path)
-        if (auto result = childType in _cachedResultsByType) {
-            return resolve((*result).getChildRefs(parentRefs));
+        // Use a CTE child layer if one holds exactly these children
+        if (auto result = findChildLayer(_cachedResults, childType, fk, parentRefs)) {
+            return resolve(result.getChildRefs(parentRefs));
         }
 
         // Naive path: query the database directly
@@ -367,7 +345,7 @@ class SQLiteSession : RelationalSession {
         // Try to get FK values from cached query results first
         // The FK column is included in the main query, so we can avoid an extra query
         foreach (result; _cachedResults.byValue) {
-            if (result.hasColumn(fk) && result.containsAnyRef(childRefs)) {
+            if (result.hasColumn(fk) && result.containsAllRefs(childRefs)) {
                 // Found the FK column in a result that actually contains our refs
                 auto fkValues = result.getColumnRaw(fk, childRefs);
                 AnyRef[] refs;
