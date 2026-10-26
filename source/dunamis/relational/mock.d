@@ -19,15 +19,37 @@ import dunamis.relational.query_node;
 // Mock Session — Holds Data and Executes Queries In-Memory
 // ============================================================================
 
+/// The in-memory data of a MockDB, shared by all of its sessions.
+private final class MockStore {
+    JSONValue[string] tableData;  // table -> array of rows
+    string[][string] primaryKeys;  // table -> list of PK column names (default: ["id"])
+    long[string] nextId;  // Auto-increment ID per table
+}
+
 /// In-memory session for unit tests.
-/// Holds table data and executes queries by filtering in-memory JSON rows.
-/// Created by MockDB and shared across all sessions (MockDB is stateless
-/// per-request — all data lives here).
+/// Executes queries by filtering in-memory JSON rows. The data lives in a
+/// store shared by all sessions of a MockDB; per-request state (fetched
+/// query results, mutation results) is per session, as with a real database.
 class MockDBImpl : RelationalSession {
+    private MockStore _store;
+
+    this() {
+        _store = new MockStore();
+    }
+
+    private this(MockStore store) {
+        _store = store;
+    }
+
+    /// A new session on the same data.
+    package MockDBImpl newSession() {
+        return new MockDBImpl(_store);
+    }
+
     private {
-        JSONValue[string] _tableData;  // table -> array of rows
-        string[][string] _primaryKeys;  // table -> list of PK column names (default: ["id"])
-        long[string] _nextId;  // Auto-increment ID per table
+        @property ref JSONValue[string] _tableData() { return _store.tableData; }
+        @property ref string[][string] _primaryKeys() { return _store.primaryKeys; }
+        @property ref long[string] _nextId() { return _store.nextId; }
     }
 
     /// Set the primary key columns for a table (for composite keys)
@@ -573,13 +595,12 @@ class MockDB(DBConfig config = defaultDBConfig) : DataSource {
         _impl = new MockDBImpl();
     }
 
-    /// Create a session — returns the shared in-memory implementation.
-    /// MockDB doesn't need per-request isolation since it's for testing.
+    /// Create a fresh per-request session on the shared in-memory data.
     override DataSession createSession() {
-        return _impl;
+        return _impl.newSession();
     }
 
-    /// Get the session for direct access (convenience for tests)
+    /// Get a session for direct access to the data (convenience for tests)
     @property MockDBImpl session() { return _impl; }
 
     // =========================================================================
