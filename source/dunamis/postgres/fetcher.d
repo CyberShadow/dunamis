@@ -72,7 +72,7 @@ class PostgresSession : RelationalSession {
         super.setup(mode);
         return acquireConnectionPermit(false).then(() => _connFactory()).then((PgSqlConnection conn) {
             _conn = conn;
-            return _conn.query("BEGIN").array();
+            return connection().query("BEGIN").array();
         }).then((PgSqlConnection.Row[] _) {
             return executeSetupStatement(0).then(() {
                 _setupDepth = 1;
@@ -106,6 +106,21 @@ class PostgresSession : RelationalSession {
         if (conn !is null && _disconnectOnTeardown)
             conn.disconnect(reason);
         releaseConnectionPermit();
+    }
+
+    /// The connection every statement of this session is issued on.
+    ///
+    /// The session only has one between setup()/resume() and
+    /// suspend()/teardown(). Expression evaluation joins all the work it
+    /// starts before the request ends (see `dunamis.core.join`), so a
+    /// statement outside that window is an engine bug; report it as an
+    /// error of the statement instead of dereferencing a null connection.
+    private PgSqlConnection connection() {
+        if (_conn is null)
+            throw new Exception(_setupDepth
+                ? "PostgreSQL session used while suspended (it has released its connection)"
+                : "PostgreSQL session used outside of a request (it has no connection)");
+        return _conn;
     }
 
     private Promise!void executeSetupStatement(size_t index) {
@@ -189,7 +204,7 @@ class PostgresSession : RelationalSession {
 
     /// Execute raw SQL for session setup.
     override Promise!void execute(string sql) {
-        return _conn.query(sql).array().then((PgSqlConnection.Row[] _) { });
+        return connection().query(sql).array().then((PgSqlConnection.Row[] _) { });
     }
 
     /// Execute SQL which returns one integer column.  This is intentionally a
@@ -197,7 +212,7 @@ class PostgresSession : RelationalSession {
     /// semantics cannot be expressed as relational query nodes (for example
     /// versioned writes).
     Promise!(long[]) queryLongs(string sql) {
-        return _conn.query(sql).array().then((PgSqlConnection.Row[] rows) {
+        return connection().query(sql).array().then((PgSqlConnection.Row[] rows) {
             long[] values;
             values.reserve(rows.length);
             foreach (row; rows)
@@ -208,7 +223,7 @@ class PostgresSession : RelationalSession {
 
     /// Execute SQL which returns one text column.
     Promise!(string[]) queryStrings(string sql) {
-        return _conn.query(sql).array().then((PgSqlConnection.Row[] rows) {
+        return connection().query(sql).array().then((PgSqlConnection.Row[] rows) {
             string[] values;
             values.reserve(rows.length);
             foreach (row; rows)
@@ -223,7 +238,7 @@ class PostgresSession : RelationalSession {
     /// current transaction and request-local database settings, instead of
     /// recursively entering GraphQL over HTTP.
     Promise!(JSONValue[]) queryJson(string sql) {
-        return _conn.query(sql).array().then((PgSqlConnection.Row[] rows) {
+        return connection().query(sql).array().then((PgSqlConnection.Row[] rows) {
             JSONValue[] values;
             values.reserve(rows.length);
             foreach (row; rows)
@@ -282,11 +297,11 @@ class PostgresSession : RelationalSession {
 
         if (idValues.length > 0) {
             // PostgreSQL array as string: {1,2,3}
-            return _conn.extendedQuery(sql, "{" ~ idValues.join(",") ~ "}").array()
+            return connection().extendedQuery(sql, "{" ~ idValues.join(",") ~ "}").array()
                 .then((PgSqlConnection.Row[] rows) => parseQueryResult(rows, allNodes));
         }
 
-        return _conn.extendedQuery(sql).array()
+        return connection().extendedQuery(sql).array()
             .then((PgSqlConnection.Row[] rows) => parseQueryResult(rows, allNodes));
     }
 
@@ -371,7 +386,7 @@ class PostgresSession : RelationalSession {
         auto pkCount = pkColumns.length;
         auto sql = buildFetchColumnSQL(table, column, validIds);
 
-        return _conn.query(sql).array().then((PgSqlConnection.Row[] rows) {
+        return connection().query(sql).array().then((PgSqlConnection.Row[] rows) {
             // Build lookup map
             string[string] values;
             foreach (row; rows) {
@@ -406,7 +421,7 @@ class PostgresSession : RelationalSession {
         auto pkCount = pkColumns.length;
         auto sql = buildFetchColumnSQL(table, column, validIds);
 
-        return _conn.query(sql).array().then((PgSqlConnection.Row[] rows) {
+        return connection().query(sql).array().then((PgSqlConnection.Row[] rows) {
             // Build lookup map
             long[string] values;
             foreach (row; rows) {
@@ -425,7 +440,7 @@ class PostgresSession : RelationalSession {
         auto sql = "SELECT " ~ pkColumns.join(", ") ~ " FROM " ~ table;
 
         auto numPkCols = pkColumns.length;
-        return _conn.query(sql).array().then((PgSqlConnection.Row[] rows) {
+        return connection().query(sql).array().then((PgSqlConnection.Row[] rows) {
             return rows.map!((r) {
                 if (numPkCols == 1) {
                     return r.column!string(0);
@@ -471,7 +486,7 @@ class PostgresSession : RelationalSession {
         if (orderBy.length)
             sql ~= " ORDER BY " ~ orderBy.join(", ");
 
-        return _conn.query(sql).array().then((PgSqlConnection.Row[] rows) {
+        return connection().query(sql).array().then((PgSqlConnection.Row[] rows) {
             // Group children by parent
             AnyRef[][string] childrenByParent;
             foreach (row; rows) {
@@ -525,7 +540,7 @@ class PostgresSession : RelationalSession {
         auto pkCount = pkColumns.length;
         auto sql = buildFetchColumnSQL(childTable, fk, validIds);
 
-        return _conn.query(sql).array().then((PgSqlConnection.Row[] rows) {
+        return connection().query(sql).array().then((PgSqlConnection.Row[] rows) {
             import std.typecons : Nullable;
             // Build lookup map
             string[string] fkValues;
@@ -590,7 +605,7 @@ class PostgresSession : RelationalSession {
         auto pkCount = pkColumns.length;
         auto sql = buildFetchColumnSQL(table, column, validIds);
 
-        return _conn.query(sql).array().then((PgSqlConnection.Row[] rows) {
+        return connection().query(sql).array().then((PgSqlConnection.Row[] rows) {
             // Build lookup map
             JSONValue[string] values;
             foreach (row; rows) {
@@ -633,7 +648,7 @@ class PostgresSession : RelationalSession {
         _cachedSQL = sql;
 
         // No parameters needed - values are embedded in SQL
-        return _conn.query(sql).array().then((PgSqlConnection.Row[] rows) {
+        return connection().query(sql).array().then((PgSqlConnection.Row[] rows) {
             return parseInsertResult(rows, typeName, pkColumns);
         });
     }
@@ -645,7 +660,7 @@ class PostgresSession : RelationalSession {
         _cachedSQL = sql;
 
         // No parameters needed - values are embedded in SQL
-        return _conn.query(sql).array().then((PgSqlConnection.Row[] rows) {
+        return connection().query(sql).array().then((PgSqlConnection.Row[] rows) {
             return parseUpdateResult(rows, typeName, pkColumns);
         });
     }
@@ -657,7 +672,7 @@ class PostgresSession : RelationalSession {
         _cachedSQL = sql;
 
         // No parameters needed - IDs are embedded in SQL
-        return _conn.query(sql).array().then((PgSqlConnection.Row[] rows) {
+        return connection().query(sql).array().then((PgSqlConnection.Row[] rows) {
             if (rows.length > 0) {
                 return rows[0].column!int(0);
             }
