@@ -41,6 +41,16 @@ enum FilterType {
     byIds,   // Fetch multiple entities by IDs
 }
 
+/// The rows a root QueryNode selects in one evaluation.
+/// Usually the node's own filter (fixed at optimization time); for root nodes
+/// whose rows are only known at evaluation time (e.g. mutation-returned
+/// entities), the refs bound by that evaluation. Passed to the session
+/// alongside the node, so that QueryNodes stay read-only after optimization.
+struct RootSelection {
+    FilterType filter = FilterType.none;
+    AnyRef[] refs;
+}
+
 // ============================================================================
 // Query Node - Represents a SQL query scope
 // ============================================================================
@@ -182,6 +192,11 @@ class QueryNode {
     void setRootFilter(FilterType filter, AnyRef[] refs = null) {
         this.rootFilter = filter;
         this.rootFilterRefs = refs;
+    }
+
+    /// The rows this node selects by its own (optimization-time) root filter.
+    @property RootSelection rootSelection() {
+        return RootSelection(rootFilter, rootFilterRefs);
     }
 
     /// Add a JOIN for belongsTo chain access.

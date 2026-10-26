@@ -59,11 +59,13 @@ class PrefetchExpr : Expr!(AnyRef[]) {
         auto session = cast(RelationalSession) ctx.getSession(ds);
 
         // For mutation-returned entities: if this is a root node with no filter,
-        // get the refs from the MapExpr's stored values and use them as the filter
-        if (_node.isRoot && _node.rootFilter == FilterType.none && _node.mapExpr !is null) {
+        // select the refs the MapExpr is iterating over in this evaluation.
+        // They are passed along with the (read-only) node, not stored in it.
+        auto root = _node.rootSelection;
+        if (_node.isRoot && root.filter == FilterType.none && _node.mapExpr !is null) {
             auto currentRefs = ctx.getValues!AnyRef(_node.mapExpr);
             if (currentRefs.length > 0) {
-                _node.setRootFilter(FilterType.byIds, currentRefs);
+                root = RootSelection(FilterType.byIds, currentRefs);
             }
         }
 
@@ -94,7 +96,7 @@ class PrefetchExpr : Expr!(AnyRef[]) {
             }
 
             // Execute the query via session (async)
-            return session.executeQueryNode(node, parentResult);
+            return session.executeQueryNode(node, parentResult, root);
         }).then((QueryResult result) {
             session.storeQueryResult(node.id, result);
             return [result.allRefs()];
@@ -601,4 +603,31 @@ unittest {
     auto parentRefs = awaitSync(proj.eval(ctx));
 
     assert(parentRefs == [AnyRef("User:10"), AnyRef("User:20")]);
+}
+
+// A root node without a filter of its own (mutation-returned entities)
+// selects the refs bound by each evaluation; evaluating the PrefetchExpr
+// must not fix one evaluation's refs into the shared QueryNode.
+unittest {
+    import dunamis.relational.mock : MockDB;
+    static MockDB!() _testDb3;
+    _testDb3 = new MockDB!();
+    _testDb3.setTableData("users", `[{"id": 1}, {"id": 2}]`);
+
+    auto node = new QueryNode(QueryNodeId(0), "User", "users", ["id"]);
+    node.dataSource = _testDb3;
+    auto mapKey = new Object();
+    node.mapExpr = mapKey;
+    auto prefetch = new PrefetchExpr(node);
+
+    AnyRef[] fetch(AnyRef[] bound) {
+        auto ctx = new EvalContext();
+        awaitSync(ctx.getSession(_testDb3).setup());
+        ctx.setValues!AnyRef(mapKey, bound);
+        return awaitSync(prefetch.eval(ctx))[0];
+    }
+
+    assert(fetch([AnyRef("User:1")]) == [AnyRef("User:1")]);
+    assert(fetch([AnyRef("User:2")]) == [AnyRef("User:2")]);
+    assert(node.rootFilter == FilterType.none);
 }

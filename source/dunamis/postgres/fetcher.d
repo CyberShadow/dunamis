@@ -256,7 +256,8 @@ class PostgresSession : RelationalSession {
     @property string sql() { return _cachedSQL; }
 
     /// Execute a QueryNode by running SQL against PostgreSQL.
-    override Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult) {
+    override Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult,
+            RootSelection root) {
         // For child nodes, check if we already have cached results from root CTE execution
         if (!node.isRoot) {
             if (node in _cachedResults) {
@@ -272,7 +273,7 @@ class PostgresSession : RelationalSession {
         _executedNodes = allNodes;
 
         // Generate the full CTE query for entire node tree
-        auto sql = toSQL(allNodes, postgresDialect(), _sqlOptimizer);
+        auto sql = toSQL(allNodes, postgresDialect(), _sqlOptimizer, root.filter);
         _cachedSQL = sql;
         debug(sql) {
             import std.stdio : writefln, writeln;
@@ -291,8 +292,8 @@ class PostgresSession : RelationalSession {
         // PostgreSQL Extended Query uses $1, $2, etc. for parameters
         // We need to pass the IDs as a PostgreSQL array
         string[] idValues;
-        if (node.rootFilter == FilterType.byId || node.rootFilter == FilterType.byIds) {
-            idValues = node.rootFilterRefs.map!(r => r.localId).array;
+        if (root.filter == FilterType.byId || root.filter == FilterType.byIds) {
+            idValues = root.refs.map!(r => r.localId).array;
         }
 
         if (idValues.length > 0) {

@@ -370,9 +370,11 @@ abstract class RelationalSession : DataSession {
     /// Execute a QueryNode as a single query and return all results.
     /// This is the main entry point for the optimized path.
     ///
-    /// For root nodes, parentResult is null.
+    /// For root nodes, parentResult is null, and `root` selects the root rows
+    /// for this evaluation (normally `node.rootSelection`).
     /// For child nodes, parentResult contains the parent's data (for FK lookups).
-    abstract Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult);
+    abstract Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult,
+        RootSelection root);
 
     // =========================================================================
     // Individual fetch methods (for naive path and MockDB!() internals)

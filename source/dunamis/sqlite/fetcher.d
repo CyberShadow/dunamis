@@ -68,7 +68,8 @@ class SQLiteSession : RelationalSession {
 
     /// Execute a QueryNode by running SQL against SQLite.
     /// Returns an immediately resolved promise since SQLite is synchronous.
-    override Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult) {
+    override Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult,
+            RootSelection root) {
         // For child nodes, check if we already have cached results from root CTE execution
         if (!node.isRoot) {
             if (node in _cachedResults) {
@@ -82,11 +83,11 @@ class SQLiteSession : RelationalSession {
         _executedNodes = allNodes;
 
         // Generate the full CTE query
-        auto sql = toSQL(allNodes, sqliteDialect(), _sqlOptimizer);
+        auto sql = toSQL(allNodes, sqliteDialect(), _sqlOptimizer, root.filter);
 
         // Substitute IDs if needed
-        if (node.rootFilter == FilterType.byId || node.rootFilter == FilterType.byIds) {
-            auto idValues = node.rootFilterRefs.map!(r => r.localId).array;
+        if (root.filter == FilterType.byId || root.filter == FilterType.byIds) {
+            auto idValues = root.refs.map!(r => r.localId).array;
             sql = sql.replace("{{IDS}}", idValues.join(","));
         } else {
             // No filter - remove the placeholder

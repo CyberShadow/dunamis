@@ -51,19 +51,21 @@ class MockDBImpl : RelationalSession {
     }
 
     /// Execute a QueryNode by filtering in-memory data
-    override Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult) {
+    override Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult,
+            RootSelection root) {
         // MockDB resolves immediately (sync execution wrapped in promise)
-        return resolve(executeQueryNodeSync(node, parentResult));
+        return resolve(executeQueryNodeSync(node, parentResult, root));
     }
 
     /// Synchronous implementation of executeQueryNode
-    package QueryResult executeQueryNodeSync(QueryNode node, QueryResult parentResult) {
+    package QueryResult executeQueryNodeSync(QueryNode node, QueryResult parentResult,
+            RootSelection root) {
         auto result = new QueryResult();
         AnyRef[] refs;
 
         // Step 1: Determine refs based on root filter or parent relationship
         if (node.isRoot) {
-            final switch (node.rootFilter) {
+            final switch (root.filter) {
                 case FilterType.none:
                     break;
                 case FilterType.all:
@@ -74,7 +76,7 @@ class MockDBImpl : RelationalSession {
                     break;
                 case FilterType.byId:
                 case FilterType.byIds:
-                    refs = node.rootFilterRefs.dup;
+                    refs = root.refs.dup;
                     result.initialize(node.typeName, refs);
                     break;
             }
@@ -716,9 +718,10 @@ private class DebugSqlSession : RelationalSession {
         return _sqlOptimizer.getOriginalExpr(alias_);
     }
 
-    override Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult) {
+    override Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult,
+            RootSelection root) {
         *_executedNodes ~= node;
-        return _inner.executeQueryNode(node, parentResult);
+        return _inner.executeQueryNode(node, parentResult, root);
     }
 
     // Delegate all other methods to wrapped session

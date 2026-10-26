@@ -4,6 +4,7 @@ import std.algorithm;
 import std.array;
 import std.conv;
 import std.format;
+import std.typecons : Nullable;
 
 import dunamis.relational.query_node : QueryNode, QueryNodeId, FilterType;
 import dunamis.relational.sql_dialect : SqlDialect;
@@ -19,7 +20,19 @@ string toSQL(QueryNode[] nodes) {
 }
 
 /// Generate a complete CTE-based SQL query with computed columns.
+/// Root nodes are filtered by their own root filter.
 string toSQL(QueryNode[] nodes, SqlDialect dialect, SqlOptimizer sqlOpt) {
+    return toSQL(nodes, dialect, sqlOpt, Nullable!FilterType.init);
+}
+
+/// ditto, filtering the root node(s) by `rootFilter` (the root selection
+/// of the evaluation executing the query) instead.
+string toSQL(QueryNode[] nodes, SqlDialect dialect, SqlOptimizer sqlOpt, FilterType rootFilter) {
+    return toSQL(nodes, dialect, sqlOpt, Nullable!FilterType(rootFilter));
+}
+
+private string toSQL(QueryNode[] nodes, SqlDialect dialect, SqlOptimizer sqlOpt,
+        Nullable!FilterType rootFilter) {
     if (nodes.length == 0)
         return "";
 
@@ -33,7 +46,8 @@ string toSQL(QueryNode[] nodes, SqlDialect dialect, SqlOptimizer sqlOpt) {
         if (node.useWindowFunction) {
             ctes ~= toCTEWithWindowFunction(node, dialect, sqlOpt);
         } else {
-            ctes ~= toCTE(node, dialect, sqlOpt);
+            ctes ~= toCTE(node, dialect, sqlOpt,
+                rootFilter.isNull ? node.rootFilter : rootFilter.get);
         }
     }
     sql ~= ctes.join(",\n");
@@ -68,6 +82,12 @@ string toSQL(QueryNode[] nodes, SqlDialect dialect, SqlOptimizer sqlOpt) {
 
 /// Generate CTE for a single QueryNode.
 private string toCTE(QueryNode node, SqlDialect dialect, SqlOptimizer sqlOpt) {
+    return toCTE(node, dialect, sqlOpt, node.rootFilter);
+}
+
+/// ditto, filtering a root node by `rootFilter`.
+private string toCTE(QueryNode node, SqlDialect dialect, SqlOptimizer sqlOpt,
+        FilterType rootFilter) {
     auto sql = appender!string;
 
     sql ~= format("  layer%d AS (\n", node.id.value);
@@ -95,7 +115,7 @@ private string toCTE(QueryNode node, SqlDialect dialect, SqlOptimizer sqlOpt) {
     // WHERE clause
     sql ~= "\n    WHERE ";
     if (node.isRoot) {
-        final switch (node.rootFilter) {
+        final switch (rootFilter) {
             case FilterType.none:
             case FilterType.all:
                 sql ~= "1=1";
