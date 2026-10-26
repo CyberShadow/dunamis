@@ -72,17 +72,6 @@ string constantToSqlLiteral(ConstantInfo info) {
 }
 
 // ============================================================================
-// Computed Column Support
-// ============================================================================
-
-/// A computed column to be added to a QueryNode's SELECT clause
-struct ComputedColumn {
-    string alias_;     // SQL alias (e.g., "computed_0")
-    string sqlExpr;    // SQL expression (e.g., "first_name || ' ' || last_name")
-    TypeInfo type;     // Result type for creating typed projection
-}
-
-// ============================================================================
 // SQL Optimizer
 // ============================================================================
 
@@ -93,62 +82,37 @@ struct ComputedColumn {
 ///   1. First run the standard optimizer to create QueryNodes and ProjectionExprs
 ///   2. Then run SqlOptimizer to find BinaryOpExprs over projections
 ///   3. SqlOptimizer replaces them with ProjectComputedExprs
-///   4. Computed columns are added to QueryNode SQL generation
+///   4. Computed columns are added to their QueryNode for SQL generation
+///
+/// The optimizer holds no per-request state: everything it produces is part
+/// of the optimized tree (its QueryNodes and projections), so one instance
+/// can serve a data source's concurrent requests, and an optimized tree can
+/// be evaluated any number of times.
 ///
 /// Data sources that support SQL computed columns should return an instance
 /// of this class from their requestedOptimizers() method.
 class SqlOptimizer : ExprOptimizer {
-    /// Track computed columns per QueryNode ID
-    private ComputedColumn[][QueryNodeId] _computedColumns;
-
-    /// Next computed column alias counter
-    private int _nextComputedAlias = 0;
-
     /// SQL dialect for database-specific SQL generation
     protected SqlDialect _dialect;
-
-    // Optimization is requested through a data-source-wide prototype, while
-    // sessions are request-local. Keep the completed state on the calling
-    // thread until that request creates its session.
-    private static SqlOptimizer _pendingThreadSnapshot;
 
     /// Create a SqlOptimizer with a specific dialect
     this(SqlDialect dialect) {
         _dialect = dialect;
     }
 
-    /// Capture the completed optimizer state for one execution. Data sources
-    /// keep a prototype optimizer for expression discovery, but SQL generation
-    /// happens asynchronously and must not observe that prototype being reset
-    /// by a later request.
-    SqlOptimizer snapshot() {
-        if (_pendingThreadSnapshot !is null) {
-            auto result = _pendingThreadSnapshot;
-            _pendingThreadSnapshot = null;
-            return result;
-        }
-        return copyState();
-    }
-
-    private SqlOptimizer copyState() {
-        auto result = new SqlOptimizer(_dialect);
-        foreach (nodeId, columns; _computedColumns)
-            result._computedColumns[nodeId] = columns.dup;
-        result._nextComputedAlias = _nextComputedAlias;
-        return result;
-    }
-
     /// Optimize an expression tree, applying SQL push-down where possible.
     /// This should be called AFTER the standard optimizer has run.
     override void optimize(ExprBase expr, OptimizeContext ctx) {
-        synchronized (this) {
-            // Clear per-request state — QueryNodeIds restart from 0 each request,
-            // so stale computed columns from previous requests would collide.
-            _computedColumns.clear();
-            _nextComputedAlias = 0;
-            optimizeRecursive(expr, ctx);
-            _pendingThreadSnapshot = copyState();
-        }
+        optimizeRecursive(expr, ctx);
+    }
+
+    /// Register a computed column on `node`, returning its alias.
+    private string addComputedColumn(QueryNode node, string sqlExpr, TypeInfo type,
+            OptimizeContext ctx) {
+        import dunamis.relational.optimize_context : RelationalOptimizeContext;
+        auto alias_ = ctx.getSourceContext!RelationalOptimizeContext().newComputedColumnAlias();
+        node.addComputedColumn(ComputedColumn(alias_, sqlExpr, type));
+        return alias_;
     }
 
     /// Recursively optimize expression and its children
@@ -290,14 +254,9 @@ class SqlOptimizer : ExprOptimizer {
         // Build the SQL expression using dialect-specific formatting
         auto sqlExpr = _dialect.binaryOp(binOp.operator, leftSql.get, rightSql.get);
 
-        // Create computed column alias
-        auto alias_ = "computed_" ~ (_nextComputedAlias++).to!string;
-
-        // Register the computed column
-        if (queryNodeId !in _computedColumns) {
-            _computedColumns[queryNodeId] = [];
-        }
-        _computedColumns[queryNodeId] ~= ComputedColumn(alias_, sqlExpr, expr.resultType);
+        // Register the computed column on the projections' QueryNode
+        assert(prefetch.node.id == queryNodeId, "Computed column operands from another QueryNode");
+        auto alias_ = addComputedColumn(prefetch.node, sqlExpr, expr.resultType, ctx);
 
         // Create and return projection for computed column
         return createProjectComputedExpr(queryNodeId, alias_, expr.resultType, input, prefetch);
@@ -327,14 +286,9 @@ class SqlOptimizer : ExprOptimizer {
         // Build the SQL expression using dialect-specific formatting
         auto sqlExpr = _dialect.unaryOp(unaryOp.operator, operandSql.get);
 
-        // Create computed column alias
-        auto alias_ = "computed_" ~ (_nextComputedAlias++).to!string;
-
-        // Register the computed column
-        if (queryNodeId !in _computedColumns) {
-            _computedColumns[queryNodeId] = [];
-        }
-        _computedColumns[queryNodeId] ~= ComputedColumn(alias_, sqlExpr, expr.resultType);
+        // Register the computed column on the projections' QueryNode
+        assert(prefetch.node.id == queryNodeId, "Computed column operands from another QueryNode");
+        auto alias_ = addComputedColumn(prefetch.node, sqlExpr, expr.resultType, ctx);
 
         // Create and return projection for computed column
         return createProjectComputedExpr(queryNodeId, alias_, expr.resultType, input, prefetch);
@@ -378,14 +332,9 @@ class SqlOptimizer : ExprOptimizer {
         // Build the SQL expression using dialect-specific formatting
         auto sqlExpr = _dialect.caseWhen(condSql.get, trueSql.get, falseSql.get);
 
-        // Create computed column alias
-        auto alias_ = "computed_" ~ (_nextComputedAlias++).to!string;
-
-        // Register the computed column
-        if (queryNodeId !in _computedColumns) {
-            _computedColumns[queryNodeId] = [];
-        }
-        _computedColumns[queryNodeId] ~= ComputedColumn(alias_, sqlExpr, expr.resultType);
+        // Register the computed column on the projections' QueryNode
+        assert(prefetch.node.id == queryNodeId, "Computed column operands from another QueryNode");
+        auto alias_ = addComputedColumn(prefetch.node, sqlExpr, expr.resultType, ctx);
 
         // Create and return projection for computed column
         return createProjectComputedExpr(queryNodeId, alias_, expr.resultType, input, prefetch);
@@ -415,14 +364,9 @@ class SqlOptimizer : ExprOptimizer {
         // Build the SQL expression using dialect-specific formatting
         auto sqlExpr = _dialect.isNullOp(operandSql.get);
 
-        // Create computed column alias
-        auto alias_ = "computed_" ~ (_nextComputedAlias++).to!string;
-
-        // Register the computed column
-        if (queryNodeId !in _computedColumns) {
-            _computedColumns[queryNodeId] = [];
-        }
-        _computedColumns[queryNodeId] ~= ComputedColumn(alias_, sqlExpr, typeid(bool));
+        // Register the computed column on the projections' QueryNode
+        assert(prefetch.node.id == queryNodeId, "Computed column operands from another QueryNode");
+        auto alias_ = addComputedColumn(prefetch.node, sqlExpr, typeid(bool), ctx);
 
         // Create and return projection for computed column
         return createProjectComputedExpr(queryNodeId, alias_, typeid(bool), input, prefetch);
@@ -490,21 +434,15 @@ class SqlOptimizer : ExprOptimizer {
         // predicates here are some(). The outer not() is pushed down separately.
         string sqlExpr = _dialect.existsSubquery(subquery);
 
-        // Create computed column alias
-        auto alias_ = "computed_" ~ (_nextComputedAlias++).to!string;
-
-        // Register the computed column on the parent QueryNode
-        if (parentNode.id !in _computedColumns) {
-            _computedColumns[parentNode.id] = [];
-        }
-        _computedColumns[parentNode.id] ~= ComputedColumn(alias_, sqlExpr, typeid(bool));
-
         // Get the input expression that provides parent entity refs as AnyRef
         // HasManyInfo knows the Parent type at compile time and creates the wrapper
         auto input = hasManyInfo.inputAsAnyRefExpr;
         if (input is null) {
             return null;
         }
+
+        // Register the computed column on the parent QueryNode
+        auto alias_ = addComputedColumn(parentNode, sqlExpr, typeid(bool), ctx);
 
         // Create and return projection for computed column
         return createProjectComputedExpr(parentNode.id, alias_, typeid(bool), input, prefetch);
@@ -803,20 +741,6 @@ class SqlOptimizer : ExprOptimizer {
         return null;
     }
 
-    /// Get computed columns for a QueryNode (for SQL generation)
-    ComputedColumn[] getComputedColumns(QueryNodeId queryNodeId) {
-        return _computedColumns.get(queryNodeId, []);
-    }
-
-    /// Check if a QueryNode has any computed columns
-    bool hasComputedColumns(QueryNodeId queryNodeId) {
-        return queryNodeId in _computedColumns && _computedColumns[queryNodeId].length > 0;
-    }
-
-    /// Get all computed columns keyed by QueryNode ID
-    const(ComputedColumn[][QueryNodeId]) allComputedColumns() {
-        return _computedColumns;
-    }
 }
 
 // ============================================================================
@@ -829,52 +753,28 @@ class SqlOptimizer : ExprOptimizer {
 ///
 /// Production data sources should use plain SqlOptimizer (no capture overhead).
 class CapturingSqlOptimizer : SqlOptimizer {
-    /// Original expressions keyed by computed column alias
-    private ExprBase[string] _originalExprs;
-
     /// Create a CapturingSqlOptimizer with a specific dialect
     this(SqlDialect dialect) {
         super(dialect);
     }
 
-    /// Clear captured expressions when starting a new request
-    override void optimize(ExprBase expr, OptimizeContext ctx) {
-        _originalExprs.clear();
-        super.optimize(expr, ctx);
-    }
-
     /// Override to capture original expression before replacement
     override protected ExprBase tryPushDownBinaryOp(ExprBase expr, BinaryOpInfo binOp, OptimizeContext ctx) {
-        auto replacement = super.tryPushDownBinaryOp(expr, binOp, ctx);
-        if (replacement !is null && replacement !is expr) {
-            // Capture the original expression
-            if (auto projComputed = cast(ProjectComputedInfo) replacement) {
-                _originalExprs[projComputed.columnAlias] = expr;
-            }
-        }
-        return replacement;
+        return capture(expr, super.tryPushDownBinaryOp(expr, binOp, ctx));
     }
 
     /// Override to capture original expression before replacement (for some/every)
     override protected ExprBase tryPushDownCollectionPredicate(ExprBase expr, CollectionPredicateInfo collPred, OptimizeContext ctx) {
-        auto replacement = super.tryPushDownCollectionPredicate(expr, collPred, ctx);
-        if (replacement !is null && replacement !is expr) {
-            // Capture the original expression
-            if (auto projComputed = cast(ProjectComputedInfo) replacement) {
-                _originalExprs[projComputed.columnAlias] = expr;
-            }
-        }
+        return capture(expr, super.tryPushDownCollectionPredicate(expr, collPred, ctx));
+    }
+
+    /// Keep the original expression in its replacement, for evaluation in
+    /// memory when the computed column is not fetched.
+    private static ExprBase capture(ExprBase original, ExprBase replacement) {
+        if (replacement !is null && replacement !is original)
+            if (auto projComputed = cast(ProjectComputedInfo) replacement)
+                projComputed.inMemoryFallback = original;
         return replacement;
-    }
-
-    /// Get the original expression for a computed column alias
-    ExprBase getOriginalExpr(string alias_) {
-        return _originalExprs.get(alias_, null);
-    }
-
-    /// Get all captured original expressions
-    const(ExprBase[string]) allOriginalExprs() {
-        return _originalExprs;
     }
 }
 
@@ -886,6 +786,11 @@ class CapturingSqlOptimizer : SqlOptimizer {
 interface ProjectComputedInfo {
     @property QueryNodeId queryNodeId();
     @property string columnAlias();
+
+    /// The original expression, evaluated in memory if the computed column
+    /// was not fetched (set by CapturingSqlOptimizer, at optimization time).
+    @property ExprBase inMemoryFallback();
+    @property void inMemoryFallback(ExprBase original);
 }
 
 /// Projection expression that reads a computed column from QueryResult.
@@ -895,6 +800,7 @@ class ProjectComputedExpr(T) : Expr!T, ProjectComputedInfo {
     private string _alias;
     private ExprBase _input;     // The input chain (for deriving refs)
     private ExprBase _prefetch;  // PrefetchExpr - ensures data is loaded
+    private ExprBase _inMemoryFallback;  // See ProjectComputedInfo.inMemoryFallback
 
     /// Accepts ExprBase to work with both typed Expr!Entity and untyped Expr!AnyRef
     this(QueryNodeId queryNodeId, string alias_, ExprBase input, PrefetchExpr prefetch) {
@@ -920,6 +826,7 @@ class ProjectComputedExpr(T) : Expr!T, ProjectComputedInfo {
         auto alias_ = _alias;
         auto input = _input;
         auto prefetch = cast(PrefetchExpr) _prefetch;
+        auto fallback = _inMemoryFallback;
 
         // Ensure data is prefetched, then evaluate input refs, then read
         return evalAs!(AnyRef[])(_prefetch, ctx).then((_) {
@@ -934,9 +841,8 @@ class ProjectComputedExpr(T) : Expr!T, ProjectComputedInfo {
             }
 
             // Fallback path: evaluate original expression (MockDB)
-            auto originalExpr = session.getOriginalExpr(alias_);
-            if (originalExpr !is null) {
-                return evalAs!T(originalExpr, ctx);
+            if (fallback !is null) {
+                return evalAs!T(fallback, ctx);
             }
 
             // No column and no fallback - return defaults
@@ -946,6 +852,8 @@ class ProjectComputedExpr(T) : Expr!T, ProjectComputedInfo {
 
     @property QueryNodeId queryNodeId() { return _queryNodeId; }
     @property string columnAlias() { return _alias; }
+    @property ExprBase inMemoryFallback() { return _inMemoryFallback; }
+    @property void inMemoryFallback(ExprBase original) { _inMemoryFallback = original; }
 }
 
 
@@ -1170,7 +1078,6 @@ unittest {
     }
     auto optimizer = new SqlOptimizer(new TestDialect());
     assert(optimizer !is null);
-    assert(!optimizer.hasComputedColumns(QueryNodeId(0)));
 }
 
 unittest {
@@ -1244,8 +1151,7 @@ unittest {
     sqlOpt.optimize(wrapper, ctx);
 
     // Check that computed columns were created
-    assert(sqlOpt.hasComputedColumns(QueryNodeId(0)));
-    auto computed = sqlOpt.getComputedColumns(QueryNodeId(0));
+    auto computed = node.computedColumns;
     assert(computed.length >= 1);
 }
 

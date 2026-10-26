@@ -35,7 +35,6 @@ class PostgresSession : RelationalSession {
     private bool _hasConnectionPermit;
     private bool _disconnectOnTeardown;
     private size_t _setupDepth;
-    private SqlOptimizer _sqlOptimizer;
     private QueryNode[] _executedNodes;
     private string _cachedSQL;
     private QueryResult[QueryNode] _cachedResults;
@@ -48,14 +47,13 @@ class PostgresSession : RelationalSession {
     }
 
     /// Create with a connection factory. The factory is called in setup().
-    this(Promise!PgSqlConnection delegate() connFactory, SqlOptimizer sqlOptimizer,
+    this(Promise!PgSqlConnection delegate() connFactory,
             bool disconnectOnTeardown,
             Promise!void delegate(bool continuation) acquireConnection = null,
             void delegate() releaseConnection = null) {
         _connFactory = connFactory;
         _acquireConnection = acquireConnection;
         _releaseConnection = releaseConnection;
-        _sqlOptimizer = sqlOptimizer;
         _disconnectOnTeardown = disconnectOnTeardown;
     }
 
@@ -247,11 +245,6 @@ class PostgresSession : RelationalSession {
         });
     }
 
-    /// Get original expression for fallback evaluation (not used - real DB evaluates SQL)
-    override ExprBase getOriginalExpr(string alias_) {
-        return null;
-    }
-
     /// Get the generated SQL (for debugging)
     @property string sql() { return _cachedSQL; }
 
@@ -273,7 +266,7 @@ class PostgresSession : RelationalSession {
         _executedNodes = allNodes;
 
         // Generate the full CTE query for entire node tree
-        auto sql = toSQL(allNodes, postgresDialect(), _sqlOptimizer, root.filter);
+        auto sql = toSQL(allNodes, postgresDialect(), root.filter);
         _cachedSQL = sql;
         debug(sql) {
             import std.stdio : writefln, writeln;
@@ -758,7 +751,7 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataSource {
 
     /// Create a fresh per-request session.
     override DataSession createSession() {
-        return new PostgresSession(_connFactory, _sqlOptimizer.snapshot(),
+        return new PostgresSession(_connFactory,
             _disconnectSessions, &acquireConnection, &releaseConnection);
     }
 

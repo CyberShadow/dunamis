@@ -29,15 +29,13 @@ import dunamis.mysql.sql;
 class MySQLSession : RelationalSession {
     private MySqlConnection _conn;
     private Promise!MySqlConnection delegate() _connFactory;
-    private SqlOptimizer _sqlOptimizer;
     private QueryNode[] _executedNodes;
     private string _cachedSQL;
     private QueryResult[QueryNode] _cachedResults;
 
     /// Create with a connection factory. The factory is called in setup().
-    this(Promise!MySqlConnection delegate() connFactory, SqlOptimizer sqlOptimizer) {
+    this(Promise!MySqlConnection delegate() connFactory) {
         _connFactory = connFactory;
-        _sqlOptimizer = sqlOptimizer;
     }
 
     /// Acquire connection and begin a transaction.
@@ -63,11 +61,6 @@ class MySQLSession : RelationalSession {
         return _conn.query(sql).array().then((MySqlConnection.Row[] _) { });
     }
 
-    /// Get original expression for fallback evaluation (not used - real DB evaluates SQL)
-    override ExprBase getOriginalExpr(string alias_) {
-        return null;
-    }
-
     /// Get the generated SQL (for debugging)
     @property string sql() { return _cachedSQL; }
 
@@ -89,7 +82,7 @@ class MySQLSession : RelationalSession {
         _executedNodes = allNodes;
 
         // Generate the full CTE query for entire node tree
-        auto sql = toSQL(allNodes, mysqlDialect(), _sqlOptimizer, root.filter);
+        auto sql = toSQL(allNodes, mysqlDialect(), root.filter);
 
         // Substitute IDs if needed
         if (root.filter == FilterType.byId || root.filter == FilterType.byIds) {
@@ -573,7 +566,7 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataSource {
 
     /// Create a fresh per-request session.
     override DataSession createSession() {
-        return new MySQLSession(_connFactory, _sqlOptimizer);
+        return new MySQLSession(_connFactory);
     }
 }
 

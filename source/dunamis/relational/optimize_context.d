@@ -22,6 +22,15 @@ class RelationalOptimizeContext {
 
         /// Next query node ID
         int _nextNodeId = 0;
+
+        /// Next computed column alias number
+        int _nextComputedAlias = 0;
+    }
+
+    /// Allocate a computed column alias, unique within this optimization.
+    string newComputedColumnAlias() {
+        import std.conv : to;
+        return "computed_" ~ (_nextComputedAlias++).to!string;
     }
 
     /// Get or create a QueryNode for a MapExpr.

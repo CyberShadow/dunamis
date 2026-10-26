@@ -8,7 +8,6 @@ import std.typecons : Nullable;
 
 import dunamis.relational.query_node : QueryNode, QueryNodeId, FilterType;
 import dunamis.relational.sql_dialect : SqlDialect;
-import dunamis.relational.sql_optimizer : SqlOptimizer;
 
 // ============================================================================
 // Query SQL Generation (CTE-based, dialect-agnostic)
@@ -16,22 +15,22 @@ import dunamis.relational.sql_optimizer : SqlOptimizer;
 
 /// Generate a complete CTE-based SQL query (without computed columns or dialect).
 string toSQL(QueryNode[] nodes) {
-    return toSQL(nodes, null, null);
+    return toSQL(nodes, null);
 }
 
 /// Generate a complete CTE-based SQL query with computed columns.
 /// Root nodes are filtered by their own root filter.
-string toSQL(QueryNode[] nodes, SqlDialect dialect, SqlOptimizer sqlOpt) {
-    return toSQL(nodes, dialect, sqlOpt, Nullable!FilterType.init);
+string toSQL(QueryNode[] nodes, SqlDialect dialect) {
+    return toSQL(nodes, dialect, Nullable!FilterType.init);
 }
 
 /// ditto, filtering the root node(s) by `rootFilter` (the root selection
 /// of the evaluation executing the query) instead.
-string toSQL(QueryNode[] nodes, SqlDialect dialect, SqlOptimizer sqlOpt, FilterType rootFilter) {
-    return toSQL(nodes, dialect, sqlOpt, Nullable!FilterType(rootFilter));
+string toSQL(QueryNode[] nodes, SqlDialect dialect, FilterType rootFilter) {
+    return toSQL(nodes, dialect, Nullable!FilterType(rootFilter));
 }
 
-private string toSQL(QueryNode[] nodes, SqlDialect dialect, SqlOptimizer sqlOpt,
+private string toSQL(QueryNode[] nodes, SqlDialect dialect,
         Nullable!FilterType rootFilter) {
     if (nodes.length == 0)
         return "";
@@ -44,9 +43,9 @@ private string toSQL(QueryNode[] nodes, SqlDialect dialect, SqlOptimizer sqlOpt,
     string[] ctes;
     foreach (node; nodes) {
         if (node.useWindowFunction) {
-            ctes ~= toCTEWithWindowFunction(node, dialect, sqlOpt);
+            ctes ~= toCTEWithWindowFunction(node, dialect);
         } else {
-            ctes ~= toCTE(node, dialect, sqlOpt,
+            ctes ~= toCTE(node, dialect,
                 rootFilter.isNull ? node.rootFilter : rootFilter.get);
         }
     }
@@ -81,24 +80,24 @@ private string toSQL(QueryNode[] nodes, SqlDialect dialect, SqlOptimizer sqlOpt,
 }
 
 /// Generate CTE for a single QueryNode.
-private string toCTE(QueryNode node, SqlDialect dialect, SqlOptimizer sqlOpt) {
-    return toCTE(node, dialect, sqlOpt, node.rootFilter);
+private string toCTE(QueryNode node, SqlDialect dialect) {
+    return toCTE(node, dialect, node.rootFilter);
 }
 
 /// ditto, filtering a root node by `rootFilter`.
-private string toCTE(QueryNode node, SqlDialect dialect, SqlOptimizer sqlOpt,
+private string toCTE(QueryNode node, SqlDialect dialect,
         FilterType rootFilter) {
     auto sql = appender!string;
 
     sql ~= format("  layer%d AS (\n", node.id.value);
     sql ~= "    SELECT ";
-    sql ~= buildSelectColumns(node, dialect, sqlOpt);
+    sql ~= buildSelectColumns(node, dialect);
 
     // Dialect-specific: add per-row JSON wrapping if needed
     auto rowJsonFunc = dialect.rowJsonFunc();
     if (rowJsonFunc.length > 0) {
         sql ~= format(",\n           %s(%s) AS row_json",
-            rowJsonFunc, buildJsonObjectArgs(node, sqlOpt));
+            rowJsonFunc, buildJsonObjectArgs(node));
     }
 
     sql ~= format("\n    FROM %s", node.table);
@@ -163,7 +162,7 @@ private string toCTE(QueryNode node, SqlDialect dialect, SqlOptimizer sqlOpt,
 }
 
 /// Generate CTE for a child node with per-parent pagination using window functions.
-private string toCTEWithWindowFunction(QueryNode node, SqlDialect dialect, SqlOptimizer sqlOpt) {
+private string toCTEWithWindowFunction(QueryNode node, SqlDialect dialect) {
     assert(!node.isRoot, "Window function pagination only applies to child nodes");
 
     auto sql = appender!string;
@@ -184,13 +183,13 @@ private string toCTEWithWindowFunction(QueryNode node, SqlDialect dialect, SqlOp
 
     // Outer SELECT: project needed columns from the windowed subquery
     sql ~= "    SELECT ";
-    sql ~= buildSelectColumns(node, dialect, sqlOpt, "_inner");
+    sql ~= buildSelectColumns(node, dialect, "_inner");
 
     // Add per-row JSON wrapping if needed (for SQLite/MySQL style)
     auto rowJsonFunc = dialect.rowJsonFunc();
     if (rowJsonFunc.length > 0) {
         sql ~= format(",\n           %s(%s) AS row_json",
-            rowJsonFunc, buildJsonObjectArgs(node, sqlOpt, "_inner"));
+            rowJsonFunc, buildJsonObjectArgs(node, "_inner"));
     }
 
     sql ~= " FROM (\n";
@@ -243,7 +242,7 @@ private string toCTEWithWindowFunction(QueryNode node, SqlDialect dialect, SqlOp
 /// Generate SQL SELECT clause including computed columns.
 /// If tableAlias is provided, uses that instead of node.table for column references
 /// (used for window function CTEs where the outer SELECT references the inner subquery).
-string buildSelectColumns(QueryNode node, SqlDialect dialect, SqlOptimizer sqlOpt, string tableAlias = null) {
+string buildSelectColumns(QueryNode node, SqlDialect dialect, string tableAlias = null) {
     string[] selectParts;
 
     auto tableName = tableAlias !is null ? tableAlias : node.table;
@@ -278,10 +277,10 @@ string buildSelectColumns(QueryNode node, SqlDialect dialect, SqlOptimizer sqlOp
         }
     }
 
-    // Computed columns (if SqlOptimizer is provided)
+    // Computed columns
     // Not supported with window functions yet (computed columns come from base table)
-    if (sqlOpt !is null && tableAlias is null) {
-        foreach (computed; sqlOpt.getComputedColumns(node.id)) {
+    if (tableAlias is null) {
+        foreach (computed; node.computedColumns) {
             selectParts ~= format("%s AS %s", computed.sqlExpr, computed.alias_);
         }
     }
@@ -291,7 +290,7 @@ string buildSelectColumns(QueryNode node, SqlDialect dialect, SqlOptimizer sqlOp
 
 /// Build key-value argument pairs for json_object/JSON_OBJECT row wrapping.
 /// Returns "'col1', table.col1, 'col2', table.col2, ..." format.
-string buildJsonObjectArgs(QueryNode node, SqlOptimizer sqlOpt, string tableAlias = null) {
+string buildJsonObjectArgs(QueryNode node, string tableAlias = null) {
     string[] args;
 
     auto tableName = tableAlias !is null ? tableAlias : node.table;
@@ -317,8 +316,8 @@ string buildJsonObjectArgs(QueryNode node, SqlOptimizer sqlOpt, string tableAlia
     }
 
     // Computed columns
-    if (sqlOpt !is null && tableAlias is null) {
-        foreach (computed; sqlOpt.getComputedColumns(node.id)) {
+    if (tableAlias is null) {
+        foreach (computed; node.computedColumns) {
             args ~= format("'%s', %s", computed.alias_, computed.sqlExpr);
         }
     }
@@ -342,9 +341,9 @@ unittest {
     node.addJoinedColumn(j, "name");
     node.markJoinedStringColumn(j, "name");
 
-    auto pg = buildSelectColumns(node, postgresDialect(), null);
+    auto pg = buildSelectColumns(node, postgresDialect());
     assert(pg == "posts.id, posts.title::text AS title, j0.id AS j0__id, j0.name::text AS j0__name", pg);
-    auto my = buildSelectColumns(node, mysqlDialect(), null);
+    auto my = buildSelectColumns(node, mysqlDialect());
     assert(my == "posts.id, CAST(posts.title AS CHAR) AS title, j0.id AS j0__id, CAST(j0.name AS CHAR) AS j0__name", my);
 }
 
@@ -358,7 +357,7 @@ unittest {
     node.setLimit(10);
     node.setOffset(20);
 
-    auto sql = toCTE(node, postgresDialect(), null);
+    auto sql = toCTE(node, postgresDialect());
 
     assert(sql.canFind("LIMIT 10"), "SQL should contain LIMIT 10: " ~ sql);
     assert(sql.canFind("OFFSET 20"), "SQL should contain OFFSET 20: " ~ sql);
@@ -374,7 +373,7 @@ unittest {
     node.setRootFilter(FilterType.all);
     node.setLimit(5);
 
-    auto sql = toCTE(node, postgresDialect(), null);
+    auto sql = toCTE(node, postgresDialect());
 
     assert(sql.canFind("LIMIT 5"), "SQL should contain LIMIT 5: " ~ sql);
     assert(!sql.canFind("OFFSET"), "SQL should not contain OFFSET: " ~ sql);
@@ -389,7 +388,7 @@ unittest {
     node.setRootFilter(FilterType.all);
     node.setOffset(15);
 
-    auto sql = toCTE(node, postgresDialect(), null);
+    auto sql = toCTE(node, postgresDialect());
 
     assert(sql.canFind("OFFSET 15"), "SQL should contain OFFSET 15: " ~ sql);
     assert(!sql.canFind("LIMIT"), "SQL should not contain LIMIT: " ~ sql);
@@ -403,7 +402,7 @@ unittest {
     node.addColumn("first_name");
     node.setRootFilter(FilterType.byIds);
 
-    auto sql = toCTE(node, postgresDialect(), null);
+    auto sql = toCTE(node, postgresDialect());
 
     assert(sql.canFind("ANY($1)"), "PostgreSQL should use ANY($1): " ~ sql);
     assert(!sql.canFind("row_json"), "PostgreSQL should not have row_json in CTE: " ~ sql);

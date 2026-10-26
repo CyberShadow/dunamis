@@ -29,14 +29,12 @@ import dunamis.sqlite.sql;
 /// Holds cached results and per-query state for a single evaluation.
 class SQLiteSession : RelationalSession {
     private SQLite _db;
-    private SqlOptimizer _sqlOptimizer;
     private QueryNode[] _executedNodes;
     private string _cachedSQL;
     private QueryResult[QueryNode] _cachedResults;
 
-    this(SQLite db, SqlOptimizer sqlOptimizer) {
+    this(SQLite db) {
         _db = db;
-        _sqlOptimizer = sqlOptimizer;
     }
 
     /// Begin a transaction.
@@ -56,11 +54,6 @@ class SQLiteSession : RelationalSession {
     override Promise!void execute(string sql) {
         _db.exec(sql);
         return resolve();
-    }
-
-    /// Get original expression for fallback evaluation (not used - real DB evaluates SQL)
-    override ExprBase getOriginalExpr(string alias_) {
-        return null;
     }
 
     /// Get the generated SQL (for debugging)
@@ -83,7 +76,7 @@ class SQLiteSession : RelationalSession {
         _executedNodes = allNodes;
 
         // Generate the full CTE query
-        auto sql = toSQL(allNodes, sqliteDialect(), _sqlOptimizer, root.filter);
+        auto sql = toSQL(allNodes, sqliteDialect(), root.filter);
 
         // Substitute IDs if needed
         if (root.filter == FilterType.byId || root.filter == FilterType.byIds) {
@@ -603,7 +596,7 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataSource {
 
     /// Create a fresh per-request session.
     override DataSession createSession() {
-        return new SQLiteSession(_db, _sqlOptimizer);
+        return new SQLiteSession(_db);
     }
 }
 

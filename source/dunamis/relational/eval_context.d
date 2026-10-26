@@ -345,14 +345,6 @@ abstract class RelationalSession : DataSession {
         return (typeName in _mutationResults) !is null;
     }
 
-    /// Get the original expression for a computed column alias (for fallback evaluation).
-    /// Used when SQL push-down creates ProjectComputedExpr but the data source
-    /// (like MockDB!()) can't actually evaluate the SQL expression.
-    /// Returns null by default (no fallback available).
-    ExprBase getOriginalExpr(string alias_) {
-        return null;
-    }
-
     /// Returns true if this session supports the naive (unoptimized) evaluation path.
     /// Some async databases (PostgreSQL, MySQL) only support the optimized path.
     /// Default: true (assumes naive path is supported).

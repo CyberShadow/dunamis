@@ -41,6 +41,13 @@ enum FilterType {
     byIds,   // Fetch multiple entities by IDs
 }
 
+/// A computed column added to a QueryNode's SELECT clause by SQL push-down.
+struct ComputedColumn {
+    string alias_;     // SQL alias (e.g., "computed_0")
+    string sqlExpr;    // SQL expression (e.g., "first_name || ' ' || last_name")
+    TypeInfo type;     // Result type for creating typed projection
+}
+
 /// The rows a root QueryNode selects in one evaluation.
 /// Usually the node's own filter (fixed at optimization time); for root nodes
 /// whose rows are only known at evaluation time (e.g. mutation-returned
@@ -146,6 +153,11 @@ class QueryNode {
     /// Multiple clauses are combined with AND.
     /// WHERE predicates (ANDed), rendered for the target dialect.
     DialectSql[] whereClauses_;
+
+    /// Computed columns (SQL expressions pushed down by SqlOptimizer).
+    /// Part of the optimized plan, so that rendering SQL needs no optimizer
+    /// state.
+    ComputedColumn[] computedColumns;
 
     /// Next join alias counter
     private int _nextJoinAlias = 0;
@@ -268,6 +280,11 @@ class QueryNode {
     /// Add ORDER BY clause (convenience)
     void addOrderBy(OrderBySpec spec) {
         orderBy_ ~= spec;
+    }
+
+    /// Add a computed column to the SELECT clause
+    void addComputedColumn(ComputedColumn column) {
+        computedColumns ~= column;
     }
 
     /// Add a WHERE predicate (ANDed with existing ones)

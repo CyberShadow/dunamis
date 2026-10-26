@@ -855,11 +855,11 @@ unittest {
     auto nodes = relCtx.allNodes();
     assert(nodes.length == 1);
 
-    auto computed = sqlOpt.getComputedColumns(nodes[0].id);
+    auto computed = nodes[0].computedColumns;
     assert(computed.length >= 1, "Should have at least 1 computed column for fullName");
 
     // Verify the full SQL output
-    auto sql = toSQL(relCtx.nodesInOrder(), testDialect(), sqlOpt);
+    auto sql = toSQL(relCtx.nodesInOrder(), testDialect());
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
@@ -877,6 +877,31 @@ EOF";
         writeln("\n=== Test: SQL push-down for computed fullName ===");
         writeln(sql);
     }
+}
+
+// Computed columns belong to the optimized tree: a data source's SqlOptimizer
+// serves every request, and optimizing another query in between must not
+// change the SQL of a tree optimized earlier.
+unittest {
+    import std.algorithm : canFind;
+
+    auto sqlOpt = new SqlOptimizer(testDialect());
+    QueryNode[] optimizeWith(E)(E query) {
+        auto optCtx = new OptimizeContext();
+        auto optimized = query.optimize(optCtx);
+        sqlOpt.optimize(optimized, optCtx);
+        return optCtx.getSourceContext!RelationalOptimizeContext().nodesInOrder();
+    }
+
+    auto nodesA = optimizeWith(map!((Expr!User user) => user.fullName)(getByIds!User([1, 2])));
+    auto nodesB = optimizeWith(map!((Expr!User user) => user.lastName ~ ", " ~ user.firstName)(
+        getByIds!User([3])));
+
+    auto sqlA = toSQL(nodesA, testDialect());
+    auto sqlB = toSQL(nodesB, testDialect());
+    assert(sqlA.canFind("((first_name || ' ') || last_name) AS computed_0"), sqlA);
+    assert(!sqlA.canFind("', '"), sqlA);
+    assert(sqlB.canFind("((last_name || ', ') || first_name) AS computed_0"), sqlB);
 }
 
 // Test computed field with arguments

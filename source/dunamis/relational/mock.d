@@ -667,7 +667,7 @@ class DebugSqlDB(DBConfig config = defaultDBConfig) : DataSource {
     string getSQL() {
         if (_cachedSQL.length == 0 && _executedNodes.length > 0) {
             import dunamis.relational.sql : toSQL;
-            _cachedSQL = toSQL(_executedNodes, _dialect, _sqlOptimizer);
+            _cachedSQL = toSQL(_executedNodes, _dialect);
         }
         return _cachedSQL;
     }
@@ -694,28 +694,19 @@ class DebugSqlDB(DBConfig config = defaultDBConfig) : DataSource {
     /// Create a session that wraps the delegate's session.
     override DataSession createSession() {
         auto innerSession = cast(RelationalSession) _delegate.createSession();
-        return new DebugSqlSession(innerSession, &_executedNodes, _sqlOptimizer);
+        return new DebugSqlSession(innerSession, &_executedNodes);
     }
 }
 
 /// Per-request session for DebugSqlDB.
 /// Wraps the delegate's session and intercepts executeQueryNode to collect nodes.
 private class DebugSqlSession : RelationalSession {
-    import dunamis.core.expr : ExprBase;
-    import dunamis.relational.sql_optimizer : CapturingSqlOptimizer;
-
     private RelationalSession _inner;
     private QueryNode[]* _executedNodes;  // Pointer to factory's list
-    private CapturingSqlOptimizer _sqlOptimizer;
 
-    this(RelationalSession inner, QueryNode[]* executedNodes, CapturingSqlOptimizer sqlOptimizer) {
+    this(RelationalSession inner, QueryNode[]* executedNodes) {
         _inner = inner;
         _executedNodes = executedNodes;
-        _sqlOptimizer = sqlOptimizer;
-    }
-
-    override ExprBase getOriginalExpr(string alias_) {
-        return _sqlOptimizer.getOriginalExpr(alias_);
     }
 
     override Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult,
