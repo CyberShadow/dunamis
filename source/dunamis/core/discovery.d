@@ -200,7 +200,8 @@ template isValidFieldMethodForType(T, string member) {
 /// Fixpoint object type discovery — expands relationships until no new types are found.
 /// Discovers all object types reachable from a root type's field return types.
 template getAllObjectTypes(Query) {
-    alias getAllObjectTypes = expandObjectFixpoint!(getRootTypes!Query);
+    // Several root fields may return the same type
+    alias getAllObjectTypes = expandObjectFixpoint!(uniqueTypes!(getRootTypes!Query));
 }
 
 /// Check if a type is already in an AliasSeq
@@ -786,4 +787,22 @@ unittest {
     static assert(staticContains!(S.SearchResult, allTypes));
     static assert(staticContains!(S.User, allTypes));
     static assert(staticContains!(S.Post, allTypes));
+}
+
+unittest {
+    import dunamis.core.expr : Expr;
+
+    // A type returned by several root fields is discovered once
+    struct S {
+        static struct User {
+            static Expr!string name(Expr!User u) { assert(false); }
+        }
+        static struct Query {
+            static Expr!(User[]) users(Expr!Query q) { assert(false); }
+            static Expr!User viewer(Expr!Query q) { assert(false); }
+        }
+    }
+
+    alias allTypes = getAllObjectTypes!(S.Query);
+    static assert(allTypes.length == 1 && is(allTypes[0] == S.User), allTypes.stringof);
 }
