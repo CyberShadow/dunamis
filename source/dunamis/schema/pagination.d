@@ -134,8 +134,9 @@ template PaginatedArrayFieldCode(SourceQuery, string fieldName, alias TypeMap) {
         result ~= "    static assert(is(S : _E!(E[]), E), \"Expected Expr!(E[])\");\n";
         result ~= "    static if (is(S : _E!(E[]), E)) {\n";
         result ~= "        _E!(E[]) result = base;\n";
-        result ~= "        if (!_off.isNull) result = " ~ _offset ~ "(result, cast(size_t) _off.get);\n";
-        result ~= "        if (!_first.isNull) result = " ~ _limit ~ "(result, cast(size_t) _first.get);\n";
+        // Result windows: filters added by later plugins go beneath them.
+        result ~= "        if (!_off.isNull) result = " ~ _offset ~ "(result, cast(size_t) _off.get, true);\n";
+        result ~= "        if (!_first.isNull) result = " ~ _limit ~ "(result, cast(size_t) _first.get, true);\n";
         result ~= "        return result;\n";
         result ~= "    }\n";
         result ~= "}\n\n";

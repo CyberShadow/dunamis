@@ -869,6 +869,33 @@ Nullable!DialectSql extractFilterWhereClause(FilterByInfo filterInfo, string tab
     return extractWhereFromExpr(predicate, filterItem, table);
 }
 
+/// Extract WHERE SQL for those top-level `&&` conjuncts of a filter predicate
+/// that can be expressed in SQL, or null if none can.  The result is implied
+/// by the predicate (but, unlike `extractFilterWhereClause`, not equivalent to
+/// it), so it can only narrow the rows that the whole predicate is then
+/// evaluated on.
+Nullable!DialectSql extractFilterConjunctsWhereClause(FilterByInfo filterInfo, string table = null) {
+    auto filterItem = filterInfo.filterItem;
+    DialectSql[] conjuncts;
+    void collect(Object expr) {
+        if (auto binOp = cast(BinaryOpInfo) expr) {
+            if (binOp.operator == "&&") {
+                collect(binOp.left);
+                collect(binOp.right);
+                return;
+            }
+        }
+        auto sql = extractWhereFromExpr(expr, filterItem, table);
+        if (!sql.isNull)
+            conjuncts ~= sql.get;
+    }
+    collect(filterInfo.filterPredicate);
+    if (conjuncts.length == 0)
+        return Nullable!DialectSql.init;
+    return Nullable!DialectSql((SqlDialect d) =>
+        "(" ~ conjuncts.map!(c => c(d)).join(" AND ") ~ ")");
+}
+
 /// Recursively extract WHERE SQL from an expression tree.
 Nullable!DialectSql extractWhereFromExpr(Object expr, Object filterItem, string table = null) {
     // Handle binary operators: AND, OR, comparison operators

@@ -31,7 +31,7 @@ mixin TestSchema!db;
 // Test Runner
 // ============================================================================
 
-class SQLiteTestRunner : IntegrationTestRunner!(db, MySchema, User) {
+class SQLiteTestRunner : IntegrationTestRunner!(db, MySchema, User, FilterLastSchema) {
     private SQLite sqlite;
 
     override string testName() {

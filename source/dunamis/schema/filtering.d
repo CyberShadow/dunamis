@@ -1564,14 +1564,20 @@ mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) 
     alias _FilterType = _FilterTypesFor!_ElementType._EntityFilter;
 
     private static Expr!(_ElementType[]) _applyFilter(T)(T base, Nullable!_FilterType filter) {
+        import dunamis.core.pagination : beneathResultWindows;
+
         if (filter.isNull)
             return base;
 
-        auto item = new FilterItemExpr!_ElementType();
-        auto predicate = buildFilterPredicateFromStruct!_ElementType(item, filter.get);
-        auto filterExpr = new FilterByExpr!_ElementType(base, item, predicate);
-        item._parentFilter = filterExpr;
-        return filterExpr;
+        // The filter selects the rows that the field's pagination (if an
+        // earlier PaginationPlugin added it) then takes its window from.
+        return beneathResultWindows!_ElementType(base, (Expr!(_ElementType[]) source) {
+            auto item = new FilterItemExpr!_ElementType();
+            auto predicate = buildFilterPredicateFromStruct!_ElementType(item, filter.get);
+            auto filterExpr = new FilterByExpr!_ElementType(source, item, predicate);
+            item._parentFilter = filterExpr;
+            return cast(Expr!(_ElementType[])) filterExpr;
+        });
     }
 
     @(__traits(getAttributes, __traits(getMember, SourceQuery, fieldName)))

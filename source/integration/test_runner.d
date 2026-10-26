@@ -44,8 +44,10 @@ import integration.schema : InterleaveBarrier, InterleaveGate, RequestContext, V
  * Template parameters:
  *   db - The module-level database instance (alias)
  *   Schema - The GraphQL schema type (from TestSchema mixin)
+ *   FilterLastSchema - The same schema with another plugin order, served for
+ *     requests with an `X-Plugin-Order: filter-last` header
  */
-abstract class IntegrationTestRunner(alias db, alias Schema, SubEntityType) {
+abstract class IntegrationTestRunner(alias db, alias Schema, SubEntityType, alias FilterLastSchema) {
     protected HttpServer server;
     protected shared bool serverReady = false;
     protected shared int exitCode = 1;
@@ -76,7 +78,10 @@ abstract class IntegrationTestRunner(alias db, alias Schema, SubEntityType) {
             auto query = json["query"].str;
             JSONValue variables = "variables" in json ? json["variables"] : JSONValue.emptyObject;
 
-            auto compiledQuery = compileQuery!Schema(query, variables);
+            auto orderHeader = "X-Plugin-Order" in request.headers;
+            auto compiledQuery = orderHeader && *orderHeader == "filter-last"
+                ? compileQuery!FilterLastSchema(query, variables)
+                : compileQuery!Schema(query, variables);
 
             // Branch on operation type (embedded in the expression tree)
             if (cast(SubscriptionResultExpr) compiledQuery) {

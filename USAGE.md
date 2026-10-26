@@ -761,6 +761,20 @@ users(filter: {posts: {every: {title: {contains: "Draft"}}}}) { ... }
 users(filter: {posts: {none: {title: {contains: "Spam"}}}}) { ... }
 ```
 
+**Filtering and pagination:** a field's `filter` selects the rows that its
+`first`/`offset` window (from `PaginationPlugin`) is then taken from, whichever
+order the two plugins are applied in: `PaginationPlugin` marks its limits as
+*result windows* (`ResultWindowInfo`), and `FilterPlugin` inserts its filter
+beneath them (`beneathResultWindows`). Limits that are part of what a field
+itself returns (e.g. a computed "latest five posts" field) are not result
+windows, so a filter on such a field applies to those five posts.
+
+On root fields, the filter, sort and window are pushed into the SQL query as far
+as that preserves this order: a filter that cannot be expressed in SQL as a
+whole (e.g. a relationship filter) is evaluated in memory, its SQL-expressible
+`AND` conditions still narrow the query, and the window is then applied in
+memory too.
+
 ## Introspection
 
 Runtime introspection is built in. The standard `__schema`, `__type`, and `__typename` meta-fields work out of the box:

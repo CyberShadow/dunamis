@@ -101,6 +101,102 @@ private Promise!(Entity[]) populatePlainFields(Entity)(RelationalSession session
 // Column Access Expression
 // ============================================================================
 
+/// Push the filters, sorts and pagination wrapping a root collection into the
+/// SQL query of its root QueryNode, removing the pushed wrappers from the
+/// expression tree; the rest stay in the tree and are applied in memory.
+///
+/// `mapExpr`'s collection is a chain of wrappers over the root expression:
+/// filters, sorts, limits and offsets, and element-wise maps and entity casts
+/// (which preserve rows and their order, so they are transparent here).  The
+/// SQL query applies WHERE, then ORDER BY, then OFFSET/LIMIT, all before the
+/// in-memory wrappers; so going from the root up, a wrapper is pushed only if
+/// that does not move it across anything it does not commute with:
+/// - a filter, unless a limit/offset is beneath it;
+/// - a sort, unless a limit/offset or an in-memory sort is beneath it;
+/// - an offset or limit, only if everything beneath it was pushed.
+/// A filter that cannot be pushed as a whole still lets its SQL-expressible
+/// conjuncts narrow the query (under the same condition) and is then applied
+/// in memory.
+private void pushDownRootCollection(QueryNode node, Object mapExpr) {
+    import dunamis.core.pagination : LimitInfo, OffsetInfo;
+    import dunamis.core.sorting : SortByInfo;
+    import dunamis.core.filtering : FilterByInfo;
+    import dunamis.relational.sql_optimizer : extractFilterWhereClause,
+        extractFilterConjunctsWhereClause;
+
+    // links[0] is mapExpr's collection, links[$-1] wraps the root expression.
+    Object[] links;
+    for (Object link = (cast(MapExprInfo) mapExpr).collection; ; ) {
+        Object next;
+        if (auto l = cast(LimitInfo) link) next = l.limitSource;
+        else if (auto o = cast(OffsetInfo) link) next = o.offsetSource;
+        else if (auto s = cast(SortByInfo) link) next = s.sortSource;
+        else if (auto f = cast(FilterByInfo) link) next = f.filterSource;
+        else if (auto m = cast(MapExprInfo) link) next = m.collection;
+        else if (auto c = cast(EntityCastInfo) link) next = c.inputExpr;
+        if (next is null || next is link)
+            break;
+        links ~= link;
+        link = next;
+    }
+
+    bool allPushed = true;    // Is everything beneath the current link pushed?
+    bool windowBeneath;       // Is a limit/offset (pushed or not) beneath it?
+    bool sortBeneath;         // Is a sort (pushed or not) beneath it?
+    bool limitPushed, offsetPushed;
+    foreach_reverse (i, link; links) {
+        Object parentObject = i ? links[i - 1] : mapExpr;
+        auto parent = cast(ExprBase) parentObject;
+        void splice(Object source) {
+            parent.replaceDependency(0, cast(ExprBase) source);
+        }
+
+        if (auto filter = cast(FilterByInfo) link) {
+            if (!windowBeneath) {
+                auto where = extractFilterWhereClause(filter, node.table);
+                if (!where.isNull) {
+                    node.addWhereClause(where.get);
+                    splice(filter.filterSource);
+                    continue;
+                }
+                auto narrowing = extractFilterConjunctsWhereClause(filter, node.table);
+                if (!narrowing.isNull)
+                    node.addWhereClause(narrowing.get);
+            }
+            allPushed = false;
+        } else if (auto sort = cast(SortByInfo) link) {
+            bool pushed;
+            if (!windowBeneath && !sortBeneath) {
+                auto specs = extractSortBySpecs(sort);
+                if (specs.length > 0) {
+                    foreach (spec; specs) node.addOrderBy(spec);
+                    splice(sort.sortSource);
+                    pushed = true;
+                }
+            }
+            sortBeneath = true;
+            if (!pushed) allPushed = false;
+        } else if (auto offset = cast(OffsetInfo) link) {
+            // OFFSET applies before LIMIT, so not over a pushed limit.
+            if (allPushed && !limitPushed && !offsetPushed) {
+                node.setOffset(offset.offsetValue);
+                splice(offset.offsetSource);
+                offsetPushed = true;
+            } else
+                allPushed = false;
+            windowBeneath = true;
+        } else if (auto limit = cast(LimitInfo) link) {
+            if (allPushed && !limitPushed) {
+                node.setLimit(limit.limitValue);
+                splice(limit.limitSource);
+                limitPushed = true;
+            } else
+                allPushed = false;
+            windowBeneath = true;
+        }
+    }
+}
+
 /// Expression that reads a column from entities.
 /// Takes typed Expr!Entity for type safety.
 class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
@@ -203,80 +299,8 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
                 // expression tree and push to the QueryNode for SQL-level execution.
                 // For child collections (HasMany): leave wrappers in the expression tree
                 // so they're applied at eval time, since HasManyAccessExpr evaluates naively.
-                if (isRootCollection) {
-                    Object originalColl = coll;
-
-                    // Schema plugins commonly wrap a root collection in
-                    // element-wise maps and entity casts. These wrappers do
-                    // not change which rows belong to the collection, so a
-                    // filter immediately below them remains safe to push into
-                    // the root SQL query. Strip that filter in place while
-                    // preserving the transparent wrapper chain.
-                    Object transparentParent;
-                    Object transparentChild = coll;
-                    while (true) {
-                        Object next;
-                        if (auto map = cast(MapExprInfo) transparentChild)
-                            next = map.collection;
-                        else if (auto entityCast = cast(EntityCastInfo) transparentChild)
-                            next = entityCast.inputExpr;
-                        else
-                            break;
-                        if (next is null || next is transparentChild)
-                            break;
-                        transparentParent = transparentChild;
-                        transparentChild = next;
-                    }
-                    if (transparentParent !is null) {
-                        if (auto filter = cast(FilterByInfo) transparentChild) {
-                            import dunamis.relational.sql_optimizer : extractFilterWhereClause;
-                            auto whereSql = extractFilterWhereClause(filter, node.table);
-                            if (!whereSql.isNull) {
-                                node.addWhereClause(whereSql.get);
-                                auto parentExpr = cast(ExprBase) transparentParent;
-                                auto sourceExpr = cast(ExprBase) filter.filterSource;
-                                if (parentExpr !is null && sourceExpr !is null)
-                                    parentExpr.replaceDependency(0, sourceExpr);
-                            }
-                        }
-                    }
-
-                    bool seenSort = false;
-                    while (true) {
-                        if (auto limitInfo = cast(LimitInfo) coll) {
-                            if (seenSort) break;
-                            node.setLimit(limitInfo.limitValue);
-                            coll = limitInfo.limitSource;
-                        } else if (auto offsetInfo = cast(OffsetInfo) coll) {
-                            if (seenSort) break;
-                            node.setOffset(offsetInfo.offsetValue);
-                            coll = offsetInfo.offsetSource;
-                        } else if (auto sortByInfo = cast(SortByInfo) coll) {
-                            auto specs = extractSortBySpecs(sortByInfo);
-                            if (specs.length > 0) {
-                                foreach (spec; specs) node.addOrderBy(spec);
-                                coll = sortByInfo.sortSource;
-                                seenSort = true;
-                            } else break;
-                        } else if (auto filterByInfo = cast(FilterByInfo) coll) {
-                            import dunamis.relational.sql_optimizer : extractFilterWhereClause;
-                            auto whereSql = extractFilterWhereClause(filterByInfo, node.table);
-                            if (!whereSql.isNull) {
-                                node.addWhereClause(whereSql.get);
-                                coll = filterByInfo.filterSource;
-                            } else break;
-                        } else break;
-                    }
-
-                    // Strip unwrapped wrappers from the tree
-                    if (coll !is originalColl) {
-                        if (auto mapExprBase = cast(ExprBase) mapExpr) {
-                            if (auto collExpr = cast(ExprBase) coll) {
-                                mapExprBase.replaceDependency(0, collExpr);
-                            }
-                        }
-                    }
-                }
+                if (isRootCollection)
+                    pushDownRootCollection(node, mapExpr);
 
                 // Configure the node based on collection type
                 if (auto rootExpr = cast(RootExprInfo) underlyingColl) {

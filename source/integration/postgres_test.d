@@ -34,7 +34,7 @@ mixin TestSchema!db;
 // Test Runner
 // ============================================================================
 
-class PostgresTestRunner : IntegrationTestRunner!(db, MySchema, User) {
+class PostgresTestRunner : IntegrationTestRunner!(db, MySchema, User, FilterLastSchema) {
     private PgSqlConnection pgConn;
 
     override string testName() {

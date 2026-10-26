@@ -6,7 +6,7 @@
 module integration.tests;
 
 import std.conv : to;
-import std.json : JSONType, JSONValue;
+import std.json : JSONType, JSONValue, parseJSON;
 import integration.test_framework;
 
 /// Return a mode-dependent suffix to avoid UNIQUE constraint failures
@@ -2024,6 +2024,85 @@ void testFilterTagsByCategory() {
 }
 
 // ============================================================================
+// Filtering Combined with Pagination
+// ============================================================================
+
+/// A field's filter selects the rows that its first/offset window is taken
+/// from - with either plugin order.  Seeded users, ordered by id: Alice (posts
+/// "Hello World", "GraphQL Rocks"), Bob ("D Programming"), Charlie (no posts),
+/// then any users the mutation tests created (no posts).
+private void checkFilteredWindow(string query, string expectedDataJson) {
+    foreach (order; ["default", "filter-last"]) {
+        auto response = graphql(query, JSONValue.emptyObject, ["X-Plugin-Order": order]);
+        assertNoErrors(response);
+        assertEqual(response["data"], parseJSON(expectedDataJson), order ~ ": " ~ query);
+    }
+}
+
+private enum byId = `orderBy: [{field: id, direction: ASC}]`;
+private enum byIdDesc = `orderBy: [{field: id, direction: DESC}]`;
+
+void testFilteredWindowScalar() {
+    checkFilteredWindow(`{ users(first: 1, ` ~ byId ~ `, filter: {firstName: {equalTo: "Charlie"}}) { firstName } }`,
+        `{"users": [{"firstName": "Charlie"}]}`);
+    checkFilteredWindow(`{ users(first: 1, offset: 1, ` ~ byId ~ `, filter: {lastName: {notEqualTo: "Smith"}}) { firstName } }`,
+        `{"users": [{"firstName": "Charlie"}]}`);
+    checkFilteredWindow(`{ posts(first: 1, ` ~ byIdDesc ~ `, filter: {title: {contains: "o"}}) { title } }`,
+        `{"posts": [{"title": "D Programming"}]}`);
+    // Pushed into SQL as a whole (WHERE, ORDER BY, OFFSET, LIMIT).
+    checkFilteredWindow(`{ users(first: 2, offset: 1, orderBy: [{field: firstName, direction: DESC}], ` ~
+            `filter: {or: [{lastName: {equalTo: "Smith"}}, {lastName: {equalTo: "Jones"}}, ` ~
+            `{lastName: {equalTo: "Brown"}}]}) { firstName } }`,
+        `{"users": [{"firstName": "Bob"}, {"firstName": "Alice"}]}`);
+}
+
+void testFilteredWindowBelongsTo() {
+    checkFilteredWindow(`{ posts(first: 1, ` ~ byId ~ `, filter: {author: {firstName: {equalTo: "Bob"}}}) { title } }`,
+        `{"posts": [{"title": "D Programming"}]}`);
+    checkFilteredWindow(`{ posts(first: 1, offset: 1, ` ~ byId ~ `, filter: {author: {firstName: {equalTo: "Alice"}}}) { title } }`,
+        `{"posts": [{"title": "GraphQL Rocks"}]}`);
+    checkFilteredWindow(`{ comments(first: 1, filter: {post: {title: {equalTo: "GraphQL Rocks"}}}) { post { title } } }`,
+        `{"comments": [{"post": {"title": "GraphQL Rocks"}}]}`);
+}
+
+void testFilteredWindowHasMany() {
+    checkFilteredWindow(`{ users(first: 1, ` ~ byId ~ `, filter: {posts: {some: {title: {contains: "Programming"}}}}) { firstName } }`,
+        `{"users": [{"firstName": "Bob"}]}`);
+    checkFilteredWindow(`{ users(first: 1, ` ~ byId ~ `, filter: {posts: {none: {title: {contains: "Hello"}}}}) { firstName } }`,
+        `{"users": [{"firstName": "Bob"}]}`);
+    checkFilteredWindow(`{ users(first: 1, offset: 1, ` ~ byId ~ `, filter: {posts: {none: {title: {contains: "Hello"}}}}) { firstName } }`,
+        `{"users": [{"firstName": "Charlie"}]}`);
+    checkFilteredWindow(`{ users(first: 2, ` ~ byId ~ `, filter: {posts: {every: {title: {contains: "Programming"}}}}) { firstName } }`,
+        `{"users": [{"firstName": "Bob"}, {"firstName": "Charlie"}]}`);
+    checkFilteredWindow(`{ users(first: 1, ` ~ byIdDesc ~ `, filter: {posts: {some: {title: {contains: "o"}}}}) { firstName } }`,
+        `{"users": [{"firstName": "Bob"}]}`);
+    // Without orderBy (as a search typically queries)
+    checkFilteredWindow(`{ users(first: 10, filter: {posts: {some: {title: {contains: "Programming"}}}}) { firstName } }`,
+        `{"users": [{"firstName": "Bob"}]}`);
+}
+
+void testFilteredWindowScalarAndRelationship() {
+    checkFilteredWindow(`{ users(first: 10, filter: {lastName: {equalTo: "Jones"}, posts: {some: {title: {contains: "D"}}}}) { firstName } }`,
+        `{"users": [{"firstName": "Bob"}]}`);
+    checkFilteredWindow(`{ users(first: 10, filter: {lastName: {equalTo: "Smith"}, posts: {some: {title: {contains: "Programming"}}}}) { firstName } }`,
+        `{"users": []}`);
+    checkFilteredWindow(`{ posts(first: 1, ` ~ byIdDesc ~ `, filter: {title: {contains: "o"}, author: {lastName: {equalTo: "Smith"}}}) { title } }`,
+        `{"posts": [{"title": "GraphQL Rocks"}]}`);
+}
+
+void testFilteredWindowSameTableTwice() {
+    checkFilteredWindow(`{
+        a: users(first: 1, ` ~ byId ~ `, filter: {posts: {some: {title: {contains: "Programming"}}}}) { firstName }
+        b: users(first: 1, ` ~ byId ~ `) { firstName }
+    }`, `{"a": [{"firstName": "Bob"}], "b": [{"firstName": "Alice"}]}`);
+}
+
+void testFilteredWindowNested() {
+    checkFilteredWindow(`{ users(first: 1, ` ~ byId ~ `) { posts(first: 1, ` ~ byId ~ `, filter: {title: {contains: "Rocks"}}) { title } } }`,
+        `{"users": [{"posts": [{"title": "GraphQL Rocks"}]}]}`);
+}
+
+// ============================================================================
 // Union / Interface (Abstract Type) Tests
 // ============================================================================
 
@@ -2318,6 +2397,12 @@ static this() {
     registerTest("Composite PK persistence", "tests", &testCompositePkPersistence);
     registerTest("Sort tags by name (composite PK)", "tests", &testSortTagsByName);
     registerTest("Filter tags by category (composite PK)", "tests", &testFilterTagsByCategory);
+    registerTest("Filtered window: scalar filter", "tests", &testFilteredWindowScalar);
+    registerTest("Filtered window: belongsTo filter", "tests", &testFilteredWindowBelongsTo);
+    registerTest("Filtered window: hasMany some/every/none", "tests", &testFilteredWindowHasMany);
+    registerTest("Filtered window: scalar and relationship filter", "tests", &testFilteredWindowScalarAndRelationship);
+    registerTest("Filtered window: same table twice", "tests", &testFilteredWindowSameTableTwice);
+    registerTest("Filtered window: nested field", "tests", &testFilteredWindowNested);
 
     // Union / Interface (abstract type) tests
     registerTest("Union query with typed fragments", "tests", &testUnionQueryWithTypedFragments);

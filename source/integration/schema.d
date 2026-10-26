@@ -245,7 +245,7 @@ mixin template TestSchema(alias db) {
     import dunamis.core.expr : Expr, context, use;
     import dunamis.core.expr.combinators : unionOf;
     import dunamis.core.types : ImplementedBy, AbstractField;
-    import dunamis.graphql : Schema, SortingPlugin, FilterPlugin, CrudMutationPlugin, ApplyPlugins;
+    import dunamis.graphql : Schema, SortingPlugin, FilterPlugin, PaginationPlugin, CrudMutationPlugin, ApplyPlugins;
     import dunamis.graphql.schema : GqlName;
     import dunamis.relational.schema : Table, ForeignKey, BelongsTo, HasMany, Col, getAll, hasMany;
     import dunamis.relational.demo : DemoEntity, DemoId, Int64;
@@ -561,5 +561,8 @@ mixin template TestSchema(alias db) {
     }
 
     alias BaseSchema = Schema!(Query, Mutation, Subscription);
-    alias MySchema = ApplyPlugins!(BaseSchema, CrudMutationPlugin, FilterPlugin, SortingPlugin);
+    alias MySchema = ApplyPlugins!(BaseSchema, CrudMutationPlugin, FilterPlugin, SortingPlugin, PaginationPlugin);
+    /// The same with FilterPlugin last (as some applications order them), served for
+    /// requests with an `X-Plugin-Order: filter-last` header.
+    alias FilterLastSchema = ApplyPlugins!(BaseSchema, CrudMutationPlugin, SortingPlugin, PaginationPlugin, FilterPlugin);
 }
