@@ -12,13 +12,15 @@ import dunamis.core.expr : Expr, constant, context, map, use;
 import dunamis.core.filtering : filterBy;
 import dunamis.graphql.schema : GqlDescription;
 import dunamis.relational.demo : MockDB;
-import dunamis.relational.schema : BelongsTo, Col, Entity, ForeignKey, HasMany, PrimaryKey, Table;
+import dunamis.relational.schema : BelongsTo, Col, Entity, ForeignKey, HasMany, PrimaryKey, Table, hasMany;
 
 MockDB!() fixtureDb;
 
 struct Greeting { string word; }
 struct Span { int from; int to; }
 struct Window { string label; Span span; } // Only returned by computed fields
+/// Only returned by a computed field; refers to an entity.
+struct PostAudit { string title; User author; }
 
 @Entity!(fixtureDb, "comments")
 struct Comment {
@@ -45,6 +47,14 @@ struct User {
     static auto span(Expr!User u) {
         return use((string name) => Span(0, cast(int) name.length), u.name);
     }
+}
+
+/// Only reachable through a computed field.
+@Entity!(fixtureDb, "likes")
+struct Like {
+    @PrimaryKey int id;
+    mixin Col!("postId", ForeignKey!Post);
+    mixin BelongsTo!("post", "postId");
 }
 
 struct Query {
@@ -110,6 +120,23 @@ auto window(Expr!User u) {
 
 auto windows(Expr!User u) {
     return use((string name) => name == "Bob" ? Nullable!(Window[]).init : Nullable!(Window[])([Window("a", Span(1, 2))]), u.name);
+}
+
+auto audit(Expr!Post p) {
+    return use((string title, int authorId) => PostAudit(title, User(authorId)), p.title, p.authorId);
+}
+
+auto likes(Expr!Post p) {
+    return hasMany!(Like, "post_id")(p);
+}
+
+/// One field name for several types
+auto label(Expr!User u) {
+    return u.name;
+}
+
+auto label(Expr!Post p) {
+    return p.title;
 }
 
 // ---- Not fields ----

@@ -43,6 +43,11 @@ private void seedFixture() {
         {"id": 101, "text": "c2", "post_id": 10},
         {"id": 102, "text": "c3", "post_id": 11}
     ]`);
+    fixtureDb.setTableData("likes", `[
+        {"id": 1000, "post_id": 10},
+        {"id": 1001, "post_id": 10},
+        {"id": 1002, "post_id": 12}
+    ]`);
 }
 
 private JSONValue executeFixture(Expr!JSONValue query) {
@@ -60,9 +65,12 @@ unittest {
         return result;
     }();
     static assert(names == ["postCount", "shout", "authorName", "greeting", "commentTexts",
-        "visiblePosts", "checkedTitle", "widened", "maybeSpan", "maybeSpans", "initial", "window", "windows"], names.stringof);
+        "visiblePosts", "checkedTitle", "widened", "maybeSpan", "maybeSpans", "initial", "window", "windows",
+        "audit", "likes", "label", "label"], names.stringof);
 
     static assert(computedFieldsIn!(fixture.authorName).length == 1);
+    // A function symbol contributes its overloads
+    static assert(computedFieldsIn!(fixture.label).length == 2);
     static assert(is(ComputedFieldEntity!(fixture.authorName) == Post));
 }
 
@@ -79,6 +87,13 @@ unittest {
     static assert(sdl.canFind("maybeSpans: [Span!]\n"), sdl);
     static assert(sdl.canFind("initial: String\n"), sdl);
     static assert(sdl.canFind("visiblePosts"), sdl);
+    // A result type only a computed field returns, with its entity member
+    // typed as the schema's entity
+    static assert(sdl.canFind("audit: PostAudit!"), sdl);
+    static assert(sdl.canFind("type PostAudit {\n  title: String!\n  author: User!\n}"), sdl);
+    // Likewise an entity type
+    static assert(sdl.canFind("likes: [Like!]!"), sdl);
+    static assert(sdl.canFind("type Like {\n  id: Int!\n  postId: Int!\n  post: Post!\n}"), sdl);
     static assert(!sdl.canFind("helper"), sdl);
     static assert(!sdl.canFind("notAField"), sdl);
     // Earlier plugins' vocabulary is unchanged
@@ -140,6 +155,30 @@ unittest {
     auto posts = result["posts"].array;
     assert(posts.length == 1, result.toString());
     assert(posts[0]["title"].str == "Other" && posts[0]["authorName"].str == "Bob", result.toString());
+}
+
+// An entity inside a computed POD result is the schema's entity: its own
+// computed fields and relations are selectable
+unittest {
+    seedFixture();
+    auto result = executeFixture(compileQuery!PluginLast(`{
+        posts(orderBy: [{field: id, direction: ASC}]) {
+            title label
+            audit { title author { name label postCount } }
+            likes { id post { title } }
+        }
+    }`));
+    auto posts = result["posts"].array;
+    assert(posts.length == 3, result.toString());
+    assert(posts[0]["label"].str == "Hello", result.toString());
+    assert(posts[0]["audit"]["author"]["label"].str == "Alice", result.toString());
+    assert(posts[0]["likes"].array.length == 2, result.toString());
+    assert(posts[0]["likes"][1]["post"]["title"].str == "Hello", result.toString());
+    assert(posts[1]["likes"].array.length == 0, result.toString());
+    assert(posts[0]["audit"]["title"].str == "Hello", result.toString());
+    assert(posts[0]["audit"]["author"]["name"].str == "Alice", result.toString());
+    assert(posts[0]["audit"]["author"]["postCount"].integer == 2, result.toString());
+    assert(posts[2]["audit"]["author"]["name"].str == "Bob", result.toString());
 }
 
 // Execution with the plugin placed first; nulls from Nullable results

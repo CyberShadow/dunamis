@@ -47,10 +47,13 @@ class RelationalOptimizeContext {
     }
 
     /// Find a root node by typeName and table (for GetAllExpr to find its QueryNode)
-    /// Returns the first matching root node, or null if not found
+    /// Returns the first matching root node, or null if not found.
+    /// Nodes never configured as roots (e.g. of a hasMany whose parent could
+    /// not be resolved, which falls back to the naive path) are not roots.
     QueryNode findRootNode(string typeName, string table) {
         foreach (node; _queryNodes.values) {
-            if (node.isRoot && node.typeName == typeName && node.table == table) {
+            if (node.isRoot && node.rootFilter != FilterType.none &&
+                    node.typeName == typeName && node.table == table) {
                 return node;
             }
         }

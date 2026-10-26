@@ -4,7 +4,8 @@
 /// `auto field(Expr!Entity e, args...)` to the schema type built from `Entity`,
 /// as if they had been declared on the entity itself. Sources are modules
 /// and/or function symbols; a module contributes every public function it
-/// declares whose first parameter is an `Expr`. Keep helpers non-public.
+/// declares whose first parameter is an `Expr`, and a function symbol all its
+/// overloads that do. Keep helpers non-public.
 ///
 /// Example:
 /// ---
@@ -69,7 +70,10 @@ private template _fieldsOf(alias source) {
     } else {
         static assert(_isFieldFunction!source,
             __traits(identifier, source) ~ " is not a computed field function (first parameter must be an Expr)");
-        alias _fieldsOf = source;
+        // A function symbol stands for its whole overload set (e.g. one field
+        // name declared for several entity types).
+        alias _fieldsOf = Filter!(_isFieldFunction,
+            __traits(getOverloads, __traits(parent, source), __traits(identifier, source)));
     }
 }
 
@@ -185,9 +189,11 @@ template ComputedFieldsPlugin(Sources...) {
 
         /// Maps a computed field's result type (at any layer of a schema type's
         /// chain, typically the user-declared one) to the extended version.
-        /// Object types that are not part of the schema (POD types that only
-        /// computed fields return) are normalized here, as Schema normalizes
-        /// the types it discovers. Other types pass through unchanged.
+        /// Object types that are not part of the schema (a POD only computed
+        /// fields return, or an entity reached through a computed relation) are
+        /// normalized here, as Schema normalizes the types it discovers, with
+        /// their members mapped in turn, so that e.g. an entity member of a POD
+        /// is the schema's entity type. Other types pass through unchanged.
         template ResultTypeMap(R) {
             alias _matches = Filter!(_isLayerOf!(BaseEntityOf!R), _AllTypes);
             static if (_matches.length > 0)
