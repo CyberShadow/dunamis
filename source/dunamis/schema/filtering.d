@@ -244,10 +244,20 @@ template isArrayReturningMethod(Entity, string member) {
             alias method = __traits(getMember, Entity, member);
             alias params = Parameters!method;
 
-            // Must take exactly one parameter that is some Expr!ParamT
+            // Must be callable with just one parameter that is some Expr!ParamT
             // (we check against Expr!Entity loosely since the Entity might have
-            // different type identity across module boundaries)
-            static if (params.length == 1 && is(params[0] : Expr!ParamT, ParamT)) {
+            // different type identity across module boundaries).  Further
+            // parameters must be optional: arguments added by earlier
+            // plugins, e.g. orderBy/first/offset on a HasMany accessor.
+            import std.traits : ParameterDefaults;
+            enum bool restOptional = () {
+                bool result = true;
+                static foreach (i; 1 .. params.length)
+                    static if (is(ParameterDefaults!method[i] == void))
+                        result = false;
+                return result;
+            }();
+            static if (params.length >= 1 && is(params[0] : Expr!ParamT, ParamT) && restOptional) {
                 alias retType = ReturnType!method;
                 alias resultType = ExprResultType!retType;
 
