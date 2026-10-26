@@ -1284,14 +1284,11 @@ private template toArrayExpr(T) {
 /// Used by the compiler to process one member type's fields at a time.
 class SubsetExpr(Member) : Expr!(Member[]) {
     private ExprBase _unionExpr;  // must implement UnionExprInfo
-    private Object _memberKey;    // may be set lazily from UnionExprInfo
+    private Object _memberKey;    // resolved from UnionExprInfo at construction/optimization
 
     this(ExprBase unionExpr) {
         _unionExpr = unionExpr;
-        // Try to resolve key immediately
-        if (auto info = cast(UnionExprInfo) unionExpr) {
-            _memberKey = info.memberKeyForType(typeid(Member));
-        }
+        resolveMemberKey();
     }
 
     /// Construct with explicit key (for cases where UnionExprInfo isn't directly available)
@@ -1305,7 +1302,10 @@ class SubsetExpr(Member) : Expr!(Member[]) {
     }
 
     override void replaceDependency(size_t index, ExprBase newDep) {
-        if (index == 0) _unionExpr = newDep;
+        if (index == 0) {
+            _unionExpr = newDep;
+            resolveMemberKey();
+        }
     }
 
     override Expr!(Member[]) optimize(OptimizeContext ctx) {
@@ -1313,15 +1313,19 @@ class SubsetExpr(Member) : Expr!(Member[]) {
         // Multiple SubsetExprs may share the same UnionExpr parent;
         // optimizeExpr is idempotent after the first pass.
         _unionExpr = optimizeExpr(_unionExpr, ctx);
+        resolveMemberKey();
         return this;
     }
 
-    override Promise!(Member[][]) eval(EvalContext ctx) {
-        if (_memberKey is null) {
-            if (auto info = cast(UnionExprInfo) _unionExpr) {
+    /// Resolve the member key from the union expression, if not known yet.
+    /// Only done while the tree is built or optimized, never during evaluation.
+    private void resolveMemberKey() {
+        if (_memberKey is null)
+            if (auto info = cast(UnionExprInfo) _unionExpr)
                 _memberKey = info.memberKeyForType(typeid(Member));
-            }
-        }
+    }
+
+    override Promise!(Member[][]) eval(EvalContext ctx) {
         assert(_memberKey !is null, "SubsetExpr: no member key for " ~ Member.stringof);
 
         auto key = _memberKey;
