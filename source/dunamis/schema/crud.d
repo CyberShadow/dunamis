@@ -123,7 +123,8 @@ template _inputColumnSqlName(Entity, string member) {
 
 /// Get the field name for a CRUD input field.
 /// Uses the D field name directly — the GraphQL layer resolves presentation
-/// names via @GqlName on the original entity field.
+/// names via @GqlName on the original entity field, whose attributes the
+/// input field carries.
 template _inputFieldGqlName(Entity, string member) {
     enum _inputFieldGqlName = member;
 }
@@ -187,10 +188,13 @@ mixin template _CrudMethods(OriginalEntity, NormalizedEntity, MutationType) {
                     }
 
                     // Create input: direct type
-                    createStructFields ~= "    " ~ _typeExpr ~ " " ~ _m ~ ";\n";
+                    // The input field carries the entity field's attributes
+                    // (e.g. a presentation name).
+                    enum _name = "@(__traits(getAttributes, __traits(getMember, OriginalEntity, \"" ~ _m ~ "\"))) ";
+                    createStructFields ~= "    " ~ _name ~ _typeExpr ~ " " ~ _m ~ ";\n";
 
                     // Update input: Nullable-wrapped type
-                    updateStructFields ~= "    " ~
+                    updateStructFields ~= "    " ~ _name ~
                         "std.typecons.Nullable!(" ~ _typeExpr ~ ") " ~ _m ~ ";\n";
 
                     // Create body: always set column
