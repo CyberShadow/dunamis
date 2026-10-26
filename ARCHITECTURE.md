@@ -238,7 +238,9 @@ A plugin is a compile-time function from Schema to Schema. Each plugin takes the
 alias MySchema = ApplyPlugins!(Schema!(Query, Mutation), FilterPlugin, SortingPlugin, PaginationPlugin);
 ```
 
-**Key invariant: each plugin only sees the output of the previous plugin.** SortingPlugin never sees `User` — it sees `FilteredUser`. Entity types are discovered from the Query's field return types, and each plugin wraps the types it finds. The only link back is the per-layer `_normalizedSource` chain: `BaseEntityOf!T` names the user-declared type at its bottom, and entity casts may span several layers of one chain. `ComputedFieldsPlugin` uses this to attach free functions written against user-declared types (`auto f(Expr!User u)`) at any position in the chain.
+**Key invariant: each plugin only sees the output of the previous plugin.** SortingPlugin never sees `User` — it sees `FilteredUser`. There is no mechanism to "look back" at original types. Entity types are discovered from the Query's field return types, and each plugin wraps the types it finds.
+
+Consequently, what a plugin does depends on its position. `ComputedFieldsPlugin`, which attaches free functions (`auto f(Expr!User u)`) to the types it is given, is an ordinary plugin in this respect: placed straight after `Schema!`, whose types wrap the user-declared ones, it attaches functions written against the user-declared types (as Schema's normalization attaches computed fields declared on an entity), and the plugins after it (filtering, sorting, pagination) treat those fields like any other. Placed after another plugin, it only knows that plugin's types.
 
 All types are treated uniformly — Query, Mutation, User, Post are all types with fields. The only distinction for Query/Mutation is that they are singletons (one instance per request), and this difference is encapsulated at the boundary rather than threaded through the plugin system.
 

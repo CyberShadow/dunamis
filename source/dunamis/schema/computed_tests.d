@@ -331,3 +331,29 @@ unittest {
         assert(posts.length == 1 && posts[0]["id"].integer == 11, result.toString());
     }
 }
+
+// A field function using the facilities of plugins applied after
+// ComputedFieldsPlugin goes through the final schema explicitly (with an
+// explicit return type: the plugin needs the signature to build that schema).
+private alias Windowed = ApplyPlugins!(Schema!Query,
+    ComputedFieldsPlugin!firstPostTitles, FilterPlugin, SortingPlugin, PaginationPlugin);
+
+Expr!(string[]) firstPostTitles(Expr!User u) {
+    import std.typecons : Nullable;
+    import dunamis.core.expr : broadcast, map, singleton;
+    auto posts = Windowed.Query.posts(Windowed.Query().singleton(), first: Nullable!int(2));
+    return map!(p => p.title)(posts).broadcast(u);
+}
+
+unittest {
+    foreach (optimize; [false, true]) {
+        seedFixture();
+        auto result = awaitSync(new Executor().execute(compileQuery!Windowed(`{
+            users { firstPostTitles }
+        }`), optimize));
+        auto users = result["users"].array;
+        assert(users.length == 3, result.toString());
+        foreach (user; users)
+            assert(user["firstPostTitles"] == JSONValue(["Hello", "hidden"]), result.toString());
+    }
+}

@@ -1001,20 +1001,42 @@ auto postTitles(Expr!User u, string separator = ", ") {
 
 ```d
 alias FinalSchema = ApplyPlugins!(Schema!(Query, Mutation),
-    FilterPlugin, SortingPlugin, PaginationPlugin,
     ComputedFieldsPlugin!(app.fields.post_titles, app.fields.other),
+    FilterPlugin, SortingPlugin, PaginationPlugin,
 );
 ```
 
+**Placement:** apply the plugin first, straight after `Schema!` (and after `CrudMutationPlugin`, if used: it leaves the entity types as `Schema!` made them, and casts the rows it writes to them directly). Like every plugin, it works with the types of the schema it is given (see ARCHITECTURE.md, Principle 6): straight after `Schema!`, those are the user-declared types as `Schema!` normalized them, so functions are written against the user-declared types. The plugins applied after it see computed fields like any other field:
+
+- `FilterPlugin` offers filters on computed scalar fields without required arguments (`users(filter: {postCount: {greaterThan: 1}})`), and `SortingPlugin` orderings on the sortable ones (`users(orderBy: [{field: postCount, direction: DESC}])`). On root fields, a condition SQL can express (e.g. on a field that is a column, or a related row's column, `p.author.age`) is pushed into the SQL query, as is an ordering by a field that is a column of the row itself; any other condition or ordering is evaluated in memory, never skipped. On root fields the documented order of a field's arguments holds either way: the `first`/`offset` window is only pushed into SQL if everything beneath it was (see [Filtering and pagination](#filtering)).
+- Array-returning computed fields take `filter`, `orderBy` and `first`/`offset` arguments like relationships do.
+
+Placed after another plugin, `ComputedFieldsPlugin` only knows that plugin's types: functions must then be written against them (e.g. the element type of `ApplyPlugins!(Schema!Query, FilterPlugin).Query.users`), and their fields are not filterable or sortable by the plugins before it. A function written against a user-declared type then matches no type: there is no mechanism to reach beneath the previous plugin's types.
+
 **How it works:**
 
-- Sources are modules and/or function symbols. A module contributes every public function declared in it (not imported into it) whose first parameter is an `Expr`; names starting with `_` are skipped. A function symbol contributes all its overloads, so one field name can be declared for several types.
-- A function is attached to the schema type whose user-declared type is `Entity`, whatever plugins wrapped it. Inside the function, `Entity` is seen exactly as declared (`u.posts` is `Expr!(Post[])`), and entity or POD results (`Expr!Post`, `Expr!(Post[])`, `Expr!(Nullable!DateRange)`, `Expr!(Nullable!(DateRange[]))` for a nullable list `[DateRange!]`) are mapped to the schema's types, including their own computed fields.
-- Result types that only computed fields return (a POD, or an entity reached through a computed relation such as `hasMany!(Like, "post_id")(p)`) are added to the schema. Their members are mapped likewise, so an entity member of a POD (`struct Audit { User user; }`, constructed as `User(id)`) is selectable as the schema's `User`. Such types pass only through the plugins from `ComputedFieldsPlugin` on: their fields take no filter, sorting or pagination arguments.
+- Sources are modules and/or function symbols. A module contributes every public function declared in it (not imported into it) whose first parameter is an `Expr`. A function symbol contributes all its overloads, so one field name can be declared for several types.
+- A function is attached to the type of the given schema that it is written against, or that directly wraps the type it is written against (for the types `Schema!` produces, the user-declared type). Inside the function, `Entity` is seen exactly as declared (`u.posts` is `Expr!(Post[])`), and entity or POD results (`Expr!Post`, `Expr!(Post[])`, `Expr!(Nullable!DateRange)`, `Expr!(Nullable!(DateRange[]))` for a nullable list `[DateRange!]`) are mapped to the schema's types likewise, including their own computed fields.
+- Result types that only computed fields return (a POD, or an entity reached through a computed relation such as `hasMany!(Like, "post_id")(p)`) are added to the schema. Their members are mapped likewise, so an entity member of a POD (`struct Audit { User user; }`, constructed as `User(id)`) is selectable as the schema's `User`. Such types pass through the plugins applied after `ComputedFieldsPlugin`, like the schema's own types.
 - The GraphQL field name is the function name; extra parameters become arguments (with defaults), and `@GqlName`, `@GqlDescription`, `@GqlDeprecated` on the function are honoured.
-- A function whose entity is not part of the schema, or whose name collides with an existing field, is a compile error.
+- A function whose entity is not a type of the given schema (nor wrapped by one), or whose name collides with an existing field, is a compile error.
 
-**Placement:** apply the plugin after `FilterPlugin` and `SortingPlugin`. Those plugins treat every scalar field as a column: placed earlier, computed fields would appear in `filter`/`orderBy` inputs, and filter conditions on them are currently skipped silently (see TODO.md). The plugin itself works at any position.
+**Using filters, sorting and pagination inside a field:** a field function sees the schema at the plugin's position, beneath `FilterPlugin`, `SortingPlugin` and `PaginationPlugin`: `u.posts` takes no `filter` argument there. To use those facilities, go through the final schema explicitly, as for [cross-collection access](#cross-collection-access):
+
+```d
+alias FinalSchema = ApplyPlugins!(Schema!(Query, Mutation),
+    ComputedFieldsPlugin!(app.fields), FilterPlugin, SortingPlugin, PaginationPlugin);
+
+// in app.fields: the first two posts' titles, for every user
+Expr!(string[]) firstPostTitles(Expr!User u) {
+    auto posts = FinalSchema.Query.posts(FinalSchema.Query().singleton(), first: Nullable!int(2));
+    return map!(p => p.title)(posts).broadcast(u);
+}
+```
+
+Give such a function an explicit return type: `FinalSchema` is built from the function's signature, so the signature must not depend on `FinalSchema`.
+
+Code written directly with `filterBy`, `sortBy`, `limit`/`offset` from `dunamis.core` works at any level.
 
 ## Field Overrides
 
