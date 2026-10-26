@@ -2387,6 +2387,24 @@ void testSubscriptionUserCreated() {
         JSONValue(firstName));
 }
 
+/// A filter on an enum column selects the same rows whether it is pushed
+/// into SQL or evaluated in memory: values are stored under their labels
+/// (the D name, or an explicit `@StoredAs` label), whatever their case.
+void testFilterByEnum() {
+    foreach (status, title; ["inProgress": "Review PR", "completed": "Deploy app"]) {
+        auto response = graphql(`{ tasks(filter: {status: {equalTo: ` ~ status ~ `}}) { title status } }`);
+        assertNoErrors(response);
+        auto tasks = response["data"]["tasks"].array;
+        bool found;
+        foreach (task; tasks) {
+            assertEqual(task["status"], JSONValue(status));
+            if (task["title"].str == title)
+                found = true;
+        }
+        assertTrue(found, "Expected task " ~ title ~ " with status " ~ status ~ ", got " ~ tasks.to!string);
+    }
+}
+
 /// A filter over a mapped collection (each post's author) selects mapped
 /// elements; it is not a condition on the root rows (the posts) even where
 /// both have a column of that name.
@@ -2431,6 +2449,7 @@ static this() {
     registerTest("Query users with posts (HasMany)", "tests", &testQueryUserWithPosts);
     registerTest("Query posts with author (BelongsTo)", "tests", &testQueryPostWithAuthor);
     registerTest("Filter over a map of each post's author", "tests", &testFilterOverNonRowPreservingMap);
+    registerTest("Filter by an enum column", "tests", &testFilterByEnum);
     registerTest("Query computed field (fullName)", "tests", &testQueryComputedField);
     registerTest("Mutation: create user", "tests", &testCreateUser);
     registerTest("Mutation persistence", "tests", &testMutationPersistence);

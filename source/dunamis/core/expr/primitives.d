@@ -65,6 +65,10 @@ class ConstExpr(T) : Expr!T, ConstantInfo {
         import std.conv : to;
         static if (is(T == string)) {
             return _value;
+        } else static if (is(T == enum)) {
+            // As data sources store it
+            import dunamis.core.types : storedLabel;
+            return storedLabel(_value);
         } else {
             return _value.to!string;
         }

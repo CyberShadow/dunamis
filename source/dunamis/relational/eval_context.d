@@ -173,22 +173,12 @@ enum defaultDBConfig = DBConfig();
 // Enum Helpers
 // ============================================================================
 
-/// Convert a database string to a D enum value.
-/// Matches the string against enum member names.
+/// Convert a database string to a D enum value: the member stored under
+/// that label (see `dunamis.core.types.StoredAs`).
 /// Returns T.init for empty strings or unknown values (graceful degradation).
 T enumFromDbString(T)(string s) if (is(T == enum)) {
-    import std.traits : EnumMembers;
-    import std.string : toLower;
-
-    if (s.length == 0) return T.init;
-
-    static foreach (member; EnumMembers!T) {
-        if (__traits(identifier, member).toLower == s.toLower) {
-            return member;
-        }
-    }
-
-    return T.init;  // Default for unknown values
+    import dunamis.core.types : enumFromStoredLabel;
+    return enumFromStoredLabel!T(s);
 }
 
 // ============================================================================

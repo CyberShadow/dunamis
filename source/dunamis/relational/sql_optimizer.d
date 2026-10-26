@@ -2,12 +2,10 @@ module dunamis.relational.sql_optimizer;
 
 import std.algorithm;
 import std.array;
-import std.ascii : toLower;
 import std.conv;
 import std.json : JSONValue;
 import std.traits;
 import std.typecons : Nullable;
-import std.utf : byChar;
 
 import ae.utils.promise;
 
@@ -55,10 +53,6 @@ string constantToSqlLiteral(ConstantInfo info) {
     // Check for bool
     if (type == typeid(bool)) {
         return strValue == "true" ? "TRUE" : "FALSE";
-    }
-    // Database enum labels use the lowercase form of their GraphQL/D names.
-    if (cast(TypeInfo_Enum) type !is null) {
-        return ("'" ~ strValue.byChar.map!toLower.array.replace("'", "''") ~ "'").idup;
     }
     // Numeric types pass through as-is
     if (type == typeid(int) || type == typeid(long) ||

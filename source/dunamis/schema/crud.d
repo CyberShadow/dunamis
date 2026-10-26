@@ -50,7 +50,8 @@ auto _fieldToJson(T)(T val) {
     } else static if (isCustomScalar!T) {
         return JSONValue(val.value);
     } else static if (is(T == enum)) {
-        return JSONValue(val.to!string);
+        import dunamis.core.types : storedLabel;
+        return JSONValue(storedLabel(val));
     } else static if (is(T == bool)) {
         return JSONValue(val);
     } else static if (isSomeString!T) {

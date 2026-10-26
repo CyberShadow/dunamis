@@ -121,7 +121,7 @@ Expr!T gated(T)(Expr!T input) { return new GatedExpr!T(input); }
 enum TaskStatus {
     pending,
     inProgress,
-    completed,
+    @StoredAs("done") completed,  // Stored under a label other than its name
     cancelled
 }
 

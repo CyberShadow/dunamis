@@ -53,6 +53,62 @@ template isPublicDataField(T, string name) {
 }
 
 // ============================================================================
+// Enum Storage Labels
+// ============================================================================
+
+/// UDA on an enum member: the label data sources store the member under
+/// (e.g. a database enum label), if it differs from the member's D name.
+///
+/// ---
+/// enum Status { @StoredAs("in_progress") inProgress, done }
+/// ---
+struct StoredAs {
+    string label;
+}
+
+/// The label data sources store the enum member `value` under: its
+/// `@StoredAs` label, or else its D name.
+string storedLabel(E)(E value) if (is(E == enum)) {
+    static foreach (name; __traits(allMembers, E)) {
+        if (value == __traits(getMember, E, name))
+            return storedLabelOf!(E, name);
+    }
+    import std.conv : to;
+    return value.to!string;  // Not a member (e.g. a combination of flags)
+}
+
+/// The member of the enum E stored under `label` (see storedLabel), or
+/// E.init for an empty or unknown label.
+E enumFromStoredLabel(E)(string label) if (is(E == enum)) {
+    static foreach (name; __traits(allMembers, E)) {
+        if (label == storedLabelOf!(E, name))
+            return __traits(getMember, E, name);
+    }
+    return E.init;
+}
+
+private template storedLabelOf(E, string name) {
+    enum storedLabelOf = () {
+        string label = name;
+        static foreach (attr; __traits(getAttributes, __traits(getMember, E, name)))
+            static if (is(typeof(attr) == StoredAs))
+                label = attr.label;
+        return label;
+    }();
+}
+
+unittest {
+    enum Status { unknown, @StoredAs("in_progress") inProgress, done }
+    assert(storedLabel(Status.inProgress) == "in_progress");
+    assert(storedLabel(Status.done) == "done");
+    assert(enumFromStoredLabel!Status("in_progress") == Status.inProgress);
+    assert(enumFromStoredLabel!Status("done") == Status.done);
+    // Labels are matched exactly
+    assert(enumFromStoredLabel!Status("inProgress") == Status.unknown);
+    assert(enumFromStoredLabel!Status("DONE") == Status.unknown);
+}
+
+// ============================================================================
 // Plain Field Support
 // ============================================================================
 
