@@ -114,6 +114,22 @@ template ArrayFieldElementType(alias fn) {
 /// Applied by every wrapper template; the first in the UDA list is canonical.
 struct OriginalName { string name; }
 
+/// The UDAs giving a plugin's wrapper of the root operation type `Root`
+/// (e.g. `FilteredQuery` for `Query`) `Root`'s original D name (as entity
+/// wrappers have), so that names derived from the root type (e.g. of
+/// argument types of its fields) do not depend on which plugins wrapped it.
+template RootTypeNameAttributes(Root) {
+    static if (is(Root == struct)) {
+        import std.traits : getUDAs;
+        static if (hasUDA!(Root, OriginalName))
+            alias RootTypeNameAttributes = AliasSeq!(getUDAs!(Root, OriginalName)[0]);
+        else
+            alias RootTypeNameAttributes = AliasSeq!(OriginalName(__traits(identifier, Root)));
+    } else {
+        alias RootTypeNameAttributes = AliasSeq!();
+    }
+}
+
 // ============================================================================
 // Identity TypeMap
 // ============================================================================

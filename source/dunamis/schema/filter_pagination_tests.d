@@ -176,4 +176,17 @@ unittest {
     }
 }
 
+/// Names derived from the root type (the sort order input types of its
+/// fields) do not depend on which plugins wrapped it before SortingPlugin.
+unittest {
+    import std.algorithm : canFind;
+    import dunamis.graphql.schema : generateSchemaSDL;
+
+    static foreach (S; AliasSeq!(FilterFirst, FilterMiddle, FilterLast)) {{
+        enum sdl = generateSchemaSDL!S;
+        static assert(sdl.canFind("input _OrderByStruct_Query_customers {"), sdl);
+        static assert(!sdl.canFind("FilteredQuery"), sdl);
+    }}
+}
+
 private alias AliasSeq(T...) = T;

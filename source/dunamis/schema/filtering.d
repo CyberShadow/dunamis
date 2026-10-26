@@ -1507,14 +1507,17 @@ template FilterPlugin(alias S) if (isSchema!S) {
         }
     }
 
+    @(RootTypeNameAttributes!(_OriginalQuery))
     struct FilteredQuery {
         mixin WrapFields!(_OriginalQuery, EntityTypeMap, FilteredArrayField);
     }
 
+    @(RootTypeNameAttributes!(S.Mutation))
     struct FilteredMutation {
         mixin WrapFields!(S.Mutation, EntityTypeMap, FilteredArrayField);
     }
 
+    @(RootTypeNameAttributes!(S.Subscription))
     struct FilteredSubscription {
         mixin WrapFields!(S.Subscription, EntityTypeMap, FilteredArrayField);
     }

@@ -32,7 +32,7 @@ import dunamis.core.expr : ExprResultType, isExpr;
 import dunamis.core.types : isAbstractType, isInternalMember;
 import dunamis.graphql.schema.udas : getGraphQLTypeName;
 import dunamis.schema.entity_cast : BaseEntityOf;
-import dunamis.schema.plugin : isSchema, NormalizeFields, OriginalName, RemapTypeAttributes, WrapFields, ForwardField;
+import dunamis.schema.plugin : isSchema, NormalizeFields, OriginalName, RemapTypeAttributes, RootTypeNameAttributes, WrapFields, ForwardField;
 import dunamis.schema.transform : isTypeInList;
 
 // Fully qualified in generated code, so that entity field names cannot shadow them.
@@ -215,14 +215,17 @@ template ComputedFieldsPlugin(Sources...) {
         static if (__traits(hasMember, S, "AllEntityTypes"))
             alias AllEntityTypes = staticMap!(EntityTypeMap, S.AllEntityTypes);
 
+        @(RootTypeNameAttributes!(S.Query))
         struct ComputedQuery {
             mixin WrapFields!(S.Query, EntityTypeMap, ForwardField);
         }
 
+        @(RootTypeNameAttributes!(S.Mutation))
         struct ComputedMutation {
             mixin WrapFields!(S.Mutation, EntityTypeMap, ForwardField);
         }
 
+        @(RootTypeNameAttributes!(S.Subscription))
         struct ComputedSubscription {
             mixin WrapFields!(S.Subscription, EntityTypeMap, ForwardField);
         }
