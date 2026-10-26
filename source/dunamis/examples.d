@@ -2011,3 +2011,36 @@ unittest {
     assert(errors[0].message == "Name contains 'o'");
     assert(errors[1].message == "Name contains 'o'");
 }
+
+// Test: null bubbling also applies to aliased non-null fields.
+// Nullability must be looked up by the schema field name, not the alias.
+unittest {
+    import dunamis.graphql : compileQuery, Schema;
+
+    createMockDB();
+    auto executor = new Executor();
+
+    auto query = compileQuery!(Schema!Query)(`{
+        users {
+            name: firstName
+            checked: validatedName
+        }
+    }`);
+
+    auto evalCtx = new EvalContext();
+    auto result = awaitSync(executor.execute(query, evalCtx));
+
+    auto users = result["users"].array;
+    assert(users.length == 3);
+
+    assert(users[0]["name"].str == "Alice");
+    assert(users[0]["checked"].str == "Alice");
+
+    // validatedName is String!, so its error nulls the whole user even when aliased
+    assert(users[1].isNull, "Bob should be null due to aliased non-null field error");
+    assert(users[2].isNull, "Carol should be null due to aliased non-null field error");
+
+    assert(evalCtx.errors.length == 2);
+    assert(evalCtx.errors[0].message == "Name contains 'o'");
+    assert(evalCtx.errors[1].message == "Name contains 'o'");
+}

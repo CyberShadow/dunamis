@@ -313,14 +313,22 @@ DynamicJsonObjectExpr compileFieldsToJsonObject(T, alias SchemaSource = void)(Ex
     // Collect field expressions
     ExprBase[] fieldExprs;
     string[] fieldNames;
+    // Schema field names, parallel to fieldNames (which hold output names,
+    // i.e. aliases where present).
+    string[] schemaFieldNames;
 
     processSelections!(getGraphQLTypeName!T)(
         selections, variables, fragments, fieldNames, fieldExprs,
-        (field) => compileFieldAccess!(T, SchemaSource)(ref_, field, variables, fragments, pathPrefix)
+        (field) {
+            schemaFieldNames ~= getFieldName(field);
+            return compileFieldAccess!(T, SchemaSource)(ref_, field, variables, fragments, pathPrefix);
+        }
     );
+    assert(schemaFieldNames.length == fieldNames.length);
 
-    // Determine non-null flags for null bubbling
-    bool[] nonNullFlags = resolveNonNullFlags!T(fieldNames);
+    // Determine non-null flags for null bubbling. Nullability is a property
+    // of the schema field, so look it up by field name, not by alias.
+    bool[] nonNullFlags = resolveNonNullFlags!T(schemaFieldNames);
 
     // Build a dynamic JSON object using runtime construction
     return buildDynamicJsonObject(fieldNames, fieldExprs, pathPrefix, nonNullFlags);
