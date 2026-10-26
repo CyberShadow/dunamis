@@ -178,28 +178,36 @@ class DynamicJsonObjectExpr : Expr!JSONValue {
     private JSONValue[] _pathPrefix;
     private bool[] _nonNullFields;
     private bool[] _nonNullItemFields;
+    private ExprBase _lengthSource;
 
     /// nonNullFields[i]: field i has a non-null type; a null value in it
     /// makes the whole object null (null bubbling).
     /// nonNullItemFields[i]: field i is a list with non-null items; a null
     /// item makes the whole list null (which may then bubble further).
+    /// lengthSource: the objects' batch (e.g. the entities they are built
+    /// for), whose length is the number of objects even if every field
+    /// fails; without one, fields that all fail make one object.
+    /// Every successful field must produce one value per object.
     this(string[] names, ExprBase[] exprs, JSONValue[] pathPrefix = [], bool[] nonNullFields = [],
-        bool[] nonNullItemFields = []) {
+        bool[] nonNullItemFields = [], ExprBase lengthSource = null) {
         assert(names.length == exprs.length, "Names and exprs must have same length");
         _names = names;
         _exprs = exprs;
         _pathPrefix = pathPrefix;
         _nonNullFields = nonNullFields;
         _nonNullItemFields = nonNullItemFields;
+        _lengthSource = lengthSource;
     }
 
     override ExprBase[] dependencies() {
-        return _exprs.dup;
+        return _lengthSource is null ? _exprs.dup : _exprs ~ _lengthSource;
     }
 
     override void replaceDependency(size_t index, ExprBase newDep) {
         if (index < _exprs.length) {
             _exprs[index] = newDep;
+        } else if (index == _exprs.length && _lengthSource !is null) {
+            _lengthSource = newDep;
         }
     }
 
@@ -208,11 +216,14 @@ class DynamicJsonObjectExpr : Expr!JSONValue {
         foreach (ref expr; _exprs) {
             expr = optimizeExpr(expr, ctx);
         }
+        if (_lengthSource !is null)
+            _lengthSource = optimizeExpr(_lengthSource, ctx);
         return this;
     }
 
     override Promise!(JSONValue[]) eval(EvalContext ctx) {
         import ae.utils.promise : Result, toResult;
+        import std.conv : to;
 
         Result!(JSONValue[])[] results;
         bool suspendsSession(ExprBase expr) {
@@ -248,27 +259,33 @@ class DynamicJsonObjectExpr : Expr!JSONValue {
         auto pathPrefix = _pathPrefix;
         auto nonNullFields = _nonNullFields;
         auto nonNullItemFields = _nonNullItemFields;
+        auto lengthSource = _lengthSource;
 
-        return evaluateFields().then(() {
-            // Determine the complete batch size. Constant expressions may
-            // legitimately produce one value before a mapped field exposes
-            // the actual batch size.
-            size_t count = 0;
-            foreach (r; results) {
-                if (r.error is null && r.value[0].length > count)
-                    count = r.value[0].length;
-            }
-            if (count == 0) count = 1; // Fallback for root fields
+        Promise!size_t batchLength() {
+            if (lengthSource !is null)
+                return lengthSource.evalResultLength(ctx);
+            // The first successful field's, or one object (e.g. at the root)
+            foreach (r; results)
+                if (r.error is null)
+                    return resolve(r.value[0].length);
+            return resolve(size_t(1));
+        }
+
+        return evaluateFields().then(() => batchLength()).then((size_t count) {
+            foreach (i, r; results)
+                if (r.error is null && r.value[0].length != count)
+                    throw new Exception("Batch size mismatch in object field '" ~ names[i] ~
+                        "': it produced " ~ r.value[0].length.to!string ~ " values for " ~
+                        count.to!string ~ " objects (use broadcast() to replicate a single " ~
+                        "value across a batch)");
 
             JSONValue[] jsonResults = new JSONValue[count];
             foreach (idx; 0 .. count) {
                 jsonResults[idx] = JSONValue.emptyObject;
                 bool hasNonNullViolation = false;
                 foreach (i, name; names) {
-                    auto valueCount = results[i].error is null
-                        ? results[i].value[0].length : 0;
-                    if (valueCount && (idx < valueCount || valueCount == 1)) {
-                        auto val = results[i].value[0][valueCount == 1 ? 0 : idx];
+                    if (results[i].error is null) {
+                        auto val = results[i].value[0][idx];
                         // Null bubbling through lists: a null item in a list
                         // of non-null items makes the list itself null
                         if (i < nonNullItemFields.length && nonNullItemFields[i] &&
@@ -943,6 +960,33 @@ unittest {
     assert(ctx.errors.length == 1);
     assert(ctx.errors[0].message == "field failed");
     assert(ctx.errors[0].path == [JSONValue("users"), JSONValue("broken")]);
+}
+
+unittest {
+    import ae.utils.promise.await : awaitSync;
+    import std.algorithm : canFind;
+    import std.conv : to;
+
+    // Test DynamicJsonObjectExpr: the length source gives the number of
+    // objects, even when every field fails
+    auto ctx = new EvalContext();
+    auto batch = new FixedJsonExpr([JSONValue(1), JSONValue(2), JSONValue(3)]);
+    auto expr = new DynamicJsonObjectExpr(["broken"], [cast(ExprBase) new FailingExpr("field failed")],
+        [JSONValue("users")], [], [], batch);
+    auto result = awaitSync(expr.eval(ctx));
+    assert(result.length == 3, result.to!string);
+    foreach (object; result)
+        assert(object["broken"].isNull);
+    assert(ctx.errors.length == 1 && ctx.errors[0].message == "field failed");
+
+    // A field with one value for a batch of three is an error, not replicated
+    auto single = new DynamicJsonObjectExpr(["name"], [cast(ExprBase) new FixedJsonExpr([JSONValue("a")])],
+        [], [], [], batch);
+    try {
+        awaitSync(single.eval(new EvalContext()));
+        assert(false, "Expected a batch size mismatch");
+    } catch (Exception e)
+        assert(e.msg.canFind("Batch size mismatch in object field 'name'"), e.msg);
 }
 
 unittest {

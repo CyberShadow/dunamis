@@ -1936,6 +1936,46 @@ unittest {
     assert(result[2] == "Carol: New Year, Independence Day, Christmas");
 }
 
+// Test: a computed field reaching a root collection without broadcast()
+// produces one result for the whole batch, which is an error rather than
+// being replicated across the batch
+unittest {
+    import std.algorithm : canFind;
+    import dunamis.core.expr.json : DynamicJsonObjectExpr;
+
+    auto db = createMockDB();
+
+    static auto holidayNames(Expr!User u) {
+        return Query().singleton().holidays().map!((Expr!Holiday h) => h.name);  // No broadcast(u)
+    }
+
+    static auto name(Expr!string e) { return use((string n) => JSONValue(n), e); }
+    static auto names(Expr!(string[]) e) { return use((string[] n) => JSONValue(n), e); }
+
+    void assertMismatch(Expr!(JSONValue[]) query) {
+        foreach (optimize; [false, true]) {
+            try {
+                auto result = awaitSync(new Executor().execute(query, optimize));
+                assert(false, "Expected a batch size mismatch, got " ~ result.to!string);
+            } catch (Exception e)
+                assert(e.msg.canFind("Batch size mismatch") && e.msg.canFind("broadcast()"), e.msg);
+        }
+    }
+
+    // As a map's body
+    assertMismatch(map!((Expr!User u) => names(holidayNames(u)))(getByIds!User([1, 2, 3])));
+
+    // As a field of the objects built for a batch
+    assertMismatch(map!((Expr!User u) => cast(Expr!JSONValue) new DynamicJsonObjectExpr(
+        ["firstName", "holidays"], [cast(ExprBase) name(u.firstName), names(holidayNames(u))],
+        [], [], [], u))(getByIds!User([1, 2, 3])));
+
+    // Aligned with broadcast(), the field is the same for every user
+    auto aligned = awaitSync(new Executor().execute(
+        map!((Expr!User u) => holidayNames(u).broadcast(u))(getByIds!User([1, 2, 3]))));
+    assert(aligned.length == 3 && aligned[2] == ["New Year", "Independence Day", "Christmas"], aligned.to!string);
+}
+
 // ============================================================================
 // Request Context Tests
 // ============================================================================

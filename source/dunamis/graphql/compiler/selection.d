@@ -340,8 +340,9 @@ DynamicJsonObjectExpr compileFieldsToJsonObject(T, alias SchemaSource = void)(Ex
     bool[] nonNullFlags = resolveNonNullFlags!T(schemaFieldNames);
     bool[] nonNullItemFlags = resolveNonNullItemFlags!T(schemaFieldNames);
 
-    // Build a dynamic JSON object using runtime construction
-    return buildDynamicJsonObject(fieldNames, fieldExprs, pathPrefix, nonNullFlags, nonNullItemFlags);
+    // Build a dynamic JSON object using runtime construction, one per
+    // object in ref_'s batch
+    return buildDynamicJsonObject(fieldNames, fieldExprs, pathPrefix, nonNullFlags, nonNullItemFlags, ref_);
 }
 
 /// Determine which fields are non-nullable based on compile-time D type info.
@@ -420,8 +421,8 @@ private template isNonNullResultType(T) {
 
 /// Build a JSON object from runtime field names and expressions
 DynamicJsonObjectExpr buildDynamicJsonObject(string[] names, ExprBase[] exprs, JSONValue[] pathPrefix = [],
-    bool[] nonNullFields = [], bool[] nonNullItemFields = []) {
-    return new DynamicJsonObjectExpr(names, exprs, pathPrefix, nonNullFields, nonNullItemFields);
+    bool[] nonNullFields = [], bool[] nonNullItemFields = [], ExprBase lengthSource = null) {
+    return new DynamicJsonObjectExpr(names, exprs, pathPrefix, nonNullFields, nonNullItemFields, lengthSource);
 }
 
 /// Compile the result of a field method based on its return type.

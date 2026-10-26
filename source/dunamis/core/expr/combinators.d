@@ -597,16 +597,15 @@ class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
 
             // 5. Evaluate body with ALL refs at once
             return evalAs!R(bodyExpr, ctx).then((R[] flatResults) {
-                // A fully failed DynamicJsonObjectExpr has no successful field
-                // from which to infer its batch size and returns one null/error
-                // placeholder. Preserve that field error for every mapped row.
-                if (flatResults.length == 1 && flatEntities.length > 1) {
-                    auto value = flatResults[0];
-                    flatResults.length = flatEntities.length;
-                    flatResults[] = value;
-                }
+                // The body yields one result per element. One result for a
+                // whole batch is not replicated: an expression producing a
+                // single value (e.g. reaching a root collection) must be
+                // aligned to the batch with broadcast().
                 if (flatResults.length != flatEntities.length)
-                    throw new Exception("MapExpr batch mismatch for " ~ Entity.stringof);
+                    throw new Exception("Batch size mismatch in map over " ~ Entity.stringof ~
+                        ": its body produced " ~ flatResults.length.to!string ~ " results for " ~
+                        flatEntities.length.to!string ~ " elements (use broadcast() to replicate " ~
+                        "a single value across a batch)");
                 // 6. Regroup to match input structure
                 R[][] result;
                 size_t offset = 0;
