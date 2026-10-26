@@ -761,19 +761,21 @@ users(filter: {posts: {every: {title: {contains: "Draft"}}}}) { ... }
 users(filter: {posts: {none: {title: {contains: "Spam"}}}}) { ... }
 ```
 
-**Filtering and pagination:** a field's `filter` selects the rows that its
-`first`/`offset` window (from `PaginationPlugin`) is then taken from, whichever
-order the two plugins are applied in: `PaginationPlugin` marks its limits as
-*result windows* (`ResultWindowInfo`), and `FilterPlugin` inserts its filter
-beneath them (`beneathResultWindows`). Limits that are part of what a field
-itself returns (e.g. a computed "latest five posts" field) are not result
-windows, so a filter on such a field applies to those five posts.
+**Filtering and pagination:** plugins apply their arguments in the order the
+plugins were applied in: each plugin wraps the field as the previous plugins
+left it. This is deliberate. Code building expression trees directly chooses
+the order of operations itself; for the flat arguments of a GraphQL field,
+the plugin order is that choice. With the documented order
+(`FilterPlugin, SortingPlugin, PaginationPlugin`), a field's `filter`
+selects the rows that are then sorted and its `first`/`offset` window is
+taken from. With `PaginationPlugin` before `FilterPlugin`, the filter is
+applied to the window instead.
 
 On root fields, the filter, sort and window are pushed into the SQL query as far
-as that preserves this order: a filter that cannot be expressed in SQL as a
-whole (e.g. a relationship filter) is evaluated in memory, its SQL-expressible
-`AND` conditions still narrow the query, and the window is then applied in
-memory too.
+as that preserves the order of operations: a filter that cannot be expressed in
+SQL as a whole (e.g. a relationship filter) is evaluated in memory, its
+SQL-expressible `AND` conditions still narrow the query (when no window is
+beneath the filter), and a window above it is then applied in memory too.
 
 ## Introspection
 

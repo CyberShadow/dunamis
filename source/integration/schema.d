@@ -562,7 +562,8 @@ mixin template TestSchema(alias db) {
 
     alias BaseSchema = Schema!(Query, Mutation, Subscription);
     alias MySchema = ApplyPlugins!(BaseSchema, CrudMutationPlugin, FilterPlugin, SortingPlugin, PaginationPlugin);
-    /// The same with FilterPlugin last (as some applications order them), served for
-    /// requests with an `X-Plugin-Order: filter-last` header.
+    /// The same with FilterPlugin last (filters apply to the requested
+    /// window), served for requests with an `X-Plugin-Order: filter-last`
+    /// header.
     alias FilterLastSchema = ApplyPlugins!(BaseSchema, CrudMutationPlugin, SortingPlugin, PaginationPlugin, FilterPlugin);
 }

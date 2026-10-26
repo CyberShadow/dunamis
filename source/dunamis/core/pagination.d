@@ -41,50 +41,6 @@ interface OffsetInfo {
     ExprBase offsetSource();
 }
 
-/// Implemented by LimitExpr and OffsetExpr.  A *result window* is the
-/// pagination requested for a field (e.g. GraphQL `first`/`offset`
-/// arguments), as opposed to a limit that is part of what a field returns
-/// (e.g. a computed "five latest posts" field).  A result window is applied
-/// to the field's final result: restrictions that other arguments of the same
-/// field ask for (filters) belong beneath it, whatever order the plugins
-/// providing those arguments were applied in.  See `beneathResultWindows`.
-interface ResultWindowInfo {
-    /// Whether this LIMIT/OFFSET is a result window.
-    bool isResultWindow();
-
-    /// The collection the window is taken from.
-    ExprBase windowSource();
-
-    /// A new window of the same kind and size over `source`, which must have
-    /// the type of `windowSource`.  This window itself is left unchanged.
-    ExprBase withWindowSource(ExprBase source);
-}
-
-/// Apply `restrict` to `collection` beneath the result windows (if any) at
-/// its top, and return the resulting collection.
-///
-/// Example: with `collection = limit(offset(users, 2, true), 10, true)` and a
-/// filtering `restrict`, the result is `limit(offset(restrict(users), 2), 10)`
-/// rather than `restrict(limit(offset(users, 2), 10))`.
-///
-/// Expression trees are not modified once built (their nodes may be shared),
-/// so the result windows are rebuilt over the restricted source; `collection`
-/// is left unchanged.
-Expr!(E[]) beneathResultWindows(E)(Expr!(E[]) collection,
-    scope Expr!(E[]) delegate(Expr!(E[])) restrict)
-{
-    auto window = cast(ResultWindowInfo) collection;
-    if (window is null || !window.isResultWindow)
-        return restrict(collection);
-    // A LIMIT/OFFSET preserves its source's element type.
-    auto source = cast(Expr!(E[])) window.windowSource;
-    assert(source !is null, "Result window source has an unexpected type");
-    auto rebuilt = cast(Expr!(E[])) window.withWindowSource(
-        beneathResultWindows!E(source, restrict));
-    assert(rebuilt !is null);
-    return rebuilt;
-}
-
 // ============================================================================
 // LimitExpr - Limit results to first N items
 // ============================================================================
@@ -95,13 +51,11 @@ Expr!(E[]) beneathResultWindows(E)(Expr!(E[]) collection,
 /// ---
 /// auto limited = limit(users(), 10);  // First 10 users
 /// ---
-class LimitExpr(T) : Expr!(T[]), LimitInfo, ResultWindowInfo {
+class LimitExpr(T) : Expr!(T[]), LimitInfo {
     private ExprBase _source;
     private size_t _limit;
-    private bool _resultWindow;  // See ResultWindowInfo
 
-    this(Expr!(T[]) source, size_t lim, bool resultWindow = false) {
-        _resultWindow = resultWindow;
+    this(Expr!(T[]) source, size_t lim) {
         _source = source;
         _limit = lim;
     }
@@ -112,12 +66,6 @@ class LimitExpr(T) : Expr!(T[]), LimitInfo, ResultWindowInfo {
 
     override void replaceDependency(size_t index, ExprBase newDep) {
         if (index == 0) _source = newDep;
-    }
-
-    bool isResultWindow() { return _resultWindow; }
-    ExprBase windowSource() { return _source; }
-    ExprBase withWindowSource(ExprBase source) {
-        return new LimitExpr!T(cast(Expr!(T[])) source, _limit, _resultWindow);
     }
 
     /// Get the limit value
@@ -165,13 +113,11 @@ class LimitExpr(T) : Expr!(T[]), LimitInfo, ResultWindowInfo {
 /// ---
 /// auto skipped = offset(users(), 20);  // Skip first 20 users
 /// ---
-class OffsetExpr(T) : Expr!(T[]), OffsetInfo, ResultWindowInfo {
+class OffsetExpr(T) : Expr!(T[]), OffsetInfo {
     private ExprBase _source;
     private size_t _offset;
-    private bool _resultWindow;  // See ResultWindowInfo
 
-    this(Expr!(T[]) source, size_t off, bool resultWindow = false) {
-        _resultWindow = resultWindow;
+    this(Expr!(T[]) source, size_t off) {
         _source = source;
         _offset = off;
     }
@@ -182,12 +128,6 @@ class OffsetExpr(T) : Expr!(T[]), OffsetInfo, ResultWindowInfo {
 
     override void replaceDependency(size_t index, ExprBase newDep) {
         if (index == 0) _source = newDep;
-    }
-
-    bool isResultWindow() { return _resultWindow; }
-    ExprBase windowSource() { return _source; }
-    ExprBase withWindowSource(ExprBase source) {
-        return new OffsetExpr!T(cast(Expr!(T[])) source, _offset, _resultWindow);
     }
 
     /// Get the offset value
@@ -235,10 +175,8 @@ class OffsetExpr(T) : Expr!(T[]), OffsetInfo, ResultWindowInfo {
 /// ---
 /// auto query = limit(users(), 10);  // First 10 users
 /// ---
-/// Pass `resultWindow = true` for the pagination requested for a field (see
-/// `ResultWindowInfo`).
-auto limit(T)(Expr!(T[]) source, size_t n, bool resultWindow = false) {
-    return new LimitExpr!T(source, n, resultWindow);
+auto limit(T)(Expr!(T[]) source, size_t n) {
+    return new LimitExpr!T(source, n);
 }
 
 /// Wrap expression with OFFSET - skips first N items.
@@ -247,10 +185,8 @@ auto limit(T)(Expr!(T[]) source, size_t n, bool resultWindow = false) {
 /// ---
 /// auto query = offset(users(), 20);  // Skip first 20 users
 /// ---
-/// Pass `resultWindow = true` for the pagination requested for a field (see
-/// `ResultWindowInfo`).
-auto offset(T)(Expr!(T[]) source, size_t n, bool resultWindow = false) {
-    return new OffsetExpr!T(source, n, resultWindow);
+auto offset(T)(Expr!(T[]) source, size_t n) {
+    return new OffsetExpr!T(source, n);
 }
 
 // ============================================================================
@@ -404,64 +340,4 @@ unittest {
 
     assert(result.length == 1);
     assert(result[0].length == 3);  // Full array
-}
-
-// beneathResultWindows restricts beneath result windows only, and rebuilds
-// them rather than modifying the (possibly shared) existing tree.
-unittest {
-    import std.functional : toDelegate;
-    import ae.utils.promise.await : awaitSync;
-
-    static struct Item {
-        int value;
-    }
-
-    static class Items : Expr!(Item[]) {
-        override ExprBase[] dependencies() { return []; }
-        override void replaceDependency(size_t, ExprBase) {}
-        override Promise!(Item[][]) eval(EvalContext ctx) {
-            return resolve([[Item(0), Item(1), Item(2), Item(3), Item(4), Item(5)]]);
-        }
-    }
-
-    // Keeps the odd items.
-    static class Odd : Expr!(Item[]) {
-        Expr!(Item[]) source;
-        this(Expr!(Item[]) source) { this.source = source; }
-        override ExprBase[] dependencies() { return [source]; }
-        override void replaceDependency(size_t, ExprBase) { assert(false); }
-        override Promise!(Item[][]) eval(EvalContext ctx) {
-            return source.eval(ctx).then((Item[][] groups) {
-                Item[][] result;
-                foreach (group; groups) {
-                    Item[] odd;
-                    foreach (item; group) if (item.value % 2) odd ~= item;
-                    result ~= odd;
-                }
-                return result;
-            });
-        }
-    }
-
-    static int[] values(Expr!(Item[]) e) {
-        int[] result;
-        foreach (item; awaitSync(e.eval(new EvalContext()))[0]) result ~= item.value;
-        return result;
-    }
-
-    static Expr!(Item[]) odd(Expr!(Item[]) s) { return new Odd(s); }
-
-    auto items = new Items();
-    auto inner = offset(items, 1, true);
-    auto window = limit(inner, 2, true);
-    auto restricted = beneathResultWindows!Item(window, toDelegate(&odd));
-    assert(values(restricted) == [3, 5]);
-    // The original windows are unchanged.
-    assert(restricted !is window);
-    assert(window.dependencies()[0] is inner && inner.dependencies()[0] is items);
-    assert(values(window) == [1, 2]);
-
-    // A limit that is not a result window stays beneath the restriction.
-    auto own = limit(items, 2);
-    assert(values(beneathResultWindows!Item(own, toDelegate(&odd))) == [1]);
 }

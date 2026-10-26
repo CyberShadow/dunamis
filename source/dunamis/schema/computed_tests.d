@@ -23,9 +23,9 @@ alias fixture = dunamis.schema.computed_fixture;
 
 
 alias PluginLast = ApplyPlugins!(Schema!Query,
-    SortingPlugin, PaginationPlugin, FilterPlugin, ComputedFieldsPlugin!fixture);
+    FilterPlugin, SortingPlugin, PaginationPlugin, ComputedFieldsPlugin!fixture);
 alias PluginFirst = ApplyPlugins!(Schema!Query,
-    ComputedFieldsPlugin!fixture, SortingPlugin, PaginationPlugin, FilterPlugin);
+    ComputedFieldsPlugin!fixture, FilterPlugin, SortingPlugin, PaginationPlugin);
 
 private void seedFixture() {
     fixtureDb = new MockDB!();

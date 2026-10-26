@@ -2027,15 +2027,22 @@ void testFilterTagsByCategory() {
 // Filtering Combined with Pagination
 // ============================================================================
 
-/// A field's filter selects the rows that its first/offset window is taken
-/// from - with either plugin order.  Seeded users, ordered by id: Alice (posts
-/// "Hello World", "GraphQL Rocks"), Bob ("D Programming"), Charlie (no posts),
-/// then any users the mutation tests created (no posts).
-private void checkFilteredWindow(string query, string expectedDataJson) {
+/// The plugin order determines whether a field's filter selects the rows its
+/// first/offset window is taken from (the default schema: FilterPlugin before
+/// PaginationPlugin) or is applied to the window (the `filter-last` schema),
+/// and the SQL pushdown must preserve either order.  `filtered` and `windowed`
+/// are the expected data for each; a null `windowed` skips the filter-last
+/// schema (where the window would depend on rows other tests create).
+/// Seeded users, ordered by id: Alice Smith (posts "Hello World", "GraphQL
+/// Rocks"), Bob Jones ("D Programming"), Charlie Brown (no posts), then any
+/// users the mutation tests created (no posts).
+private void checkFilteredWindow(string query, string filtered, string windowed) {
     foreach (order; ["default", "filter-last"]) {
+        auto expected = order == "default" ? filtered : windowed;
+        if (expected is null) continue;
         auto response = graphql(query, JSONValue.emptyObject, ["X-Plugin-Order": order]);
         assertNoErrors(response);
-        assertEqual(response["data"], parseJSON(expectedDataJson), order ~ ": " ~ query);
+        assertEqual(response["data"], parseJSON(expected), order ~ ": " ~ query);
     }
 }
 
@@ -2044,62 +2051,67 @@ private enum byIdDesc = `orderBy: [{field: id, direction: DESC}]`;
 
 void testFilteredWindowScalar() {
     checkFilteredWindow(`{ users(first: 1, ` ~ byId ~ `, filter: {firstName: {equalTo: "Charlie"}}) { firstName } }`,
-        `{"users": [{"firstName": "Charlie"}]}`);
+        `{"users": [{"firstName": "Charlie"}]}`, `{"users": []}`);
     checkFilteredWindow(`{ users(first: 1, offset: 1, ` ~ byId ~ `, filter: {lastName: {notEqualTo: "Smith"}}) { firstName } }`,
-        `{"users": [{"firstName": "Charlie"}]}`);
+        `{"users": [{"firstName": "Charlie"}]}`, `{"users": [{"firstName": "Bob"}]}`);
     checkFilteredWindow(`{ posts(first: 1, ` ~ byIdDesc ~ `, filter: {title: {contains: "o"}}) { title } }`,
-        `{"posts": [{"title": "D Programming"}]}`);
+        `{"posts": [{"title": "D Programming"}]}`, null);
+    checkFilteredWindow(`{ posts(first: 1, ` ~ byId ~ `, filter: {title: {contains: "Rocks"}}) { title } }`,
+        `{"posts": [{"title": "GraphQL Rocks"}]}`, `{"posts": []}`);
     // Pushed into SQL as a whole (WHERE, ORDER BY, OFFSET, LIMIT).
     checkFilteredWindow(`{ users(first: 2, offset: 1, orderBy: [{field: firstName, direction: DESC}], ` ~
             `filter: {or: [{lastName: {equalTo: "Smith"}}, {lastName: {equalTo: "Jones"}}, ` ~
             `{lastName: {equalTo: "Brown"}}]}) { firstName } }`,
-        `{"users": [{"firstName": "Bob"}, {"firstName": "Alice"}]}`);
+        `{"users": [{"firstName": "Bob"}, {"firstName": "Alice"}]}`, null);
 }
 
 void testFilteredWindowBelongsTo() {
     checkFilteredWindow(`{ posts(first: 1, ` ~ byId ~ `, filter: {author: {firstName: {equalTo: "Bob"}}}) { title } }`,
-        `{"posts": [{"title": "D Programming"}]}`);
+        `{"posts": [{"title": "D Programming"}]}`, `{"posts": []}`);
     checkFilteredWindow(`{ posts(first: 1, offset: 1, ` ~ byId ~ `, filter: {author: {firstName: {equalTo: "Alice"}}}) { title } }`,
-        `{"posts": [{"title": "GraphQL Rocks"}]}`);
-    checkFilteredWindow(`{ comments(first: 1, filter: {post: {title: {equalTo: "GraphQL Rocks"}}}) { post { title } } }`,
-        `{"comments": [{"post": {"title": "GraphQL Rocks"}}]}`);
+        `{"posts": [{"title": "GraphQL Rocks"}]}`, `{"posts": [{"title": "GraphQL Rocks"}]}`);
+    checkFilteredWindow(`{ comments(first: 1, ` ~ byId ~ `, filter: {post: {title: {equalTo: "GraphQL Rocks"}}}) { post { title } } }`,
+        `{"comments": [{"post": {"title": "GraphQL Rocks"}}]}`, `{"comments": []}`);
 }
 
 void testFilteredWindowHasMany() {
     checkFilteredWindow(`{ users(first: 1, ` ~ byId ~ `, filter: {posts: {some: {title: {contains: "Programming"}}}}) { firstName } }`,
-        `{"users": [{"firstName": "Bob"}]}`);
+        `{"users": [{"firstName": "Bob"}]}`, `{"users": []}`);
     checkFilteredWindow(`{ users(first: 1, ` ~ byId ~ `, filter: {posts: {none: {title: {contains: "Hello"}}}}) { firstName } }`,
-        `{"users": [{"firstName": "Bob"}]}`);
+        `{"users": [{"firstName": "Bob"}]}`, `{"users": []}`);
     checkFilteredWindow(`{ users(first: 1, offset: 1, ` ~ byId ~ `, filter: {posts: {none: {title: {contains: "Hello"}}}}) { firstName } }`,
-        `{"users": [{"firstName": "Charlie"}]}`);
+        `{"users": [{"firstName": "Charlie"}]}`, `{"users": [{"firstName": "Bob"}]}`);
     checkFilteredWindow(`{ users(first: 2, ` ~ byId ~ `, filter: {posts: {every: {title: {contains: "Programming"}}}}) { firstName } }`,
-        `{"users": [{"firstName": "Bob"}, {"firstName": "Charlie"}]}`);
+        `{"users": [{"firstName": "Bob"}, {"firstName": "Charlie"}]}`, `{"users": [{"firstName": "Bob"}]}`);
     checkFilteredWindow(`{ users(first: 1, ` ~ byIdDesc ~ `, filter: {posts: {some: {title: {contains: "o"}}}}) { firstName } }`,
-        `{"users": [{"firstName": "Bob"}]}`);
+        `{"users": [{"firstName": "Bob"}]}`, `{"users": []}`);
     // Without orderBy (as a search typically queries)
     checkFilteredWindow(`{ users(first: 10, filter: {posts: {some: {title: {contains: "Programming"}}}}) { firstName } }`,
-        `{"users": [{"firstName": "Bob"}]}`);
+        `{"users": [{"firstName": "Bob"}]}`, null);
 }
 
 void testFilteredWindowScalarAndRelationship() {
     checkFilteredWindow(`{ users(first: 10, filter: {lastName: {equalTo: "Jones"}, posts: {some: {title: {contains: "D"}}}}) { firstName } }`,
-        `{"users": [{"firstName": "Bob"}]}`);
+        `{"users": [{"firstName": "Bob"}]}`, null);
     checkFilteredWindow(`{ users(first: 10, filter: {lastName: {equalTo: "Smith"}, posts: {some: {title: {contains: "Programming"}}}}) { firstName } }`,
-        `{"users": []}`);
+        `{"users": []}`, `{"users": []}`);
     checkFilteredWindow(`{ posts(first: 1, ` ~ byIdDesc ~ `, filter: {title: {contains: "o"}, author: {lastName: {equalTo: "Smith"}}}) { title } }`,
-        `{"posts": [{"title": "GraphQL Rocks"}]}`);
+        `{"posts": [{"title": "GraphQL Rocks"}]}`, null);
+    checkFilteredWindow(`{ posts(first: 1, ` ~ byId ~ `, filter: {title: {contains: "Rocks"}, author: {lastName: {equalTo: "Smith"}}}) { title } }`,
+        `{"posts": [{"title": "GraphQL Rocks"}]}`, `{"posts": []}`);
 }
 
 void testFilteredWindowSameTableTwice() {
     checkFilteredWindow(`{
         a: users(first: 1, ` ~ byId ~ `, filter: {posts: {some: {title: {contains: "Programming"}}}}) { firstName }
         b: users(first: 1, ` ~ byId ~ `) { firstName }
-    }`, `{"a": [{"firstName": "Bob"}], "b": [{"firstName": "Alice"}]}`);
+    }`, `{"a": [{"firstName": "Bob"}], "b": [{"firstName": "Alice"}]}`,
+        `{"a": [], "b": [{"firstName": "Alice"}]}`);
 }
 
 void testFilteredWindowNested() {
     checkFilteredWindow(`{ users(first: 1, ` ~ byId ~ `) { posts(first: 1, ` ~ byId ~ `, filter: {title: {contains: "Rocks"}}) { title } } }`,
-        `{"users": [{"posts": [{"title": "GraphQL Rocks"}]}]}`);
+        `{"users": [{"posts": [{"title": "GraphQL Rocks"}]}]}`, `{"users": [{"posts": []}]}`);
 }
 
 // ============================================================================

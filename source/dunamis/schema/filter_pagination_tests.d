@@ -1,6 +1,9 @@
 /// Unit tests for the interaction of FilterPlugin with PaginationPlugin and
-/// SortingPlugin: a field's `filter` argument selects the rows that its
-/// `first`/`offset` window is then taken from, whatever the plugin order.
+/// SortingPlugin: the plugin order determines the order in which a field's
+/// `filter`, `orderBy` and `first`/`offset` arguments apply, in both execution
+/// modes. With FilterPlugin before PaginationPlugin, the filter selects the
+/// rows the window is taken from; with FilterPlugin after it, the filter is
+/// applied to the window.
 module dunamis.schema.filter_pagination_tests;
 
 version (unittest):
@@ -86,77 +89,90 @@ private void check(alias S)(string field, string args, long[] expected, bool opt
         field ~ "(" ~ args ~ "): expected " ~ expected.to!string ~ ", got " ~ found.to!string);
 }
 
-/// Plugin orders in use: filter outermost, and the documented one.
-private alias FilterLast = ApplyPlugins!(Schema!FpQuery, SortingPlugin, PaginationPlugin, FilterPlugin);
+/// The documented order (filter, then sort, then window), the same with
+/// SortingPlugin first, and with FilterPlugin last (window, then filter).
 private alias FilterFirst = ApplyPlugins!(Schema!FpQuery, CrudMutationPlugin, FilterPlugin, SortingPlugin, PaginationPlugin);
 private alias FilterMiddle = ApplyPlugins!(Schema!FpQuery, SortingPlugin, FilterPlugin, PaginationPlugin);
+private alias FilterLast = ApplyPlugins!(Schema!FpQuery, SortingPlugin, PaginationPlugin, FilterPlugin);
+
+/// Check a query against each plugin order: `filtered` is the expected
+/// result where the filter applies before the window, `windowed` where it
+/// applies to the window.
+private void checkOrders(string field, string args, long[] filtered, long[] windowed, bool optimize) {
+    check!FilterFirst(field, args, filtered, optimize);
+    check!FilterMiddle(field, args, filtered, optimize);
+    check!FilterLast(field, args, windowed, optimize);
+}
 
 /// Relationship filters are evaluated in memory, which MockDB supports in
-/// both execution modes.
+/// both execution modes; the optimizer must preserve each order.
 unittest {
-    static foreach (S; AliasSeq!(FilterLast, FilterFirst, FilterMiddle)) {
-        foreach (optimize; [false, true]) {
-            seed();
-            enum m = `{some: {category: {equalTo: "M"}}}`;
-            enum r = `{category: {equalTo: "R"}}`;
+    foreach (optimize; [false, true]) {
+        seed();
+        enum m = `{some: {category: {equalTo: "M"}}}`;
+        enum r = `{category: {equalTo: "R"}}`;
 
-            // BelongsTo
-            check!S("products", `first: 2, filter: {account: {category: {equalTo: "M"}}}`, [12], optimize);
-            check!S("products", `first: 2, offset: 1, filter: {account: ` ~ r ~ `}`, [2, 3], optimize);
-            check!S("products", `first: 2, filter: {account: ` ~ r ~ `}, orderBy: [{field: id, direction: DESC}]`,
-                [11, 10], optimize);
+        // BelongsTo
+        checkOrders("products", `first: 2, filter: {account: {category: {equalTo: "M"}}}`, [12], [], optimize);
+        checkOrders("products", `first: 2, offset: 1, filter: {account: ` ~ r ~ `}`, [2, 3], [2, 3], optimize);
+        checkOrders("products", `first: 2, filter: {account: ` ~ r ~ `}, orderBy: [{field: id, direction: DESC}]`,
+            [11, 10], [11], optimize);
 
-            // HasMany some/every/none
-            check!S("customers", `first: 10, filter: {accounts: ` ~ m ~ `}`, [12], optimize);
-            check!S("customers", `first: 1, filter: {accounts: {none: ` ~ r ~ `}}`, [12], optimize);
-            check!S("customers", `first: 5, offset: 1, filter: {accounts: {none: ` ~ r ~ `}}`, [13], optimize);
-            check!S("customers", `first: 3, offset: 10, filter: {accounts: {every: ` ~ r ~ `}}`, [11, 13], optimize);
-            check!S("customers", `first: 2, filter: {accounts: {some: ` ~ r ~ `}}, orderBy: [{field: id, direction: DESC}]`,
-                [11, 10], optimize);
-            check!S("customers", `first: 2, offset: 1, filter: {accounts: {every: ` ~ r ~ `}}, orderBy: [{field: id, direction: DESC}]`,
-                [11, 10], optimize);
+        // HasMany some/every/none
+        checkOrders("customers", `first: 10, filter: {accounts: ` ~ m ~ `}`, [12], [], optimize);
+        checkOrders("customers", `first: 1, filter: {accounts: {none: ` ~ r ~ `}}`, [12], [], optimize);
+        checkOrders("customers", `first: 5, offset: 1, filter: {accounts: {none: ` ~ r ~ `}}`, [13], [], optimize);
+        checkOrders("customers", `first: 3, offset: 10, filter: {accounts: {every: ` ~ r ~ `}}`, [11, 13], [11, 13], optimize);
+        checkOrders("customers", `first: 2, filter: {accounts: {some: ` ~ r ~ `}}, orderBy: [{field: id, direction: DESC}]`,
+            [11, 10], [], optimize);
+        checkOrders("customers", `first: 2, offset: 1, filter: {accounts: {every: ` ~ r ~ `}}, orderBy: [{field: id, direction: DESC}]`,
+            [11, 10], [11], optimize);
 
-            // Combined with a scalar condition (as a search typically does)
-            check!S("customers", `first: 10, filter: {name: {equalTo: "v12"}, accounts: ` ~ m ~ `}`, [12], optimize);
-            check!S("customers", `first: 10, filter: {name: {equalTo: "v11"}, accounts: ` ~ m ~ `}`, [], optimize);
-        }
+        // Combined with a scalar condition (as a search typically does)
+        checkOrders("customers", `first: 10, filter: {name: {equalTo: "v12"}, accounts: ` ~ m ~ `}`, [12], [], optimize);
+        checkOrders("customers", `first: 13, filter: {name: {equalTo: "v12"}, accounts: ` ~ m ~ `}`, [12], [12], optimize);
+        checkOrders("customers", `first: 10, filter: {name: {equalTo: "v11"}, accounts: ` ~ m ~ `}`, [], [], optimize);
     }
 }
 
 /// Scalar root filters.  MockDB ignores SQL WHERE clauses, so these only run
 /// naively here; the optimized path is covered by the Postgres integration suite.
 unittest {
-    static foreach (S; AliasSeq!(FilterLast, FilterFirst, FilterMiddle)) {
-        seed();
-        check!S("accounts", `first: 2, filter: {category: {equalTo: "M"}}`, [12], false);
-        check!S("accounts", `first: 2, offset: 10, filter: {category: {equalTo: "R"}}`, [11], false);
-        check!S("accounts", `first: 2, filter: {category: {equalTo: "R"}}, orderBy: [{field: id, direction: DESC}]`,
-            [11, 10], false);
-        check!S("customers", `first: 1, filter: {name: {equalTo: "v13"}}`, [13], false);
-    }
+    seed();
+    checkOrders("accounts", `first: 2, filter: {category: {equalTo: "M"}}`, [12], [], false);
+    checkOrders("accounts", `first: 2, offset: 10, filter: {category: {equalTo: "R"}}`, [11], [11], false);
+    checkOrders("accounts", `first: 2, filter: {category: {equalTo: "R"}}, orderBy: [{field: id, direction: DESC}]`,
+        [11, 10], [11], false);
+    checkOrders("customers", `first: 1, filter: {name: {equalTo: "v13"}}`, [13], [], false);
 }
 
-/// Nested (HasMany) fields: the filter applies before the per-parent window.
+/// Nested (HasMany) fields follow the plugin order too.
 unittest {
-    static foreach (S; AliasSeq!(FilterLast, FilterFirst, FilterMiddle)) {
-        foreach (optimize; [false, true]) {
-            seed();
-            auto result = awaitSync(new Executor().execute(compileQuery!S(`{
-                customers(filter: {id: {equalTo: 12}}) {
-                    id
-                    accounts(first: 1, filter: {category: {equalTo: "M"}}) { id }
-                }
-            }`), optimize));
-            // MockDB ignores the root WHERE when optimizing; look up customer 12.
-            bool seen;
-            foreach (v; result["customers"].array) {
-                if (v["id"].integer != 12) continue;
-                seen = true;
-                auto cs = v["accounts"].array;
-                assert(cs.length == 1 && cs[0]["id"].integer == 12, S.stringof ~ ": " ~ result.toString());
+    foreach (optimize; [false, true]) {
+        seed();
+        // Customer 12's only account is its "M" one, customer 1's is "R".
+        enum query = `{
+            customers(filter: {id: {in: [1, 12]}}) {
+                id
+                accounts(first: 1, filter: {category: {equalTo: "M"}}) { id }
             }
-            assert(seen, result.toString());
-        }
+        }`;
+        static foreach (S; AliasSeq!(FilterFirst, FilterMiddle, FilterLast)) {{
+            auto result = awaitSync(new Executor().execute(compileQuery!S(query), optimize));
+            // MockDB ignores the root WHERE when optimizing; look up customers 1 and 12.
+            int seen;
+            foreach (v; result["customers"].array) {
+                auto id = v["id"].integer;
+                if (id != 1 && id != 12) continue;
+                seen++;
+                auto cs = v["accounts"].array;
+                if (id == 12)
+                    assert(cs.length == 1 && cs[0]["id"].integer == 12, S.stringof ~ ": " ~ result.toString());
+                else
+                    assert(cs.length == 0, S.stringof ~ ": " ~ result.toString());
+            }
+            assert(seen == 2, result.toString());
+        }}
     }
 }
 

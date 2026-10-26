@@ -1563,21 +1563,18 @@ mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) 
     // _EnumType_*, _EntityFilter, _ShallowFilter, or _*ChildFilter into the host struct.
     alias _FilterType = _FilterTypesFor!_ElementType._EntityFilter;
 
+    // The filter wraps the field's collection as the previous plugins left
+    // it: with an earlier PaginationPlugin, it filters the requested window.
+    // Plugin order determines the order of operations.
     private static Expr!(_ElementType[]) _applyFilter(T)(T base, Nullable!_FilterType filter) {
-        import dunamis.core.pagination : beneathResultWindows;
-
         if (filter.isNull)
             return base;
 
-        // The filter selects the rows that the field's pagination (if an
-        // earlier PaginationPlugin added it) then takes its window from.
-        return beneathResultWindows!_ElementType(base, (Expr!(_ElementType[]) source) {
-            auto item = new FilterItemExpr!_ElementType();
-            auto predicate = buildFilterPredicateFromStruct!_ElementType(item, filter.get);
-            auto filterExpr = new FilterByExpr!_ElementType(source, item, predicate);
-            item._parentFilter = filterExpr;
-            return cast(Expr!(_ElementType[])) filterExpr;
-        });
+        auto item = new FilterItemExpr!_ElementType();
+        auto predicate = buildFilterPredicateFromStruct!_ElementType(item, filter.get);
+        auto filterExpr = new FilterByExpr!_ElementType(base, item, predicate);
+        item._parentFilter = filterExpr;
+        return filterExpr;
     }
 
     @(__traits(getAttributes, __traits(getMember, SourceQuery, fieldName)))
