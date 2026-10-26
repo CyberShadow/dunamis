@@ -74,15 +74,47 @@ struct GraphQLError {
 /// Usage:
 ///   auto session = cast(RelationalSession) evalCtx.getSession(db);
 ///   auto values = session.getColumnValues!string(nodeId, "name", refs);
+///
+/// A context may be a scope of another (see `createScope`): a scope has its
+/// own value bindings and memoized evaluations, and shares everything
+/// request-scoped (sessions, request contexts, string maps, errors) with the
+/// context it was created from.
 class EvalContext {
+    /// The context this one is a scope of (null for a request's context).
+    private EvalContext _parent;
+
+    /// The request's context (the outermost one this is a scope of).
+    private @property EvalContext root() {
+        auto ctx = this;
+        while (ctx._parent !is null)
+            ctx = ctx._parent;
+        return ctx;
+    }
+
+    /// Create a scope of this context, for evaluating a sub-expression with
+    /// bindings of its own (for example a filter predicate for one item).
+    /// Values bound and evaluations memoized in the scope stay in the scope;
+    /// those of this context are visible from it, unless the scope overrides
+    /// them. This context is not modified, so other evaluations in flight in
+    /// it are not affected.
+    EvalContext createScope() {
+        auto scope_ = new EvalContext();
+        scope_._parent = this;
+        return scope_;
+    }
+
     /// Request-scoped string metadata for adapters (for example HTTP headers).
     private string[string][string] _stringMaps;
 
     void setStringMap(string name, string[string] values) {
+        if (_parent !is null)
+            return root.setStringMap(name, values);
         _stringMaps[name] = values.dup;
     }
 
     string[string] getStringMap(string name) {
+        if (_parent !is null)
+            return root.getStringMap(name);
         if (auto values = name in _stringMaps)
             return (*values).dup;
         return null;
@@ -102,6 +134,8 @@ class EvalContext {
     /// Sessions are cached: calling getSession(ds) twice returns the same session.
     /// The Executor calls setup()/teardown() on all sessions.
     DataSession getSession(DataSource ds) {
+        if (_parent !is null)
+            return root.getSession(ds);
         if (auto s = ds in _sessions)
             return *s;
         auto s = ds.createSession();
@@ -111,6 +145,8 @@ class EvalContext {
 
     /// Get all sessions (for Executor lifecycle management).
     @property DataSession[] allSessions() {
+        if (_parent !is null)
+            return root.allSessions;
         return _sessions.values;
     }
 
@@ -138,12 +174,9 @@ class EvalContext {
     /// Get values for an expression.
     /// Returns empty array if not set or if type doesn't match.
     T[] getValues(T)(Object key) {
-        if (auto p = cast(void*) key in _valueMap) {
-            if (!p.empty && p.hasType!T) {
-                return p.get!T();
-            }
-        }
-        return [];
+        T[] vals;
+        tryGetValues!T(key, vals);
+        return vals;
     }
 
     /// Get the values bound for an expression, distinguishing "bound to an
@@ -156,6 +189,8 @@ class EvalContext {
                 return true;
             }
         }
+        if (_parent !is null)
+            return _parent.tryGetValues!T(key, vals);
         return false;
     }
 
@@ -168,6 +203,8 @@ class EvalContext {
             if (p.hasType!(Promise!(T[])))
                 return p.get!(Promise!(T[]))()[0];
         }
+        if (_parent !is null)
+            return _parent.getCachedEval!T(expr);
         return null;
     }
 
@@ -180,16 +217,9 @@ class EvalContext {
             _exprCache[key] = SealedArray([promise]);
     }
 
-    /// Clear the cached eval for a specific expression.
-    /// Used by filtering/sorting to invalidate cache between iterations.
+    /// Clear the cached eval for a specific expression (in this context).
     void clearCachedEval(Object expr) {
         _exprCache.remove(cast(void*) expr);
-    }
-
-    /// Clear all cached evaluations.
-    /// Used when context state changes in ways that invalidate all cached results.
-    void clearAllCachedEvals() {
-        _exprCache.clear();
     }
 
     // ========================================================================
@@ -204,6 +234,8 @@ class EvalContext {
     /// Store a request context value. Call once per type before executing a query.
     /// Only struct types are supported (value semantics, no aliasing issues).
     void setRequestContext(T)(T value) if (is(T == struct)) {
+        if (_parent !is null)
+            return root.setRequestContext(value);
         auto p = new T;
         *p = value;
         _requestContexts[typeid(T)] = cast(void*) p;
@@ -212,6 +244,8 @@ class EvalContext {
     /// Retrieve a previously stored request context value.
     /// Asserts if the context type was not set — this is a programming error.
     T getRequestContext(T)() if (is(T == struct)) {
+        if (_parent !is null)
+            return root.getRequestContext!T();
         auto p = typeid(T) in _requestContexts;
         assert(p !is null,
             "Request context " ~ T.stringof ~ " not set. " ~
@@ -221,6 +255,8 @@ class EvalContext {
 
     /// Check if a request context type has been set.
     bool hasRequestContext(T)() if (is(T == struct)) {
+        if (_parent !is null)
+            return root.hasRequestContext!T();
         return (typeid(T) in _requestContexts) !is null;
     }
 
@@ -232,17 +268,19 @@ class EvalContext {
 
     /// Record a field-level error with its path.
     void addError(string message, JSONValue[] path) {
+        if (_parent !is null)
+            return root.addError(message, path);
         _errors ~= GraphQLError(message, path);
     }
 
     /// Get all collected errors (for response assembly).
     @property const(GraphQLError)[] errors() const {
-        return _errors;
+        return _parent !is null ? _parent.errors : _errors;
     }
 
     /// Check if any errors were collected.
     @property bool hasErrors() const {
-        return _errors.length > 0;
+        return errors.length > 0;
     }
 }
 
@@ -341,4 +379,36 @@ unittest {
     auto rootJson = ctx.errors[2].toJson();
     assert(rootJson["message"].str == "root error");
     assert("path" !in rootJson);
+}
+
+unittest {
+    // Scopes: own bindings and memo, request-scoped state shared
+    import ae.utils.promise : resolve;
+    static struct AuthCtx { string userId; }
+
+    auto ctx = new EvalContext();
+    auto key = new Object();
+    auto other = new Object();
+    ctx.setValues!int(key, [1]);
+    ctx.setValues!int(other, [2]);
+    ctx.setCachedEval!int(other, resolve([2]));
+    ctx.setRequestContext(AuthCtx("user-1"));
+
+    auto scope_ = ctx.createScope();
+    scope_.setValues!int(key, [10]);
+    assert(scope_.getValues!int(key) == [10]);
+    assert(scope_.getValues!int(other) == [2]);
+    assert(ctx.getValues!int(key) == [1]);
+    assert(scope_.getCachedEval!int(other) is ctx.getCachedEval!int(other));
+    scope_.setCachedEval!int(key, resolve([10]));
+    assert(ctx.getCachedEval!int(key) is null);
+    assert(scope_.getRequestContext!AuthCtx.userId == "user-1");
+
+    scope_.addError("failed", []);
+    assert(ctx.hasErrors && ctx.errors.length == 1);
+    assert(scope_.errors.length == 1);
+
+    import ae.utils.promise.await : awaitSync;
+    assert(awaitSync(ctx.getCachedEval!int(other)) == [2]);
+    assert(awaitSync(scope_.getCachedEval!int(key)) == [10]);
 }

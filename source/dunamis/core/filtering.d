@@ -159,16 +159,14 @@ class FilterByExpr(Entity) : Expr!(Entity[]), FilterByInfo {
                 filtered.reserve(group.length);
 
                 foreach (item; group) {
-                    // Set current filter item in context
-                    ctx.setValues!Entity(self, [item]);
-
-                    // Clear ALL cached evaluations - the entire predicate tree depends on the
-                    // filter item, including nested BinaryOpExpr, ConstantExpr, column access, etc.
-                    // Each iteration has a new context (different filter item), so all caches are invalid.
-                    ctx.clearAllCachedEvals();
+                    // Evaluate the predicate for this item in a scope of its
+                    // own: its evaluations depend on the item, and must not
+                    // be memoized in (or wipe the memo of) the shared context.
+                    auto itemCtx = ctx.createScope();
+                    itemCtx.setValues!Entity(self, [item]);
 
                     // Evaluate predicate
-                    bool[] results = evalAs!bool(predicate, ctx).await;
+                    bool[] results = evalAs!bool(predicate, itemCtx).await;
                     debug(filter) {
                         import std.stdio : writefln;
                         writefln("  predicate results=%s", results);
@@ -277,4 +275,55 @@ unittest {
     // body after template-constraint deduction.
     auto filtered = filterBy!((item) => item.eq(item))(new TestCollectionExpr());
     static assert(is(typeof(filtered) == FilterByExpr!TestEntity));
+}
+
+// Evaluating a filter predicate in memory must not disturb the memoized
+// evaluations of the rest of the request (expressions with side effects,
+// such as mutations, rely on being evaluated once).
+unittest {
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core.expr : use;
+
+    static struct TestEntity { int id; }
+
+    static class TestCollectionExpr : Expr!(TestEntity[]) {
+        override ExprBase[] dependencies() { return []; }
+        override void replaceDependency(size_t, ExprBase) {}
+        override Promise!(TestEntity[][]) eval(EvalContext) {
+            return resolve([[TestEntity(1), TestEntity(2)]]);
+        }
+    }
+
+    static class CountingExpr : Expr!int {
+        int evaluations;
+        override ExprBase[] dependencies() { return []; }
+        override void replaceDependency(size_t, ExprBase) {}
+        override Promise!(int[]) eval(EvalContext) {
+            evaluations++;
+            return resolve([1]);
+        }
+    }
+
+    // Evaluates its input only after the filter has started evaluating its
+    // predicate.
+    static class LaterExpr : Expr!int {
+        ExprBase input;
+        this(ExprBase input) { this.input = input; }
+        override ExprBase[] dependencies() { return [input]; }
+        override void replaceDependency(size_t, ExprBase dep) { input = dep; }
+        override Promise!(int[]) eval(EvalContext ctx) {
+            auto p = resolve();
+            foreach (_; 0 .. 20)
+                p = p.then(() {});
+            return p.then(() => evalAs!int(input, ctx));
+        }
+    }
+
+    auto counted = new CountingExpr();
+    auto filtered = filterBy!((item) => item.eq(item))(new TestCollectionExpr());
+    auto query = use((int a, TestEntity[] items, int b) => a + cast(int) items.length + b,
+        counted, filtered, new LaterExpr(counted));
+
+    assert(awaitSync(evalAs!int(query, new EvalContext())) == [4]);
+    assert(counted.evaluations == 1);
 }

@@ -190,16 +190,16 @@ class SortByExpr(Entity, Pred) : Expr!(Entity[]), SortByInfo
                     size_t pos = 0;
                     while (pos < sorted.length) {
                         // Compare: is item < sorted[pos]?
-                        // Clear expression cache since context values changed
-                        ctx.clearAllCachedEvals();
-                        ctx.setValues!Entity(self, [item, sorted[pos]]);
+                        // Evaluated in a scope of its own (see FilterByExpr)
+                        auto pairCtx = ctx.createScope();
+                        pairCtx.setValues!Entity(self, [item, sorted[pos]]);
 
                         bool itemIsLess;
                         static if (is(Pred : Expr!bool)) {
-                            bool[] results = evalAs!bool(predicate, ctx).await;
+                            bool[] results = evalAs!bool(predicate, pairCtx).await;
                             itemIsLess = results.length > 0 ? results[0] : false;
                         } else static if (is(Pred : Expr!int)) {
-                            int[] results = evalAs!int(predicate, ctx).await;
+                            int[] results = evalAs!int(predicate, pairCtx).await;
                             itemIsLess = results.length > 0 ? results[0] < 0 : false;
                         }
 
