@@ -7,6 +7,7 @@ import ae.utils.promise;
 import dunamis.core.eval;
 import dunamis.core.optimize;
 import dunamis.core.expr.base;
+import dunamis.core.join : joinAll;
 
 // ============================================================================
 // Binary Operation Expression
@@ -65,7 +66,7 @@ class SqlBinaryBoolExpr(L, R) : Expr!bool, BinaryOpInfo {
         return this;
     }
     override Promise!(bool[]) eval(EvalContext ctx) {
-        return all(evalAs!L(_left, ctx), evalAs!R(_right, ctx))
+        return joinAll(evalAs!L(_left, ctx), evalAs!R(_right, ctx))
             .dmd21804workaround.then((values) {
                 bool[] result = new bool[values[0].length];
                 foreach (i; 0 .. result.length)
@@ -121,7 +122,7 @@ class BinaryOpExpr(L, string op, R = L) : Expr!(typeof(mixin("L.init " ~ op ~ " 
         auto right = _right;
 
         // Evaluate both operands in parallel, then combine
-        return all(evalAs!L(left, ctx), evalAs!R(right, ctx))
+        return joinAll(evalAs!L(left, ctx), evalAs!R(right, ctx))
             .dmd21804workaround
             .then((results) {
                 auto lefts = results[0];

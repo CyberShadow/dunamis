@@ -14,6 +14,7 @@ import dunamis.core.types;
 import dunamis.core.eval;
 import dunamis.core.optimize;
 import dunamis.core.expr.base;
+import dunamis.core.join : joinAll;
 
 // ============================================================================
 // Use Combinator (computed fields)
@@ -67,7 +68,7 @@ class UseExpr(Fn, Exprs...) : Expr!(ReturnType!Fn)
         }
 
         // Wait for all, then combine results
-        return all(promises.expand).then((EvaluatedArrays results) {
+        return joinAll(promises.expand).then((EvaluatedArrays results) {
             R[] result = new R[results[0].length];
             foreach (idx; 0 .. results[0].length) {
                 // Build argument tuple and call fn
@@ -155,7 +156,7 @@ class TryUseExpr(Fn, Exprs...) : Expr!(GqlResult!(ReturnType!Fn))
             promises[i] = evalAs!(InputTypes[i])(_inputs[i], ctx);
         }
 
-        return all(promises.expand).then((EvaluatedArrays results) {
+        return joinAll(promises.expand).then((EvaluatedArrays results) {
             GqlResult!R[] result = new GqlResult!R[results[0].length];
             foreach (idx; 0 .. results[0].length) {
                 Tuple!InputTypes args;
@@ -228,7 +229,7 @@ class BroadcastExpr(T) : Expr!T {
 
     override Promise!(T[]) eval(EvalContext ctx) {
         alias ResultTuple = Tuple!(T[], size_t);
-        return all(
+        return joinAll(
             _source.eval(ctx),
             _sizeReference.evalResultLength(ctx)
         ).then((ResultTuple results) {

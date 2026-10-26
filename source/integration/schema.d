@@ -240,6 +240,21 @@ mixin template TestSchema(alias db) {
             );
         }
 
+        /// Computed field with two inputs: the first fails for the whole
+        /// batch as soon as the user's first name is known, while the second
+        /// still needs several dependent round trips (posts, their authors,
+        /// those authors' posts' titles). The field's error must not let the
+        /// request finish — and its session be torn down — while the second
+        /// input is still querying.
+        static auto failsBesideSlowSibling(Expr!User u) {
+            import dunamis.core.expr : map;
+            return use(
+                (string failed, string[][] coAuthorTitles) => failed,
+                failingField(u),
+                map!((Expr!Post p) => map!((Expr!Post q) => q.title)(p.author.posts))(u.posts)
+            );
+        }
+
         /// Test recursive input: returns user's firstName (simplified test)
         /// Real impl would apply filter logic
         static auto matchesFilter(Expr!User u, FilterInput filter) {

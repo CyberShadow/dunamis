@@ -60,7 +60,7 @@ Expr!ResultType belongsTo(Parent, ResultType = Parent, string fk, Child)(Expr!Ch
 /// Populate plain field values into entities by fetching from database.
 /// Used by GetByIdsExpr and GetAllExpr in naive mode to pre-populate fields.
 private Promise!(Entity[]) populatePlainFields(Entity)(RelationalSession session, Entity[] entities) {
-    import ae.utils.promise : all;
+    import dunamis.core.join : joinAll;
     import dunamis.core.types : AnyRef;
 
     if (entities.length == 0) {
@@ -92,8 +92,8 @@ private Promise!(Entity[]) populatePlainFields(Entity)(RelationalSession session
                 });
         }}
 
-        // all(Promise!void[]) returns Promise!void, then we return entities
-        return all(fetches).then(() => entities);
+        // joinAll(Promise!void[]) returns Promise!void, then we return entities
+        return joinAll(fetches).then(() => entities);
     }
 }
 

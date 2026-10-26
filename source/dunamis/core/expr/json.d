@@ -12,6 +12,7 @@ import dunamis.core.types;
 import dunamis.core.eval;
 import dunamis.core.optimize;
 import dunamis.core.expr.base;
+import dunamis.core.join : joinAll;
 
 // ============================================================================
 // jsonObject Combinator (JSON construction)
@@ -141,7 +142,7 @@ class JsonObjectExpr(Args...) : Expr!JSONValue
         }
 
         // Wait for all fields, then build JSON objects
-        return all(promises.expand).then((Tuple!FieldArrayTypes results) {
+        return joinAll(promises.expand).then((Tuple!FieldArrayTypes results) {
             auto count = results[0].length;
             JSONValue[] jsonResults = new JSONValue[count];
 

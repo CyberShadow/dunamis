@@ -1776,6 +1776,25 @@ void testNonNullFieldErrorNullsData() {
     assertErrorPath(response, [JSONValue("users"), JSONValue("failingField")]);
 }
 
+void testFieldErrorBesideInFlightSibling() {
+    // One input of a computed field fails for the whole batch while the other
+    // is still issuing dependent queries. The request (and its session) must
+    // not end until that sibling has settled: before structured joins, the
+    // sibling's next query ran on the torn-down session and crashed the
+    // server with a null-connection dereference.
+    auto response = graphql(`{ tasks { title } users { failsBesideSlowSibling } }`);
+
+    assertPartialResult(response);
+    assertErrorPath(response, [JSONValue("users"), JSONValue("failsBesideSlowSibling")]);
+    assertTrue(response["errors"].array[0]["message"].str == "intentional error in failingField",
+        "Expected the failing input's own error, got: " ~ response["errors"].toString());
+
+    // The server and its session pool are still healthy.
+    auto followUp = graphql(`{ users { firstName posts { title author { firstName } } } }`);
+    assertNoErrors(followUp);
+    assertTrue(followUp["data"]["users"].array.length >= 2, "Expected at least 2 users");
+}
+
 // ============================================================================
 // Composite Primary Key Tests
 // ============================================================================
@@ -2285,6 +2304,7 @@ static this() {
     registerTest("Field error returns partial result", "tests", &testFieldErrorPartialResult);
     registerTest("Field error has correct path", "tests", &testFieldErrorPath);
     registerTest("Non-null field error nulls the whole response data", "tests", &testNonNullFieldErrorNullsData);
+    registerTest("Field error beside an in-flight sibling input", "tests", &testFieldErrorBesideInFlightSibling);
 
     // Composite primary key tests
     registerTest("Query all tags (composite PK)", "tests", &testQueryAllTags);
