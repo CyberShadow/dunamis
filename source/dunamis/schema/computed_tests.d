@@ -98,6 +98,8 @@ unittest {
     static assert(sdl.canFind("type Like {\n  id: Int!\n  postId: Int!\n  post: Post!\n}"), sdl);
     static assert(!sdl.canFind("helper"), sdl);
     static assert(!sdl.canFind("notAField"), sdl);
+    // (nor are members of the library's filter types)
+    static assert(!sdl.canFind("toString"), sdl);
     // The query plugins applied after it see computed fields like any other
     static assert(sdl.canFind("users(") && sdl.canFind("filter:") && sdl.canFind("orderBy:"), sdl);
     static assert(sdl.canFind("  postCount: IntFilter\n"), sdl);

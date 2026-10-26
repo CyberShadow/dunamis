@@ -444,6 +444,13 @@ struct EntityFilter(Entity) {
     Nullable!(typeof(this)[]) and;
     Nullable!(typeof(this)[]) or;
     typeof(this)* not;
+
+    /// Formats as the filter type's name. Phobos compiles `toString` of
+    /// every `Nullable!T` (e.g. of `and`), which would otherwise compile the
+    /// formatting of every field of every filter type.
+    void toString(scope void delegate(const(char)[]) sink) const {
+        sink(__gqlTypeName);
+    }
 }
 
 /// The declarations of the column, relationship and scalar array fields of
