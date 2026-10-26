@@ -17,6 +17,9 @@ class RelationalOptimizeContext {
         /// Query nodes keyed by MapExpr identity (using Object pointer)
         QueryNode[void*] _queryNodes;
 
+        /// Query nodes keyed by their root expression's identity
+        QueryNode[void*] _rootNodes;
+
         /// PrefetchExpr for each QueryNode (keyed by node ID)
         PrefetchExpr[QueryNodeId] _prefetchExprs;
 
@@ -53,6 +56,20 @@ class RelationalOptimizeContext {
     QueryNode getNode(Object mapExpr) {
         auto key = cast(void*) mapExpr;
         return _queryNodes.get(key, null);
+    }
+
+    /// Record that the root expression `root` (e.g. a GetAllExpr) is the
+    /// root collection of `node`'s query.
+    void setRootNode(Object root, QueryNode node) {
+        _rootNodes[cast(void*) root] = node;
+    }
+
+    /// The query node of the root expression `root`, or null if none was
+    /// recorded (see setRootNode).  Several root fields may read the same
+    /// table with different SQL (e.g. different WHERE clauses): each root
+    /// expression must read its own node's rows.
+    QueryNode rootNodeOf(Object root) {
+        return _rootNodes.get(cast(void*) root, null);
     }
 
     /// Find a root node by typeName and table (for GetAllExpr to find its QueryNode)

@@ -896,115 +896,268 @@ Nullable!DialectSql extractFilterConjunctsWhereClause(FilterByInfo filterInfo, s
         "(" ~ conjuncts.map!(c => c(d)).join(" AND ") ~ ")");
 }
 
-/// Recursively extract WHERE SQL from an expression tree.
+/// Recursively extract WHERE SQL from an expression tree: the condition the
+/// predicate `expr` puts on the rows of `table` that `filterItem` stands for.
+///
+/// Besides conditions on the item's own columns, this covers conditions on
+/// related rows: a condition on a belongs-to relationship becomes a condition
+/// on the item's foreign key (`fk IN (SELECT pk FROM parent WHERE ...)`, also
+/// through chains of relationships), and `some` over a to-many relationship
+/// an `EXISTS` subquery over the child table. A predicate with any part that
+/// cannot be expressed this way gives null.
 Nullable!DialectSql extractWhereFromExpr(Object expr, Object filterItem, string table = null) {
-    // Handle binary operators: AND, OR, comparison operators
-    if (auto binOp = cast(BinaryOpInfo) expr) {
-        string op = binOp.operator;
+    WhereContext context;
+    return context.extract(expr, filterItem, table);
+}
 
-        // Logical operators: AND, OR
-        if (op == "&&" || op == "||") {
-            auto leftSql = extractWhereFromExpr(binOp.left, filterItem, table);
-            auto rightSql = extractWhereFromExpr(binOp.right, filterItem, table);
-            if (!leftSql.isNull && !rightSql.isNull) {
-                string sqlOp = (op == "&&") ? "AND" : "OR";
-                auto l = leftSql.get, r = rightSql.get;
-                return Nullable!DialectSql((SqlDialect d) => "(" ~ l(d) ~ " " ~ sqlOp ~ " " ~ r(d) ~ ")");
+/// The state of a WHERE clause extraction: the aliases of the subqueries it
+/// renders.
+private struct WhereContext {
+    private int aliases;
+
+    /// A fresh table alias for a subquery.
+    string newAlias() {
+        return "_f" ~ (++aliases).to!string;
+    }
+
+    /// One belongs-to step from a row to its related row.
+    static struct Hop {
+        string fk;           // foreign key column of the row
+        string parentTable;  // the related row's table
+        string parentPk;     // and its (single-column) primary key
+    }
+
+    /// The row a predicate's operand belongs to: the item (`hops` empty) or a
+    /// row related to it through belongs-to relationships.
+    static struct RowPath {
+        bool valid;
+        Hop[] hops;
+    }
+
+    /// Resolve an entity expression to the item it is, or the row related to
+    /// the item through belongs-to relationships, seeing through entity casts
+    /// and nullable unwrapping.
+    static RowPath resolveRow(Object entity, Object filterItem) {
+        while (true) {
+            if (entity is null)
+                return RowPath.init;
+            if (entity is filterItem)
+                return RowPath(true);
+            if (auto entityCast = cast(EntityCastInfo) entity) {
+                auto inner = entityCast.inputExpr;
+                if (inner is entity) return RowPath.init;
+                entity = inner;
+                continue;
             }
-            return Nullable!DialectSql.init;
+            if (auto unwrap = cast(UnwrapNullableInfo) entity) {
+                auto inner = unwrap.inputExpr;
+                if (inner is entity) return RowPath.init;
+                entity = inner;
+                continue;
+            }
+            if (auto belongsTo = cast(BelongsToInfo) entity) {
+                auto parentPk = belongsTo.parentPkColumns;
+                if (parentPk.length != 1)
+                    return RowPath.init;
+                auto path = resolveRow(belongsTo.inputExpr, filterItem);
+                if (!path.valid)
+                    return RowPath.init;
+                path.hops ~= Hop(belongsTo.fkColumn, belongsTo.parentTable, parentPk[0]);
+                return path;
+            }
+            return RowPath.init;
         }
+    }
 
-        // Comparison operators: ==, !=, <, <=, >, >=
-        if (op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=" ||
-            op == "rangeContains" || op == "rangeContainedBy" || op == "rangeOverlaps" ||
-            op == "rangeStrictlyLeft" || op == "rangeStrictlyRight" ||
-            op == "rangeNotExtendsRight" || op == "rangeNotExtendsLeft" ||
-            op == "rangeAdjacent") {
-            // Try to match: column op constant or constant op column
-            auto leftColInfo = extractFilterColumnInfo(binOp.left, filterItem, table);
-            auto rightColInfo = extractFilterColumnInfo(binOp.right, filterItem, table);
-            auto leftConst = extractConstant(binOp.left);
-            auto rightConst = extractConstant(binOp.right);
+    /// The SQL condition, on the rows of `table`, that the row `path` leads to
+    /// satisfies the condition `condition` renders for a table reference.
+    DialectSql onRow(RowPath path, string table, DialectSql delegate(string rowTable) condition) {
+        if (path.hops.length == 0)
+            return condition(table);
+        auto hop = path.hops[0];
+        auto alias_ = newAlias();
+        auto inner = onRow(RowPath(true, path.hops[1 .. $]), alias_, condition);
+        auto fk = qualified(table, hop.fk);
+        auto subquery = "SELECT " ~ alias_ ~ "." ~ hop.parentPk ~ " FROM " ~ hop.parentTable ~ " " ~ alias_ ~
+            " WHERE ";
+        return (SqlDialect d) => "(" ~ fk ~ " IN (" ~ subquery ~ inner(d) ~ "))";
+    }
 
-            string column, value;
-            bool isColumnOnLeft = false;
+    static string qualified(string table, string column) {
+        return (table.length ? table ~ "." : "") ~ column;
+    }
 
-            if (!leftColInfo.isNull && !rightConst.isNull) {
-                column = leftColInfo.get;
-                value = rightConst.get;
-                isColumnOnLeft = true;
-            } else if (!rightColInfo.isNull && !leftConst.isNull) {
-                column = rightColInfo.get;
-                value = leftConst.get;
-                isColumnOnLeft = false;
-            } else {
+    /// The column an operand reads, on the row it belongs to.
+    static bool resolveColumn(Object expr, Object filterItem, out RowPath path, out string column) {
+        // A nullable column's values, unwrapped
+        while (auto unwrap = cast(UnwrapNullableInfo) expr) {
+            if (unwrap.inputExpr is expr) break;
+            expr = unwrap.inputExpr;
+        }
+        auto colAccess = cast(ColumnAccessInfo) expr;
+        if (colAccess is null) return false;
+        path = resolveRow(colAccess.inputExpr, filterItem);
+        column = colAccess.column;
+        return path.valid;
+    }
+
+    Nullable!DialectSql extract(Object expr, Object filterItem, string table) {
+        // Handle binary operators: AND, OR, comparison operators
+        if (auto binOp = cast(BinaryOpInfo) expr) {
+            string op = binOp.operator;
+
+            // Logical operators: AND, OR
+            if (op == "&&" || op == "||") {
+                auto leftSql = extract(binOp.left, filterItem, table);
+                auto rightSql = extract(binOp.right, filterItem, table);
+                if (!leftSql.isNull && !rightSql.isNull) {
+                    string sqlOp = (op == "&&") ? "AND" : "OR";
+                    auto l = leftSql.get, r = rightSql.get;
+                    return Nullable!DialectSql((SqlDialect d) => "(" ~ l(d) ~ " " ~ sqlOp ~ " " ~ r(d) ~ ")");
+                }
                 return Nullable!DialectSql.init;
             }
 
-            string sqlOp = translateComparisonOp(op, isColumnOnLeft);
-            return dialectAgnostic(column ~ " " ~ sqlOp ~ " " ~ value);
-        }
-    }
+            // Comparison operators: ==, !=, <, <=, >, >=
+            if (op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=" ||
+                op == "rangeContains" || op == "rangeContainedBy" || op == "rangeOverlaps" ||
+                op == "rangeStrictlyLeft" || op == "rangeStrictlyRight" ||
+                op == "rangeNotExtendsRight" || op == "rangeNotExtendsLeft" ||
+                op == "rangeAdjacent") {
+                // Try to match: column op constant or constant op column
+                RowPath path;
+                string column;
+                string value;
+                bool isColumnOnLeft;
+                auto leftConst = extractConstant(binOp.left);
+                auto rightConst = extractConstant(binOp.right);
+                if (!rightConst.isNull && resolveColumn(binOp.left, filterItem, path, column)) {
+                    value = rightConst.get;
+                    isColumnOnLeft = true;
+                } else if (!leftConst.isNull && resolveColumn(binOp.right, filterItem, path, column)) {
+                    value = leftConst.get;
+                    isColumnOnLeft = false;
+                } else {
+                    return Nullable!DialectSql.init;
+                }
 
-    // Handle unary NOT operator
-    if (auto unaryOp = cast(UnaryOpInfo) expr) {
-        if (unaryOp.operator == "!") {
-            auto operandSql = extractWhereFromExpr(unaryOp.operand, filterItem, table);
-            if (!operandSql.isNull) {
-                auto operand = operandSql.get;
-                return Nullable!DialectSql((SqlDialect d) => "NOT " ~ operand(d));
+                string sqlOp = translateComparisonOp(op, isColumnOnLeft);
+                return Nullable!DialectSql(onRow(path, table, (string rowTable) {
+                    auto sql = qualified(rowTable, column) ~ " " ~ sqlOp ~ " " ~ value;
+                    return (SqlDialect _) => sql;
+                }));
             }
         }
-    }
 
-    // Handle constant true/false
-    if (auto constInfo = cast(ConstantInfo) expr) {
-        if (constInfo.valueType == typeid(bool)) {
-            bool val = constInfo.valueAsString == "true";
-            return dialectAgnostic(val ? "1=1" : "1=0");
+        // Handle unary NOT operator
+        if (auto unaryOp = cast(UnaryOpInfo) expr) {
+            if (unaryOp.operator == "!") {
+                auto operandSql = extract(unaryOp.operand, filterItem, table);
+                if (!operandSql.isNull) {
+                    auto operand = operandSql.get;
+                    return Nullable!DialectSql((SqlDialect d) => "NOT " ~ operand(d));
+                }
+            }
         }
-    }
 
-    // Handle LIKE expressions (contains, startsWith, endsWith)
-    if (auto likeInfo = cast(LikeInfo) expr) {
-        auto colInfo = extractFilterColumnInfo(likeInfo.likeOperand, filterItem, table);
-        if (!colInfo.isNull) {
-            // The pattern already has % and _ escaped as \% and \_ by
-            // escapeLikePattern(); the dialect quotes it and picks the
-            // (case-sensitive or -insensitive) matching operator.
-            string column = colInfo.get;
-            string escapedPattern = likeInfo.likePattern.replace("'", "''");
-            bool caseInsensitive = likeInfo.caseInsensitive;
-            return Nullable!DialectSql((SqlDialect d) => d.likeOp(column, escapedPattern, caseInsensitive));
+        // Handle null checks of nullable columns and relationships
+        if (auto isNullOp = cast(IsNullInfo) expr) {
+            RowPath path;
+            string column;
+            if (!resolveColumn(isNullOp.operand, filterItem, path, column)) {
+                // A nullable belongs-to relationship is null if its foreign key is.
+                auto belongsTo = cast(BelongsToInfo) isNullOp.operand;
+                if (belongsTo is null)
+                    return Nullable!DialectSql.init;
+                path = resolveRow(belongsTo.inputExpr, filterItem);
+                column = belongsTo.fkColumn;
+                if (!path.valid)
+                    return Nullable!DialectSql.init;
+            }
+            return Nullable!DialectSql(onRow(path, table, (string rowTable) {
+                auto sql = "(" ~ qualified(rowTable, column) ~ " IS NULL)";
+                return (SqlDialect _) => sql;
+            }));
         }
+
+        // Handle `some` over a to-many relationship
+        if (auto collPred = cast(CollectionPredicateInfo) expr) {
+            // The collection, seen through element-wise entity casts
+            Object collection = collPred.collection;
+            while (true) {
+                if (auto entityCast = cast(EntityCastInfo) collection) {
+                    if (entityCast.inputExpr is collection) break;
+                    collection = entityCast.inputExpr;
+                } else if (auto map = cast(MapExprInfo) collection) {
+                    if (map.collection is collection || !isElementCast(map)) break;
+                    collection = map.collection;
+                } else
+                    break;
+            }
+            auto hasMany = cast(HasManyInfo) collection;
+            if (hasMany is null || hasMany.parentPkColumns.length != 1)
+                return Nullable!DialectSql.init;
+            auto path = resolveRow(hasMany.inputExpr, filterItem);
+            if (!path.valid)
+                return Nullable!DialectSql.init;
+            auto childAlias = newAlias();
+            auto predicate = extract(collPred.predicate, collPred.itemPlaceholder, childAlias);
+            if (predicate.isNull)
+                return Nullable!DialectSql.init;
+            auto pred = predicate.get;
+            auto childTable = hasMany.childTable;
+            auto fk = hasMany.fkColumn;
+            auto parentPk = hasMany.parentPkColumns[0];
+            return Nullable!DialectSql(onRow(path, table, (string rowTable) {
+                auto subquery = "SELECT 1 FROM " ~ childTable ~ " " ~ childAlias ~
+                    " WHERE " ~ childAlias ~ "." ~ fk ~ " = " ~ qualified(rowTable, parentPk) ~ " AND ";
+                return (SqlDialect d) => d.existsSubquery(subquery ~ pred(d));
+            }));
+        }
+
+        // Handle constant true/false
+        if (auto constInfo = cast(ConstantInfo) expr) {
+            if (constInfo.valueType == typeid(bool)) {
+                bool val = constInfo.valueAsString == "true";
+                return dialectAgnostic(val ? "1=1" : "1=0");
+            }
+        }
+
+        // Handle LIKE expressions (contains, startsWith, endsWith, like)
+        if (auto likeInfo = cast(LikeInfo) expr) {
+            RowPath path;
+            string column;
+            if (resolveColumn(likeInfo.likeOperand, filterItem, path, column)) {
+                // The pattern already has % and _ escaped as \% and \_ by
+                // escapeLikePattern() (or is a LIKE pattern); the dialect
+                // quotes it and picks the (case-sensitive or -insensitive)
+                // matching operator.
+                string escapedPattern = likeInfo.likePattern.replace("'", "''");
+                bool caseInsensitive = likeInfo.caseInsensitive;
+                return Nullable!DialectSql(onRow(path, table, (string rowTable) {
+                    auto columnSql = qualified(rowTable, column);
+                    return (SqlDialect d) => d.likeOp(columnSql, escapedPattern, caseInsensitive);
+                }));
+            }
+        }
+
+        return Nullable!DialectSql.init;
     }
 
-    return Nullable!DialectSql.init;
+    /// Whether a MapExpr only casts each element to another entity type
+    /// (as plugins wrapping an entity's relationships do).
+    static bool isElementCast(MapExprInfo map) {
+        auto body_ = map.bodyExpr;
+        auto entityCast = cast(EntityCastInfo) body_;
+        if (entityCast is null)
+            return false;
+        auto item = cast(EveryItemOfExprInfo) entityCast.inputExpr;
+        return item !is null && item.parentMap is cast(Object) map;
+    }
 }
 
 private Nullable!DialectSql dialectAgnostic(string sql) {
     return Nullable!DialectSql((SqlDialect) => sql);
-}
-
-/// Try to extract column name from an expression that should be a column access on the filter item.
-private Nullable!string extractFilterColumnInfo(Object expr, Object filterItem, string table) {
-    // Check if this is a column access expression
-    auto colAccess = cast(ColumnAccessInfo) expr;
-    if (colAccess is null) return Nullable!string.init;
-
-    // Get the input expression and check if it's the filter item placeholder
-    auto inputExpr = colAccess.inputExpr();
-    while (auto entityCast = cast(EntityCastInfo) inputExpr) {
-        auto inner = entityCast.inputExpr;
-        if (inner is null || inner is inputExpr)
-            break;
-        inputExpr = inner;
-    }
-    if (cast(Object) inputExpr is filterItem) {
-        return Nullable!string((table.length ? table ~ "." : "") ~ colAccess.column);
-    }
-
-    return Nullable!string.init;
 }
 
 /// Extract SQL literal from a constant expression.

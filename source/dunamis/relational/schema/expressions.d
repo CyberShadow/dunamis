@@ -304,6 +304,7 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
 
                 // Configure the node based on collection type
                 if (auto rootExpr = cast(RootExprInfo) underlyingColl) {
+                    relCtx.setRootNode(underlyingColl, node);
                     if (rootExpr.filterType == FilterType.byIds) {
                         node.setRootFilter(FilterType.byIds, rootExpr.filterRefs);
                     } else if (rootExpr.filterType == FilterType.all) {
@@ -599,7 +600,12 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
 
         auto relCtx = ctx.getSourceContext!RelationalOptimizeContext();
 
-        auto node = relCtx.findRootNode(EntityID!Entity.typeName, EntityID!Entity.table);
+        // The node configured for this root collection (another root field
+        // may query the same table differently); failing that, any root node
+        // of the table.
+        auto node = relCtx.rootNodeOf(this);
+        if (node is null)
+            node = relCtx.findRootNode(EntityID!Entity.typeName, EntityID!Entity.table);
 
         if (node is null) {
             return this;
@@ -767,8 +773,10 @@ class HasManyAccessExpr(Parent, Child, string fk, string[] orderBy = null) : Exp
     @property string fkColumn() { return fk; }
     static if (!is(Parent == void)) {
         @property string parentTypeName() { return EntityID!Parent.typeName; }
+        @property string[] parentPkColumns() { return getPkColumns!Parent; }
     } else {
         @property string parentTypeName() { return ""; }
+        @property string[] parentPkColumns() { return []; }
     }
     @property string[] orderColumns() { return orderBy.dup; }
 }

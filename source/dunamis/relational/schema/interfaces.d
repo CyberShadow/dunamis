@@ -54,6 +54,10 @@ interface HasManyInfo {
     /// Parent entity type name (for ref encoding)
     @property string parentTypeName();
 
+    /// Primary key columns of the parent table, which the child table's
+    /// foreign key refers to (empty if unknown)
+    @property string[] parentPkColumns();
+
     /// Child columns that order each parent's children (empty: unordered)
     @property string[] orderColumns();
 }
