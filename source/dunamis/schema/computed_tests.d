@@ -8,23 +8,22 @@ import std.json : JSONValue;
 import ae.utils.promise.await : awaitSync;
 
 import dunamis.core : EvalContext, Executor;
-import dunamis.core.expr : Expr;
+import dunamis.core.expr : Expr, use;
 import dunamis.graphql.compiler : compileQuery;
 import dunamis.graphql.schema : Schema, generateSchemaSDL;
 import dunamis.relational.demo : MockDB;
 import dunamis.schema.computed : ComputedFieldsPlugin, ComputedFieldEntity, computedFieldsIn;
 import dunamis.schema.filtering : FilterPlugin;
 import dunamis.schema.pagination : PaginationPlugin;
-import dunamis.schema.plugin : ApplyPlugins;
+import dunamis.schema.plugin : ApplyPlugins, ArrayFieldElementType;
 import dunamis.schema.sorting : SortingPlugin;
 static import dunamis.schema.computed_fixture;
 import dunamis.schema.computed_fixture : fixtureDb, Greeting, Query, Post, User;
 alias fixture = dunamis.schema.computed_fixture;
 
 
-alias PluginLast = ApplyPlugins!(Schema!Query,
-    FilterPlugin, SortingPlugin, PaginationPlugin, ComputedFieldsPlugin!fixture);
-alias PluginFirst = ApplyPlugins!(Schema!Query,
+/// The documented placement: straight after Schema!, before the query plugins.
+alias FinalSchema = ApplyPlugins!(Schema!Query,
     ComputedFieldsPlugin!fixture, FilterPlugin, SortingPlugin, PaginationPlugin);
 
 private void seedFixture() {
@@ -78,7 +77,7 @@ unittest {
 unittest {
     import std.algorithm : canFind;
 
-    enum sdl = generateSchemaSDL!PluginLast;
+    enum sdl = generateSchemaSDL!FinalSchema;
     static assert(sdl.canFind(`"""Number of posts written by the user"""` ~ "\n  postCount: Int!"), sdl);
     static assert(sdl.canFind(`shout(suffix: String = "!"): String!`), sdl);
     static assert(sdl.canFind("authorName: String!"), sdl);
@@ -96,20 +95,19 @@ unittest {
     static assert(sdl.canFind("type Like {\n  id: Int!\n  postId: Int!\n  post: Post!\n}"), sdl);
     static assert(!sdl.canFind("helper"), sdl);
     static assert(!sdl.canFind("notAField"), sdl);
-    // Earlier plugins' vocabulary is unchanged
+    // The query plugins applied after it see computed fields like any other
     static assert(sdl.canFind("users(") && sdl.canFind("filter:") && sdl.canFind("orderBy:"), sdl);
-    static assert(!sdl.canFind("postCount: IntFilter"), sdl);
-
-    // Placing the plugin first is supported too
-    enum sdlFirst = generateSchemaSDL!PluginFirst;
-    static assert(sdlFirst.canFind("postCount: Int!"), sdlFirst);
+    static assert(sdl.canFind("  postCount: IntFilter\n"), sdl);
+    static assert(sdl.canFind("  authorName: StringFilter\n"), sdl);
+    // (but not those with required arguments)
+    static assert(!sdl.canFind("  shout: StringFilter\n"), sdl);
 }
 
-// Execution with the plugin placed last: sorting, pagination and nested filters still apply.
+// Execution: sorting, pagination and nested filters apply.
 // (MockDB ignores SQL WHERE clauses, so root filters are covered by the Postgres integration suite.)
 unittest {
     seedFixture();
-    auto result = executeFixture(compileQuery!PluginLast(`{
+    auto result = executeFixture(compileQuery!FinalSchema(`{
         users(orderBy: [{field: id, direction: ASC}], first: 1) {
             name
             postCount
@@ -161,7 +159,7 @@ unittest {
 // computed fields and relations are selectable
 unittest {
     seedFixture();
-    auto result = executeFixture(compileQuery!PluginLast(`{
+    auto result = executeFixture(compileQuery!FinalSchema(`{
         posts(orderBy: [{field: id, direction: ASC}]) {
             title label
             audit { title author { name label postCount } }
@@ -181,10 +179,10 @@ unittest {
     assert(posts[2]["audit"]["author"]["name"].str == "Bob", result.toString());
 }
 
-// Execution with the plugin placed first; nulls from Nullable results
+// Nulls from Nullable results
 unittest {
     seedFixture();
-    auto result = executeFixture(compileQuery!PluginFirst(`{
+    auto result = executeFixture(compileQuery!FinalSchema(`{
         users(first: 1, offset: 1) { postCount initial maybeSpan { from } maybeSpans { from } posts { authorName } }
     }`));
     auto bob = result["users"][0];
@@ -201,7 +199,7 @@ unittest {
     seedFixture();
     auto ctx = new EvalContext();
     auto result = awaitSync(new Executor().execute(
-        compileQuery!PluginLast(`{ posts { title checkedTitle } }`), ctx));
+        compileQuery!FinalSchema(`{ posts { title checkedTitle } }`), ctx));
     assert(result["posts"].array.length == 3, result.toString());
     foreach (post; result["posts"].array)
         assert(!post["title"].isNull && post["checkedTitle"].isNull, result.toString());
@@ -225,3 +223,41 @@ unittest {
         generateSchemaSDL!(ApplyPlugins!(Schema!Query, ComputedFieldsPlugin!orphan))));
     static assert(!__traits(compiles, computedFieldsIn!notAField));
 }
+
+// The plugin works with the types of the schema it is applied to: after
+// another plugin, functions written against user-declared types match no
+// type (the plugin does not look beneath the previous plugin's wrappers),
+// while functions written against that schema's own types are attached.
+private alias Filtered = ApplyPlugins!(Schema!Query, FilterPlugin);
+private alias FilteredUser = ArrayFieldElementType!(Filtered.Query.users);
+
+auto nameLength(Expr!FilteredUser u) {
+    return use((string name) => cast(int) name.length, u.name);
+}
+
+unittest {
+    import std.algorithm : canFind;
+
+    static assert(!__traits(compiles,
+        generateSchemaSDL!(ApplyPlugins!(Filtered, ComputedFieldsPlugin!(fixture.authorName)))));
+
+    alias Extended = ApplyPlugins!(Filtered, ComputedFieldsPlugin!nameLength);
+    enum sdl = generateSchemaSDL!Extended;
+    static assert(sdl.canFind("nameLength: Int!"), sdl);
+    // Placed after FilterPlugin, the computed field is not filterable
+    static assert(!sdl.canFind("nameLength: IntFilter"), sdl);
+
+    seedFixture();
+    auto result = executeFixture(compileQuery!Extended(`{ users { nameLength } }`));
+    assert(result["users"][0]["nameLength"].integer == 5, result.toString());
+}
+
+// Result-only types are extended like the schema's own types
+unittest {
+    import dunamis.schema.computed_fixture : Window;
+    alias P = ComputedFieldsPlugin!fixture;
+    alias C = P!(Schema!Query);
+    alias W = C.FieldTypeMap!Window;
+    static assert(is(C.EntityTypeMap!W == C.WithComputed!W));
+}
+
