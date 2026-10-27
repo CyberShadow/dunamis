@@ -149,6 +149,21 @@ template EnumFilter(E) if (is(E == enum)) {
 /// ---
 struct FilteredBy(Filter) {}
 
+/// Whether `T` is a custom scalar whose values compare with each other, so
+/// that it is filtered by a `StringFilter` (its operands deserialized as
+/// values of `T`). Other custom scalars, e.g. one wrapping a type whose
+/// comparison operators its `alias this` does not reach, are not filtered
+/// (unless they declare a filter with `@FilteredBy`).
+template isOrderedCustomScalar(T) {
+    import dunamis.core.types : isCustomScalar;
+    static if (isCustomScalar!T)
+        // (Compared as lvalues, as evaluation does: e.g. std.bigint.BigInt
+        // compares rvalues but not lvalues through alias this.)
+        enum bool isOrderedCustomScalar = __traits(compiles, { T a, b; bool r = a < b; r = a == b; });
+    else
+        enum bool isOrderedCustomScalar = false;
+}
+
 /// Whether values of type `T` are filtered by a filter type `T` declares
 /// with `@FilteredBy`.
 template hasDeclaredFilter(T) {
@@ -394,7 +409,7 @@ template ColumnFilterType(T) {
         alias ColumnFilterType = ColumnFilterType!U;
     } else static if (hasDeclaredFilter!T) {
         alias ColumnFilterType = DeclaredFilterType!T;
-    } else static if (isCustomScalar!T) {
+    } else static if (isOrderedCustomScalar!T) {
         alias ColumnFilterType = StringFilter;
     } else static if (is(T == enum)) {
         alias ColumnFilterType = EnumFilter!T;
@@ -1027,7 +1042,7 @@ template isFilterableType(T) {
         enum isFilterableType = isFilterableType!U;
     } else static if (hasDeclaredFilter!T) {
         enum isFilterableType = true;
-    } else static if (isCustomScalar!T) {
+    } else static if (isOrderedCustomScalar!T) {
         enum isFilterableType = true;
     } else {
         // Check if it's a basic scalar type or enum
@@ -1401,6 +1416,23 @@ unittest {
     assert(ids(`{big: {in: ["7", "8"]}}`) == [2, 3]);
     assert(ids(`{big: {notIn: ["7", "8"]}}`) == [1]);
     assert(ids(`{big: {greaterThan: "7", lessThan: "5000000000"}}`) == [3]);
+}
+
+unittest {
+    import std.bigint : BigInt, toDecimalString;
+    import dunamis.core : CustomScalar;
+
+    // A custom scalar whose values do not compare (std.bigint.BigInt's
+    // comparison is not reached through alias this) is not filtered
+    alias TestBigInt = CustomScalar!(BigInt, "TestBigInt",
+        (BigInt v) => JSONValue(toDecimalString(v)),
+        (JSONValue j) => BigInt(j.str));
+    static assert(!isOrderedCustomScalar!TestBigInt);
+    static assert(is(ColumnFilterType!TestBigInt == void) && !isFilterableType!TestBigInt);
+
+    alias TestLong = CustomScalar!(long, "TestLong", (long v) => JSONValue(v), (JSONValue j) => j.integer);
+    static assert(isOrderedCustomScalar!TestLong && is(ColumnFilterType!TestLong == StringFilter));
+    static assert(!isOrderedCustomScalar!long);
 }
 
 unittest {
