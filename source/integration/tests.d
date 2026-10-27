@@ -2205,6 +2205,36 @@ void testNestedToManyFilters() {
         `{"users": [{"firstName": "Alice"}, {"firstName": "Charlie"}]}`);
 }
 
+/// A computed field broadcasting a global root (every user) beneath a
+/// client root of the same table which is filtered or windowed: the global
+/// root still sees every row.
+void testGlobalRootBeneathRestrictedRoot() {
+    import std.algorithm : sort;
+
+    foreach (restriction; [`filter: {firstName: {equalTo: "Alice"}}`, `first: 1, ` ~ byId]) {
+        auto response = graphql(`{ all: users { firstName } users(` ~ restriction ~ `) { ` ~
+            `firstName posts { comments { everyonesFirstNames } } } }`);
+        assertNoErrors(response);
+        string[] everyone;
+        foreach (user; response["data"]["all"].array)
+            everyone ~= user["firstName"].str;
+        everyone.sort();
+        auto users = response["data"]["users"].array;
+        assertTrue(users.length == 1 && users[0]["firstName"].str == "Alice", response.toString());
+        size_t comments;
+        foreach (post; users[0]["posts"].array)
+            foreach (comment; post["comments"].array) {
+                string[] names;
+                foreach (name; comment["everyonesFirstNames"].array)
+                    names ~= name.str;
+                names.sort();
+                assertTrue(names == everyone, restriction ~ ": " ~ response.toString());
+                comments++;
+            }
+        assertTrue(comments >= 2, "Expected Alice's seeded comments: " ~ response.toString());
+    }
+}
+
 void testNestedMixedFilters() {
     // A belongs-to filter within a to-many filter, and the other way round.
     checkNestedFilter(`{ users(` ~ byId ~ `, filter: {posts: {some: {author: {age: {lessThan: 18}}}}}) { firstName } }`,
@@ -2620,6 +2650,7 @@ static this() {
     registerTest("Nested filters: belongs-to within belongs-to", "tests", &testNestedBelongsToFilters);
     registerTest("Nested filters: to-many within to-many", "tests", &testNestedToManyFilters);
     registerTest("Nested filters: belongs-to and to-many mixed", "tests", &testNestedMixedFilters);
+    registerTest("Global root beneath a restricted root of its table", "tests", &testGlobalRootBeneathRestrictedRoot);
     registerTest("Filter: like", "tests", &testLikeFilter);
     registerTest("Unknown input object fields are rejected", "tests", &testUnknownInputFieldsRejected);
 

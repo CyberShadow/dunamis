@@ -593,8 +593,19 @@ mixin template TestSchema(alias db) {
         return p.author.age;
     }
 
+    /// Every user's first name: a global root of the table the client's
+    /// query also selects from, broadcast to each comment
+    Expr!(string[]) everyonesFirstNames(Expr!Comment c) {
+        import dunamis.core.expr : broadcast, map, singleton;
+        return broadcast(map!userFirstName(Query().singleton().users()), c);
+    }
+
+    private Expr!string userFirstName(Expr!User u) {
+        return u.firstName;
+    }
+
     import dunamis.schema.computed : ComputedFieldsPlugin;
-    alias TestComputedFields = ComputedFieldsPlugin!(postCount, surnameFirst, years, authorAge);
+    alias TestComputedFields = ComputedFieldsPlugin!(postCount, surnameFirst, years, authorAge, everyonesFirstNames);
 
     alias BaseSchema = Schema!(Query, Mutation, Subscription);
     alias MySchema = ApplyPlugins!(BaseSchema, CrudMutationPlugin, TestComputedFields, FilterPlugin, SortingPlugin, PaginationPlugin);

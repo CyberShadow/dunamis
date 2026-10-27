@@ -68,7 +68,8 @@ unittest {
     }();
     static assert(names == ["postCount", "shout", "authorName", "greeting", "commentTexts",
         "visiblePosts", "checkedTitle", "widened", "maybeSpan", "maybeSpans", "initial", "window", "windows",
-        "audit", "likes", "label", "label", "_internal"], names.stringof);
+        "audit", "likes", "label", "label", "_internal", "notes", "digest", "noteCount", "siblingTexts",
+        "greetedUsers", "shownCheckedTitles"], names.stringof);
 
     static assert(computedFieldsIn!(fixture.authorName).length == 1);
     // A function symbol contributes its overloads
@@ -184,6 +185,194 @@ unittest {
     assert(posts[0]["audit"]["author"]["name"].str == "Alice", result.toString());
     assert(posts[0]["audit"]["author"]["postCount"].integer == 2, result.toString());
     assert(posts[2]["audit"]["author"]["name"].str == "Bob", result.toString());
+}
+
+/// More users, posts and comments: users with several, one and no posts,
+/// and a post without comments amid others.
+private void seedNotesFixture() {
+    fixtureDb = new MockDB!();
+    fixtureDb.setTableData("users", `[
+        {"id": 1, "name": "Alice"},
+        {"id": 2, "name": "Bob"},
+        {"id": 3, "name": "Carol"},
+        {"id": 4, "name": "Dave"}
+    ]`);
+    fixtureDb.setTableData("posts", `[
+        {"id": 10, "title": "Hello", "author_id": 1},
+        {"id": 11, "title": "hidden", "author_id": 1},
+        {"id": 12, "title": "Other", "author_id": 2},
+        {"id": 13, "title": "Later", "author_id": 2},
+        {"id": 14, "title": "Mine", "author_id": 4}
+    ]`);
+    fixtureDb.setTableData("comments", `[
+        {"id": 100, "text": "c1", "post_id": 10},
+        {"id": 101, "text": "c2", "post_id": 10},
+        {"id": 102, "text": "c3", "post_id": 11},
+        {"id": 103, "text": "c4", "post_id": 13},
+        {"id": 104, "text": "c5", "post_id": 14}
+    ]`);
+    fixtureDb.setTableData("likes", `[]`);
+}
+
+private JSONValue executeNotes(string query, bool optimize) {
+    auto ctx = new EvalContext();
+    ctx.setRequestContext(Greeting("Hi"));
+    auto result = awaitSync(new Executor().execute(compileQuery!FinalSchema(query), ctx, optimize));
+    assert(ctx.errors.length == 0, ctx.errors[0].message ~ " in " ~ result.toString());
+    return result;
+}
+
+// Lists of PODs with entity members (also nullable ones), and a POD list in
+// a POD: the entities are the schema's, with their columns, relations and
+// computed fields selectable, also under aliases
+unittest {
+    import std.algorithm : canFind;
+
+    enum sdl = generateSchemaSDL!FinalSchema;
+    static assert(sdl.canFind("): [CommentNote!]!\n"), sdl);
+    static assert(sdl.canFind("type CommentNote {\n  text: String!\n  author: User!\n  editor: User\n}"), sdl);
+    static assert(sdl.canFind("  digest: PostDigest!\n"), sdl);
+    static assert(sdl.canFind("  reviewer: User\n"), sdl);
+
+    foreach (optimize; [false, true]) {
+        seedNotesFixture();
+        auto result = executeNotes(`{
+            posts(orderBy: [{field: id, direction: ASC}]) {
+                id
+                notes {
+                    text
+                    author { name label postCount posts { title } }
+                    editor { name }
+                    editedBy: editor { label postCount }
+                }
+                digest { notes { text writer: author { name } } reviewer { name } }
+            }
+        }`, optimize);
+        auto posts = result["posts"].array;
+        assert(posts.length == 5, result.toString());
+
+        auto hello = posts[0];
+        assert(hello["id"].integer == 10, result.toString());
+        auto notes = hello["notes"].array;
+        assert(notes.length == 2, result.toString());
+        assert(notes[0]["text"].str == "c1" && notes[1]["text"].str == "c2", result.toString());
+        foreach (note; notes) {
+            assert(note["author"]["name"].str == "Alice", result.toString());
+            assert(note["author"]["label"].str == "Alice", result.toString());
+            assert(note["author"]["postCount"].integer == 2, result.toString());
+            assert(note["author"]["posts"] == JSONValue([["title": "Hello"], ["title": "hidden"]]), result.toString());
+        }
+        assert(notes[0]["editor"]["name"].str == "Bob", result.toString());
+        assert(notes[0]["editedBy"]["label"].str == "Bob" && notes[0]["editedBy"]["postCount"].integer == 2,
+            result.toString());
+        assert(notes[1]["editor"].isNull && notes[1]["editedBy"].isNull, result.toString());
+        assert(hello["digest"]["reviewer"]["name"].str == "Carol", result.toString());
+        assert(hello["digest"]["notes"].array.length == 2, result.toString());
+        assert(hello["digest"]["notes"][1]["writer"]["name"].str == "Alice", result.toString());
+
+        // No comments: no notes, amid posts with notes
+        assert(posts[2]["id"].integer == 12 && posts[2]["notes"].array.length == 0, result.toString());
+        assert(posts[2]["digest"]["notes"].array.length == 0 && posts[2]["digest"]["reviewer"].isNull,
+            result.toString());
+        assert(posts[3]["notes"][0]["text"].str == "c4", result.toString());
+        assert(posts[3]["notes"][0]["author"]["name"].str == "Bob", result.toString());
+        assert(posts[4]["notes"][0]["author"]["name"].str == "Dave", result.toString());
+        assert(posts[4]["notes"][0]["author"]["postCount"].integer == 1, result.toString());
+    }
+}
+
+// A computed field over a child collection calling another computed field,
+// beside the same field selected on the children: the batches stay aligned
+// for parents with several, one and no children, and children without
+// grandchildren
+unittest {
+    foreach (optimize; [false, true]) {
+        seedNotesFixture();
+        auto result = executeNotes(`{
+            users(orderBy: [{field: id, direction: ASC}]) {
+                id noteCount
+                posts { id notes { text } }
+            }
+        }`, optimize);
+        auto users = result["users"].array;
+        assert(users.length == 4, result.toString());
+        long[] counts;
+        foreach (user; users)
+            counts ~= user["noteCount"].integer;
+        assert(counts == [3, 1, 0, 1], result.toString());
+        assert(users[0]["posts"].array.length == 2, result.toString());
+        assert(users[0]["posts"][1]["notes"] == JSONValue([["text": "c3"]]), result.toString());
+        assert(users[1]["posts"][0]["id"].integer == 12 && users[1]["posts"][0]["notes"].array.length == 0,
+            result.toString());
+        assert(users[1]["posts"][1]["notes"] == JSONValue([["text": "c4"]]), result.toString());
+        assert(users[2]["posts"].array.length == 0, result.toString());
+        assert(users[3]["posts"][0]["notes"] == JSONValue([["text": "c5"]]), result.toString());
+    }
+}
+
+// A computed field reaching back up and down the tree it is selected in
+unittest {
+    foreach (optimize; [false, true]) {
+        seedNotesFixture();
+        auto result = executeNotes(`{
+            users(orderBy: [{field: id, direction: ASC}]) {
+                posts { comments { text siblingTexts } }
+            }
+        }`, optimize);
+        auto users = result["users"].array;
+        foreach (post; users[0]["posts"].array)
+            foreach (comment; post["comments"].array)
+                assert(comment["siblingTexts"].str == "c1,c2,c3", result.toString());
+        assert(users[0]["posts"][0]["comments"].array.length == 2, result.toString());
+        assert(users[1]["posts"][0]["comments"].array.length == 0, result.toString());
+        assert(users[1]["posts"][1]["comments"][0]["siblingTexts"].str == "c4", result.toString());
+        assert(users[3]["posts"][0]["comments"][0]["siblingTexts"].str == "c5", result.toString());
+    }
+}
+
+// A global root, indexed by a `use` (into a final class which is no object
+// type of the schema) and broadcast inside nested maps, with the request
+// context: evaluated once per selection, not per element
+unittest {
+    import std.conv : to;
+    import dunamis.schema.computed_fixture : userIndexBuilds;
+
+    foreach (optimize; [false, true]) {
+        seedNotesFixture();
+        userIndexBuilds = 0;
+        auto result = executeNotes(`{
+            users(orderBy: [{field: id, direction: ASC}]) {
+                posts { comments { text greetedUsers } }
+            }
+        }`, optimize);
+        size_t comments;
+        foreach (user; result["users"].array)
+            foreach (post; user["posts"].array)
+                foreach (comment; post["comments"].array) {
+                    assert(comment["greetedUsers"].str == "Hi Alice+Bob+Carol+Dave", result.toString());
+                    comments++;
+                }
+        assert(comments == 5, result.toString());
+        assert(userIndexBuilds == 1, (optimize ? "(optimized) " : "(naive) ") ~
+            "users indexed " ~ userIndexBuilds.to!string ~ " times: " ~ result.toString());
+    }
+}
+
+// A collection restricted with filterBy on a `use` + context predicate
+// before a computed field which throws for the excluded elements: the
+// excluded elements are not evaluated, so there is no error
+unittest {
+    foreach (optimize; [false, true]) {
+        seedNotesFixture();
+        auto result = executeNotes(`{
+            users(orderBy: [{field: id, direction: ASC}]) { shownCheckedTitles }
+        }`, optimize);
+        auto users = result["users"].array;
+        assert(users[0]["shownCheckedTitles"] == JSONValue(["Hello"]), result.toString());
+        assert(users[1]["shownCheckedTitles"] == JSONValue(["Other", "Later"]), result.toString());
+        assert(users[2]["shownCheckedTitles"].array.length == 0, result.toString());
+        assert(users[3]["shownCheckedTitles"] == JSONValue(["Mine"]), result.toString());
+    }
 }
 
 // Nulls from Nullable results
