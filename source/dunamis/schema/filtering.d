@@ -113,6 +113,13 @@ template EnumFilter(E) if (is(E == enum)) {
         @GqlName("in") Nullable!(E[]) in_;
         Nullable!(E[]) notIn;
         Nullable!bool isNull;
+
+        /// Formats as the filter type's name (see EntityFilter.toString):
+        /// formatting the fields would compile the formatting of `E`.
+        void toString(scope void delegate(const(char)[]) sink) const {
+            enum name = getOriginalTypeName!(typeof(this));
+            sink(name);
+        }
     }
 }
 

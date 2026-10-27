@@ -253,16 +253,19 @@ abstract class Expr(T) : ExprBase {
         }
     }
 
-    // Null checks - only available on Expr!(Nullable!T)
+    // Null checks - only available on Expr!(Nullable!T). Templates, so that
+    // they (and an IsNullExpr class) are only compiled for the nullable
+    // types they are used on, not for every Expr!(Nullable!T) (e.g. those of
+    // every schema type's to-one fields).
     static if (is(T == Nullable!U, U)) {
         /// Check if this nullable value is null
-        auto isNull() {
+        auto isNull()() {
             import dunamis.core.expr.operators : IsNullExpr;
             return new IsNullExpr!U(this);
         }
 
         /// Check if this nullable value is not null (convenience for isNull().not())
-        auto isNotNull() {
+        auto isNotNull()() {
             return isNull().not();
         }
     }

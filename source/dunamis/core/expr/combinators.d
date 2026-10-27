@@ -60,26 +60,39 @@ class UseExpr(Fn, Exprs...) : Expr!(ReturnType!Fn)
     override Promise!(R[]) eval(EvalContext ctx) {
         auto fn = _fn;
 
-        // Build tuple of promises for all inputs
-        alias PromiseTypes = staticMap!(toPromiseArray, InputTypes);
-        Tuple!PromiseTypes promises;
-        static foreach (i; 0 .. Exprs.length) {
-            promises[i] = evalAs!(InputTypes[i])(_inputs[i], ctx);
-        }
-
-        // Wait for all, then combine results
-        return joinAll(promises.expand).then((EvaluatedArrays results) {
-            R[] result = new R[results[0].length];
-            foreach (idx; 0 .. results[0].length) {
-                // Build argument tuple and call fn
-                Tuple!InputTypes args;
-                static foreach (i; 0 .. Exprs.length) {
-                    args[i] = results[i][idx];
-                }
-                result[idx] = fn(args.expand);
+        static if (Exprs.length == 1) {
+            // A single input needs no joining. (Joining compiles promise,
+            // result and tuple types of its own for each input type: for
+            // each `use` of a schema type, e.g. each plugin's cast of a
+            // nullable object.)
+            return evalAs!(InputTypes[0])(_inputs[0], ctx).then((InputTypes[0][] values) {
+                R[] result = new R[values.length];
+                foreach (idx; 0 .. values.length)
+                    result[idx] = fn(values[idx]);
+                return result;
+            });
+        } else {
+            // Build tuple of promises for all inputs
+            alias PromiseTypes = staticMap!(toPromiseArray, InputTypes);
+            Tuple!PromiseTypes promises;
+            static foreach (i; 0 .. Exprs.length) {
+                promises[i] = evalAs!(InputTypes[i])(_inputs[i], ctx);
             }
-            return result;
-        });
+
+            // Wait for all, then combine results
+            return joinAll(promises.expand).then((EvaluatedArrays results) {
+                R[] result = new R[results[0].length];
+                foreach (idx; 0 .. results[0].length) {
+                    // Build argument tuple and call fn
+                    Tuple!InputTypes args;
+                    static foreach (i; 0 .. Exprs.length) {
+                        args[i] = results[i][idx];
+                    }
+                    result[idx] = fn(args.expand);
+                }
+                return result;
+            });
+        }
     }
 }
 

@@ -187,7 +187,7 @@ template SortedArrayFieldCode(SourceQuery, string fieldName, alias TypeMap) {
     private enum string _I = "dunamis.schema.forward.ForwardFieldImpl!(SourceQuery, \"" ~ fieldName ~ "\", TypeMap)";
     private enum string _Expr = "dunamis.core.expr.Expr";
     private enum string _entityCast = "dunamis.schema.entity_cast.pluginEntityCast";
-    private enum string _sortBy = "dunamis.core.sorting.sortBy";
+    private enum string _sortByField = "dunamis.core.sorting.sortByField";
     private enum string _SD = "dunamis.core.sorting.SortDirection";
     private enum string _wrap = "dunamis.schema.transform.wrapEntityResult";
 
@@ -230,9 +230,9 @@ template SortedArrayFieldCode(SourceQuery, string fieldName, alias TypeMap) {
             static foreach (member; sortableFields) {
                 result ~= "            case " ~ _enumName ~ "." ~ member ~ ":\n";
                 result ~= "                if (dir == " ~ _SD ~ ".ASC)\n";
-                result ~= "                    _result = " ~ _sortBy ~ "!((a, b) => a." ~ member ~ ".lt(b." ~ member ~ "))(source);\n";
+                result ~= "                    _result = " ~ _sortByField ~ "!(\"" ~ member ~ "\", " ~ _SD ~ ".ASC)(source);\n";
                 result ~= "                else\n";
-                result ~= "                    _result = " ~ _sortBy ~ "!((a, b) => a." ~ member ~ ".gt(b." ~ member ~ "))(source);\n";
+                result ~= "                    _result = " ~ _sortByField ~ "!(\"" ~ member ~ "\", " ~ _SD ~ ".DESC)(source);\n";
                 result ~= "                break;\n";
             }
             result ~= "        }\n";

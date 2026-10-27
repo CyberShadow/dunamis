@@ -19,11 +19,15 @@ To entityCastValue(To, From)(From from) {
         } else {
             import dunamis.core.types : isInternalMember;
 
+            import std.traits : FieldNameTuple;
+
             // Copy matching public instance fields.
             // Uses visibility checks instead of name conventions (see Principle 8 in ARCHITECTURE.md).
             // Cannot use isPlainField here because entityCastValue runs during plugin type
-            // construction when forward references may not yet be resolved.
-            static foreach (member; __traits(allMembers, From)) {{
+            // construction when forward references may not yet be resolved. Only data
+            // fields can be copied, so only those are checked (rather than every
+            // member, e.g. every field function of a schema type).
+            static foreach (member; FieldNameTuple!From) {{
                 static if (!isInternalMember!member && __traits(hasMember, To, member)) {
                     // Skip non-public fields (e.g., package-scoped _normalizedSource)
                     static if (__traits(compiles, __traits(getVisibility, __traits(getMember, From, member))) &&

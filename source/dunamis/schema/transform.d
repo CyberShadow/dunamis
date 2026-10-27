@@ -81,14 +81,14 @@ template ReplaceTypeRefs(T, alias TypeMap) {
 // ============================================================================
 
 /// Check if type T is in the Types list
+///
+/// Iterates rather than recursing on the rest of the list: plugins' type maps
+/// ask this of every type they map, with the list of all object types of the
+/// schema, and a recursive check would instantiate itself once per element
+/// with the rest of the list as arguments (memory quadratic in its length).
 template isTypeInList(T, Types...) {
-    static if (Types.length == 0) {
-        enum isTypeInList = false;
-    } else static if (is(T == Types[0])) {
-        enum isTypeInList = true;
-    } else {
-        enum isTypeInList = isTypeInList!(T, Types[1..$]);
-    }
+    import dunamis.core.discovery : staticContains;
+    enum bool isTypeInList = staticContains!(T, Types);
 }
 
 // ============================================================================

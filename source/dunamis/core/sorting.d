@@ -165,7 +165,8 @@ class SortByExpr(Entity, Pred) : Expr!(Entity[]), SortByInfo
     }
 
     override Promise!(Entity[][]) eval(EvalContext ctx) {
-        import ae.utils.promise.await : async, await;
+        import ae.utils.promise.await : async;
+        import dunamis.core.awaiting : await;
 
         // Naive path: in-memory sorting using predicate evaluation
         // Uses fibers via async/await for clean sequential code
@@ -267,6 +268,19 @@ auto sortBy(alias pred, Coll)(Coll collection)
 }
 
 /// Extract the Entity type from an Expr!(Entity[]) type
+/// Sort `source` by the field `member` of its elements, in direction `dir`
+/// (an ordering of the SortingPlugin's `orderBy` arguments).
+///
+/// The `orderBy` argument of every list field with elements of type `E`
+/// sorts through this one instance per field of `E` and direction, rather
+/// than through comparison functions of its own.
+Expr!(E[]) sortByField(string member, SortDirection dir, E)(Expr!(E[]) source) {
+    static if (dir == SortDirection.ASC)
+        return sortBy!((a, b) => mixin("a." ~ member ~ ".lt(b." ~ member ~ ")"))(source);
+    else
+        return sortBy!((a, b) => mixin("a." ~ member ~ ".gt(b." ~ member ~ ")"))(source);
+}
+
 private template CollectionEntityType(Coll) {
     static if (is(Coll : Expr!(E[]), E)) {
         alias CollectionEntityType = E;

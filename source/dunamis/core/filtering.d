@@ -135,7 +135,7 @@ class FilterByExpr(Entity) : Expr!(Entity[]), FilterByInfo {
     }
 
     override Promise!(Entity[][]) eval(EvalContext ctx) {
-        import ae.utils.promise.await : await;
+        import dunamis.core.awaiting : await;
 
         // Naive path: in-memory filtering using predicate evaluation
         auto predicate = _predicate;
