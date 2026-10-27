@@ -13,6 +13,19 @@ import dunamis.core.types;
 import dunamis.core.sorting : OrderBySpec, SortDirection;
 import dunamis.relational.query_node;
 
+/// Whether column values of type `T` are records: structs decoded from a
+/// JSON object of their fields (see `extractJsonValue`).
+private template isRecordValue(T) {
+    import std.traits : FieldNameTuple;
+    import dunamis.core.types : AnyRef, isCustomScalar;
+    import dunamis.relational.schema.attrs : hasDecodedBy;
+
+    static if (is(T == struct) && !is(T == AnyRef) && !isCustomScalar!T && !hasDecodedBy!T)
+        enum isRecordValue = FieldNameTuple!T.length > 0;
+    else
+        enum isRecordValue = false;
+}
+
 /// Convert the JSON representation returned by SQL aggregation into a typed
 /// column value. Kept at module scope so both optimized QueryResult decoding
 /// and the generic/naive column dispatcher support the same type set.
@@ -360,7 +373,10 @@ abstract class RelationalSession : DataSession {
 
         static if (is(T == Nullable!U, U)) {
             // Nullable type - use JSON fetch to preserve null information
-            return fetchColumnJson(table, column, refs).then((JSONValue[] jsonValues) {
+            auto fetched = isRecordValue!U
+                ? fetchRecordColumnJson(table, column, refs)
+                : fetchColumnJson(table, column, refs);
+            return fetched.then((JSONValue[] jsonValues) {
                 T[] result;
                 result.reserve(jsonValues.length);
                 foreach (val; jsonValues) {
@@ -405,12 +421,22 @@ abstract class RelationalSession : DataSession {
                 return values.map!(value => extractJsonValue!T(value)).array;
             });
         } else static if (is(T == struct)) {
-            return fetchColumnJson(table, column, refs).then((JSONValue[] values) {
+            auto fetched = isRecordValue!T
+                ? fetchRecordColumnJson(table, column, refs)
+                : fetchColumnJson(table, column, refs);
+            return fetched.then((JSONValue[] values) {
                 return values.map!(value => extractJsonValue!T(value)).array;
             });
         } else {
             static assert(false, "Unsupported column type: " ~ T.stringof);
         }
+    }
+
+    /// Fetch a column of a record (composite) type as JSONValue array, as
+    /// objects keyed by field name (as the optimized path's JSON rows have
+    /// them). By default, as `fetchColumnJson`.
+    Promise!(JSONValue[]) fetchRecordColumnJson(string table, string column, AnyRef[] refs) {
+        return fetchColumnJson(table, column, refs);
     }
 
     /// Fetch string column values - override in subclass

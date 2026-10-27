@@ -575,6 +575,19 @@ class PostgresSession : RelationalSession {
     }
 
     override Promise!(JSONValue[]) fetchColumnJson(string table, string column, AnyRef[] refs) {
+        return fetchColumnValues(table, column, refs, false);
+    }
+
+    /// Records are fetched as `to_json(column)`: their text representation
+    /// is PostgreSQL's positional composite syntax.
+    override Promise!(JSONValue[]) fetchRecordColumnJson(string table, string column, AnyRef[] refs) {
+        return fetchColumnValues(table, column, refs, true);
+    }
+
+    /// The values of `column` of the rows `refs` of `table`: as JSON documents
+    /// (selected with `to_json`) if `asJson`, otherwise as their text.
+    private Promise!(JSONValue[]) fetchColumnValues(string table, string column, AnyRef[] refs,
+            bool asJson) {
         if (refs.length == 0) {
             return resolve(cast(JSONValue[])[]);
         }
@@ -597,7 +610,7 @@ class PostgresSession : RelationalSession {
 
         auto pkColumns = getPkColumnsForTable(table);
         auto pkCount = pkColumns.length;
-        auto sql = buildFetchColumnSQL(table, column, validIds);
+        auto sql = buildFetchColumnSQL(table, asJson ? "to_json(" ~ column ~ ")::text" : column, validIds);
 
         return connection().query(sql).array().then((PgSqlConnection.Row[] rows) {
             // Build lookup map
@@ -617,6 +630,8 @@ class PostgresSession : RelationalSession {
                         values[key] = JSONValue(null);
                     }
                 }
+                if (asJson && values[key].type == JSONType.string)
+                    values[key] = parseJSON(values[key].str);
             }
             // Return in ref order (invalid refs get null)
             JSONValue[] result;
