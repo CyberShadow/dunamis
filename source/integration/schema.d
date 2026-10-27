@@ -512,6 +512,24 @@ mixin template TestSchema(alias db) {
     }
 
     struct Mutation {
+        /// The badge with the given key, built from it: an entity with a
+        /// composite key returned by a mutation field, its columns read by key
+        static Expr!UserBadge badgeByKey(Expr!Mutation m, Int64 userId, string badgeName) {
+            import dunamis.core.expr : effect;
+            return effect(() => UserBadge(userId.value, badgeName), m);
+        }
+
+        /// ditto, a list of them, with nulls for the empty names
+        static Expr!(Nullable!UserBadge[]) badgesByKeys(Expr!Mutation m, Int64 userId, string[] badgeNames) {
+            import dunamis.core.expr : effect;
+            return effect(() {
+                Nullable!UserBadge[] badges;
+                foreach (name; badgeNames)
+                    badges ~= name.length ? Nullable!UserBadge(UserBadge(userId.value, name)) : Nullable!UserBadge.init;
+                return badges;
+            }, m);
+        }
+
         static auto createUserWithName(Expr!Mutation parent, string firstName, string lastName) {
             return insert!User([
                 "first_name": JSONValue(firstName),

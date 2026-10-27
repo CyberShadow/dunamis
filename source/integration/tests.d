@@ -2806,3 +2806,20 @@ void testInterleavedEvaluationsOfOneTree() {
     assertTrue(createdIds[0] != createdIds[1],
         "Both evaluations returned the same created user: " ~ createdIds[0].toString());
 }
+
+/// The columns of an entity with a composite key returned by a mutation
+/// field are read by its key
+void testCompositeKeyEntityOfMutation() {
+    auto badgeName = "keyed-" ~ modeSuffix();
+    assertNoErrors(graphql(`mutation {
+        createUserBadge(userId: 1, badgeName: "` ~ badgeName ~ `", description: "Keyed") { badgeName }
+    }`));
+    auto response = graphql(`mutation { badgeByKey(userId: 1, badgeName: "` ~ badgeName ~ `") { badgeName description } }`);
+    assertNoErrors(response);
+    assertEqual(response["data"]["badgeByKey"], JSONValue([
+        "badgeName": JSONValue(badgeName), "description": JSONValue("Keyed")]));
+    auto list = graphql(`mutation { badgesByKeys(userId: 1, badgeNames: ["` ~ badgeName ~ `", ""]) { badgeName description } }`);
+    assertNoErrors(list);
+    assertEqual(list["data"]["badgesByKeys"], JSONValue([JSONValue([
+        "badgeName": JSONValue(badgeName), "description": JSONValue("Keyed")]), JSONValue(null)]));
+}

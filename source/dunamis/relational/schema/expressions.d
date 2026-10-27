@@ -425,8 +425,10 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
                 return resolve(session.getMutationColumnValues!T(EntityID!Entity.typeName, column, entityRefs));
             }
 
-            // Otherwise, fetch from database (async)
+            // Otherwise, fetch from database (async). (The refs need not
+            // come from a root fetch that recorded the key.)
             if (session !is null) {
+                session.notePkColumns(EntityID!Entity.table, getPkColumns!Entity);
                 return session.fetchColumn!T(EntityID!Entity.table, column, entityRefs);
             }
 
