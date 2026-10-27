@@ -46,6 +46,29 @@ struct GqlDeprecated {
     string reason = "No longer supported";
 }
 
+/// UDA giving the default value of an input object field in the GraphQL
+/// schema, as a GraphQL value literal (e.g. `@GqlDefault("[]")`).
+///
+/// It is the value of the field's D initializer, which an absent field has:
+/// the attribute only presents it. A field with a default may be omitted
+/// even if its type is non-null.
+struct GqlDefault {
+    string value;
+}
+
+/// The @GqlDefault value of a member, or null if it has none
+template getGqlDefault(alias member) {
+    enum getGqlDefault = () {
+        alias attrs = __traits(getAttributes, member);
+        static foreach (attr; attrs) {
+            static if (is(typeof(attr) == GqlDefault)) {
+                return attr.value;
+            }
+        }
+        return string.init;
+    }();
+}
+
 // ============================================================================
 // GraphQL Type Name Resolution
 // ============================================================================

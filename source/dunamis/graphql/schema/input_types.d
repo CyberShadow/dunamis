@@ -107,11 +107,12 @@ template getInputTypeFields(T) if (isInputType!T) {
                             enum gqlType = graphqlInputTypeName!MemberType ~ "!";
                         }
 
+                        enum defaultValue = getGqlDefault!(__traits(getMember, T, member));
                         fields ~= InputFieldInfo(
                             getGqlName!(__traits(getMember, T, member), member),
                             gqlType,
-                            false,
-                            "",
+                            defaultValue !is null,
+                            defaultValue,
                         );
                     }
                 }
@@ -144,8 +145,11 @@ template graphqlInputTypeName(T) {
         // Pointer - treat as nullable reference (enables recursive types)
         enum graphqlInputTypeName = graphqlInputTypeName!U;
     } else static if (is(T == E[], E)) {
-        // Array type - elements are non-null by default in input
-        enum graphqlInputTypeName = "[" ~ graphqlInputTypeName!E ~ "!]";
+        // Array type - elements are non-null unless Nullable
+        static if (is(E == Nullable!U, U))
+            enum graphqlInputTypeName = "[" ~ graphqlInputTypeName!E ~ "]";
+        else
+            enum graphqlInputTypeName = "[" ~ graphqlInputTypeName!E ~ "!]";
     } else static if (is(T == JSONValue[string])) {
         // Raw JSON object type
         enum graphqlInputTypeName = "JSON";

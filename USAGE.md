@@ -390,7 +390,17 @@ The three-state mapping (`Nullable!(Nullable!T)`) supports patch mutation semant
 - **Null** = set to NULL
 - **Value** = set to this value
 
-This distinction is semantic (handled in your resolver logic), not schema-level — GraphQL represents both `Nullable!T` and `Nullable!(Nullable!T)` as nullable types.
+This distinction is semantic (handled in your resolver logic), not schema-level — GraphQL represents both `Nullable!T` and `Nullable!(Nullable!T)` as nullable types. (An absent field is `Nullable!(Nullable!T).init`; an explicit `null` is a present `Nullable!T.init`.)
+
+Lists of `Nullable!T` items are lists of nullable items (`Nullable!int[]` is `[Int]!`). A value which is not a list given for a list is a list of that one item (GraphQL input coercion).
+
+**Defaults:** `@GqlDefault("<value literal>")` on an input field presents its default in the schema (SDL, introspection); the value is the field's D initializer, which an absent field keeps:
+
+```d
+struct Changes {
+    @GqlDefault("[]") Change[] changes;   // changes: [Change!]! = []
+}
+```
 
 ## Union & Interface Types
 

@@ -9,7 +9,7 @@ import std.array : join;
 import std.typecons : Nullable;
 
 import dunamis.core.expr : Expr, constant, effect, fieldAccess, map, use;
-import dunamis.graphql.schema : GqlDescription;
+import dunamis.graphql.schema : GqlDefault, GqlDescription;
 import dunamis.schema.computed_fixture : Query, User, fixtureDb;
 
 /// The mutation root type: all its fields are computed fields declared here.
@@ -251,4 +251,73 @@ struct StepPayload {
             return v.entry;
         }, p);
     }
+}
+
+// ---- Input objects ----
+
+/// Options of describeOptions.
+struct Options {
+    /// Three states: absent, null, or a value
+    Nullable!(Nullable!string) note;
+    /// A list of nullable items
+    Nullable!int[] numbers;
+    /// Omitted, the empty list
+    @GqlDefault("[]") string[] tags;
+}
+
+/// Describes its options.
+Expr!string describeOptions(Expr!Mutation m, Options options) {
+    import std.conv : to;
+    auto note = options.note.isNull ? "absent" : options.note.get.isNull ? "null" : options.note.get.get;
+    string numbers;
+    foreach (n; options.numbers)
+        numbers ~= (numbers.length ? "," : "") ~ (n.isNull ? "null" : n.get.to!string);
+    return effect(() => note ~ " [" ~ numbers ~ "] [" ~ options.tags.join(",") ~ "]", m);
+}
+
+/// A UDA on input fields (not a GraphQL one).
+struct Tagged { string tag; }
+
+/// Changes of describeChanges: nested input objects, three-state.
+struct ItemPatch {
+    @Tagged("n") Nullable!(Nullable!string) name;
+    @Tagged("c") Nullable!(Nullable!int) count;
+}
+/// ditto
+struct ItemChange {
+    Nullable!int id;
+    Nullable!(Nullable!ItemPatch) patch;
+}
+/// ditto
+struct Changes {
+    ItemChange[] changes;
+    Nullable!string note;
+}
+
+/// Describes its changes (as a procedure).
+Expr!string describeChangesLater(Expr!Mutation m, Changes input) {
+    return perform!((EvalContext ctx, Changes input) => changesText(input))(m, [cast(DataSource) fixtureDb], input);
+}
+
+/// Describes its changes.
+Expr!string describeChanges(Expr!Mutation m, Changes input) {
+    auto result = changesText(input);
+    return effect(() => result, m);
+}
+
+private string changesText(ref const Changes input) {
+    import std.conv : to;
+    string result;
+    foreach (change; input.changes) {
+        result ~= (change.id.isNull ? "new" : change.id.get.to!string) ~ ":";
+        if (change.patch.isNull) result ~= "absent";
+        else if (change.patch.get.isNull) result ~= "null";
+        else {
+            auto p = change.patch.get.get;
+            result ~= (p.name.isNull ? "-" : p.name.get.isNull ? "null" : p.name.get.get) ~ "/" ~
+                (p.count.isNull ? "-" : p.count.get.isNull ? "null" : p.count.get.get.to!string);
+        }
+        result ~= ";";
+    }
+    return result;
 }

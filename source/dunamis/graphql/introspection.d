@@ -287,7 +287,8 @@ private RuntimeInputFieldInfo[] buildRuntimeInputFields(T)() {
                         enum typeJson = nonNullOf(buildBaseTypeRefJson!MemberType());
                     }
 
-                    fields ~= RuntimeInputFieldInfo(getGqlName!(__traits(getMember, T, member), member), typeJson, "");
+                    fields ~= RuntimeInputFieldInfo(getGqlName!(__traits(getMember, T, member), member), typeJson,
+                        getGqlDefault!(__traits(getMember, T, member)));
                 }
             }
         }
@@ -796,7 +797,7 @@ private JSONValue inputValueJson(string name, string description, JSONValue type
         "name": JSONValue(name),
         "description": JSONValue(description.length > 0 ? description : null),
         "type": typeJson,
-        "defaultValue": JSONValue(defaultValue.length > 0 ? defaultValue : null)
+        "defaultValue": defaultValue.length > 0 ? JSONValue(defaultValue) : JSONValue(null)
     ]);
 }
 

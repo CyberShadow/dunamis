@@ -246,3 +246,66 @@ unittest {
     assert(atomicLog.log == ["begin 1", "keep 1", "begin 2", "undo 2", "begin 3", "undo 3", "begin 4", "keep 4"],
         atomicLog.log.to!string);
 }
+
+// Input objects: three-state fields (absent, null, value), lists of nullable
+// items, a non-list value given for a list, field defaults
+unittest {
+    enum sdl = generateSchemaSDL!RootSchema;
+    static assert(sdl.canFind("input Options {\n  note: String\n  numbers: [Int]!\n  tags: [String!]! = []\n}"), sdl);
+
+    seed();
+    auto result = run(`mutation {
+        absent: describeOptions(options: {numbers: [1, null]})
+        nul: describeOptions(options: {note: null, numbers: 2, tags: ["x"]})
+        value: describeOptions(options: {note: "n", numbers: []})
+    }`);
+    assert(result == parseJSON(`{"absent": "absent [1,null] []", "nul": "null [2] [x]", "value": "n [] []"}`),
+        result.toString());
+
+    // The same through variables
+    auto ctx = new EvalContext();
+    ctx.setRequestContext(Greeting("Hi"));
+    auto query = compileQuery!RootSchema(`mutation($a: Options!, $b: Options!) {
+        a: describeOptions(options: $a) b: describeOptions(options: $b) }`,
+        parseJSON(`{"a": {"numbers": [null]}, "b": {"note": null, "numbers": 3}}`));
+    auto viaVariables = awaitSync(new Executor().execute(query, ctx));
+    assert(viaVariables == parseJSON(`{"a": "absent [null] []", "b": "null [3] []"}`), viaVariables.toString());
+
+    // Introspection gives the default
+    auto type = run(`{ __type(name: "Options") { inputFields { name defaultValue } } }`);
+    assert(type["__type"]["inputFields"] == parseJSON(`[
+        {"name": "note", "defaultValue": null},
+        {"name": "numbers", "defaultValue": null},
+        {"name": "tags", "defaultValue": "[]"}
+    ]`), type.toString());
+}
+
+// compileOperationField: one field of an operation, for adapters
+unittest {
+    import dunamis.core.expr : DynamicJsonObjectExpr, ExprBase;
+    import dunamis.graphql.operations : compileOperationField;
+
+    seed();
+    auto field = compileOperationField!RootSchema(`mutation { a: record(entry: "a") b: record(entry: $b) }`,
+        parseJSON(`{"b": "b"}`), 1);
+    auto ctx = new EvalContext();
+    ctx.setRequestContext(Greeting("Hi"));
+    auto result = awaitSync(new Executor().execute(new DynamicJsonObjectExpr(["b"], [field]), ctx));
+    assert(result == parseJSON(`{"b": "b"}`), result.toString());
+    assert(mutationLog == ["b"]);
+}
+
+// Nested input objects with three-state fields, literal and in variables
+unittest {
+    seed();
+    auto result = run(`mutation {
+        literal: describeChanges(input: {changes: [{id: 1, patch: {name: "a", count: null}}, {patch: null}, {id: 2}]})
+    }`);
+    assert(result == parseJSON(`{"literal": "1:a/null;new:null;2:absent;"}`), result.toString());
+    auto ctx = new EvalContext();
+    ctx.setRequestContext(Greeting("Hi"));
+    auto query = compileQuery!RootSchema(`mutation($input: Changes!) { v: describeChanges(input: $input) w: describeChangesLater(input: $input) }`,
+        parseJSON(`{"input": {"changes": [{"id": -1, "patch": {"count": 3}}, {"patch": {}}]}}`));
+    auto viaVariables = awaitSync(new Executor().execute(query, ctx));
+    assert(viaVariables == parseJSON(`{"v": "-1:-/3;new:-/-;", "w": "-1:-/3;new:-/-;"}`), viaVariables.toString());
+}

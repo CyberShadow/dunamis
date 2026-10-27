@@ -329,7 +329,10 @@ T extractValueFromJson(T)(JSONValue json) {
     import std.json : JSONType;
 
     if (json.type == JSONType.null_) {
-        static if (is(T == Nullable!U, U)) {
+        static if (is(T == Nullable!(Nullable!U), U)) {
+            // Three-state: explicitly null (absent is T.init)
+            return T(Nullable!U.init);
+        } else static if (is(T == Nullable!U, U)) {
             return T.init;
         } else static if (is(T == U*, U)) {
             return null;  // Pointer is nullable
@@ -396,9 +399,10 @@ T extractValueFromJson(T)(JSONValue json) {
     } else static if (isInputType!T) {
         return extractInputObjectFromJson!T(json);
     } else static if (is(T : U[], U) && !is(T == string)) {
-        // Array type - extract each element
+        // Array type - extract each element. Input coercion makes a value
+        // which is not a list a list of one item.
         if (json.type != JSONType.array) {
-            throw new CompilerException("Expected array for " ~ T.stringof ~ ", got " ~ json.type.to!string);
+            return [extractValueFromJson!U(json)];
         }
         U[] result;
         foreach (item; json.array) {
@@ -466,6 +470,11 @@ T extractValue(T)(Value val) {
     import graphql.ast : ValueEnum;
 
     if (val is null || val.ruleSelection == ValueEnum.N) {
+        static if (is(T == Nullable!(Nullable!U), U)) {
+            // Three-state: explicitly null (absent is T.init)
+            if (val !is null)
+                return T(U.init);
+        }
         return T.init;
     }
 
@@ -479,7 +488,10 @@ T extractValue(T)(Value val) {
         return extractBool(val);
     } else static if (is(T == Nullable!U, U)) {
         if (isNullValue(val)) {
-            return T.init;  // null
+            static if (is(U == Nullable!V, V))
+                return T(U.init);  // Three-state: explicitly null
+            else
+                return T.init;  // null
         }
         return T(extractValue!U(val));
     } else static if (is(T == U*, U)) {
@@ -509,8 +521,12 @@ T extractValue(T)(Value val) {
     } else static if (is(T : U[], U) && !is(T == string)) {
         // Array type - extract each element from GraphQL list literal
         import graphql.ast : ValueEnum, Values;
-        if (val is null || val.ruleSelection != ValueEnum.ARR) {
+        if (val is null) {
             throw new CompilerException("Expected array for " ~ T.stringof);
+        }
+        // Input coercion makes a value which is not a list a list of one item
+        if (val.ruleSelection != ValueEnum.ARR) {
+            return [extractValue!U(val)];
         }
         U[] result;
         // Traverse the linked list of array values
