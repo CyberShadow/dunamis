@@ -22,6 +22,7 @@ import dunamis.core.expr : Expr, ExprResultType, ExprBase;
 import dunamis.core.types : isCustomScalar, isPublicMember;
 import dunamis.core.filtering : filterBy, FilterByExpr, FilterItemExpr, FilterByInfo;
 import dunamis.schema.plugin;
+import dunamis.graphql.schema.udas : GqlName;
 // isSchema imported via dunamis.schema.plugin wildcard import above
 
 // ============================================================================
@@ -33,7 +34,7 @@ import dunamis.schema.plugin;
 struct StringFilter {
     Nullable!string equalTo;
     Nullable!string notEqualTo;
-    Nullable!(string[]) in_;
+    @GqlName("in") Nullable!(string[]) in_;
     Nullable!(string[]) notIn;
     Nullable!string lessThan;
     Nullable!string lessThanOrEqualTo;
@@ -57,7 +58,7 @@ struct StringFilter {
 struct IntFilter {
     Nullable!int equalTo;
     Nullable!int notEqualTo;
-    Nullable!(int[]) in_;
+    @GqlName("in") Nullable!(int[]) in_;
     Nullable!(int[]) notIn;
     Nullable!int lessThan;
     Nullable!int lessThanOrEqualTo;
@@ -71,7 +72,7 @@ struct IntFilter {
 struct LongFilter {
     Nullable!long equalTo;
     Nullable!long notEqualTo;
-    Nullable!(long[]) in_;
+    @GqlName("in") Nullable!(long[]) in_;
     Nullable!(long[]) notIn;
     Nullable!long lessThan;
     Nullable!long lessThanOrEqualTo;
@@ -85,7 +86,7 @@ struct LongFilter {
 struct FloatFilter {
     Nullable!double equalTo;
     Nullable!double notEqualTo;
-    Nullable!(double[]) in_;
+    @GqlName("in") Nullable!(double[]) in_;
     Nullable!(double[]) notIn;
     Nullable!double lessThan;
     Nullable!double lessThanOrEqualTo;
@@ -109,7 +110,7 @@ template EnumFilter(E) if (is(E == enum)) {
     struct EnumFilter {
         Nullable!E equalTo;
         Nullable!E notEqualTo;
-        Nullable!(E[]) in_;
+        @GqlName("in") Nullable!(E[]) in_;
         Nullable!(E[]) notIn;
         Nullable!bool isNull;
     }

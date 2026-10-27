@@ -82,10 +82,7 @@ template hasGqlHidden(alias member) {
     enum hasGqlHidden = staticIndexOf!(GqlHidden, __traits(getAttributes, member)) >= 0;
 }
 
-/// The GraphQL name of a member whose D name is `defaultName`: the name
-/// given by its @GqlName UDA if present; otherwise a D keyword followed by an
-/// underscore (D's convention for names which are keywords, e.g. `in_`)
-/// stands for the keyword; otherwise the D name.
+/// Get the @GqlName value if present, otherwise return the default name
 template getGqlName(alias member, string defaultName) {
     enum getGqlName = () {
         alias attrs = __traits(getAttributes, member);
@@ -94,40 +91,8 @@ template getGqlName(alias member, string defaultName) {
                 return attr.name;
             }
         }
-        return presentedMemberName(defaultName);
+        return defaultName;
     }();
-}
-
-/// The GraphQL name of a D member name `name` without @GqlName: a D keyword
-/// followed by an underscore stands for the keyword.
-string presentedMemberName(string name) pure nothrow @safe {
-    import std.algorithm.searching : canFind;
-    if (name.length > 1 && name[$ - 1] == '_' && dKeywords.canFind(name[0 .. $ - 1]))
-        return name[0 .. $ - 1];
-    return name;
-}
-
-/// D keywords, which cannot name a member.
-private immutable string[] dKeywords = [
-    "abstract", "alias", "align", "asm", "assert", "auto", "body", "bool", "break", "byte",
-    "case", "cast", "catch", "cdouble", "cent", "cfloat", "char", "class", "const", "continue",
-    "creal", "dchar", "debug", "default", "delegate", "delete", "deprecated", "do", "double",
-    "else", "enum", "export", "extern", "false", "final", "finally", "float", "for", "foreach",
-    "foreach_reverse", "function", "goto", "idouble", "if", "ifloat", "immutable", "import",
-    "in", "inout", "int", "interface", "invariant", "ireal", "is", "lazy", "long", "macro",
-    "mixin", "module", "new", "nothrow", "null", "out", "override", "package", "pragma",
-    "private", "protected", "public", "pure", "real", "ref", "return", "scope", "shared",
-    "short", "static", "struct", "super", "switch", "synchronized", "template", "this",
-    "throw", "true", "try", "typeid", "typeof", "ubyte", "ucent", "uint", "ulong", "union",
-    "unittest", "ushort", "version", "void", "wchar", "while", "with",
-];
-
-unittest {
-    static assert(presentedMemberName("in_") == "in");
-    static assert(presentedMemberName("version_") == "version");
-    static assert(presentedMemberName("name_") == "name_");
-    static assert(presentedMemberName("_") == "_");
-    static assert(presentedMemberName("in") == "in");
 }
 
 /// Get the @GqlDescription text if present, otherwise return empty string

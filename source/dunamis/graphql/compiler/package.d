@@ -1996,7 +1996,7 @@ unittest {
     static struct Post {
         mixin DemoId;
         mixin Col!("title", string);
-        // A D keyword followed by an underscore is presented as the keyword
+        @GqlName("body")
         mixin Col!("body_", string, "body");
     }
 
