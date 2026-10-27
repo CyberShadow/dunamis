@@ -3592,3 +3592,54 @@ unittest {
     assert(ctx.errors[0].message == "no span");
     assert(ctx.errors[0].path == [JSONValue("users"), JSONValue("span")], ctx.errors.to!string);
 }
+
+// The selection set of an object stored in a column (a struct, e.g. a
+// PostgreSQL composite type) reads the column from the batched query, also
+// when the object is evaluated once for all selected fields (ObjectExpr,
+// NullableObjectExpr), instead of fetching it by the naive per-column path,
+// which with PostgreSQL returns the composite's text representation
+// ("(days,3)"), so that decoding it failed with "JSONValue is not an object".
+unittest {
+    import std.algorithm.searching : canFind;
+    import std.typecons : Nullable;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+    import dunamis.relational.mock : DebugSqlDB;
+    import dunamis.postgres.dialect : postgresDialect;
+
+    static DebugSqlDB!() db;
+    static struct Period { Nullable!string unit; Nullable!int quantity; }
+
+    @DemoEntity!(db, "states")
+    static struct State {
+        mixin DemoId;
+        mixin Col!("leadTime", Period, "lead_time");
+        mixin Col!("trialPeriod", Nullable!Period, "trial_period");
+    }
+
+    static struct Query {
+        mixin Table!(State, "states");
+    }
+
+    auto mock = new MockDB!();
+    mock.setTableData("states", `[
+        {"id": 1, "lead_time": {"unit": "days", "quantity": 3}, "trial_period": null},
+        {"id": 2, "lead_time": {"unit": "months", "quantity": 1}, "trial_period": {"unit": "days", "quantity": 7}}
+    ]`);
+
+    db = new DebugSqlDB!()(mock, postgresDialect());
+    auto result = awaitSync(new Executor().execute(compileTestQuery!Query(
+        `{ states { leadTime { unit quantity } } }`)));
+    assert(db.getSQL().canFind("states.lead_time"), db.getSQL());
+    assert(result["states"][0]["leadTime"]["unit"].str == "days", result.toString());
+    assert(result["states"][1]["leadTime"]["quantity"].integer == 1, result.toString());
+
+    db = new DebugSqlDB!()(mock, postgresDialect());
+    result = awaitSync(new Executor().execute(compileTestQuery!Query(
+        `{ states { trialPeriod { unit quantity } } }`)));
+    assert(db.getSQL().canFind("states.trial_period"), db.getSQL());
+    assert(result["states"][0]["trialPeriod"].isNull, result.toString());
+    assert(result["states"][1]["trialPeriod"]["quantity"].integer == 7, result.toString());
+}
