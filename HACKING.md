@@ -33,4 +33,23 @@ An integration suite can also be run outside Nix: build it with e.g.
 `build/dunamis` with `PGHOST`/`PGPORT`/`PGUSER`/`PGDATABASE` (or the
 `MYSQL_*` variables) pointing at a scratch database; see `flake.nix`.
 
+### Compiler Memory Benchmark
+
+Schemas are compile-time constructs, and compiling one (and the GraphQL
+compiler for it) takes memory and time growing with its numbers of types and
+fields. `tools/schema_bench.d` generates a synthetic schema module of a given
+size (entities, columns, relationships, computed fields of various kinds,
+mutations; see `--help`) to measure how:
+
+```bash
+dub run -q --single tools/schema_bench.d -- --entities=16 --object-fields=1 --ops > /tmp/bench.d
+/usr/bin/time -f '%M KB, %e s' ldc2 -c -o- \
+  $(dub describe -q --compiler=ldc2 --config=library --data=versions,import-paths) /tmp/bench.d
+```
+
+`-o-` measures the front-end only; to include code generation (about as much
+again), compile to an object file instead (e.g. `-g -of=/tmp/bench.o`, as
+application builds do). Compare two configurations differing in one
+dimension to get the cost of a field or type of a kind.
+
 See [ARCHITECTURE.md](ARCHITECTURE.md) for high-level architecture details.
