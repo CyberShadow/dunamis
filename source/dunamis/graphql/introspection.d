@@ -164,8 +164,13 @@ private RuntimeFieldInfo[] buildRuntimeFields(T)() {
         enum gqlFieldName = getGqlName!(fn, member);
         enum description = getGqlDescription!fn;
         enum deprecation = getGqlDeprecated!fn;
-        enum typeJson = computedFieldTypeRefJson!fn();
-        enum args = computedFieldRuntimeArgs!fn();
+        // Instantiated per result type, and only for fields with arguments:
+        // per field, they would be compiled for every field of the schema
+        enum typeJson = fieldResultTypeRefJson!(ExprResultType!(ReturnType!(typeof(fn))))();
+        static if (Parameters!fn.length > 1)
+            enum args = computedFieldRuntimeArgs!fn();
+        else
+            enum RuntimeArgInfo[] args = null;
 
         fields ~= RuntimeFieldInfo(
             gqlFieldName,
@@ -180,12 +185,10 @@ private RuntimeFieldInfo[] buildRuntimeFields(T)() {
     return fields;
 }
 
-/// Get JSONValue type ref for a computed field's return type.
+/// Get JSONValue type ref for a computed field's result type (the value type
+/// of its Expr return type).
 /// Mirrors computedFieldReturnType but produces JSONValue instead of string.
-private JSONValue computedFieldTypeRefJson(alias member)() {
-    alias Return = ReturnType!(typeof(member));
-    alias ResultT = ExprResultType!Return;
-
+private JSONValue fieldResultTypeRefJson(ResultT)() {
     static if (is(ResultT == string)) {
         return typeRefJson!string;
     }
@@ -237,7 +240,7 @@ private RuntimeArgInfo[] computedFieldRuntimeArgs(alias member)() {
                     paramNames[i],
                     buildBaseTypeRefJson!P(),  // nullable (has default), no NON_NULL wrapper
                     true,
-                    defaultValueToString(Defaults[i])
+                    defaultValueToString!(Defaults[i])
                 );
             }
         }

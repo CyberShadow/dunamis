@@ -197,7 +197,7 @@ template getComputedFieldArguments(alias member) {
                         argName,
                         graphqlBaseTypeName!P,
                         true,
-                        defaultValueToString(Defaults[i])
+                        defaultValueToString!(Defaults[i])
                     );
                 }
             }
@@ -206,14 +206,24 @@ template getComputedFieldArguments(alias member) {
     }();
 }
 
-/// Convert a default value to its GraphQL SDL string representation
-string defaultValueToString(T)(T value) {
+/// Convert a default value to its GraphQL SDL string representation.
+///
+/// The value is a template argument, so that the representation of an empty
+/// list (e.g. the default of the `orderBy` argument of each list field, each
+/// with an element type of its own) does not compile the formatting of its
+/// element type.
+string defaultValueToString(alias value)() {
+    import std.traits : isSomeString;
+
+    alias T = typeof(value);
     static if (is(T == string)) {
         return `"` ~ value ~ `"`;
     } else static if (is(T == bool)) {
         return value ? "true" : "false";
     } else static if (is(T == typeof(null))) {
         return "null";
+    } else static if (is(T : E[], E) && !isSomeString!T && value.length == 0) {
+        return "[]";
     } else {
         return value.to!string;
     }

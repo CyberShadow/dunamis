@@ -160,7 +160,7 @@ template getRootFieldArguments(alias member) {
                         paramNames[i],
                         graphqlBaseTypeName!P,
                         true,
-                        defaultValueToString(Defaults[i])
+                        defaultValueToString!(Defaults[i])
                     );
                 }
             }

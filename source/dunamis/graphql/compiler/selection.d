@@ -551,7 +551,12 @@ ExprBase compileFieldAccess(T, alias SchemaSource = void)(Expr!T ref_, Field fie
         static if (!hasGqlHidden!memberSym) {
             enum gqlName = getGqlName!(memberSym, member);
             if (fieldName == gqlName) {
-                auto resultExpr = callComputedField!(memberSym, T)(ref_, field.args, variables);
+                // A field without arguments is called directly, rather than
+                // through an instance of callComputedField of its own
+                static if (Parameters!memberSym.length > 1)
+                    auto resultExpr = callComputedField!(memberSym, T)(ref_, field.args, variables);
+                else
+                    auto resultExpr = memberSym(ref_);
                 return compileFieldResult!(typeof(resultExpr), SchemaSource)(resultExpr, field.ss, variables, fragments, nestedPath);
             }
         }
@@ -570,7 +575,7 @@ ExprBase compileFieldAccess(T, alias SchemaSource = void)(Expr!T ref_, Field fie
         static foreach (member; getSchemaFields!T) {{
             alias memberSym = __traits(getMember, T, member);
             enum gqlName = getGqlName!(memberSym, member);
-            if (gqlName == "id")
+            static if (gqlName == "id")
                 idExpr = callComputedField!(memberSym, T)(ref_, null, variables);
         }}
         return compileExtensionField(getGraphQLTypeName!T, fieldName,

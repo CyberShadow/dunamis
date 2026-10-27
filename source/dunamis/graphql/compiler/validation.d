@@ -508,7 +508,12 @@ private ValidationError[] validateFieldAccess(T, alias SchemaSource)(Field field
             enum gqlName = getGqlName!(memberSym, member);
             if (fieldName == gqlName) {
                 ValidationError[] errors;
-                errors ~= validateFieldArguments!(memberSym)(field, variables);
+                // Fields without arguments share one validation of their
+                // (absence of) arguments, rather than an instance each
+                static if (Parameters!memberSym.length > 1)
+                    errors ~= validateFieldArguments!(memberSym)(field, variables);
+                else
+                    errors ~= validateNoFieldArguments(field);
                 errors ~= validateFieldResult!(ReturnType!(typeof(memberSym)), SchemaSource)(field, fragments, visited, variables);
                 return errors;
             }
@@ -520,11 +525,51 @@ private ValidationError[] validateFieldAccess(T, alias SchemaSource)(Field field
     return [fieldError("Unknown field '" ~ fieldName ~ "' on type " ~ getGraphQLTypeName!T, field)];
 }
 
+/// Validate the arguments of a computed field which takes none.
+private ValidationError[] validateNoFieldArguments(Field field) {
+    ValidationError[] errors = duplicateArgumentErrors(field);
+    errors ~= unexpectedArgumentErrors(field);
+    return errors;
+}
+
+/// Errors for the arguments given more than once to a field.
+private ValidationError[] duplicateArgumentErrors(Field field) {
+    ValidationError[] errors;
+    string[string] seen;
+    foreach (arg; iterateArguments(field.args)) {
+        auto name = arg.name.value;
+        if (name is null) continue;
+        if (name in seen) {
+            errors ~= ValidationError(
+                "Duplicate argument '" ~ name ~ "' on field '" ~ getFieldName(field) ~ "'",
+                arg.name.line,
+                arg.name.column
+            );
+        }
+        seen[name] = name;
+    }
+    return errors;
+}
+
+/// Errors for the arguments given to a field which takes none.
+private ValidationError[] unexpectedArgumentErrors(Field field) {
+    ValidationError[] errors;
+    foreach (arg; iterateArguments(field.args)) {
+        auto name = arg.name.value;
+        if (name is null) continue;
+        errors ~= ValidationError(
+            "Unknown argument '" ~ name ~ "' on field '" ~ getFieldName(field) ~ "'",
+            arg.name.line,
+            arg.name.column
+        );
+    }
+    return errors;
+}
+
 /// Validate arguments for a computed field.
 private ValidationError[] validateFieldArguments(alias fn)(Field field, JSONValue variables) {
     import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
 
-    ValidationError[] errors;
     auto args = field.args;
 
     alias Params = Parameters!fn;
@@ -532,21 +577,7 @@ private ValidationError[] validateFieldArguments(alias fn)(Field field, JSONValu
     enum paramNames = [ParameterIdentifierTuple!fn];
 
     // Check for duplicate arguments
-    {
-        string[string] seen;
-        foreach (arg; iterateArguments(args)) {
-            auto name = arg.name.value;
-            if (name is null) continue;
-            if (name in seen) {
-                errors ~= ValidationError(
-                    "Duplicate argument '" ~ name ~ "' on field '" ~ getFieldName(field) ~ "'",
-                    arg.name.line,
-                    arg.name.column
-                );
-            }
-            seen[name] = name;
-        }
-    }
+    ValidationError[] errors = duplicateArgumentErrors(field);
 
     // Check for unknown arguments (skip first param which is Expr!Entity or Expr!Parent)
     static if (Params.length > 1) {
@@ -597,15 +628,7 @@ private ValidationError[] validateFieldArguments(alias fn)(Field field, JSONValu
         }}
     } else {
         // Field takes no arguments — check for unexpected arguments
-        foreach (arg; iterateArguments(args)) {
-            auto name = arg.name.value;
-            if (name is null) continue;
-            errors ~= ValidationError(
-                "Unknown argument '" ~ name ~ "' on field '" ~ getFieldName(field) ~ "'",
-                arg.name.line,
-                arg.name.column
-            );
-        }
+        errors ~= unexpectedArgumentErrors(field);
     }
 
     return errors;
