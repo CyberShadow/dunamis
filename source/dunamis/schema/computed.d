@@ -2,10 +2,25 @@
 ///
 /// `ComputedFieldsPlugin!(Sources)` attaches free functions of the form
 /// `auto field(Expr!Entity e, args...)` to the schema type built from `Entity`,
-/// as if they had been declared on the entity itself. Sources are modules
-/// and/or function symbols; a module contributes every public function it
-/// declares whose first parameter is an `Expr`, and a function symbol all its
-/// overloads that do. Keep helpers non-public.
+/// as if they had been declared on the entity itself. Sources are modules,
+/// function symbols and/or field sets; a module contributes every public
+/// function it declares whose first parameter is an `Expr`, a function symbol
+/// all its overloads that do, and a field set (a struct) the sources it has
+/// public aliases of and the public static field functions it declares. Keep
+/// helpers non-public.
+///
+/// The names of all types and functions the plugin and the plugins after it
+/// generate include the plugin's sources, and so grow with their number (for
+/// a function symbol, by its name and type). Where there are many, a field
+/// set naming them keeps these names short, which saves compiler memory:
+/// ---
+/// struct AppFields {
+///     alias users = app.fields.users;    // a module
+///     alias fullName = app.fullName;      // a function
+/// }
+/// alias FinalSchema = ApplyPlugins!(Schema!(Query, Mutation),
+///     ComputedFieldsPlugin!AppFields, FilterPlugin, SortingPlugin, PaginationPlugin);
+/// ---
 ///
 /// Example:
 /// ---
@@ -49,7 +64,7 @@ static import dunamis.schema.transform;
 // Field discovery
 // ============================================================================
 
-/// The free functions contributed by Sources (modules and/or function symbols).
+/// The free functions contributed by Sources (modules, function symbols and/or field sets).
 template computedFieldsIn(Sources...) {
     alias computedFieldsIn = staticMap!(_fieldsOf, Sources);
 }
@@ -75,6 +90,8 @@ private template _isFieldFunction(alias fn) {
 private template _fieldsOf(alias source) {
     static if (__traits(isModule, source)) {
         alias _fieldsOf = staticMap!(_ApplyModule!source._declaredFields, __traits(allMembers, source));
+    } else static if (is(source == struct)) {
+        alias _fieldsOf = staticMap!(_ApplyFieldSet!source._sourcesOf, __traits(allMembers, source));
     } else {
         static assert(_isFieldFunction!source,
             __traits(identifier, source) ~ " is not a computed field function (first parameter must be an Expr)");
@@ -82,6 +99,25 @@ private template _fieldsOf(alias source) {
         // name declared for several entity types).
         alias _fieldsOf = Filter!(_isFieldFunction,
             __traits(getOverloads, __traits(parent, source), __traits(identifier, source)));
+    }
+}
+
+private template _ApplyFieldSet(F) {
+    // The fields of the public members of the field set F: of the modules
+    // and field sets it has aliases of, and of the functions it declares or
+    // has aliases of (each with its whole overload set).
+    template _sourcesOf(string name) {
+        static if (isInternalMember!name || __traits(getVisibility, __traits(getMember, F, name)) != "public") {
+            alias _sourcesOf = AliasSeq!();
+        } else static if (__traits(isModule, __traits(getMember, F, name)) ||
+                          is(__traits(getMember, F, name) == struct)) {
+            alias _sourcesOf = _fieldsOf!(__traits(getMember, F, name));
+        } else {
+            alias _sourcesOf = Filter!(_isFieldFunction, __traits(getOverloads, F, name));
+            static assert(_sourcesOf.length,
+                F.stringof ~ "." ~ name ~ " is not a computed field source (a module, a field set, " ~
+                "or computed field functions)");
+        }
     }
 }
 

@@ -421,6 +421,36 @@ unittest {
     static assert(!__traits(compiles, computedFieldsIn!notAField));
 }
 
+// A field set (a struct) contributes the sources it has public aliases of,
+// in order, and the public static field functions it declares
+unittest {
+    import std.meta : staticMap;
+
+    enum identifierOf(alias fn) = __traits(identifier, fn);
+
+    static struct ModuleSet { alias fields = fixture; }
+    static assert([staticMap!(identifierOf, computedFieldsIn!ModuleSet)] ==
+        [staticMap!(identifierOf, computedFieldsIn!fixture)]);
+
+    static struct FunctionSet {
+        alias label = fixture.label;
+        alias authorName = fixture.authorName;
+        static Expr!string nickname(Expr!User u) { return u.name; }
+        private static Expr!string _helper(Expr!User u) { return u.name; }
+        static struct Nested { alias shout = fixture.shout; }
+    }
+    static assert([staticMap!(identifierOf, computedFieldsIn!FunctionSet)] ==
+        ["label", "label", "authorName", "nickname", "shout"]);
+
+    static struct NotASource { alias x = int; }
+    static assert(!__traits(compiles, computedFieldsIn!NotASource));
+
+    // The schema is the same as with the sources themselves
+    static struct AuthorNameSet { alias authorName = fixture.authorName; }
+    static assert(generateSchemaSDL!(ApplyPlugins!(Schema!Query, ComputedFieldsPlugin!AuthorNameSet)) ==
+        generateSchemaSDL!(ApplyPlugins!(Schema!Query, ComputedFieldsPlugin!(fixture.authorName))));
+}
+
 // The plugin works with the types of the schema it is applied to: after
 // another plugin, functions written against user-declared types match no
 // type (the plugin does not look beneath the previous plugin's wrappers),

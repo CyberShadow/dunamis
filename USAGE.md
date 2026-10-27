@@ -1045,7 +1045,17 @@ Placed after another plugin, `ComputedFieldsPlugin` only knows that plugin's typ
 
 **How it works:**
 
-- Sources are modules and/or function symbols. A module contributes every public function declared in it (not imported into it) whose first parameter is an `Expr`. A function symbol contributes all its overloads, so one field name can be declared for several types.
+- Sources are modules, function symbols and/or field sets. A module contributes every public function declared in it (not imported into it) whose first parameter is an `Expr`. A function symbol contributes all its overloads, so one field name can be declared for several types. A field set is a struct naming sources: it contributes the sources it has public aliases of (modules, functions, other field sets), in order, and the public static field functions it declares.
+- The names of the types and functions the plugin (and every plugin after it) generates include the plugin's sources, so they grow with the number of sources (a function symbol adds its name and type), and with them the compiler's memory. With many sources, pass one field set naming them instead:
+
+  ```d
+  struct AppFields {
+      alias postTitles = app.fields.post_titles;
+      alias other = app.fields.other;
+  }
+  alias FinalSchema = ApplyPlugins!(Schema!(Query, Mutation),
+      ComputedFieldsPlugin!AppFields, FilterPlugin, SortingPlugin, PaginationPlugin);
+  ```
 - A function is attached to the type of the given schema that it is written against, or that directly wraps the type it is written against (for the types `Schema!` produces, the user-declared type). Inside the function, `Entity` is seen exactly as declared (`u.posts` is `Expr!(Post[])`), and entity or POD results (`Expr!Post`, `Expr!(Post[])`, `Expr!(Nullable!DateRange)`, `Expr!(Nullable!(DateRange[]))` for a nullable list `[DateRange!]`, `Expr!(Nullable!Cell[])` for a list of nullable items `[Cell]!`, `Expr!(Nullable!Cell[][])` for a nested list `[[Cell]!]!`) are mapped to the schema's types likewise, including their own computed fields. Selection sets apply to the items of lists at any depth. (Lists of nullable items are not filtered by `FilterPlugin`.)
 - Result types that only computed fields return (a POD, or an entity reached through a computed relation such as `hasMany!(Like, "post_id")(p)`) are added to the schema. Their members are mapped likewise, so an entity member of a POD (`struct Audit { User user; }`, constructed as `User(id)`) is selectable as the schema's `User`. Such types pass through the plugins applied after `ComputedFieldsPlugin`, like the schema's own types.
 - The GraphQL field name is the function name; extra parameters become arguments (with defaults), and `@GqlName`, `@GqlDescription`, `@GqlDeprecated` on the function are honoured.
