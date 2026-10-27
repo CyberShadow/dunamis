@@ -207,13 +207,13 @@ mixin template ForwardFieldWithMappings(SourceType, string fieldName, alias Type
 /// );
 /// ---
 template ExternalTypesPlugin(alias S, NewMappings...) if (isSchema!S) {
-    import dunamis.core.discovery : getAllObjectTypes;
+    import std.meta : AliasSeq;
+    import dunamis.core.discovery : getSchemaObjectTypes, SchemaRootTypes;
     import dunamis.schema.transform : isTypeInList;
     import dunamis.schema.plugin : getFieldMembers, isComputedField, OriginalName;
 
-    // Discover all object types from the inner schema's Query
-    alias _OriginalQuery = S.Query;
-    alias _AllTypes = getAllObjectTypes!_OriginalQuery;
+    // The inner schema's object types: its root types, and those reachable from them
+    alias _AllTypes = AliasSeq!(SchemaRootTypes!S, getSchemaObjectTypes!S);
 
     // TypeMap: route types to their wrapped versions.
     // - Directly-mapped types (Date→string): identity (serialized at call site)
@@ -280,33 +280,10 @@ template ExternalTypesPlugin(alias S, NewMappings...) if (isSchema!S) {
         }
     }
 
-    // Wrap Query: forward all fields with value mapping
-    struct Query {
-        static foreach (_m; getFieldMembers!_OriginalQuery) {
-            static if (isComputedField!(_OriginalQuery, _m)) {
-                mixin ForwardFieldWithMappings!(_OriginalQuery, _m, _TypeMap, NewMappings);
-            }
-        }
-    }
-
-    // Wrap Mutation: forward all fields with value mapping
-    struct Mutation {
-        static foreach (_m; getFieldMembers!(S.Mutation)) {
-            static if (isComputedField!(S.Mutation, _m)) {
-                mixin ForwardFieldWithMappings!(S.Mutation, _m, _TypeMap, NewMappings);
-            }
-        }
-    }
-
-    // Wrap Subscription: forward all fields with value mapping
-    struct Subscription {
-        static foreach (_m; getFieldMembers!(S.Subscription)) {
-            static if (isComputedField!(S.Subscription, _m)) {
-                mixin ForwardFieldWithMappings!(S.Subscription, _m, _TypeMap, NewMappings);
-            }
-        }
-    }
-
+    // The root types are object types of the schema like any other
+    alias Query = _TypeMap!(S.Query);
+    alias Mutation = _TypeMap!(S.Mutation);
+    alias Subscription = _TypeMap!(S.Subscription);
 }
 
 // ============================================================================

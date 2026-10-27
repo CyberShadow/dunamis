@@ -53,12 +53,12 @@ import dunamis.schema.plugin;
 /// ---
 template PaginationPlugin(alias S) if (isSchema!S) {
     import std.meta : AliasSeq, staticMap;
-    import dunamis.core.discovery : getAllObjectTypes;
+    import dunamis.core.discovery : getSchemaObjectTypes, SchemaRootTypes;
     import dunamis.schema.transform : isTypeInList;
 
-    // Get all entity types discovered from the schema
-    alias _OriginalQuery = S.Query;
-    alias _AllEntityTypes = getAllObjectTypes!_OriginalQuery;
+    // The schema's object types: its root types, and those reachable from them
+    alias _AllEntityTypes = getSchemaObjectTypes!S;
+    alias _AllTypes = AliasSeq!(SchemaRootTypes!S, _AllEntityTypes);
 
     // Generate paginated versions of each entity type.
     template PaginatedEntity(Entity) {
@@ -72,33 +72,19 @@ template PaginationPlugin(alias S) if (isSchema!S) {
     // Map all entity types to their paginated versions
     alias AllEntityTypes = staticMap!(PaginatedEntity, _AllEntityTypes);
 
-    /// Entity type map: maps discovered entity types to their paginated versions.
+    /// Entity type map: maps the schema's object types (the root types
+    /// included) to their paginated versions.
     template EntityTypeMap(T) {
-        static if (isTypeInList!(T, _AllEntityTypes)) {
+        static if (isTypeInList!(T, _AllTypes)) {
             alias EntityTypeMap = PaginatedEntity!T;
         } else {
             alias EntityTypeMap = T;
         }
     }
 
-    @(RootTypeNameAttributes!(_OriginalQuery))
-    struct PaginatedQuery {
-        mixin WrapFields!(_OriginalQuery, EntityTypeMap, PaginatedArrayField);
-    }
-
-    @(RootTypeNameAttributes!(S.Mutation))
-    struct PaginatedMutation {
-        mixin WrapFields!(S.Mutation, EntityTypeMap, PaginatedArrayField);
-    }
-
-    @(RootTypeNameAttributes!(S.Subscription))
-    struct PaginatedSubscription {
-        mixin WrapFields!(S.Subscription, EntityTypeMap, PaginatedArrayField);
-    }
-
-    alias Query = PaginatedQuery;
-    alias Mutation = PaginatedMutation;
-    alias Subscription = PaginatedSubscription;
+    alias Query = EntityTypeMap!(S.Query);
+    alias Mutation = EntityTypeMap!(S.Mutation);
+    alias Subscription = EntityTypeMap!(S.Subscription);
 }
 
 /// Eponymous code template for PaginatedArrayField.

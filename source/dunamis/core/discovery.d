@@ -202,10 +202,28 @@ template isValidFieldMethodForType(T, string member) {
 // ============================================================================
 
 /// Fixpoint object type discovery — expands relationships until no new types are found.
-/// Discovers all object types reachable from a root type's field return types.
-template getAllObjectTypes(Query) {
-    // Several root fields may return the same type
-    alias getAllObjectTypes = expandObjectFixpoint!(uniqueTypes!(getRootTypes!Query));
+/// Discovers all object types reachable from the root types `Roots` (e.g. a
+/// schema's Query, Mutation and Subscription types), other than the roots
+/// themselves. Root types are object types like any other: their fields are
+/// followed like those of the types they lead to.
+template getAllObjectTypes(Roots...) {
+    alias getAllObjectTypes = ExcludeTypes!Roots.From!(expandObjectFixpoint!(uniqueTypes!Roots));
+}
+
+/// The object types of the schema `S` other than its root types: all object
+/// types reachable from its Query, Mutation and (if it has one) Subscription
+/// types.
+template getSchemaObjectTypes(alias S) {
+    alias getSchemaObjectTypes = getAllObjectTypes!(SchemaRootTypes!S);
+}
+
+/// The root types of the schema `S`: its Query, Mutation and (if it has one)
+/// Subscription types.
+template SchemaRootTypes(alias S) {
+    static if (__traits(hasMember, S, "Subscription"))
+        alias SchemaRootTypes = AliasSeq!(S.Query, S.Mutation, S.Subscription);
+    else
+        alias SchemaRootTypes = AliasSeq!(S.Query, S.Mutation);
 }
 
 // The type list helpers below are used on lists of hundreds of types (all
@@ -296,11 +314,6 @@ template getRelatedTypes(T) {
     } else {
         alias getRelatedTypes = _fieldRelated;
     }
-}
-
-/// Get root object types from a Query type
-template getRootTypes(Query) {
-    alias getRootTypes = getRootTypesImpl!(Query, 0, __traits(allMembers, Query));
 }
 
 /// Whether each of Types is its last occurrence in Types.
@@ -485,22 +498,6 @@ private template _RelatedOf(T) {
     }
 }
 
-/// The object type a root field of Query leads to (as a one-element AliasSeq), if any.
-private template _RootOf(Query) {
-    template of(string member) {
-        static if (!isInternalMember!member &&
-                   is(typeof(__traits(getMember, Query, member)) == function)) {
-            alias fn = __traits(getMember, Query, member);
-            static if (isValidFieldMethod!(Query, fn))
-                alias of = _objectOrNothing!(extractObjectFromType!(ExprResultType!(ReturnType!fn)));
-            else
-                alias of = AliasSeq!();
-        } else {
-            alias of = AliasSeq!();
-        }
-    }
-}
-
 private template _objectOrNothing(T) {
     static if (is(T == void))
         alias _objectOrNothing = AliasSeq!();
@@ -511,11 +508,6 @@ private template _objectOrNothing(T) {
 /// Helper to get related types from a type by iterating over members.
 private template getRelatedTypesImpl(T, size_t idx, Members...) {
     alias getRelatedTypesImpl = staticMap!(_RelatedOf!T.of, Members[idx .. $]);
-}
-
-/// Helper to get root types from Query by iterating over members.
-private template getRootTypesImpl(Query, size_t idx, Members...) {
-    alias getRootTypesImpl = staticMap!(_RootOf!Query.of, Members[idx .. $]);
 }
 
 /// Expand one level: get all related types from a set of types

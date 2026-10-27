@@ -12,7 +12,7 @@ import dunamis.graphql.schema.input_types;
 // Re-export type discovery from core (renamed: getAllEntityTypes → getAllObjectTypes)
 public import dunamis.core.discovery :
     getAllObjectTypes, extractObjectFromType,
-    getRelatedTypes, getRootTypes,
+    getRelatedTypes, getSchemaObjectTypes, SchemaRootTypes,
     uniqueTypes, uniqueTypesForExpand,
     staticContains, ExcludeTypes;
 
@@ -140,40 +140,14 @@ template getInputTypesFromEntitiesImpl(Entities...) {
     alias getInputTypesFromEntitiesImpl = staticMap!(getInputTypesFromEntity, Entities);
 }
 
-/// Collect all input types from all entities in the schema.
+/// Collect all input types of the schema with the root types `Roots`: the
+/// argument types of the fields of the roots and of all object types
+/// reachable from them.
 /// Uses BFS expansion to discover nested input types including recursive ones.
-template getAllInputTypes(Query) {
-    alias _AllObjectTypes = getAllObjectTypes!Query;
-    alias DirectInputTypes = getInputTypesFromEntitiesImpl!_AllObjectTypes;
+template getAllInputTypes(Roots...) {
+    alias DirectInputTypes = getInputTypesFromEntitiesImpl!(getAllObjectTypes!Roots, Roots);
     // Expand to discover nested input types (handles recursive types via fixed-depth BFS)
     alias getAllInputTypes = expandAllInputTypes!(uniqueTypesForExpand!DirectInputTypes);
-}
-
-/// Helper to get input types from mutation parameters (iterative)
-template getInputTypesFromMutationImpl(Mutation, size_t idx, Members...) {
-    static if (idx >= Members.length) {
-        alias getInputTypesFromMutationImpl = AliasSeq!();
-    } else {
-        enum member = Members[idx];
-        alias Rest = getInputTypesFromMutationImpl!(Mutation, idx + 1, Members);
-
-        static if (!isPublicMember!(Mutation, member)) {
-            alias getInputTypesFromMutationImpl = Rest;
-        } else static if (is(typeof(__traits(getMember, Mutation, member)) == function)) {
-            alias fn = __traits(getMember, Mutation, member);
-            alias Params = Parameters!fn;
-            // Get input types from parameters (skip first which is parent Expr!Mutation)
-            alias InputTypes = getInputTypesFromParamsImpl!(1, Params);
-            alias getInputTypesFromMutationImpl = AliasSeq!(InputTypes, Rest);
-        } else {
-            alias getInputTypesFromMutationImpl = Rest;
-        }
-    }
-}
-
-/// Collect all input types from a Mutation type's parameters
-template getInputTypesFromMutation(Mutation) {
-    alias getInputTypesFromMutation = getInputTypesFromMutationImpl!(Mutation, 0, __traits(allMembers, Mutation));
 }
 
 // ============================================================================
@@ -310,9 +284,9 @@ template getEnumTypesFromEntitiesImpl(Entities...) {
     alias getEnumTypesFromEntitiesImpl = staticMap!(getEnumTypesFromEntity, Entities);
 }
 
-/// Collect all enum types from all entities in the schema
-template getAllEnumTypes(Query) {
-    alias _AllObjectTypes = getAllObjectTypes!Query;
-    alias AllEnumTypes = getEnumTypesFromEntitiesImpl!_AllObjectTypes;
+/// Collect all enum types of the schema with the root types `Roots` (those
+/// of the fields of the roots and of all object types reachable from them)
+template getAllEnumTypes(Roots...) {
+    alias AllEnumTypes = getEnumTypesFromEntitiesImpl!(getAllObjectTypes!Roots, Roots);
     alias getAllEnumTypes = uniqueTypes!AllEnumTypes;
 }

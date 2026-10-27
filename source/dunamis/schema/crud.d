@@ -279,12 +279,15 @@ template _extractNormalizedEntity(alias QueryType, string member) {
 /// - Generates create/update/delete for each entity with single-PK + @AutoIncrement
 /// - Skips CRUD generation if the method name already exists on S.Mutation (user override)
 template CrudMutationPlugin(alias S) if (isSchema!S) {
-    import dunamis.schema.plugin : WrapFields, IdentityTypeMap, ForwardField;
+    import dunamis.schema.plugin : WrapFields, IdentityTypeMap, ForwardField, OriginalName, RemapTypeAttributes;
     import dunamis.relational.schema.attrs : hasTableEntity, extractTableEntity;
 
     alias Query = S.Query;
     alias Subscription = S.Subscription;
 
+    // Mutation with fields added, as any wrapper of a type of the schema
+    @(RemapTypeAttributes!(IdentityTypeMap, __traits(getAttributes, S.Mutation)))
+    @OriginalName(__traits(identifier, S.Mutation))
     struct CrudMutation {
         // Forward all existing mutation fields from the source schema
         mixin WrapFields!(S.Mutation, IdentityTypeMap, ForwardField);

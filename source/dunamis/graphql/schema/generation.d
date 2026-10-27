@@ -331,31 +331,17 @@ template generateSchemaSDL(alias SchemaOrQuery) {
     }
 
     // Use Schema-provided AllEntityTypes if available (for plugins like PaginationPlugin),
-    // otherwise discover entity types from Query
+    // otherwise discover the object types from the root types
     static if (isSchema!SchemaOrQuery && __traits(hasMember, SchemaOrQuery, "AllEntityTypes")) {
         alias AllTypes = SchemaOrQuery.AllEntityTypes;
     } else {
-        alias AllTypes = getAllObjectTypes!QueryType;
+        alias AllTypes = getAllObjectTypes!(QueryType, MutationType, SubscriptionType);
     }
 
-    // Collect input types from entities AND mutations (if any)
-    // Both are expanded to discover nested types (handles recursive types)
-    alias EntityInputTypes = getAllInputTypes!QueryType;
-    // Root Query arguments (notably plugin-generated filters/orderings) are
-    // not part of getAllObjectTypes!QueryType, so discover them explicitly.
-    alias QueryDirectInputTypes = getInputTypesFromEntity!QueryType;
-    alias QueryInputTypes = expandAllInputTypes!(uniqueTypesForExpand!QueryDirectInputTypes);
-    alias QueryAndEntityInputTypes = uniqueTypesForExpand!(AliasSeq!(EntityInputTypes, QueryInputTypes));
-    static if (getFields!MutationType.length > 0) {
-        alias MutationDirectTypes = getInputTypesFromMutation!MutationType;
-        alias MutationInputTypes = expandAllInputTypes!(uniqueTypesForExpand!MutationDirectTypes);
-        alias AllInputTypes = uniqueTypesForExpand!(AliasSeq!(QueryAndEntityInputTypes, MutationInputTypes));
-    } else {
-        alias AllInputTypes = QueryAndEntityInputTypes;
-    }
-
-    // Collect enum types from entities
-    alias AllEnumTypes = uniqueTypes!(getAllEnumTypes!QueryType, getEnumTypesFromEntity!QueryType);
+    // Input and enum types of the root types' and all object types' fields
+    // (expanded to discover nested types; handles recursive types)
+    alias AllInputTypes = getAllInputTypes!(QueryType, MutationType, SubscriptionType);
+    alias AllEnumTypes = getAllEnumTypes!(QueryType, MutationType, SubscriptionType);
 
     // Discover abstract types (unions + interfaces)
     alias AllAbstractTypes = getAllAbstractTypes!AllTypes;

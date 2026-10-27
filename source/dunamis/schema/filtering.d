@@ -1200,14 +1200,14 @@ T extractJsonValue(T)(JSONValue value) {
 ///   User.posts(filter: PostFilter): [Post!]!
 template FilterPlugin(alias S) if (isSchema!S) {
     import std.meta : AliasSeq, staticMap;
-    import dunamis.core.discovery : getAllObjectTypes;
+    import dunamis.core.discovery : getSchemaObjectTypes, SchemaRootTypes;
     import dunamis.schema.transform : isTypeInList;
 
-    // Get all entity types discovered from the schema
-    alias _OriginalQuery = S.Query;
-    alias _AllEntityTypes = getAllObjectTypes!_OriginalQuery;
+    // The schema's object types: its root types, and those reachable from them
+    alias _AllEntityTypes = getSchemaObjectTypes!S;
+    alias _AllTypes = AliasSeq!(SchemaRootTypes!S, _AllEntityTypes);
 
-    // Generate filtered versions of each entity type
+    // Generate filtered versions of each object type
     template FilteredEntity(Entity) {
         @(RemapTypeAttributes!(EntityTypeMap, __traits(getAttributes, Entity)))
         @OriginalName(__traits(identifier, Entity))
@@ -1219,33 +1219,19 @@ template FilterPlugin(alias S) if (isSchema!S) {
     // Map all entity types to their filtered versions
     alias AllEntityTypes = staticMap!(FilteredEntity, _AllEntityTypes);
 
-    /// Entity type map: maps original entity types to their filtered versions.
+    /// Entity type map: maps the schema's object types (the root types
+    /// included) to their filtered versions.
     template EntityTypeMap(T) {
-        static if (isTypeInList!(T, _AllEntityTypes)) {
+        static if (isTypeInList!(T, _AllTypes)) {
             alias EntityTypeMap = FilteredEntity!T;
         } else {
             alias EntityTypeMap = T;
         }
     }
 
-    @(RootTypeNameAttributes!(_OriginalQuery))
-    struct FilteredQuery {
-        mixin WrapFields!(_OriginalQuery, EntityTypeMap, FilteredArrayField);
-    }
-
-    @(RootTypeNameAttributes!(S.Mutation))
-    struct FilteredMutation {
-        mixin WrapFields!(S.Mutation, EntityTypeMap, FilteredArrayField);
-    }
-
-    @(RootTypeNameAttributes!(S.Subscription))
-    struct FilteredSubscription {
-        mixin WrapFields!(S.Subscription, EntityTypeMap, FilteredArrayField);
-    }
-
-    alias Query = FilteredQuery;
-    alias Mutation = FilteredMutation;
-    alias Subscription = FilteredSubscription;
+    alias Query = EntityTypeMap!(S.Query);
+    alias Mutation = EntityTypeMap!(S.Mutation);
+    alias Subscription = EntityTypeMap!(S.Subscription);
 }
 
 // ============================================================================

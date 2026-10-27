@@ -2163,6 +2163,28 @@ void testFilteredWindowComputedInSql() {
         `{"posts": [{"title": "GraphQL Rocks"}]}`, null);
 }
 
+/// Computed fields of the root type (free functions written against Query):
+/// a list root field whose own condition and the plugins' filter, ordering
+/// and window apply (in SQL), with nested selections, and a root field over it.
+void testComputedRootFields() {
+    checkFilteredWindow(`{ usersExcept(firstName: "Bob", filter: {` ~ seededUsers ~ `}, ` ~ byId ~ `) ` ~
+            `{ firstName posts(` ~ byId ~ `) { title } } }`,
+        `{"usersExcept": [{"firstName": "Alice", "posts": [{"title": "Hello World"}, {"title": "GraphQL Rocks"}]}, ` ~
+            `{"firstName": "Charlie", "posts": []}]}`, null);
+    checkFilteredWindow(`{ usersExcept(firstName: "Alice", first: 1, filter: {` ~ seededUsers ~ `}, ` ~ byIdDesc ~ `) { firstName } }`,
+        `{"usersExcept": [{"firstName": "Charlie"}]}`, null);
+
+    auto response = graphql(`{ users { firstName } all: countExcept(firstName: "") notAlice: countExcept(firstName: "Alice") }`);
+    assertNoErrors(response);
+    auto users = response["data"]["users"].array;
+    size_t alices;
+    foreach (u; users)
+        if (u["firstName"].str == "Alice")
+            alices++;
+    assertEqual(response["data"]["all"], JSONValue(cast(long) users.length), "countExcept over all users");
+    assertEqual(response["data"]["notAlice"], JSONValue(cast(long) (users.length - alices)), "countExcept without Alices");
+}
+
 void testFilteredWindowNested() {
     checkFilteredWindow(`{ users(first: 1, ` ~ byId ~ `) { posts(first: 1, ` ~ byId ~ `, filter: {title: {contains: "Rocks"}}) { title } } }`,
         `{"users": [{"posts": [{"title": "GraphQL Rocks"}]}]}`, `{"users": [{"posts": []}]}`);
@@ -2647,6 +2669,7 @@ static this() {
     registerTest("Filtered window: nested field", "tests", &testFilteredWindowNested);
     registerTest("Filtered window: computed fields in memory", "tests", &testFilteredWindowComputedInMemory);
     registerTest("Filtered window: computed fields in SQL", "tests", &testFilteredWindowComputedInSql);
+    registerTest("Computed root fields", "tests", &testComputedRootFields);
     registerTest("Nested filters: belongs-to within belongs-to", "tests", &testNestedBelongsToFilters);
     registerTest("Nested filters: to-many within to-many", "tests", &testNestedToManyFilters);
     registerTest("Nested filters: belongs-to and to-many mixed", "tests", &testNestedMixedFilters);

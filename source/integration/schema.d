@@ -604,8 +604,24 @@ mixin template TestSchema(alias db) {
         return u.firstName;
     }
 
+    /// The users with another first name: a computed root field over
+    /// another root field, whose condition is pushed into SQL, and which the
+    /// query plugins extend like `users`
+    Expr!(User[]) usersExcept(Expr!Query q, string firstName) {
+        import dunamis.core.filtering : filterBy;
+        return filterBy!((Expr!User u) => u.firstName.ne(firstName))(Query.users(q));
+    }
+
+    /// The number of users with another first name (a computed root field
+    /// over another computed root field)
+    Expr!int countExcept(Expr!Query q, string firstName) {
+        import dunamis.core.expr : map;
+        return use((string[] names) => cast(int) names.length, map!userFirstName(usersExcept(q, firstName)));
+    }
+
     import dunamis.schema.computed : ComputedFieldsPlugin;
-    alias TestComputedFields = ComputedFieldsPlugin!(postCount, surnameFirst, years, authorAge, everyonesFirstNames);
+    alias TestComputedFields = ComputedFieldsPlugin!(postCount, surnameFirst, years, authorAge, everyonesFirstNames,
+        usersExcept, countExcept);
 
     alias BaseSchema = Schema!(Query, Mutation, Subscription);
     alias MySchema = ApplyPlugins!(BaseSchema, CrudMutationPlugin, TestComputedFields, FilterPlugin, SortingPlugin, PaginationPlugin);

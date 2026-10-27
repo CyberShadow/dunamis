@@ -105,7 +105,7 @@ GraphQLResult compileQuery(alias SchemaType)(string queryString, JSONValue varia
         }
     } else if (isMutation) {
         static if (getFields!MutationType.length > 0) {
-            return compileRootMutationSet!MutationType(op.ss, variables, fragments);
+            return compileRootMutationSet!(MutationType, SchemaType)(op.ss, variables, fragments);
         } else {
             throw new CompilerException("Mutation operations require a Schema with Mutation type");
         }

@@ -1051,6 +1051,36 @@ Placed after another plugin, `ComputedFieldsPlugin` only knows that plugin's typ
 - The GraphQL field name is the function name; extra parameters become arguments (with defaults), and `@GqlName`, `@GqlDescription`, `@GqlDeprecated` on the function are honoured.
 - A function whose entity is not a type of the given schema (nor wrapped by one), or whose name collides with an existing field, is a compile error.
 
+**Root fields:** the root types are types of the schema like any other, so functions written against the user-declared `Query` or `Mutation` become fields of the query or mutation root, with the same rules (arguments, results, plugins applied after the plugin):
+
+```d
+module app.fields.root;
+
+/// A query field over other root fields (`Query.users(q)`, the field
+/// functions of this module).
+Expr!(Nullable!User) userNamed(Expr!Query q, string name) {
+    return use(&findUser, map!userId(Query.users(q)), map!userName(Query.users(q)), constant(name, q));
+}
+
+/// A list root field: FilterPlugin, SortingPlugin and PaginationPlugin add
+/// their arguments to it, as to `users`.
+Expr!(User[]) usersExcept(Expr!Query q, string name) {
+    return filterBy!((Expr!User u) => u.name.ne(name))(Query.users(q));
+}
+
+/// A mutation field. `effect` runs its callable when the field is evaluated.
+Expr!RenamePayload rename(Expr!Mutation m, int userId, string name) {
+    return effect(() => RenamePayload(db.rename(userId, name), User(userId)), m);
+}
+
+/// The query root, to read the state after the mutation (`mutation { ... query { users { name } } }`).
+Expr!Query query(Expr!Mutation m) {
+    return effect(() => Query.init, m);
+}
+```
+
+Each request has one instance of each root type, from which root fields are evaluated; that is the only difference between root types and other types, and it is handled where the request is compiled (the GraphQL compiler), not by the plugins. Root fields return scalars, entities, nullable entities, lists or PODs (types only mutation fields return, such as `RenamePayload`, are part of the schema like those of any other field), with selection sets as for any field. Mutation fields are evaluated one after the other, in the order of the request; a failing nullable mutation field is null, with the error at its path, and the fields after it still run; a null (or failing) non-null mutation field makes the whole result null, as for query fields, and the fields after it are not evaluated. In GraphQL, the root types are named after their role (`Query`, `Mutation`, `Subscription`), whatever the D names of the user-declared types.
+
 **Using filters, sorting and pagination inside a field:** a field function sees the schema at the plugin's position, beneath `FilterPlugin`, `SortingPlugin` and `PaginationPlugin`: `u.posts` takes no `filter` argument there. To use those facilities, go through the final schema explicitly, as for [cross-collection access](#cross-collection-access):
 
 ```d
@@ -1193,7 +1223,7 @@ Errors are collected on `EvalContext` during evaluation. The server includes bot
 - **Field-level granularity** — each field in a selection set is independently error-caught; one field's failure doesn't affect siblings
 - **Path tracking** — error paths trace through nested selections (e.g., `["users", "posts", "title"]`)
 - **Transparent** — no changes needed to entity definitions or computed fields; error catching is automatic
-- **Sequential mutations** — mutation fields also catch errors independently and continue to the next field
+- **Sequential mutations** — mutation fields also catch errors independently and continue to the next field; a null in a non-null mutation field makes the whole result null (null bubbling, as for query fields), and the fields after it are not evaluated
 
 ### Per-Element Errors with GqlResult
 

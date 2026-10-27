@@ -326,16 +326,25 @@ class DynamicJsonObjectExpr : Expr!JSONValue {
 /// each field completes before the next starts - required for mutation semantics.
 /// Supports field-level error catching: if a field expression fails,
 /// the field is set to null and the error is recorded on the EvalContext.
+/// Null bubbling is as for DynamicJsonObjectExpr: a null in a non-null field
+/// (nonNullFields), or a null item in a list of non-null items
+/// (nonNullItemFields), makes the whole object null. The fields after such a
+/// field are then not evaluated (their results could not be returned).
 class SequentialJsonObjectExpr : Expr!JSONValue {
     private string[] _names;
     private ExprBase[] _exprs;
     private JSONValue[] _pathPrefix;
+    private bool[] _nonNullFields;
+    private bool[] _nonNullItemFields;
 
-    this(string[] names, ExprBase[] exprs, JSONValue[] pathPrefix = []) {
+    this(string[] names, ExprBase[] exprs, JSONValue[] pathPrefix = [], bool[] nonNullFields = [],
+        bool[] nonNullItemFields = []) {
         assert(names.length == exprs.length, "Names and exprs must have same length");
         _names = names;
         _exprs = exprs;
         _pathPrefix = pathPrefix;
+        _nonNullFields = nonNullFields;
+        _nonNullItemFields = nonNullItemFields;
     }
 
     override ExprBase[] dependencies() {
@@ -370,17 +379,39 @@ class SequentialJsonObjectExpr : Expr!JSONValue {
         auto fieldName = _names[idx];
         auto fieldExpr = _exprs[idx];
         auto pathPrefix = _pathPrefix;
+        bool nonNull = idx < _nonNullFields.length && _nonNullFields[idx];
+        bool nonNullItems = idx < _nonNullItemFields.length && _nonNullItemFields[idx];
 
-        return evalToJson(fieldExpr, ctx).then((JSONValue[] fieldVals) {
-            result[fieldName] = fieldVals[0];
+        Promise!(JSONValue[]) next(JSONValue value) {
+            if (nonNullItems && value.type == JSONType.array)
+                foreach (item; value.array)
+                    if (item.isNull) {
+                        value = JSONValue(null);
+                        break;
+                    }
+            if (nonNull && value.isNull)
+                return resolve([JSONValue(null)]);
+            result[fieldName] = value;
             return evalFieldsSequentially(ctx, idx + 1, result);
-        }).except((Exception e) {
-            // Field failed — set to null and record error, continue with next field
-            result[fieldName] = JSONValue(null);
+        }
+
+        import ae.utils.promise : Result, toResult;
+        // (An expression may also fail before returning its promise.)
+        Promise!(JSONValue[]) evaluated;
+        try {
+            evaluated = evalToJson(fieldExpr, ctx);
+        } catch (Exception e) {
+            evaluated = new Promise!(JSONValue[]);
+            evaluated.reject(e);
+        }
+        return evaluated.toResult().then((Result!(JSONValue[]) r) {
+            if (r.error is null)
+                return next(r.value[0][0]);
+            // Field failed — null, with the error recorded at the field's path
             JSONValue[] errorPath = pathPrefix.dup;
             errorPath ~= JSONValue(fieldName);
-            ctx.addError(e.msg, errorPath);
-            return evalFieldsSequentially(ctx, idx + 1, result);
+            ctx.addError(r.error.msg, errorPath);
+            return next(JSONValue(null));
         });
     }
 }

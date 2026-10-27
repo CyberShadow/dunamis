@@ -319,22 +319,11 @@ JSONValue buildIntrospectionJson(alias SchemaOrQuery)() {
     static if (isSchema!SchemaOrQuery && __traits(hasMember, SchemaOrQuery, "AllEntityTypes")) {
         alias AllEntityTypes = SchemaOrQuery.AllEntityTypes;
     } else {
-        alias AllEntityTypes = getAllObjectTypes!QueryType;
+        alias AllEntityTypes = getAllObjectTypes!(QueryType, MutationType, SubscriptionType);
     }
 
-    // (Root Query arguments are not part of getAllObjectTypes!QueryType, as
-    // in generateSchemaSDL.)
-    alias AllInputTypes_ = uniqueTypesForExpand!(AliasSeq!(getAllInputTypes!QueryType,
-        expandAllInputTypes!(uniqueTypesForExpand!(getInputTypesFromEntity!QueryType))));
-    static if (getFields!MutationType.length > 0) {
-        alias MutationDirectTypes = getInputTypesFromMutation!MutationType;
-        alias MutationInputTypes = expandAllInputTypes!(uniqueTypesForExpand!MutationDirectTypes);
-        alias AllInputTypes = uniqueTypesForExpand!(AliasSeq!(AllInputTypes_, MutationInputTypes));
-    } else {
-        alias AllInputTypes = AllInputTypes_;
-    }
-
-    alias AllEnumTypes = getAllEnumTypes!QueryType;
+    alias AllInputTypes = getAllInputTypes!(QueryType, MutationType, SubscriptionType);
+    alias AllEnumTypes = getAllEnumTypes!(QueryType, MutationType, SubscriptionType);
 
     // Discover abstract types
     alias AllAbstractTypes = getAllAbstractTypes!AllEntityTypes;

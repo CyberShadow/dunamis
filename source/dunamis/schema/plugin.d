@@ -147,22 +147,6 @@ template NamedAfterBase(T) {
         static assert(false, T.stringof ~ " has no @NamedAfter attribute");
 }
 
-/// The UDAs giving a plugin's wrapper of the root operation type `Root`
-/// (e.g. `FilteredQuery` for `Query`) `Root`'s original D name (as entity
-/// wrappers have), so that names derived from the root type (e.g. of
-/// argument types of its fields) do not depend on which plugins wrapped it.
-template RootTypeNameAttributes(Root) {
-    static if (is(Root == struct)) {
-        import std.traits : getUDAs;
-        static if (hasUDA!(Root, OriginalName))
-            alias RootTypeNameAttributes = AliasSeq!(getUDAs!(Root, OriginalName)[0]);
-        else
-            alias RootTypeNameAttributes = AliasSeq!(OriginalName(__traits(identifier, Root)));
-    } else {
-        alias RootTypeNameAttributes = AliasSeq!();
-    }
-}
-
 // ============================================================================
 // Identity TypeMap
 // ============================================================================
@@ -354,56 +338,61 @@ mixin template NormalizeFields(SourceType, alias TypeMap = IdentityTypeMap) {
 // Normalize Plugin
 // ============================================================================
 
-/// Internal plugin that normalizes all discovered object types to use only
-/// static Expr methods. Plain fields and plain methods are converted to
-/// computed fields via `use()`, making all field access uniform.
+/// Internal plugin that normalizes all object types of the schema — its root
+/// types (Query, Mutation, Subscription) and all object types reachable from
+/// them — to use only static Expr methods. Plain fields and plain methods are
+/// converted to computed fields via `use()`, making all field access uniform.
+///
+/// The root types are normalized like any other object type. They are named
+/// after the root operation type they are (`Query`, `Mutation`,
+/// `Subscription`) rather than after the user-declared types.
 ///
 /// Used internally by Schema to normalize types before external plugins
 /// are applied.
 template NormalizePlugin(RawQuery, RawMutation, RawSubscription = void) {
-    import std.meta : staticMap;
+    import std.meta : AliasSeq;
     import dunamis.core.discovery : getAllObjectTypes;
     import dunamis.schema.transform : isTypeInList;
 
-    // Discover all entity and POD types reachable from the Query root
-    alias _AllTypes = getAllObjectTypes!RawQuery;
+    static if (is(RawSubscription == void)) {
+        struct _EmptySubscription {}
+        alias _RawSubscription = _EmptySubscription;
+    } else {
+        alias _RawSubscription = RawSubscription;
+    }
 
-    // Create normalized version of each discovered type
-    template _NormalizedType(T) {
+    alias _Roots = AliasSeq!(RawQuery, RawMutation, _RawSubscription);
+
+    // Discover all entity and POD types reachable from the roots
+    alias _AllTypes = getAllObjectTypes!_Roots;
+
+    // Create normalized version of each object type
+    template _NormalizedType(T, string name = __traits(identifier, T)) {
         @(RemapTypeAttributes!(_TypeMap, __traits(getAttributes, T)))
-        @OriginalName(__traits(identifier, T))
+        @OriginalName(name)
         struct _NormalizedType {
             mixin NormalizeFields!(T, _TypeMap);
         }
     }
 
-    // Map all discovered object types to their normalized versions.
+    // Map all object types (the roots included) to their normalized versions.
     template _TypeMap(T) {
-        static if (isTypeInList!(T, _AllTypes)) {
+        static if (is(T == RawQuery)) {
+            alias _TypeMap = Query;
+        } else static if (is(T == RawMutation)) {
+            alias _TypeMap = Mutation;
+        } else static if (is(T == _RawSubscription)) {
+            alias _TypeMap = Subscription;
+        } else static if (isTypeInList!(T, _AllTypes)) {
             alias _TypeMap = _NormalizedType!T;
         } else {
             alias _TypeMap = T;
         }
     }
 
-    // Wrap Query: forward all fields with type remapping
-    struct Query {
-        mixin WrapFields!(RawQuery, _TypeMap, ForwardField);
-    }
-
-    // Wrap Mutation: forward all fields with type remapping
-    struct Mutation {
-        mixin WrapFields!(RawMutation, _TypeMap, ForwardField);
-    }
-
-    // Wrap Subscription: forward all fields with type remapping
-    static if (is(RawSubscription == void)) {
-        struct Subscription {}
-    } else {
-        struct Subscription {
-            mixin WrapFields!(RawSubscription, _TypeMap, ForwardField);
-        }
-    }
+    alias Query = _NormalizedType!(RawQuery, "Query");
+    alias Mutation = _NormalizedType!(RawMutation, "Mutation");
+    alias Subscription = _NormalizedType!(_RawSubscription, "Subscription");
 }
 
 // ============================================================================

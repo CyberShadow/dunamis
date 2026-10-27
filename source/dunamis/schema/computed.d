@@ -25,16 +25,18 @@
 /// after `Schema!`, whose types normalize the user-declared ones, functions
 /// are written against the user-declared types (as computed fields declared
 /// on an entity are) and see them unchanged (`u.posts` is `Expr!(Post[])`).
-/// Their results are mapped to the schema's types likewise.
+/// Their results are mapped to the schema's types likewise. The root types
+/// are types of the schema like any other: `auto field(Expr!Query q, ...)`
+/// and `auto field(Expr!Mutation m, ...)` are root fields.
 module dunamis.schema.computed;
 
 import std.meta : AliasSeq, Filter, staticMap;
 import std.traits : Parameters;
 
-import dunamis.core.discovery : extractObjectFromType, getAllObjectTypes;
+import dunamis.core.discovery : extractObjectFromType, getSchemaObjectTypes, SchemaRootTypes;
 import dunamis.core.expr : Expr, ExprResultType, isExpr;
 import dunamis.core.types : isAbstractType, isInternalMember;
-import dunamis.schema.plugin : isSchema, NormalizeFields, OriginalName, getOriginalTypeName, RemapTypeAttributes, RootTypeNameAttributes, WrapFields, ForwardField;
+import dunamis.schema.plugin : isSchema, NormalizeFields, OriginalName, getOriginalTypeName, RemapTypeAttributes, WrapFields, ForwardField;
 import dunamis.schema.transform : isTypeInList;
 
 // Fully qualified in generated code, so that entity field names cannot shadow them.
@@ -168,7 +170,10 @@ template ComputedFieldsPlugin(Sources...) {
     private alias _fields = computedFieldsIn!Sources;
 
     template ComputedFieldsPlugin(alias S) if (isSchema!S) {
-        alias _AllTypes = getAllObjectTypes!(S.Query);
+        // The schema's object types: its root types (functions written
+        // against Query or Mutation are root fields), and those reachable
+        // from them
+        alias _AllTypes = AliasSeq!(SchemaRootTypes!S, getSchemaObjectTypes!S);
 
         template _standsFor(E) {
             enum bool _standsFor(T) = standsFor!(T, E);
@@ -243,23 +248,8 @@ template ComputedFieldsPlugin(Sources...) {
         static if (__traits(hasMember, S, "AllEntityTypes"))
             alias AllEntityTypes = staticMap!(EntityTypeMap, S.AllEntityTypes);
 
-        @(RootTypeNameAttributes!(S.Query))
-        struct ComputedQuery {
-            mixin WrapFields!(S.Query, EntityTypeMap, ForwardField);
-        }
-
-        @(RootTypeNameAttributes!(S.Mutation))
-        struct ComputedMutation {
-            mixin WrapFields!(S.Mutation, EntityTypeMap, ForwardField);
-        }
-
-        @(RootTypeNameAttributes!(S.Subscription))
-        struct ComputedSubscription {
-            mixin WrapFields!(S.Subscription, EntityTypeMap, ForwardField);
-        }
-
-        alias Query = ComputedQuery;
-        alias Mutation = ComputedMutation;
-        alias Subscription = ComputedSubscription;
+        alias Query = EntityTypeMap!(S.Query);
+        alias Mutation = EntityTypeMap!(S.Mutation);
+        alias Subscription = EntityTypeMap!(S.Subscription);
     }
 }

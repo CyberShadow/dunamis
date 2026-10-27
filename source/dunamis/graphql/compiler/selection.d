@@ -12,7 +12,7 @@ import dunamis.core.expr : ExprBase, ExprResultType, Expr, isExpr, singleton,
     use, toJsonValue, map, constant;
 import dunamis.core.expr.combinators : SubsetExpr, ConcatArrayExpr, UnionExprInfo;
 import dunamis.core.types : isCustomScalar, isGqlResult, GqlResult, isAbstractType;
-import dunamis.core.discovery : getSchemaFields, fieldResultType, getAllObjectTypes,
+import dunamis.core.discovery : getSchemaFields, fieldResultType, getSchemaObjectTypes,
     getAbstractTypeMembers, getNarrowTargets, getAllAbstractTypes;
 import dunamis.graphql.introspection;
 import dunamis.graphql.schema;
@@ -84,7 +84,7 @@ DynamicJsonObjectExpr compileRootSubscriptionSet(Subscription, alias SchemaType 
 // ============================================================================
 
 /// Compile the root selection set for mutations (sequential execution)
-SequentialJsonObjectExpr compileRootMutationSet(Mutation)(SelectionSet ss, JSONValue variables, FragmentMap fragments) {
+SequentialJsonObjectExpr compileRootMutationSet(Mutation, alias SchemaType = Mutation)(SelectionSet ss, JSONValue variables, FragmentMap fragments) {
     auto selections = iterateSelections(ss);
 
     if (selections.length == 0) {
@@ -93,25 +93,32 @@ SequentialJsonObjectExpr compileRootMutationSet(Mutation)(SelectionSet ss, JSONV
 
     string[] fieldNames;
     ExprBase[] fieldExprs;
+    string[] schemaFieldNames;
 
     processSelections!(getGraphQLTypeName!Mutation)(
         selections, variables, fragments, fieldNames, fieldExprs,
-        (field) => compileRootField!Mutation(field, variables, fragments)
+        (field) {
+            schemaFieldNames ~= getFieldName(field);
+            return compileRootField!(Mutation, SchemaType)(field, variables, fragments);
+        }
     );
+    assert(schemaFieldNames.length == fieldNames.length);
 
-    return new SequentialJsonObjectExpr(fieldNames, fieldExprs);
+    // Null bubbling as for queries: a null in a non-null root field makes the
+    // whole result null.
+    return new SequentialJsonObjectExpr(fieldNames, fieldExprs, [],
+        resolveNonNullFlags!Mutation(schemaFieldNames),
+        resolveNonNullItemFlags!Mutation(schemaFieldNames));
 }
 
-/// Compile a single root field (works for both Query and Mutation).
-/// Scans for function members with matching GraphQL name.
+/// Compile a single field of a root type (Query, Mutation or Subscription).
+/// The root types' fields are compiled like those of any other type
+/// (compileFieldAccess), on the request's single instance of the root type;
+/// only the introspection meta-fields of the schema are particular to them.
 ExprBase compileRootField(Parent, alias IntrospectionSource = Parent)(Field field, JSONValue variables, FragmentMap fragments) {
     auto fieldName = getFieldName(field);
-    auto parentExpr = singleton(Parent.init);
 
-    // Introspection fields
-    if (fieldName == "__typename") {
-        return wrapAsJsonExpr(singleton(getGraphQLTypeName!Parent));
-    }
+    // Introspection meta-fields
     if (fieldName == "__schema") {
         auto schemaJson = buildIntrospectionJson!IntrospectionSource();
         auto result = applySelectionSet(schemaJson, field.ss, variables, fragments);
@@ -126,62 +133,12 @@ ExprBase compileRootField(Parent, alias IntrospectionSource = Parent)(Field fiel
         return wrapAsJsonExpr(singleton(JSONValue(null)));
     }
 
-    // Build path prefix for nested selections: [outputName]
-    auto outputName = getOutputName(field);
-    JSONValue[] nestedPath = [JSONValue(outputName)];
-
-    static foreach (member; getSchemaFields!Parent) {{
-        alias memberSym = __traits(getMember, Parent, member);
-        enum gqlName = getGqlName!(memberSym, member);
-        if (fieldName == gqlName) {
-            return callRootField!(memberSym, Parent, IntrospectionSource)(parentExpr, field.args, field.ss, variables, fragments, nestedPath);
-        }
-    }}
-
-    if (extensionFieldExists !is null && compileExtensionField !is null &&
-        extensionFieldExists(getGraphQLTypeName!Parent, fieldName))
-        return compileExtensionField(getGraphQLTypeName!Parent, fieldName, null,
-            field.args, field.ss, variables);
-
-    throw new CompilerException("Unknown field: " ~ fieldName);
-}
-
-/// Call a root field function and handle the return type.
-/// Root fields return Expr!T which we may need to descend into with a selection set.
-/// Works for both Query and Mutation fields.
-/// SchemaSource enables abstract type resolution (default void = no abstract types).
-ExprBase callRootField(alias fn, Parent, alias SchemaSource = void)(Expr!Parent parent, Arguments args, SelectionSet ss, JSONValue variables, FragmentMap fragments, JSONValue[] pathPrefix = []) {
-    import std.traits : Parameters, ReturnType, ParameterDefaults, ParameterIdentifierTuple;
-    import std.typecons : tuple;
-    import dunamis.core.expr : Expr, ExprResultType, isExpr;
-
-    alias Params = Parameters!fn;
-    alias Return = ReturnType!fn;
-
-    // Verify return type is an Expr
-    static assert(isExpr!Return,
-        "Root field " ~ __traits(identifier, fn) ~ " must return an Expr type, got " ~ Return.stringof);
-
-    // Extract arguments (skip first param which is parent)
-    static if (Params.length == 1) {
-        // Only parent, no additional args
-        auto resultExpr = fn(parent);
-    } else {
-        auto argTuple = mixin(() {
-            string code = "tuple(";
-            static foreach (i; 1 .. Params.length) {
-                code ~= (i > 1 ? ", " : "") ~
-                    "extractArg!(Params[" ~ i.stringof ~ "], ParameterDefaults!fn[" ~ i.stringof ~ "])" ~
-                    "(args, [ParameterIdentifierTuple!fn][" ~ i.stringof ~ "], variables)";
-            }
-            code ~= ")";
-            return code;
-        }());
-        auto resultExpr = fn(parent, argTuple.expand);
-    }
-
-    // Handle return type generically
-    return compileFieldResult!(typeof(resultExpr), SchemaSource)(resultExpr, ss, variables, fragments, pathPrefix);
+    // The root type is a singleton: one instance per request
+    static if (isSchema!IntrospectionSource)
+        alias SchemaSource = IntrospectionSource;
+    else
+        alias SchemaSource = void;
+    return compileFieldAccess!(Parent, SchemaSource)(singleton(Parent.init), field, variables, fragments);
 }
 
 /// Wrap an expression to convert its result to JSONValue
@@ -607,15 +564,17 @@ ExprBase compileFieldAccess(T, alias SchemaSource = void)(Expr!T ref_, Field fie
 
     if (extensionFieldExists !is null && compileExtensionField !is null &&
         extensionFieldExists(getGraphQLTypeName!T, fieldName)) {
+        // Extension fields receive the object's id (none for objects
+        // without one, such as the root types' single instances)
+        ExprBase idExpr = null;
         static foreach (member; getSchemaFields!T) {{
             alias memberSym = __traits(getMember, T, member);
             enum gqlName = getGqlName!(memberSym, member);
-            if (gqlName == "id") {
-                auto idExpr = callComputedField!(memberSym, T)(ref_, null, variables);
-                return compileExtensionField(getGraphQLTypeName!T, fieldName,
-                    idExpr, field.args, field.ss, variables);
-            }
+            if (gqlName == "id")
+                idExpr = callComputedField!(memberSym, T)(ref_, null, variables);
         }}
+        return compileExtensionField(getGraphQLTypeName!T, fieldName,
+            idExpr, field.args, field.ss, variables);
     }
 
     throw new CompilerException("Unknown field '" ~ fieldName ~ "' on type " ~ T.stringof);
@@ -633,7 +592,7 @@ ExprBase compileFieldAccess(T, alias SchemaSource = void)(Expr!T ref_, Field fie
 ExprBase compileAbstractArrayResult(AbstractT, alias SchemaSource, ResultExpr)(
     ResultExpr resultExpr, SelectionSet ss, JSONValue variables, FragmentMap fragments, JSONValue[] pathPrefix = [])
 {
-    alias AllTypes = getAllObjectTypes!(SchemaSource.Query);
+    alias AllTypes = getSchemaObjectTypes!SchemaSource;
     alias Members = getAbstractTypeMembers!(AbstractT, AllTypes);
 
     static assert(Members.length > 0,

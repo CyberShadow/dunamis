@@ -31,11 +31,14 @@ import dunamis.schema.plugin : isSchema;
 /// corresponding change event fires. The subscriber evaluates the selection
 /// set against the event payload.
 template RdbmsSubscriptionPlugin(alias S) if (isSchema!S) {
-    import dunamis.schema.plugin : WrapFields, IdentityTypeMap, ForwardField;
+    import dunamis.schema.plugin : WrapFields, IdentityTypeMap, ForwardField, OriginalName, RemapTypeAttributes;
 
     alias Query = S.Query;
     alias Mutation = S.Mutation;
 
+    // Subscription with fields added, as any wrapper of a type of the schema
+    @(RemapTypeAttributes!(IdentityTypeMap, __traits(getAttributes, S.Subscription)))
+    @OriginalName(__traits(identifier, S.Subscription))
     struct GeneratedSubscription {
         // Forward existing subscription fields
         mixin WrapFields!(S.Subscription, IdentityTypeMap, ForwardField);

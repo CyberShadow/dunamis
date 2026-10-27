@@ -13,7 +13,7 @@ import graphql.tokenmodule : Token;
 import dunamis.core.types : isCustomScalar, isGqlResult, isAbstractType, getImplementedByMembers, isPublicDataField;
 import dunamis.core.expr : ExprResultType, Expr, isExpr;
 import dunamis.core.discovery : isObjectType, extractObjectFromType, getSchemaFields,
-    getAbstractTypeMembers, getAllObjectTypes;
+    getAbstractTypeMembers, getSchemaObjectTypes;
 import dunamis.graphql.schema;
 import dunamis.graphql.compiler.values;
 import dunamis.graphql.compiler.extensions : extensionFieldExists;
@@ -447,26 +447,13 @@ private ValidationError[] validateRootField(Parent, alias SchemaSource)(Field fi
     auto fieldName = getFieldName(field);
     if (fieldName is null) return [];
 
-    // Introspection fields are always valid
-    if (fieldName == "__typename" || fieldName == "__schema" || fieldName == "__type") {
+    // The schema's introspection meta-fields are always valid
+    if (fieldName == "__schema" || fieldName == "__type") {
         return [];
     }
 
-    // Check against computed field methods on the Query/Mutation type
-    static foreach (member; getSchemaFields!Parent) {{
-        alias memberSym = __traits(getMember, Parent, member);
-        enum gqlName = getGqlName!(memberSym, member);
-        if (fieldName == gqlName) {
-            ValidationError[] errors;
-            errors ~= validateFieldArguments!(memberSym)(field, variables);
-            errors ~= validateFieldResult!(ReturnType!(typeof(memberSym)), SchemaSource)(field, fragments, visited, variables);
-            return errors;
-        }
-    }}
-
-    if (extensionFieldExists !is null &&
-        extensionFieldExists(getGraphQLTypeName!Parent, fieldName)) return [];
-    return [fieldError("Unknown field '" ~ fieldName ~ "' on type " ~ getGraphQLTypeName!Parent, field)];
+    // The root types' own fields are those of any other type
+    return validateFieldAccess!(Parent, SchemaSource)(field, fragments, visited, variables);
 }
 
 /// Validate a selection set against an entity/object type.
@@ -719,7 +706,7 @@ private ValidationError[] validateAbstractSelectionSet(AbstractT, alias SchemaSo
     ValidationError[] errors;
     if (ss is null) return errors;
 
-    alias AllTypes = getAllObjectTypes!(SchemaSource.Query);
+    alias AllTypes = getSchemaObjectTypes!SchemaSource;
     alias Members = getAbstractTypeMembers!(AbstractT, AllTypes);
     enum abstractName = getGraphQLTypeName!AbstractT;
     enum bool isInterface = getSchemaFields!AbstractT.length > 0;

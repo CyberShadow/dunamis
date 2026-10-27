@@ -258,15 +258,16 @@ mixin template OverridableFields(SourceType, alias TypeMap, string entityName) {
 /// );
 /// ---
 template FieldOverridePlugin(alias S) if (isSchema!S) {
-    import std.meta : staticMap;
-    import dunamis.core.discovery : getAllObjectTypes;
+    import std.meta : AliasSeq, staticMap;
+    import dunamis.core.discovery : getSchemaObjectTypes, SchemaRootTypes;
     import dunamis.schema.transform : isTypeInList;
     import dunamis.schema.plugin : isSchema;
 
-    alias _OriginalQuery = S.Query;
-    alias _AllEntityTypes = getAllObjectTypes!_OriginalQuery;
+    // The schema's object types: its root types, and those reachable from them
+    alias _AllEntityTypes = getSchemaObjectTypes!S;
+    alias _AllTypes = AliasSeq!(SchemaRootTypes!S, _AllEntityTypes);
 
-    /// Overridable version of each discovered entity type.
+    /// Overridable version of each object type.
     template OverridableEntity(Entity) {
         @(RemapTypeAttributes!(EntityTypeMap, __traits(getAttributes, Entity)))
         @OriginalName(__traits(identifier, Entity))
@@ -277,30 +278,19 @@ template FieldOverridePlugin(alias S) if (isSchema!S) {
 
     alias AllEntityTypes = staticMap!(OverridableEntity, _AllEntityTypes);
 
-    /// Entity type map: maps discovered entity types to their overridable versions.
+    /// Entity type map: maps the schema's object types (the root types
+    /// included) to their overridable versions.
     template EntityTypeMap(T) {
-        static if (isTypeInList!(T, _AllEntityTypes)) {
+        static if (isTypeInList!(T, _AllTypes)) {
             alias EntityTypeMap = OverridableEntity!T;
         } else {
             alias EntityTypeMap = T;
         }
     }
 
-    struct OverridableQuery {
-        mixin OverridableFields!(_OriginalQuery, EntityTypeMap, "Query");
-    }
-
-    struct OverridableMutation {
-        mixin OverridableFields!(S.Mutation, EntityTypeMap, "Mutation");
-    }
-
-    struct OverridableSubscription {
-        mixin OverridableFields!(S.Subscription, EntityTypeMap, "Subscription");
-    }
-
-    alias Query = OverridableQuery;
-    alias Mutation = OverridableMutation;
-    alias Subscription = OverridableSubscription;
+    alias Query = EntityTypeMap!(S.Query);
+    alias Mutation = EntityTypeMap!(S.Mutation);
+    alias Subscription = EntityTypeMap!(S.Subscription);
 }
 
 // ============================================================================
