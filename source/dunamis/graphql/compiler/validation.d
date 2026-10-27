@@ -23,8 +23,11 @@ import dunamis.graphql.compiler.extensions : extensionFieldExists;
 // ============================================================================
 
 private template isScalarElement(T) {
+    import std.traits : isSomeString;
     static if (is(T == Nullable!U, U))
         enum isScalarElement = isScalarElement!U;
+    else static if (is(T == E[], E) && !isSomeString!T && !isCustomScalar!T)
+        enum isScalarElement = isScalarElement!E;
     else
         enum isScalarElement = isCustomScalar!T || !is(T == struct) || isGqlResult!T;
 }
@@ -663,6 +666,9 @@ private ValidationError[] validateFieldResultType(ResultType, alias SchemaSource
                 )];
             }
             return [];
+        } else static if (is(E == Nullable!V, V) || is(E == F[], F)) {
+            // Nullable objects or lists of objects — validate as the item type
+            return validateFieldResultType!(E, SchemaSource)(field, fragments, visited, variables);
         } else {
             // Array of objects — requires selection set
             if (field.ss is null) {

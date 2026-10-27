@@ -69,7 +69,8 @@ unittest {
     static assert(names == ["postCount", "shout", "authorName", "greeting", "commentTexts",
         "visiblePosts", "checkedTitle", "widened", "maybeSpan", "maybeSpans", "initial", "window", "windows",
         "audit", "likes", "label", "label", "_internal", "notes", "digest", "noteCount", "siblingTexts",
-        "greetedUsers", "shownCheckedTitles"], names.stringof);
+        "greetedUsers", "shownCheckedTitles", "cells", "maybeCells", "grid", "postGrid", "strictTitle"],
+        names.stringof);
 
     static assert(computedFieldsIn!(fixture.authorName).length == 1);
     // A function symbol contributes its overloads
@@ -628,4 +629,101 @@ unittest {
     enum sdl = generateSchemaSDL!TermSchema;
     static assert(sdl.canFind("input PeriodFilter {\n  containsElement: Day\n  isNull: Boolean\n}"), sdl);
     static assert(sdl.canFind("  period: PeriodFilter\n"), sdl);
+}
+
+// Nested lists and nullable list items, as results and as POD members:
+// selection sets apply to the items at any depth, entities in them are the
+// schema's, and null bubbling goes through each list level
+unittest {
+    import std.algorithm : canFind;
+
+    enum sdl = generateSchemaSDL!FinalSchema;
+    static assert(sdl.canFind("  cells: [[Cell]!]!\n"), sdl);
+    static assert(sdl.canFind("  maybeCells: [Cell]!\n"), sdl);
+    static assert(sdl.canFind("type Grid {\n  header: [String!]!\n  cells: [[Cell]!]!\n}"), sdl);
+    static assert(sdl.canFind("type Cell {\n  text: String!\n  owner: User\n}"), sdl);
+    static assert(sdl.canFind("  postGrid: [[PostRef!]!]\n"), sdl);
+    static assert(sdl.canFind("type PostRef {\n  post: Post!\n}"), sdl);
+
+    // Introspection: the same wrappers, and the item types
+    {
+        auto result = executeFixture(compileQuery!FinalSchema(`{
+            user: __type(name: "User") {
+                fields { name type { kind ofType { kind ofType { kind ofType { kind ofType { kind name } } } } } }
+            }
+            cell: __type(name: "Cell") { kind fields { name } }
+        }`));
+        JSONValue typeOf(string field) {
+            foreach (f; result["user"]["fields"].array)
+                if (f["name"].str == field)
+                    return f["type"];
+            assert(false, field ~ " not found in " ~ result.toString());
+        }
+        auto cells = typeOf("cells");
+        assert(cells["kind"].str == "NON_NULL" && cells["ofType"]["kind"].str == "LIST" &&
+            cells["ofType"]["ofType"]["kind"].str == "NON_NULL" &&
+            cells["ofType"]["ofType"]["ofType"]["kind"].str == "LIST" &&
+            cells["ofType"]["ofType"]["ofType"]["ofType"]["kind"].str == "OBJECT" &&
+            cells["ofType"]["ofType"]["ofType"]["ofType"]["name"].str == "Cell", result.toString());
+        auto postGrid = typeOf("postGrid");
+        assert(postGrid["kind"].str == "LIST" && postGrid["ofType"]["kind"].str == "NON_NULL" &&
+            postGrid["ofType"]["ofType"]["kind"].str == "LIST" &&
+            postGrid["ofType"]["ofType"]["ofType"]["kind"].str == "NON_NULL", result.toString());
+        assert(result["cell"]["kind"].str == "OBJECT" && result["cell"]["fields"].array.length == 2,
+            result.toString());
+    }
+
+    foreach (optimize; [false, true]) {
+        seedNotesFixture();
+        auto ctx = new EvalContext();
+        ctx.setRequestContext(Greeting("Hi"));
+        auto result = awaitSync(new Executor().execute(compileQuery!FinalSchema(`{
+            users(orderBy: [{field: id, direction: ASC}]) {
+                name
+                cells { text owner { name postCount } }
+                maybeCells { label: text owner { name } }
+                grid { header cells { text } }
+                postGrid { post { id title } }
+            }
+        }`), ctx, optimize));
+        assert(ctx.errors.length == 0, ctx.errors[0].message);
+        auto users = result["users"].array;
+        assert(users.length == 4, result.toString());
+
+        auto alice = users[0];
+        auto row = JSONValue([JSONValue(["text": JSONValue("Alice"),
+            "owner": JSONValue(["name": JSONValue("Alice"), "postCount": JSONValue(2)])]), JSONValue(null)]);
+        assert(alice["cells"] == JSONValue([row, JSONValue.emptyArray, JSONValue([JSONValue(null)])]),
+            result.toString());
+        assert(alice["maybeCells"] == JSONValue([JSONValue(null),
+            JSONValue(["label": JSONValue("Alice"), "owner": JSONValue(null)])]), result.toString());
+        assert(alice["grid"] == JSONValue(["header": JSONValue([JSONValue("Alice")]),
+            "cells": JSONValue([JSONValue([JSONValue(["text": JSONValue("Alice")]), JSONValue(null)]),
+                JSONValue.emptyArray, JSONValue([JSONValue(null)])])]), result.toString());
+        // Bob: two posts; Carol: none
+        JSONValue post(long id, string title) {
+            return JSONValue(["post": JSONValue(["id": JSONValue(id), "title": JSONValue(title)])]);
+        }
+        assert(users[1]["postGrid"] == JSONValue([JSONValue([post(12, "Other"), post(13, "Later")]),
+            JSONValue.emptyArray]), result.toString());
+        assert(users[2]["postGrid"] == JSONValue([JSONValue.emptyArray, JSONValue.emptyArray]), result.toString());
+        assert(users[2]["cells"][0][0]["text"].str == "Carol", result.toString());
+
+        // strictTitle fails (for the batch of all posts, because of the
+        // hidden one): each non-null post nulls its PostRef, which nulls its
+        // row ([PostRef!]!), which nulls the list ([[PostRef!]!]), which is
+        // nullable; empty rows have nothing to null
+        ctx = new EvalContext();
+        ctx.setRequestContext(Greeting("Hi"));
+        result = awaitSync(new Executor().execute(compileQuery!FinalSchema(`{
+            users(orderBy: [{field: id, direction: ASC}]) { name postGrid { post { id strictTitle } } }
+        }`), ctx, optimize));
+        users = result["users"].array;
+        assert(users.length == 4, result.toString());
+        assert(users[0]["postGrid"].isNull && users[1]["postGrid"].isNull && users[3]["postGrid"].isNull,
+            result.toString());
+        assert(users[2]["postGrid"] == JSONValue([JSONValue.emptyArray, JSONValue.emptyArray]), result.toString());
+        assert(users[3]["name"].str == "Dave", result.toString());
+        assert(ctx.errors.length == 1 && ctx.errors[0].message == "hidden post", result.toString());
+    }
 }

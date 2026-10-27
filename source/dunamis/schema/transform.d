@@ -253,6 +253,7 @@ auto wrapEntityResult(alias TypeMap, R)(R result)
     if (isExpr!R)
 {
     import dunamis.core.expr : ExprResultType, map, use, Expr;
+    import dunamis.core.expr.primitives : EntityCastExpr;
     import dunamis.schema.entity_cast : pluginEntityCast;
 
     alias ResultT = ExprResultType!R;
@@ -277,6 +278,11 @@ auto wrapEntityResult(alias TypeMap, R)(R result)
             } else {
                 return map!((Expr!E e) => pluginEntityCast!MappedE(e))(result);
             }
+        } else static if (!is(ReplaceTypeRefs!(E, TypeMap) == E)) {
+            // Items referring to object types (nullable objects, nested
+            // lists): convert the values (lazily, as pluginEntityCast does:
+            // the target types may still be under construction here)
+            return new EntityCastExpr!(ReplaceTypeRefs!(ResultT, TypeMap), ResultT, deepEntityCastValue)(result);
         } else {
             return result;
         }
@@ -303,8 +309,31 @@ auto wrapEntityResult(alias TypeMap, R)(R result)
         } else {
             return pluginEntityCast!MappedT(result);
         }
+    } else static if (is(ResultT == Nullable!UOther, UOther) && !is(ReplaceTypeRefs!(ResultT, TypeMap) == ResultT)) {
+        // Other nullable values referring to object types (e.g. a nullable
+        // nested list of objects): convert the values, lazily
+        return new EntityCastExpr!(ReplaceTypeRefs!(ResultT, TypeMap), ResultT, deepEntityCastValue)(result);
     } else {
         return result;
+    }
+}
+
+/// Value-level entity cast through Nullable and array wrappers, for
+/// wrapEntityResult.
+To deepEntityCastValue(To, From)(From val) {
+    import dunamis.schema.entity_cast : entityCastValue;
+    static if (is(From == To)) {
+        return val;
+    } else static if (is(From == Nullable!F, F) && is(To == Nullable!T, T)) {
+        if (val.isNull) return To.init;
+        return To(deepEntityCastValue!(T, F)(val.get));
+    } else static if (is(From == F[], F) && is(To == T[], T)) {
+        auto result = new T[val.length];
+        foreach (i, item; val)
+            result[i] = deepEntityCastValue!(T, F)(item);
+        return result;
+    } else {
+        return entityCastValue!(To, From)(val);
     }
 }
 

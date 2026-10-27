@@ -8,7 +8,7 @@ import std.array : join;
 import std.typecons : Nullable;
 import std.uni : toUpper;
 
-import dunamis.core.expr : Expr, broadcast, constant, context, map, singleton, use;
+import dunamis.core.expr : Expr, broadcast, constant, context, fieldAccess, map, singleton, use;
 import dunamis.core.filtering : filterBy;
 import dunamis.graphql.schema : GqlDescription;
 import dunamis.relational.demo : MockDB;
@@ -250,6 +250,68 @@ private Expr!bool isShown(Expr!Post p) {
 
 private bool shown(string title, Greeting greeting) {
     return title != "hidden";
+}
+
+// Nested lists and nullable list items, as results and as POD members.
+
+/// Only returned by computed fields: in nested lists, and as nullable items.
+struct Cell { string text; Nullable!User owner; }
+/// Only returned by a computed field: a nested list in a POD.
+struct Grid { string[] header; Nullable!Cell[][] cells; }
+/// Only returned by a computed field, in a nested list: refers to an entity.
+struct PostRef { Post post; }
+
+/// `[[Cell]!]!`: a row with a cell (owned by Alice, user 1) and a gap, an
+/// empty row, and a row with only a gap.
+Expr!(Nullable!Cell[][]) cells(Expr!User u) {
+    return use(&cellsOf, u.name);
+}
+
+private Nullable!Cell[][] cellsOf(string name) {
+    return [[Nullable!Cell(Cell(name, Nullable!User(User(1)))), Nullable!Cell.init], [], [Nullable!Cell.init]];
+}
+
+/// `[Cell]!`: a gap, and a cell without an owner.
+Expr!(Nullable!Cell[]) maybeCells(Expr!User u) {
+    return use(&maybeCellsOf, u.name);
+}
+
+private Nullable!Cell[] maybeCellsOf(string name) {
+    return [Nullable!Cell.init, Nullable!Cell(Cell(name, Nullable!User.init))];
+}
+
+Expr!Grid grid(Expr!User u) {
+    return use(&gridOf, u.name);
+}
+
+private Grid gridOf(string name) {
+    return Grid([name], cellsOf(name));
+}
+
+/// `[[PostRef!]!]`: a row of the user's posts, and an empty row.
+Expr!(Nullable!(PostRef[][])) postGrid(Expr!User u) {
+    return use(&postGridOf, map!postId(u.posts));
+}
+
+private Expr!int postId(Expr!Post p) {
+    return fieldAccess!"id"(p);
+}
+
+private Nullable!(PostRef[][]) postGridOf(int[] postIds) {
+    PostRef[] row;
+    foreach (id; postIds)
+        row ~= PostRef(Post(id));
+    return Nullable!(PostRef[][])([row, []]);
+}
+
+/// A non-null field which fails for some posts.
+Expr!string strictTitle(Expr!Post p) {
+    return use(&strictTitleOf, p.title);
+}
+
+private string strictTitleOf(string title) {
+    if (title == "hidden") throw new Exception("hidden post");
+    return title;
 }
 
 // ---- Not fields ----

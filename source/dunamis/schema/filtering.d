@@ -302,7 +302,13 @@ template isArrayReturningMethod(Entity, string member) {
 template isEntityArrayField(Entity, string member) {
     static if (isArrayReturningMethod!(Entity, member)) {
         alias ElementT = getArrayElementType!(Entity, member);
-        enum isEntityArrayField = isEntityType!ElementT;
+        import std.typecons : Nullable;
+        // Lists of nullable objects are not filtered, like lists of
+        // nullable scalars (see isScalarArrayField).
+        static if (is(ElementT == Nullable!U, U))
+            enum isEntityArrayField = false;
+        else
+            enum isEntityArrayField = isEntityType!ElementT;
     } else {
         enum isEntityArrayField = false;
     }
@@ -1239,7 +1245,7 @@ template FilterPlugin(alias S) if (isSchema!S) {
 /// LDC eagerly resolves `alias TypeMap` when forwarded from a mixin template to a
 /// regular template, causing circular forward references during struct construction.
 mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) {
-    import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
+    import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple, isInstanceOf;
     import std.conv : to;
     import dunamis.core.expr : Expr, ExprResultType;
     import dunamis.core.filtering : FilterByExpr, FilterItemExpr;
@@ -1252,7 +1258,8 @@ mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) 
     alias _SrcEntity = ExprResultType!(_SrcParams[0]);
     alias _ElementType = ArrayFieldElementType!(__traits(getMember, SourceQuery, fieldName));
 
-    static if (!isEntityType!_ElementType) {
+    // (Lists of nullable objects are not filtered: see isEntityArrayField.)
+    static if (!isEntityType!_ElementType || isInstanceOf!(Nullable, _ElementType)) {
         import dunamis.schema.plugin : ForwardField;
         mixin ForwardField!(SourceQuery, fieldName, TypeMap);
     } else {

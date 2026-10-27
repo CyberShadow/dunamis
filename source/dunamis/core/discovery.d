@@ -128,6 +128,10 @@ template isObjectType(T) {
         else static if (isGqlResult!T) {
             enum isObjectType = false;
         }
+        // Exclude Nullable (a wrapper of a possibly object type, e.g. a list item)
+        else static if (is(T == Nullable!U, U)) {
+            enum isObjectType = false;
+        }
         // Check if it has at least one valid field method, plain field, or plain method
         else {
             enum isObjectType = hasAnyValidFieldMethod!T || hasAnyPlainField!T || hasAnyPlainMethod!T;

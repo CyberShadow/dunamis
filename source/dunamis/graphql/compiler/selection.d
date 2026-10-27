@@ -26,11 +26,32 @@ import dunamis.graphql.compiler.extensions : extensionFieldExists, compileExtens
 
 package(dunamis.graphql):
 
+/// Whether list items of type T are leaves (scalars, or lists of them),
+/// which are serialized as they are, without a selection set.
 private template isScalarElement(T) {
     static if (is(T == Nullable!U, U))
         enum isScalarElement = isScalarElement!U;
+    else static if (is(T == E[], E) && !isSomeString!T && !isCustomScalar!T)
+        enum isScalarElement = isScalarElement!E;
     else
         enum isScalarElement = isCustomScalar!T || !is(T == struct) || isGqlResult!T;
+}
+
+/// Whether items of type T are plain objects (non-null structs with a
+/// selection set), compiled by compileMapExpr.
+private template isObjectElement(T) {
+    enum isObjectElement = is(T == struct) && !is(T == Nullable!U, U) && !isScalarElement!T;
+}
+
+/// Whether a null item in a list of T makes the list null (null bubbling):
+/// T is non-null, and an object or a list which can itself become null.
+private template bubblesNullItems(T) {
+    static if (is(T == Nullable!U, U))
+        enum bubblesNullItems = false;
+    else static if (is(T == E[], E) && !isSomeString!T && !isCustomScalar!T)
+        enum bubblesNullItems = bubblesNullItems!E;
+    else
+        enum bubblesNullItems = is(T == struct) && !isCustomScalar!T && !isGqlResult!T;
 }
 
 /// Compile the root selection set for subscriptions.
@@ -302,6 +323,50 @@ MapExpr!(Entity, DynamicJsonObjectExpr) compileMapExpr(Entity, alias SchemaSourc
     )(collection);
 }
 
+/// Compile a selection set for each item of a list of objects, nullable
+/// objects, or (nested) lists of them.
+/// Returns Expr!(JSONValue[]), the items' JSON values for each list.
+/// Note: Explicit return type breaks circular template instantiation.
+Expr!(JSONValue[]) compileListItems(E, alias SchemaSource = void, Coll)(Coll collection, SelectionSet ss,
+    JSONValue variables, FragmentMap fragments, JSONValue[] pathPrefix = []) {
+    static if (isObjectElement!E) {
+        return compileMapExpr!(E, SchemaSource)(collection, ss, variables, fragments, pathPrefix);
+    } else {
+        return map!(
+            (Expr!E item) => compileListItem!(E, SchemaSource)(item, ss, variables, fragments, pathPrefix)
+        )(collection);
+    }
+}
+
+/// Compile one item of a list which is not a plain object (a nullable
+/// object, or a list) as a field result of its own, as one JSON value.
+Expr!JSONValue compileListItem(E, alias SchemaSource = void)(Expr!E item, SelectionSet ss,
+    JSONValue variables, FragmentMap fragments, JSONValue[] pathPrefix = []) {
+    auto compiled = compileFieldResult!(Expr!E, SchemaSource)(item, ss, variables, fragments, pathPrefix);
+    if (auto json = cast(Expr!JSONValue) compiled)
+        return json;
+    auto items = cast(Expr!(JSONValue[])) compiled;
+    assert(items !is null, "List item of type " ~ E.stringof ~ " compiled to neither JSON nor a JSON list");
+    // Null bubbling: a null item in a list of non-null items makes the list null
+    static if (is(E == F[], F) && bubblesNullItems!F)
+        return use(&strictListJson, items);
+    else
+        return use(&listJson, items);
+}
+
+/// A list's JSON value.
+private JSONValue listJson(JSONValue[] items) {
+    return JSONValue(items);
+}
+
+/// A list's JSON value, null if one of its (non-null) items is null.
+private JSONValue strictListJson(JSONValue[] items) {
+    foreach (item; items)
+        if (item.isNull)
+            return JSONValue(null);
+    return JSONValue(items);
+}
+
 /// Compile the body of a selection set (the fields to extract).
 /// Works with any struct type that has field methods.
 /// SchemaSource enables abstract type resolution for nested fields.
@@ -386,9 +451,10 @@ bool[] resolveNonNullItemFlags(T)(string[] fieldNames) {
     return flags;
 }
 
-/// Check if a D type maps to a GraphQL list whose items are non-null objects.
-/// Only object items are considered: scalar items cannot become null through
-/// null bubbling, and array-valued scalars must not be inspected.
+/// Check if a D type maps to a GraphQL list whose non-null items can become
+/// null through null bubbling: objects, or lists of them (see
+/// bubblesNullItems). Scalar items cannot, and array-valued scalars must not
+/// be inspected.
 private template isNonNullObjectListType(T) {
     import std.traits : isSomeString;
     import std.typecons : Nullable;
@@ -397,8 +463,7 @@ private template isNonNullObjectListType(T) {
     } else static if (is(T == Nullable!U, U)) {
         enum isNonNullObjectListType = isNonNullObjectListType!U;
     } else static if (is(T == E[], E) && !isSomeString!T && !isCustomScalar!T) {
-        enum isNonNullObjectListType = is(E == struct) && !isCustomScalar!E &&
-            !is(E == Nullable!V, V) && !isGqlResult!E;
+        enum isNonNullObjectListType = bubblesNullItems!E;
     } else {
         enum isNonNullObjectListType = false;
     }
@@ -450,12 +515,12 @@ ExprBase compileFieldResult(ResultExpr, alias SchemaSource = void)(ResultExpr re
             // Array of scalars (custom or primitive) or GqlResult elements - wrap to JSON
             return wrapAsJsonExpr(resultExpr);
         } else {
-            // Array of structs - requires selection set
+            // Array of structs, nullable structs or lists of them - requires selection set
             if (ss is null) {
                 throw new CompilerException(
                     "Field returning [" ~ E.stringof ~ "] requires a selection set");
             }
-            return compileMapExpr!(E, SchemaSource)(resultExpr, ss, variables, fragments, pathPrefix);
+            return compileListItems!(E, SchemaSource)(resultExpr, ss, variables, fragments, pathPrefix);
         }
     }
     // GqlResult types — materialize errors to Nullable and recurse
@@ -473,8 +538,8 @@ ExprBase compileFieldResult(ResultExpr, alias SchemaSource = void)(ResultExpr re
                 "Field returning [" ~ E.stringof ~ "] requires a selection set");
         }
         auto unwrapper = new UnwrapNullableExpr!(E[])(resultExpr);
-        auto items = compileMapExpr!(E, SchemaSource)(unwrapper, ss, variables, fragments, pathPrefix);
-        auto innerExpr = use((JSONValue[] values) => JSONValue(values), items);
+        auto items = compileListItems!(E, SchemaSource)(unwrapper, ss, variables, fragments, pathPrefix);
+        auto innerExpr = use(&listJson, items);
         return finalizeNullableObjectExpr!(E[])(resultExpr, unwrapper, innerExpr);
     }
     // Nullable structs (entities) - handle null case specially
