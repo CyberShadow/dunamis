@@ -1089,6 +1089,23 @@ Expr!Query query(Expr!Mutation m) {
 }
 ```
 
+**Procedures:** a mutation field doing more than one call (several statements, reads of its own writes) is best written as a procedure, run with `perform!fn(lengthSource, sources, args...)` (`dunamis.core.expr.effects`). `fn(EvalContext ctx, args)` runs once per request, when the field is evaluated, in a fiber of its own (`performSized` sets the stack size; the default is 1 MB), so it is written in direct style, awaiting promises (`ae.utils.promise.await.await`). `sources` are the data sources it uses: the executor sets up their sessions for the request, which the procedure gets with `ctx.getSession`. With `evaluateNested(expr, ctx)`, a procedure evaluates a typed expression (optimized as its own tree) on those sessions, so that it sees the procedure's writes. If the procedure throws, the field fails.
+
+```d
+Expr!AddPayload addUser(Expr!Mutation m, string name) {
+    return perform!addUserProcedure(m, [cast(DataSource) db], name);
+}
+
+AddPayload addUserProcedure(EvalContext ctx, string name) @async {
+    auto session = cast(PostgresSession) ctx.getSession(db);
+    auto id = session.queryLongs("INSERT INTO users (name) VALUES (...) RETURNING id").await[0];
+    auto count = evaluateNested(userCount(Query().singleton()), ctx).await;  // sees the new user
+    return AddPayload(User(cast(int) id), count);
+}
+```
+
+**Atomic mutation fields:** each mutation field is an atomic section of the request's sessions (`DataSession.beginAtomic`/`endAtomic`; for PostgreSQL, a savepoint): if the field fails (it fails, or is null with errors recorded while it was evaluated, such as a failing non-null field of its value), its work is undone, and the request's other fields' work is kept.
+
 Each request has one instance of each root type, from which root fields are evaluated; that is the only difference between root types and other types, and it is handled where the request is compiled (the GraphQL compiler), not by the plugins. Root fields return scalars, entities, nullable entities, lists or PODs (types only mutation fields return, such as `RenamePayload`, are part of the schema like those of any other field), with selection sets as for any field. Mutation fields are evaluated one after the other, in the order of the request; a failing nullable mutation field is null, with the error at its path, and the fields after it still run; a null (or failing) non-null mutation field makes the whole result null, as for query fields, and the fields after it are not evaluated. In GraphQL, the root types are named after their role (`Query`, `Mutation`, `Subscription`), whatever the D names of the user-declared types.
 
 **Using filters, sorting and pagination inside a field:** a field function sees the schema at the plugin's position, beneath `FilterPlugin`, `SortingPlugin` and `PaginationPlugin`: `u.posts` takes no `filter` argument there. To use those facilities, go through the final schema explicitly, as for [cross-collection access](#cross-collection-access):

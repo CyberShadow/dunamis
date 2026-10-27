@@ -250,6 +250,8 @@ mixin template TestSchema(alias db) {
     import dunamis.relational.schema : Table, ForeignKey, BelongsTo, HasMany, Col, getAll, hasMany;
     import dunamis.relational.demo : DemoEntity, DemoId, Int64;
     import dunamis.relational.mutation : insert;
+    import dunamis.core.eval : EvalContext;
+    import ae.utils.promise.await : async;
 
     @DemoEntity!(db, "users")
     struct User {
@@ -511,7 +513,47 @@ mixin template TestSchema(alias db) {
         }
     }
 
+    /// A procedure (see Mutation.createUserAndCount): creates a user, then
+    /// counts the users, in a nested evaluation which sees the new one; fails
+    /// afterwards if `fail` is set.
+    static int createAndCountUsers(EvalContext ctx, string firstName, bool fail) @async {
+        import ae.utils.promise.await : await;
+        import dunamis.core.expr : evaluateNested, map, singleton;
+        import dunamis.relational.eval_context : RelationalSession;
+        import dunamis.relational.mutation : InsertInput;
+
+        auto session = cast(RelationalSession) ctx.getSession(db);
+        session.executeInsert("users", "User", InsertInput([
+            "first_name": JSONValue(firstName),
+            "last_name": JSONValue("Procedure"),
+            "age": JSONValue(30),
+        ]), ["id"], true).await;
+        auto count = evaluateNested(use((string[] names) => cast(int) names.length,
+            map!((Expr!User u) => u.firstName)(Query().singleton().users())), ctx).await;
+        if (fail)
+            throw new Exception("Procedure failed after creating " ~ firstName);
+        return count;
+    }
+
+    /// A procedure (see Mutation.nestedCounts): two nested evaluations, of
+    /// different trees, on the request's session.
+    static string countUsersAndPosts(EvalContext ctx) @async {
+        import std.conv : to;
+        import ae.utils.promise.await : await;
+        import dunamis.core.expr : evaluateNested, map, singleton;
+
+        auto names = evaluateNested(use((string[] v) => v, map!((Expr!User u) => u.firstName)(Query().singleton().users())), ctx).await;
+        auto titles = evaluateNested(use((string[] v) => v, map!((Expr!Post p) => p.title)(Query().singleton().posts())), ctx).await;
+        return names.length.to!string ~ " users, " ~ titles.length.to!string ~ " posts";
+    }
+
     struct Mutation {
+        /// The numbers of users and posts (see countUsersAndPosts)
+        static Expr!string nestedCounts(Expr!Mutation m) {
+            import dunamis.core.expr : perform;
+            return perform!countUsersAndPosts(m, [db]);
+        }
+
         /// The badge with the given key, built from it: an entity with a
         /// composite key returned by a mutation field, its columns read by key
         static Expr!UserBadge badgeByKey(Expr!Mutation m, Int64 userId, string badgeName) {
@@ -528,6 +570,12 @@ mixin template TestSchema(alias db) {
                     badges ~= name.length ? Nullable!UserBadge(UserBadge(userId.value, name)) : Nullable!UserBadge.init;
                 return badges;
             }, m);
+        }
+
+        /// Creates a user and returns the number of users (see createAndCountUsers)
+        static Expr!int createUserAndCount(Expr!Mutation m, string firstName, bool fail) {
+            import dunamis.core.expr : perform;
+            return perform!createAndCountUsers(m, [db], firstName, fail);
         }
 
         static auto createUserWithName(Expr!Mutation parent, string firstName, string lastName) {

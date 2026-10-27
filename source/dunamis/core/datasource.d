@@ -50,6 +50,19 @@ class DataSession {
     /// success=false: execution failed (ROLLBACK).
     Promise!void teardown(SetupMode mode = SetupMode.query, bool success = true) { return resolve(); }
 
+    /// Begin an atomic section of the session's work (for example a root
+    /// mutation field): the work done until `endAtomic` is either kept or,
+    /// if the section fails, undone. Returns a token for `endAtomic`; 0 if
+    /// the session cannot undo the section's work (the default: sessions
+    /// without transactions). Sections may nest.
+    Promise!ulong beginAtomic() { return resolve(0UL); }
+
+    /// End the atomic section begun with the token `token`: keep its work
+    /// (success=true), or undo it (success=false). A no-op for the token 0.
+    /// The section's work is kept if the session committed it in the
+    /// meantime (see e.g. suspend()).
+    Promise!void endAtomic(ulong token, bool success) { return resolve(); }
+
     /// Temporarily release resources while evaluation waits for external work.
     /// The logical session remains active and may later be resumed. Backends
     /// which do not retain scarce resources can use the no-op default.

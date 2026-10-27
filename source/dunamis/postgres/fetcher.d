@@ -39,6 +39,9 @@ class PostgresSession : RelationalSession {
     private string _cachedSQL;
     private QueryResult[QueryNode] _cachedResults;
     private string[] _setupStatements;
+    /// Numbers the session's transactions (incremented at each BEGIN), to
+    /// tell whether an atomic section's savepoint still exists.
+    private ulong _transaction;
 
     /// Add transaction-local initialization SQL for this request (for
     /// example SET LOCAL application context values).
@@ -70,6 +73,7 @@ class PostgresSession : RelationalSession {
         super.setup(mode);
         return acquireConnectionPermit(false).then(() => _connFactory()).then((PgSqlConnection conn) {
             _conn = conn;
+            _transaction++;
             return connection().query("BEGIN").array();
         }).then((PgSqlConnection.Row[] _) {
             return executeSetupStatement(0).then(() {
@@ -137,10 +141,30 @@ class PostgresSession : RelationalSession {
             return resolve();
         auto conn = _conn;
         return conn.query("COMMIT").array().then((PgSqlConnection.Row[] _) {
+            _transaction++;
             return conn.query("BEGIN").array();
         }).then((PgSqlConnection.Row[] _) {
             return executeSetupStatement(0);
         });
+    }
+
+    /// An atomic section is a savepoint of the current transaction.
+    override Promise!ulong beginAtomic() {
+        if (_conn is null || !_setupDepth)
+            return resolve(0UL);
+        auto transaction = _transaction;
+        return execute("SAVEPOINT dunamis_atomic").then(() => transaction);
+    }
+
+    /// ditto
+    override Promise!void endAtomic(ulong token, bool success) {
+        // (The transaction of the savepoint ended: its work was committed.)
+        if (token == 0 || token != _transaction || _conn is null)
+            return resolve();
+        if (success)
+            return execute("RELEASE SAVEPOINT dunamis_atomic");
+        return execute("ROLLBACK TO SAVEPOINT dunamis_atomic")
+            .then(() => execute("RELEASE SAVEPOINT dunamis_atomic"));
     }
 
     /// End the current read transaction and release its connection while an
@@ -164,6 +188,7 @@ class PostgresSession : RelationalSession {
             return resolve();
         return acquireConnectionPermit(true).then(() => _connFactory()).then((PgSqlConnection conn) {
             _conn = conn;
+            _transaction++;
             return conn.query("BEGIN").array();
         }).then((PgSqlConnection.Row[] _) {
             return executeSetupStatement(0);

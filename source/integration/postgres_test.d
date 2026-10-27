@@ -104,9 +104,14 @@ class PostgresTestRunner : IntegrationTestRunner!(db, MySchema, User, FilterLast
 // Tests needing concurrent request sessions
 static this() {
     import integration.test_framework : registerTest;
-    import integration.tests : testInterleavedEvaluationsOfOneTree, testCompositeKeyEntityOfMutation;
+    import integration.tests : testInterleavedEvaluationsOfOneTree, testProceduresAndAtomicMutationFields,
+        testNestedEvaluationsOfDifferentTrees, testCompositeKeyEntityOfMutation;
     registerTest("Interleaved evaluations of one optimized tree", "postgres",
         &testInterleavedEvaluationsOfOneTree);
+    registerTest("Procedures and atomic mutation fields", "postgres",
+        &testProceduresAndAtomicMutationFields);
+    registerTest("Nested evaluations of different trees", "postgres",
+        &testNestedEvaluationsOfDifferentTrees);
     registerTest("Composite-key entity of a mutation field", "postgres",
         &testCompositeKeyEntityOfMutation);
 }

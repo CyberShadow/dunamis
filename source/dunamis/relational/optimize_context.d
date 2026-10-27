@@ -13,6 +13,13 @@ import dunamis.relational.query_node;
 /// Holds QueryNodes and their PrefetchExprs keyed by MapExpr identity.
 /// Retrieved via OptimizeContext.getSourceContext!RelationalOptimizeContext()
 class RelationalOptimizeContext {
+    /// The last QueryNodeId.tree allocated (per thread, as evaluations are).
+    private static uint lastTree;
+
+    this() {
+        _tree = ++lastTree;
+    }
+
     private {
         /// Query nodes keyed by MapExpr identity (using Object pointer)
         QueryNode[void*] _queryNodes;
@@ -25,6 +32,9 @@ class RelationalOptimizeContext {
 
         /// Next query node ID
         int _nextNodeId = 0;
+
+        /// The tree of this optimization (see QueryNodeId.tree)
+        uint _tree;
 
         /// Next computed column alias number
         int _nextComputedAlias = 0;
@@ -46,7 +56,7 @@ class RelationalOptimizeContext {
             return _queryNodes[key];
         }
 
-        auto node = new QueryNode(QueryNodeId(_nextNodeId++), typeName, table, pkColumns);
+        auto node = new QueryNode(QueryNodeId(_nextNodeId++, _tree), typeName, table, pkColumns);
         node.mapExpr = mapExpr;  // Store for looking up currentRefs at eval time
         _queryNodes[key] = node;
         return node;
@@ -195,8 +205,11 @@ unittest {
     auto node2 = ctx.getOrCreateNode(map2, "Post", "posts", ["id"]);
     auto node1again = ctx.getOrCreateNode(map1, "User", "users", ["id"]);
 
-    assert(node1.id == QueryNodeId(0));
-    assert(node2.id == QueryNodeId(1));
+    assert(node1.id.value == 0);
+    assert(node2.id.value == 1);
+    assert(node1.id.tree == node2.id.tree);
+    // The nodes of another optimization are distinct
+    assert((new RelationalOptimizeContext()).getOrCreateNode(map1, "User", "users", ["id"]).id != node1.id);
     assert(node1again is node1);  // Same node returned
 
     assert(ctx.allNodes().length == 2);

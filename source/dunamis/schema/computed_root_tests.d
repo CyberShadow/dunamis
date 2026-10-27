@@ -7,6 +7,7 @@ module dunamis.schema.computed_root_tests;
 version (unittest):
 
 import std.algorithm : canFind;
+import std.conv : to;
 import std.json : JSONValue, parseJSON;
 
 import ae.utils.promise.await : awaitSync;
@@ -23,7 +24,7 @@ import dunamis.schema.sorting : SortingPlugin;
 static import dunamis.schema.computed_fixture;
 static import dunamis.schema.computed_root_fixture;
 import dunamis.schema.computed_fixture : fixtureDb, Greeting, Query;
-import dunamis.schema.computed_root_fixture : Mutation, mutationLog;
+import dunamis.schema.computed_root_fixture : Mutation, mutationLog, procedureRuns, atomicLog, AtomicLogDB;
 alias fixture = dunamis.schema.computed_fixture;
 alias rootFixture = dunamis.schema.computed_root_fixture;
 
@@ -46,6 +47,8 @@ private void seed() {
     fixtureDb.setTableData("comments", `[]`);
     fixtureDb.setTableData("likes", `[]`);
     mutationLog = null;
+    procedureRuns = 0;
+    atomicLog = new AtomicLogDB;
 }
 
 private JSONValue run(string query, EvalContext ctx = null) {
@@ -190,4 +193,56 @@ unittest {
     assert(hasField(result["mutation"], "recordFor") && hasField(result["mutation"], "query"), result.toString());
     assert(hasField(result["payload"], "user"), result.toString());
     assert(hasField(result["query"], "census") && hasField(result["query"], "users"), result.toString());
+}
+
+// Procedures (perform): run once, in order with the other mutation fields;
+// a nested evaluation sees the procedure's writes
+unittest {
+    seed();
+    auto ctx = new EvalContext();
+    auto result = run(`mutation {
+        added: addUser(id: 4, name: "Dave")
+        twice: addUserReadTwice(id: 5, name: "Eve")
+    }`, ctx);
+    assert(ctx.errors.length == 0, ctx.errors[0].message);
+    assert(result == parseJSON(`{"added": 4, "twice": 10}`), result.toString());
+    assert(procedureRuns == 2);
+    auto users = run(`{ userCount }`);
+    assert(users == parseJSON(`{"userCount": 5}`), users.toString());
+}
+
+// A procedure which throws makes its field fail, with the error at its path
+unittest {
+    seed();
+    auto ctx = new EvalContext();
+    auto result = run(`mutation { a: record(entry: "a") failed: failingProcedure b: record(entry: "b") }`, ctx);
+    assert(result == parseJSON(`{"a": "a", "failed": null, "b": "b"}`), result.toString());
+    assert(ctx.errors.length == 1 && ctx.errors[0].message == "procedure failed");
+    assert(ctx.errors[0].path == [JSONValue("failed")]);
+}
+
+// Nested evaluations of different trees in one request
+unittest {
+    seed();
+    auto ctx = new EvalContext();
+    auto result = run(`{ users { name } namesAndTitles }`, ctx);
+    assert(ctx.errors.length == 0, ctx.errors[0].message);
+    assert(result["namesAndTitles"] == JSONValue("Alice,Bob,Carol|Hello,hidden,Other"), result.toString());
+}
+
+// Each mutation field is an atomic section of the request's sessions, undone
+// if the field fails (also if a non-null field of its value does)
+unittest {
+    seed();
+    auto ctx = new EvalContext();
+    auto result = run(`mutation {
+        a: atomicStep(entry: "a")
+        b: atomicStep(entry: "")
+        c: atomicStepPayload(entry: "") { checked }
+        d: atomicStepPayload(entry: "d") { checked }
+    }`, ctx);
+    assert(result == parseJSON(`{"a": "a", "b": null, "c": null, "d": {"checked": "d"}}`), result.toString());
+    assert(ctx.errors.length == 2, result.toString());
+    assert(atomicLog.log == ["begin 1", "keep 1", "begin 2", "undo 2", "begin 3", "undo 3", "begin 4", "keep 4"],
+        atomicLog.log.to!string);
 }

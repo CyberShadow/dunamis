@@ -330,6 +330,13 @@ class DynamicJsonObjectExpr : Expr!JSONValue {
 /// (nonNullFields), or a null item in a list of non-null items
 /// (nonNullItemFields), makes the whole object null. The fields after such a
 /// field are then not evaluated (their results could not be returned).
+///
+/// Each field is atomic: its evaluation is an atomic section of the
+/// request's sessions (see DataSession.beginAtomic), whose work is undone if
+/// the field fails, i.e. if its evaluation fails or it is null with errors
+/// recorded while evaluating it (such as a field of its value which is
+/// non-null and failed). Other errors of its value (of nullable fields) do
+/// not undo its work.
 class SequentialJsonObjectExpr : Expr!JSONValue {
     private string[] _names;
     private ExprBase[] _exprs;
@@ -396,22 +403,47 @@ class SequentialJsonObjectExpr : Expr!JSONValue {
         }
 
         import ae.utils.promise : Result, toResult;
-        // (An expression may also fail before returning its promise.)
-        Promise!(JSONValue[]) evaluated;
-        try {
-            evaluated = evalToJson(fieldExpr, ctx);
-        } catch (Exception e) {
-            evaluated = new Promise!(JSONValue[]);
-            evaluated.reject(e);
+        import dunamis.core.datasource : DataSession;
+
+        auto sessions = ctx.allSessions;
+        ulong[] tokens;
+        Promise!void beginAtomic(size_t i) {
+            if (i == sessions.length) return resolve();
+            return sessions[i].beginAtomic().then((ulong token) {
+                tokens ~= token;
+                return beginAtomic(i + 1);
+            });
         }
-        return evaluated.toResult().then((Result!(JSONValue[]) r) {
+        Promise!void endAtomic(size_t i, bool success) {
+            if (i == sessions.length) return resolve();
+            return sessions[i].endAtomic(tokens[i], success).then(() => endAtomic(i + 1, success));
+        }
+
+        size_t errorsBefore;
+        return beginAtomic(0).then(() {
+            errorsBefore = ctx.errors.length;
+            // (An expression may also fail before returning its promise.)
+            Promise!(JSONValue[]) evaluated;
+            try {
+                evaluated = evalToJson(fieldExpr, ctx);
+            } catch (Exception e) {
+                evaluated = new Promise!(JSONValue[]);
+                evaluated.reject(e);
+            }
+            return evaluated.toResult();
+        }).then((Result!(JSONValue[]) r) {
+            JSONValue value;
             if (r.error is null)
-                return next(r.value[0][0]);
-            // Field failed — null, with the error recorded at the field's path
-            JSONValue[] errorPath = pathPrefix.dup;
-            errorPath ~= JSONValue(fieldName);
-            ctx.addError(r.error.msg, errorPath);
-            return next(JSONValue(null));
+                value = r.value[0][0];
+            else {
+                // Field failed — null, with the error recorded at the field's path
+                JSONValue[] errorPath = pathPrefix.dup;
+                errorPath ~= JSONValue(fieldName);
+                ctx.addError(r.error.msg, errorPath);
+                value = JSONValue(null);
+            }
+            bool failed = r.error !is null || (value.isNull && ctx.errors.length > errorsBefore);
+            return endAtomic(0, !failed).then(() => next(value));
         });
     }
 }

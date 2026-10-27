@@ -2807,6 +2807,52 @@ void testInterleavedEvaluationsOfOneTree() {
         "Both evaluations returned the same created user: " ~ createdIds[0].toString());
 }
 
+// ============================================================================
+// Procedures (perform, evaluateNested) and atomic mutation fields
+// ============================================================================
+
+/// A procedure's nested evaluation sees its write; a mutation field which
+/// fails is undone, the fields before it are not (PostgreSQL: savepoints).
+void testProceduresAndAtomicMutationFields() {
+    auto before = graphql(`{ users { id } }`);
+    assertNoErrors(before);
+    auto count = before["data"]["users"].array.length;
+    auto kept = "Kept" ~ modeSuffix(), undone = "Undone" ~ modeSuffix();
+
+    auto response = graphql(`mutation {
+        kept: createUserAndCount(firstName: "` ~ kept ~ `", fail: false)
+        undone: createUserAndCount(firstName: "` ~ undone ~ `", fail: true)
+    }`);
+    // createUserAndCount is non-null, so the failure nulls the data
+    assertTrue(response["data"].type == JSONType.null_, "Expected null data: " ~ response.toString());
+    assertTrue(response["errors"].array.length == 1, "Expected one error: " ~ response.toString());
+    assertEqual(response["errors"][0]["path"], JSONValue([JSONValue("undone")]));
+
+    auto ok = graphql(`mutation { counted: createUserAndCount(firstName: "` ~ kept ~ `2", fail: false) }`);
+    assertNoErrors(ok);
+    // The first and this one are counted, not the undone one
+    assertEqual(ok["data"]["counted"], JSONValue(count + 2));
+
+    auto after = graphql(`{ users { firstName } }`);
+    assertNoErrors(after);
+    bool[string] names;
+    foreach (user; after["data"]["users"].array)
+        names[user["firstName"].str] = true;
+    assertTrue((kept in names) !is null, "The first field's user should exist");
+    assertTrue((undone in names) is null, "The failed field's user should not exist");
+}
+
+/// Nested evaluations of different trees on one session see their own results
+void testNestedEvaluationsOfDifferentTrees() {
+    auto direct = graphql(`{ users { id } posts { id } }`);
+    assertNoErrors(direct);
+    auto expected = direct["data"]["users"].array.length.to!string ~ " users, " ~
+        direct["data"]["posts"].array.length.to!string ~ " posts";
+    auto response = graphql(`mutation { nestedCounts users: createUserWithName(firstName: "Nested", lastName: "` ~ modeSuffix() ~ `") { id } }`);
+    assertNoErrors(response);
+    assertEqual(response["data"]["nestedCounts"], JSONValue(expected));
+}
+
 /// The columns of an entity with a composite key returned by a mutation
 /// field are read by its key
 void testCompositeKeyEntityOfMutation() {

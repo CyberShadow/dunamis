@@ -123,8 +123,13 @@ class Executor {
         return result;
     }
 
+    /// The data sources of the expressions of a tree, deduplicated by instance.
+    static DataSource[] dataSourcesOf(ExprBase root) {
+        return collectDataSources(root);
+    }
+
     /// Walk expression tree and collect data sources, deduplicated by instance.
-    private DataSource[] collectDataSources(ExprBase root) {
+    private static DataSource[] collectDataSources(ExprBase root) {
         DataSource[] result;
         bool[DataSource] seen;
 

@@ -84,6 +84,9 @@ class EvalContext {
     private EvalContext _parent;
 
     /// The request's context (the outermost one this is a scope of).
+    @property EvalContext request() { return root; }
+
+    /// ditto
     private @property EvalContext root() {
         auto ctx = this;
         while (ctx._parent !is null)
@@ -141,6 +144,14 @@ class EvalContext {
         auto s = ds.createSession();
         _sessions[ds] = s;
         return s;
+    }
+
+    /// Whether the request has a session for the data source `ds` (that
+    /// is, `getSession(ds)` was called, normally by the executor).
+    bool hasSession(DataSource ds) {
+        if (_parent !is null)
+            return root.hasSession(ds);
+        return (ds in _sessions) !is null;
     }
 
     /// Get all sessions (for Executor lifecycle management).

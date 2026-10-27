@@ -10,7 +10,7 @@ import std.typecons : Nullable;
 
 import dunamis.core.expr : Expr, constant, effect, fieldAccess, map, use;
 import dunamis.graphql.schema : GqlDescription;
-import dunamis.schema.computed_fixture : Query, User;
+import dunamis.schema.computed_fixture : Query, User, fixtureDb;
 
 /// The mutation root type: all its fields are computed fields declared here.
 struct Mutation {}
@@ -141,4 +141,114 @@ Expr!(Nullable!User) maybeUser(Expr!Mutation m, int userId) {
 /// The query root, to read the state after the mutation.
 Expr!Query query(Expr!Mutation m) {
     return effect(() => Query.init, m);
+}
+
+// ---- Procedures (perform) ----
+
+import ae.utils.promise : Promise, resolve;
+import ae.utils.promise.await : async, await;
+import dunamis.core.datasource : DataSession, DataSource;
+import dunamis.core.eval : EvalContext;
+import dunamis.core.expr : evaluateNested, perform, singleton;
+
+/// The number of times the procedures below ran.
+__gshared int procedureRuns;
+
+/// Adds a user (as a procedure) and returns the number of users then.
+Expr!int addUser(Expr!Mutation m, int id, string name) {
+    return perform!addUserProcedure(m, [cast(DataSource) fixtureDb], id, name);
+}
+
+/// The sum of two reads of one addUser procedure.
+Expr!int addUserReadTwice(Expr!Mutation m, int id, string name) {
+    auto added = addUser(m, id, name);
+    return use((int a, int b) => a + b, added, added);
+}
+
+private int addUserProcedure(EvalContext ctx, int id, string name) @async {
+    import std.json : JSONValue;
+    import dunamis.relational.eval_context : RelationalSession;
+    import dunamis.relational.mutation : InsertInput;
+
+    procedureRuns++;
+    auto session = cast(RelationalSession) ctx.getSession(fixtureDb);
+    session.executeInsert("users", "User", InsertInput(["id": JSONValue(id), "name": JSONValue(name)]),
+        ["id"], false).await;
+    // A nested evaluation, which sees the new user
+    return evaluateNested(userCount(Query().singleton()), ctx).await;
+}
+
+/// A procedure which fails (after awaiting).
+Expr!(Nullable!int) failingProcedure(Expr!Mutation m) {
+    return perform!failAfterAwaiting(m, [cast(DataSource) fixtureDb]);
+}
+
+private Nullable!int failAfterAwaiting(EvalContext ctx) @async {
+    resolve().await;
+    if (ctx !is null)
+        throw new Exception("procedure failed");
+    return Nullable!int(1);
+}
+
+/// The names of the users and the titles of the posts, in two nested
+/// evaluations of different trees.
+Expr!string namesAndTitles(Expr!Query q) {
+    return perform!((EvalContext ctx) {
+        import dunamis.schema.computed_fixture : Post;
+        auto names = evaluateNested(map!userName(Query.users(Query().singleton())), ctx).await;
+        auto titles = evaluateNested(map!((Expr!Post p) => p.title)(Query.posts(Query().singleton())), ctx).await;
+        return names.join(",") ~ "|" ~ titles.join(",");
+    })(q, [cast(DataSource) fixtureDb]);
+}
+
+/// A data source logging the atomic sections of its sessions.
+final class AtomicLogDB : DataSource {
+    string[] log;
+    override DataSession createSession() { return new AtomicLogSession(this); }
+}
+
+/// ditto
+final class AtomicLogSession : DataSession {
+    private AtomicLogDB _db;
+    private ulong _next;
+    this(AtomicLogDB db) { _db = db; }
+    override Promise!ulong beginAtomic() {
+        import std.conv : to;
+        _db.log ~= "begin " ~ (_next + 1).to!string;
+        return resolve(++_next);
+    }
+    override Promise!void endAtomic(ulong token, bool success) {
+        import std.conv : to;
+        _db.log ~= (success ? "keep " : "undo ") ~ token.to!string;
+        return resolve();
+    }
+}
+
+/// ditto
+__gshared AtomicLogDB atomicLog;
+
+/// Records a non-empty entry on atomicLog's session; fails for an empty one.
+Expr!(Nullable!string) atomicStep(Expr!Mutation m, string entry) {
+    return perform!((EvalContext ctx, string entry) {
+        if (entry.length == 0) throw new Exception("empty step");
+        return Nullable!string(entry);
+    })(m, [cast(DataSource) atomicLog], entry);
+}
+
+/// Like atomicStep, returning an object whose non-null field fails for an
+/// empty entry: the step is then null, with an error, too.
+Expr!(Nullable!StepPayload) atomicStepPayload(Expr!Mutation m, string entry) {
+    return perform!((EvalContext ctx, string entry) => Nullable!StepPayload(StepPayload(entry)))(
+        m, [cast(DataSource) atomicLog], entry);
+}
+
+/// ditto
+struct StepPayload {
+    string entry;
+    static Expr!string checked(Expr!StepPayload p) {
+        return use((StepPayload v) {
+            if (v.entry.length == 0) throw new Exception("empty payload");
+            return v.entry;
+        }, p);
+    }
 }

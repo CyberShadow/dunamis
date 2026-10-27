@@ -15,8 +15,14 @@ import dunamis.relational.sql_dialect : DialectSql, SqlDialect;
 // ============================================================================
 
 /// Typed wrapper for QueryNode IDs. Prevents confusion with other ints.
+///
+/// `value` numbers the nodes of one optimized tree (it names their SQL
+/// layers); `tree` tells the trees optimized in a process apart, so that the
+/// results of the nodes of different trees evaluated on one session (for
+/// example of a nested evaluation, see `evaluateNested`) do not collide.
 struct QueryNodeId {
     int value;
+    uint tree;
 }
 
 /// Sentinel for "no QueryNode assigned yet" (replaces -1 convention).
