@@ -38,59 +38,6 @@ interface BinaryOpInfo {
     ExprBase right();
 }
 
-/// A binary boolean operation whose SQL operator is supplied at runtime.
-/// This is useful for database-native predicates (for example PostgreSQL
-/// range operators) which are not D operators and therefore cannot use the
-/// compile-time `BinaryOpExpr` template.
-///
-/// When the operation is not pushed down to SQL, it is evaluated in memory
-/// by `fallback`; without one, evaluating it is an error (rather than
-/// silently yielding false).
-class SqlBinaryBoolExpr(L, R) : Expr!bool, BinaryOpInfo {
-    private ExprBase _left;
-    private ExprBase _right;
-    private string _operator;
-    private bool delegate(L, R) _fallback;
-
-    this(Expr!L left, string operator, Expr!R right,
-            bool delegate(L, R) fallback = null) {
-        _left = left;
-        _right = right;
-        _operator = operator;
-        _fallback = fallback;
-    }
-
-    override ExprBase[] dependencies() { return [_left, _right]; }
-    override void replaceDependency(size_t index, ExprBase value) {
-        if (index == 0) _left = value; else _right = value;
-    }
-    override Expr!bool optimize(OptimizeContext ctx) {
-        _left = cast(ExprBase)(cast(Expr!L)_left).optimize(ctx);
-        _right = cast(ExprBase)(cast(Expr!R)_right).optimize(ctx);
-        return this;
-    }
-    override Promise!(bool[]) eval(EvalContext ctx) {
-        if (_fallback is null)
-            throw new Exception("SQL operator " ~ _operator ~
-                " cannot be evaluated in memory; it must be pushed down to SQL");
-        return joinAll(evalAs!L(_left, ctx), evalAs!R(_right, ctx))
-            .dmd21804workaround.then((values) {
-                bool[] result = new bool[values[0].length];
-                foreach (i; 0 .. result.length)
-                    result[i] = _fallback(values[0][i], values[1][i]);
-                return result;
-            });
-    }
-    override string operator() { return _operator; }
-    override ExprBase left() { return _left; }
-    override ExprBase right() { return _right; }
-}
-
-Expr!bool sqlBinaryBool(L, R)(Expr!L left, string operator, Expr!R right,
-        bool delegate(L, R) fallback = null) {
-    return new SqlBinaryBoolExpr!(L, R)(left, operator, right, fallback);
-}
-
 /// Expression representing a binary operation (arithmetic, concatenation, comparison).
 /// Supports mixed types (e.g., int + float -> float).
 /// Can be evaluated in D or pushed down to SQL.

@@ -9,7 +9,7 @@ import std.typecons : Nullable;
 import ae.utils.promise.await : awaitSync;
 
 import dunamis.core : EvalContext, Executor;
-import dunamis.core.expr : Expr, use;
+import dunamis.core.expr : Expr, ExprBase, use;
 import dunamis.graphql.compiler : compileQuery;
 import dunamis.graphql.schema : Schema, generateSchemaSDL;
 import dunamis.relational.demo : MockDB;
@@ -364,15 +364,35 @@ unittest {
     }
 }
 
-// Range filters (`containsElement`) on a range-valued computed field, whose
-// result type is only returned by computed fields: the range is tested
-// through its own endpoint fields at the filter's level.
+// Filters a value type declares (`@FilteredBy`) on a computed field of the
+// type, which only computed fields return: the filter's condition tests the
+// value through the type's own endpoint fields at the filter's level.
 JSONValue dayToJson(string v) { return JSONValue(v); }
 /// ditto
 string dayFromJson(JSONValue j) { return j.str; }
 import dunamis.core.types : CustomScalar;
+import dunamis.schema.filtering : FilteredBy;
 alias Day = CustomScalar!(string, "Day", dayToJson, dayFromJson);
+@FilteredBy!PeriodFilter
 struct Period { Nullable!Day start; Nullable!Day end; }
+
+/// Whether a half-open period [start, end) (unbounded where null) contains a day.
+bool periodContains(Nullable!Day start, Nullable!Day end, string day) {
+    return (start.isNull || start.get.value <= day) && (end.isNull || day < end.get.value);
+}
+
+struct PeriodFilter {
+    Nullable!Day containsElement;
+    Nullable!bool isNull;
+
+    Expr!bool condition(V)(Expr!V period, ExprBase lengthSource) const {
+        import dunamis.core.expr : constant;
+        if (containsElement.isNull)
+            return null;
+        return use(&periodContains, V.start(period), V.end(period),
+            constant(containsElement.get.value, lengthSource));
+    }
+}
 
 private MockDB!() termDb;
 
@@ -414,4 +434,9 @@ unittest {
         assert(ids("2020-07-01") == [1, 2], ids("2020-07-01").to!string);
         assert(ids("2019-07-01") == [], ids("2019-07-01").to!string);
     }
+
+    import std.algorithm : canFind;
+    enum sdl = generateSchemaSDL!TermSchema;
+    static assert(sdl.canFind("input PeriodFilter {\n  containsElement: Day\n  isNull: Boolean\n}"), sdl);
+    static assert(sdl.canFind("  period: PeriodFilter\n"), sdl);
 }

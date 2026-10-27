@@ -778,7 +778,10 @@ any depth, also through cycles in the schema: each entity has one filter type
 (belongs-to) relationship is filtered by its target's filter, and matches
 nothing where the relationship is null; a to-many relationship is filtered by
 `some`/`every`/`none` over the related entities' filter
-(`PostFilterListFilter`).
+(`PostFilterListFilter`). All object types are filtered alike, whatever their
+data source: a field (taking no arguments) of a value object type, e.g. a
+struct-valued column or an object computed in D, is filtered by that type's
+filter as a relationship is.
 
 ```graphql
 # Comments on posts by authors in the "R&D" department
@@ -795,6 +798,33 @@ On root fields, relationship filters are pushed into SQL as subqueries
 (`fk IN (SELECT pk FROM parent WHERE ...)` for to-one relationships, `EXISTS`
 for `some` and its negations); filters which cannot be expressed in SQL (e.g.
 over computed fields) are evaluated in memory.
+
+**Filters declared by value types:** a value type with filter operators of
+its own (e.g. a range type, with containment) declares its filter input type
+with `@FilteredBy`; its fields are then filtered as columns, by that type. The
+filter type's `condition` builds the condition its operators put on a value,
+from the value type's fields as the filter plugin sees them:
+
+```d
+@FilteredBy!SpanFilter
+struct Span { int from; int to; }
+
+struct SpanFilter {
+    Nullable!int contains;
+    Nullable!bool isNull;  // optional; handled like that of the built-in filters
+
+    Expr!bool condition(V)(Expr!V span, ExprBase lengthSource) const {
+        if (contains.isNull) return null;  // puts no condition
+        auto point = constant(contains.get, lengthSource);
+        return V.from(span).le(point).and(point.lt(V.to(span)));
+    }
+}
+```
+
+A database storing such a type in a representation of its own (e.g. a
+PostgreSQL range column, which arrives as text) is read with the decoder the
+type declares with `@DecodedBy!decode` (`dunamis.relational.schema`), a
+function from the column's JSON value to the type.
 
 **Unknown filter fields:** like all input objects, filters must only contain
 fields their type defines (in literals and in variables); anything else is a

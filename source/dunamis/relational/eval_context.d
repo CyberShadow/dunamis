@@ -21,6 +21,7 @@ private T extractJsonValue(T)(JSONValue val) {
     import std.json : JSONType;
     import std.typecons : Nullable;
     import dunamis.core.types : AnyRef, isCustomScalar;
+    import dunamis.relational.schema.attrs : hasDecodedBy, decodeWithDeclaredDecoder;
 
     static if (is(T == Nullable!U, U)) {
         return val.type == JSONType.null_ ? T.init : T(extractJsonValue!U(val));
@@ -94,27 +95,12 @@ private T extractJsonValue(T)(JSONValue val) {
                 T.stringof ~ ", got " ~ val.type.to!string ~ ": " ~ val.toString());
         }
         return result;
+    } else static if (hasDecodedBy!T) {
+        // A value type decoded from a representation of its own
+        return decodeWithDeclaredDecoder!T(val);
     } else static if (is(T == struct)) {
         import std.traits : FieldNameTuple;
         T result;
-        // PostgreSQL range values are emitted by row_to_json as their textual
-        // representation. Decode range-shaped structs (e.g. a DateRange)
-        // into their start/end members.
-        static if (__traits(hasMember, T, "start") && __traits(hasMember, T, "end")) {
-            if (val.type == JSONType.string) {
-                auto text = val.str;
-                auto comma = text.countUntil(',');
-                if (comma >= 0 && text.length >= 2) {
-                    auto start = text[1 .. cast(size_t) comma];
-                    auto end = text[cast(size_t) comma + 1 .. $ - 1];
-                    if (start.length)
-                        result.start = extractJsonValue!(typeof(result.start))(JSONValue(start));
-                    if (end.length)
-                        result.end = extractJsonValue!(typeof(result.end))(JSONValue(end));
-                }
-                return result;
-            }
-        }
         static foreach (fieldName; FieldNameTuple!T) {{
             enum sqlName = (() {
                 string name;
@@ -895,4 +881,27 @@ unittest {
     assert(session.hasQueryResult(QueryNodeId(0)));
     assert(!session.hasQueryResult(QueryNodeId(1)));
     assert(session.getQueryResult(QueryNodeId(0)) is result);
+}
+
+// A value type declaring its decoder (`@DecodedBy`) is decoded by it; other
+// structs from JSON objects with a member per field.
+version (unittest) {
+    import dunamis.relational.schema.attrs : DecodedBy;
+
+    private Interval decodeInterval(JSONValue v) {
+        import std.string : split;
+        auto bounds = v.str.split("..");
+        return Interval(bounds[0].to!int, bounds[1].to!int);
+    }
+
+    @DecodedBy!decodeInterval
+    private struct Interval { int from; int to; }
+
+    private struct Pair { int from; int to; }
+}
+
+unittest {
+    assert(extractJsonValue!Interval(JSONValue("3..5")) == Interval(3, 5));
+    assert(extractJsonValue!(Nullable!Interval)(JSONValue(null)).isNull);
+    assert(extractJsonValue!Pair(parseJSON(`{"from": 3, "to": 5}`)) == Pair(3, 5));
 }

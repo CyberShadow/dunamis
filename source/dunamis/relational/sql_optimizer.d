@@ -1013,11 +1013,7 @@ private struct WhereContext {
             }
 
             // Comparison operators: ==, !=, <, <=, >, >=
-            if (op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=" ||
-                op == "rangeContains" || op == "rangeContainedBy" || op == "rangeOverlaps" ||
-                op == "rangeStrictlyLeft" || op == "rangeStrictlyRight" ||
-                op == "rangeNotExtendsRight" || op == "rangeNotExtendsLeft" ||
-                op == "rangeAdjacent") {
+            if (op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=") {
                 // Try to match: column op constant or constant op column
                 RowPath path;
                 string column;
@@ -1162,14 +1158,6 @@ string translateComparisonOp(string op, bool columnOnLeft) {
             case "<=": return "<=";
             case ">": return ">";
             case ">=": return ">=";
-            case "rangeContains": return "@>";
-            case "rangeContainedBy": return "<@";
-            case "rangeOverlaps": return "&&";
-            case "rangeStrictlyLeft": return "<<";
-            case "rangeStrictlyRight": return ">>";
-            case "rangeNotExtendsRight": return "&<";
-            case "rangeNotExtendsLeft": return "&>";
-            case "rangeAdjacent": return "-|-";
             default: return op;
         }
     } else {
