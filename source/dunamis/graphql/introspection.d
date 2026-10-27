@@ -400,6 +400,8 @@ JSONValue buildIntrospectionJson(alias SchemaOrQuery)() {
     // Introspection meta-types
     types ~= introspectionMetaTypes();
 
+    types = uniqueNamedTypes(types);
+
     // Build schema JSON
     JSONValue queryTypeRef = JSONValue(["name": JSONValue("Query")]);
 
@@ -436,6 +438,43 @@ JSONValue buildIntrospectionJson(alias SchemaOrQuery)() {
         "types": JSONValue(types),
         "directives": JSONValue(directives)
     ]);
+}
+
+/// The types of `types`, each name once. Several D types may stand for the
+/// same GraphQL type (e.g. instantiations of a filter template for types of
+/// the same name at different plugin positions), but distinct GraphQL types
+/// must not share a name: one would shadow the other in the schema, so this
+/// throws.
+private JSONValue[] uniqueNamedTypes(JSONValue[] types) {
+    JSONValue[] result;
+    JSONValue[string] seen;
+    foreach (type; types) {
+        auto name = type["name"].str;
+        if (auto previous = name in seen) {
+            if (*previous != type)
+                throw new Exception("Distinct GraphQL types share the name " ~ name ~
+                    ":\n" ~ previous.toString() ~ "\n" ~ type.toString());
+            continue;
+        }
+        seen[name] = type;
+        result ~= type;
+    }
+    return result;
+}
+
+unittest {
+    import std.exception : assertThrown;
+    import std.json : parseJSON;
+
+    auto a = parseJSON(`{"name": "SpanFilter", "kind": "INPUT_OBJECT", "inputFields": [{"name": "contains"}]}`);
+    auto sameAsA = parseJSON(`{"kind": "INPUT_OBJECT", "inputFields": [{"name": "contains"}], "name": "SpanFilter"}`);
+    auto b = parseJSON(`{"name": "SpanFilter", "kind": "INPUT_OBJECT", "inputFields": [{"name": "from"}]}`);
+    auto other = parseJSON(`{"name": "Other", "kind": "SCALAR"}`);
+
+    // The same type, discovered twice, is served once.
+    assert(uniqueNamedTypes([a, other, sameAsA]) == [a, other]);
+    // Distinct types of the same name are rejected.
+    assertThrown(uniqueNamedTypes([a, other, b]));
 }
 
 // ----------------------------------------------------------------------------

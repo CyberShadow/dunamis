@@ -3,7 +3,7 @@ module dunamis.schema.computed_tests;
 
 version (unittest):
 
-import std.json : JSONValue;
+import std.json : JSONValue, parseJSON;
 import std.typecons : Nullable;
 
 import ae.utils.promise.await : awaitSync;
@@ -602,8 +602,16 @@ auto period(Expr!Term t) {
         : Period(Nullable!Day(Day("2020-01-01")), Nullable!Day(Day("2021-01-01"))), t.label);
 }
 
+/// A list of values of the type: filtered by lists of its declared filter.
+auto periods(Expr!Term t) {
+    return use((string label) => label == "open"
+        ? [Period(Nullable!Day(Day("2020-06-01")), Nullable!Day.init)]
+        : [Period(Nullable!Day(Day("2019-01-01")), Nullable!Day(Day("2019-02-01"))),
+           Period(Nullable!Day(Day("2020-01-01")), Nullable!Day(Day("2021-01-01")))], t.label);
+}
+
 private alias TermSchema = ApplyPlugins!(Schema!TermQuery,
-    ComputedFieldsPlugin!period, FilterPlugin, SortingPlugin, PaginationPlugin);
+    ComputedFieldsPlugin!(period, periods), FilterPlugin, SortingPlugin, PaginationPlugin);
 
 unittest {
     import std.conv : to;
@@ -623,12 +631,48 @@ unittest {
         assert(ids("2021-03-01") == [2], ids("2021-03-01").to!string);
         assert(ids("2020-07-01") == [1, 2], ids("2020-07-01").to!string);
         assert(ids("2019-07-01") == [], ids("2019-07-01").to!string);
+
+        long[] idsOfList(string operator, string day) {
+            auto result = awaitSync(new Executor().execute(compileQuery!TermSchema(
+                `{ terms(filter: {periods: {` ~ operator ~ `: {containsElement: "` ~ day ~ `"}}}) { id } }`),
+                optimize));
+            long[] found;
+            foreach (row; result["terms"].array)
+                found ~= row["id"].integer;
+            return found;
+        }
+        assert(idsOfList("some", "2019-01-15") == [1], idsOfList("some", "2019-01-15").to!string);
+        assert(idsOfList("some", "2020-07-01") == [1, 2], idsOfList("some", "2020-07-01").to!string);
+        assert(idsOfList("every", "2020-07-01") == [2], idsOfList("every", "2020-07-01").to!string);
+        assert(idsOfList("none", "2019-01-15") == [2], idsOfList("none", "2019-01-15").to!string);
+
+        // The list's own filter argument is the declared filter too.
+        auto result = awaitSync(new Executor().execute(compileQuery!TermSchema(
+            `{ terms { id periods(filter: {containsElement: "2019-01-15"}) { start } } }`), optimize));
+        assert(result["terms"] == parseJSON(`[
+            {"id": 1, "periods": [{"start": "2019-01-01"}]},
+            {"id": 2, "periods": []}
+        ]`), result.toString());
     }
 
     import std.algorithm : canFind;
     enum sdl = generateSchemaSDL!TermSchema;
     static assert(sdl.canFind("input PeriodFilter {\n  containsElement: Day\n  isNull: Boolean\n}"), sdl);
     static assert(sdl.canFind("  period: PeriodFilter\n"), sdl);
+    // A list of periods is filtered by lists of the declared filter, not by
+    // a filter of the type's fields (which would be another "PeriodFilter").
+    static assert(sdl.canFind("  periods: PeriodFilterListFilter\n"), sdl);
+    static assert(sdl.canFind("input PeriodFilterListFilter {\n  some: PeriodFilter\n"), sdl);
+    static assert(!sdl.canFind("  start: StringFilter"), sdl);
+    static assert(sdl.canFind("  periods(filter: PeriodFilter"), sdl);
+
+    // Introspection serves the declared filter under its name.
+    termDb = new MockDB!();
+    termDb.setTableData("terms", `[]`);
+    auto result = awaitSync(new Executor().execute(compileQuery!TermSchema(
+        `{ __type(name: "PeriodFilter") { inputFields { name } } }`)));
+    assert(result["__type"]["inputFields"] ==
+        parseJSON(`[{"name": "containsElement"}, {"name": "isNull"}]`), result.toString());
 }
 
 // Nested lists and nullable list items, as results and as POD members:

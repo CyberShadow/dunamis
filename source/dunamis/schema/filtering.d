@@ -324,7 +324,10 @@ template isEntityArrayField(Entity, string member) {
         static if (is(ElementT == Nullable!U, U))
             enum isEntityArrayField = false;
         else
-            enum isEntityArrayField = isEntityType!ElementT;
+            // Lists of values of a type with a declared filter are filtered
+            // by that filter (see isScalarArrayField), like single values,
+            // not by an EntityFilter of the type's fields.
+            enum isEntityArrayField = isEntityType!ElementT && !hasDeclaredFilter!ElementT;
     } else {
         enum isEntityArrayField = false;
     }
@@ -341,7 +344,7 @@ template isScalarArrayField(Entity, string member) {
         static if (is(ElementT == Nullable!U, U))
             enum isScalarArrayField = false;
         else
-            enum isScalarArrayField = !isEntityType!ElementT;
+            enum isScalarArrayField = !isEntityType!ElementT || hasDeclaredFilter!ElementT;
     } else {
         enum isScalarArrayField = false;
     }
@@ -1280,7 +1283,12 @@ mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) 
         mixin ForwardField!(SourceQuery, fieldName, TypeMap);
     } else {
 
-    alias _FilterType = EntityFilter!_ElementType;
+    // Values of a type with a declared filter are filtered by it, here as
+    // everywhere else, rather than by an EntityFilter of the type's fields.
+    static if (hasDeclaredFilter!_ElementType)
+        alias _FilterType = DeclaredFilterType!_ElementType;
+    else
+        alias _FilterType = EntityFilter!_ElementType;
 
     // The filter wraps the field's collection as the previous plugins left
     // it: with an earlier PaginationPlugin, it filters the requested window.
@@ -1290,7 +1298,13 @@ mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) 
             return base;
 
         auto item = new FilterItemExpr!_ElementType();
-        auto predicate = buildFilterPredicateFromStruct!_ElementType(item, filter.get);
+        static if (hasDeclaredFilter!_ElementType) {
+            import dunamis.core.expr : constant;
+            Expr!bool predicate = buildColumnCondition(cast(Expr!_ElementType) item, filter.get, item, fieldName);
+            if (predicate is null)
+                predicate = constant(true, item);
+        } else
+            auto predicate = buildFilterPredicateFromStruct!_ElementType(item, filter.get);
         auto filterExpr = new FilterByExpr!_ElementType(base, item, predicate);
         item._parentFilter = filterExpr;
         return filterExpr;

@@ -420,12 +420,21 @@ template generateSchemaSDL(alias SchemaOrQuery) {
         }
 
         // Generate input types (discovered from computed field arguments)
-        bool[string] emittedInputTypeNames;
+        // Several D types may stand for the same input type (e.g.
+        // instantiations of a filter template for types of the same name at
+        // different plugin positions), but distinct input types must not
+        // share a name, as one would shadow the other.
+        string[string] emittedInputTypes;  // name -> SDL
         static foreach (InputType; AllInputTypes) {{
             enum inputTypeName = getGraphQLTypeName!InputType;
-            if (inputTypeName !in emittedInputTypeNames) {
-                emittedInputTypeNames[inputTypeName] = true;
-                result ~= generateInputTypeSDL!InputType();
+            auto inputTypeSDL = generateInputTypeSDL!InputType();
+            if (auto previous = inputTypeName in emittedInputTypes) {
+                assert(*previous == inputTypeSDL,
+                    "Distinct GraphQL input types share the name " ~ inputTypeName ~ ":\n" ~
+                    *previous ~ inputTypeSDL);
+            } else {
+                emittedInputTypes[inputTypeName] = inputTypeSDL;
+                result ~= inputTypeSDL;
                 result ~= "\n";
             }
         }}
