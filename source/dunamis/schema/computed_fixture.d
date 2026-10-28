@@ -25,8 +25,9 @@ struct PostAudit { string title; User author; }
 /// Only returned by computed fields, in lists: refers to entities, one of
 /// them nullable.
 struct CommentNote { string text; User author; Nullable!User editor; }
-/// Only returned by a computed field: a POD list in a POD.
-struct PostDigest { CommentNote[] notes; Nullable!User reviewer; }
+/// Only returned by a computed field: a POD list in a POD (and a field named
+/// as a parameter of the plugins' field forwarding).
+struct PostDigest { CommentNote[] notes; Nullable!User reviewer; string fieldName; }
 
 @Entity!(fixtureDb, "comments")
 struct Comment {
@@ -185,7 +186,7 @@ Expr!PostDigest digest(Expr!Post p) {
 }
 
 private PostDigest digestOf(CommentNote[] notes, string title) {
-    return PostDigest(notes, title == "Hello" ? Nullable!User(User(3)) : Nullable!User.init);
+    return PostDigest(notes, title == "Hello" ? Nullable!User(User(3)) : Nullable!User.init, "title");
 }
 
 /// A computed field over a child collection calling another computed field.

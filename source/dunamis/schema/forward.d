@@ -28,7 +28,9 @@ template ForwardFieldCode(SourceType, string fieldName, alias TypeMap) {
     import std.conv : to;
 
     private alias Impl = ForwardFieldImpl!(SourceType, fieldName, TypeMap);
-    private enum string _I = "dunamis.schema.forward.ForwardFieldImpl!(SourceType, fieldName, TypeMap)";
+    // (The field's name as a literal: in the target struct, `fieldName`
+    // would be a field of that name, if the struct has one.)
+    private enum string _I = "dunamis.schema.forward.ForwardFieldImpl!(SourceType, \"" ~ fieldName ~ "\", TypeMap)";
 
     private enum string _paramListStr = () {
         string result = "dunamis.core.expr.Expr!(typeof(this)) " ~ Impl.srcParamNames[0];

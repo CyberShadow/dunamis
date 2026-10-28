@@ -270,7 +270,7 @@ unittest {
                     editor { name }
                     editedBy: editor { label postCount }
                 }
-                digest { notes { text writer: author { name } } reviewer { name } }
+                digest { notes { text writer: author { name } } reviewer { name } fieldName }
             }
         }`, optimize);
         auto posts = result["posts"].array;
@@ -294,6 +294,7 @@ unittest {
         assert(hello["digest"]["reviewer"]["name"].str == "Carol", result.toString());
         assert(hello["digest"]["notes"].array.length == 2, result.toString());
         assert(hello["digest"]["notes"][1]["writer"]["name"].str == "Alice", result.toString());
+        assert(hello["digest"]["fieldName"].str == "title", result.toString());
 
         // No comments: no notes, amid posts with notes
         assert(posts[2]["id"].integer == 12 && posts[2]["notes"].array.length == 0, result.toString());
