@@ -137,6 +137,8 @@ private void pushDownRootCollection(QueryNode node, Object mapExpr) {
             if (preservesElements(m)) next = m.collection;
         }
         else if (auto c = cast(EntityCastInfo) link) next = c.inputExpr;
+        // (All or none of its source's rows, so it commutes with all of them)
+        else if (auto g = cast(OnlyIfInfo) link) next = g.onlyIfSource;
         if (next is null || next is link)
             break;
         links ~= link;
@@ -284,6 +286,13 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
                             if (!preservesElements(m)) break;
                             auto inner = m.collection;
                             if (inner is peek) break;
+                            peek = inner;
+                            continue;
+                        }
+                        // Conditional collections: all or none of the rows
+                        if (auto onlyIfInfo = cast(OnlyIfInfo) peek) {
+                            auto inner = onlyIfInfo.onlyIfSource;
+                            if (inner is null || inner is peek) break;
                             peek = inner;
                             continue;
                         }

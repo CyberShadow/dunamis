@@ -263,6 +263,83 @@ auto broadcast(T)(Expr!T source, ExprBase sizeReference) {
 }
 
 // ============================================================================
+// OnlyIfExpr: Conditional Collections
+// ============================================================================
+
+/// Interface of a conditional collection (see `onlyIf`), for optimizers.
+interface OnlyIfInfo {
+    /// The collection (type-erased), of which the conditional collection is
+    /// either all or none of the elements.
+    ExprBase onlyIfSource();
+}
+
+/// The collection `source` where `condition` holds, else an empty list (see
+/// `onlyIf`).
+///
+/// It is either all of the source's elements or none of them, so it
+/// commutes with filters, sorts and windows over it: an optimizer may see
+/// through it (pushing a filter over it into the source's query), as it does
+/// through entity casts.
+class OnlyIfExpr(T) : Expr!(T[]), OnlyIfInfo {
+    private ExprBase _source;     // Expr!(T[]), dependency 0 (the collection)
+    private ExprBase _condition;  // Expr!bool
+
+    this(Expr!(T[]) source, Expr!bool condition) {
+        _source = source;
+        _condition = condition;
+    }
+
+    ExprBase onlyIfSource() { return _source; }
+
+    override ExprBase[] dependencies() {
+        return [_source, _condition];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0) _source = newDep;
+        else if (index == 1) _condition = newDep;
+    }
+
+    override Expr!(T[]) optimize(OptimizeContext ctx) {
+        _source = (cast(Expr!(T[])) _source).optimize(ctx);
+        _condition = (cast(Expr!bool) _condition).optimize(ctx);
+        return this;
+    }
+
+    override Promise!(T[][]) eval(EvalContext ctx) {
+        auto source = cast(Expr!(T[])) _source;
+        return (cast(Expr!bool) _condition).eval(ctx).then((bool[] conditions) {
+            bool any;
+            foreach (c; conditions)
+                any = any || c;
+            if (!any)  // (The source is not evaluated.)
+                return resolve(new T[][](conditions.length));
+            return source.eval(ctx).then((T[][] lists) {
+                // (A source of a batch of one, e.g. a root collection, is
+                // the same for every item.)
+                assert(lists.length == conditions.length || lists.length == 1,
+                    "onlyIf: the source's batch is neither the condition's nor of one");
+                auto result = new T[][](conditions.length);
+                foreach (i, c; conditions)
+                    if (c)
+                        result[i] = lists[lists.length == 1 ? 0 : i];
+                return result;
+            });
+        });
+    }
+}
+
+/// The collection `source` if `condition` holds, else an empty list, for
+/// each item of the batch (`condition`'s): e.g. a root collection, depending
+/// on a value of the object of a field. The source is evaluated only if the
+/// condition holds for some item. Filters, sorts and windows applied to the
+/// result apply to the source as they would to the source itself (so that,
+/// for a root collection, they are pushed into its SQL query alike).
+auto onlyIf(T)(Expr!bool condition, Expr!(T[]) source) {
+    return new OnlyIfExpr!T(source, condition);
+}
+
+// ============================================================================
 // ContextExpr: Request Context Access
 // ============================================================================
 

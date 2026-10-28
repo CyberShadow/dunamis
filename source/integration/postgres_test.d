@@ -121,6 +121,8 @@ static this() {
         &testCompositeKeyEntityOfMutation);
     registerTest("Sessions derived with other settings", "postgres",
         &testDerivedSessionSettings);
+    registerTest("Conditional collections (onlyIf) of root collections", "postgres",
+        &testOnlyIfRootCollection);
 }
 
 /// Run `fn` in a fiber of the event loop's thread (where the data source's
@@ -213,6 +215,31 @@ void testDerivedSessionSettings() {
         assertTrue(session.queryStrings(modeSql).await == ["request"], "The request's settings were not restored");
         assertTrue(derived.queryStrings(modeSql).await == ["scoped"], "The derived session failed after the error");
         assertTrue(userCount() == before + 1, "The request's work before the section was lost");
+    });
+}
+
+/// A filter over a conditional collection (onlyIf) of a root collection is
+/// pushed into its SQL query (and applied there); where the condition does
+/// not hold, it is empty.
+void testOnlyIfRootCollection() {
+    onEventLoop(() {
+        import dunamis.core.eval : EvalContext;
+        import dunamis.core.expr : Expr, constant, evaluateNested, map, onlyIf, singleton;
+        import dunamis.core.filtering : filterBy;
+        import integration.test_framework : assertTrue;
+
+        auto ctx = new EvalContext();
+        auto session = cast(PostgresSession) ctx.getSession(db);
+        session.setup().await;
+        scope (exit) session.teardown(SetupMode.query, false).await;
+
+        foreach (condition; [true, false]) {
+            auto q = Query().singleton();
+            auto names = evaluateNested(map!((Expr!User u) => u.firstName)(
+                filterBy!((Expr!User u) => u.firstName.eq("Alice"))(onlyIf(constant(condition, q), Query.users(q)))),
+                ctx).await;
+            assertTrue(condition ? names.length && names.all!(n => n == "Alice") : !names.length, "onlyIf(" ~ condition.to!string ~ "): " ~ names.to!string);
+        }
     });
 }
 

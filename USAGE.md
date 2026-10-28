@@ -943,6 +943,18 @@ static auto availability(Expr!User u) {
 }
 ```
 
+**Conditional collections:** `onlyIf(condition, collection)` is the collection where `condition` holds, else an empty list (for each item of the condition's batch); the collection is evaluated only if the condition holds for some item. Since it is all or none of the collection, a field's filter, sort and window apply to it as to the collection itself (for a root collection, they are pushed into its SQL query):
+
+```d
+struct Snapshot {
+    bool visible;
+    // All holidays, if the snapshot is visible
+    static Expr!(Holiday[]) holidays(Expr!Snapshot s) {
+        return onlyIf(fieldAccess!"visible"(s), Query().singleton().holidays());
+    }
+}
+```
+
 **Pre- vs post-processed schema access:**
 
 ```d

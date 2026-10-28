@@ -194,3 +194,46 @@ unittest {
 }
 
 private alias AliasSeq(T...) = T;
+
+/// A conditional collection (onlyIf) of a root collection: the collection,
+/// or nothing (without evaluating it); a filter over it is pushed into the
+/// root collection's query as over the collection itself.
+unittest {
+    import dunamis.core.expr : Expr, MapExprInfo, OnlyIfInfo, constant, fieldAccess, map, onlyIf, singleton, use;
+    import dunamis.core.filtering : filterBy;
+    import dunamis.relational.schema.interfaces : RootExprInfo;
+
+    seed();
+    foreach (optimize; [false, true])
+        foreach (condition; [false, true]) {
+            auto q = singleton(FpQuery.init);
+            auto tree = map!((Expr!FpAccount c) => FpAccount.category(c))(
+                filterBy!((Expr!FpAccount c) => FpAccount.category(c).eq("M"))(
+                    onlyIf(constant(condition, q), FpQuery.accounts(q))));
+            auto executor = new Executor();
+            if (optimize) {
+                // (As without onlyIf: the map's collection is then the root collection.)
+                auto plain = executor.optimize(map!((Expr!FpAccount c) => FpAccount.category(c))(
+                    filterBy!((Expr!FpAccount c) => FpAccount.category(c).eq("M"))(FpQuery.accounts(q))));
+                assert(cast(RootExprInfo) (cast(MapExprInfo) plain).collection);
+                auto optimized = executor.optimize(tree);
+                // (The filter was pushed into the query, whose WHERE clause
+                // MockDB ignores: all accounts.)
+                assert(cast(OnlyIfInfo) (cast(MapExprInfo) optimized).collection,
+                    "The filter over onlyIf was not pushed into the root collection's query");
+                auto found = awaitSync(executor.execute(optimized, false));
+                assert(found.length == (condition ? 12 : 0), found.to!string);
+            } else {
+                auto found = awaitSync(executor.execute(tree, false));
+                string[] expected = condition ? ["M"] : null;
+                assert(found == expected, found.to!string);
+            }
+        }
+
+    // The source is not evaluated where the condition does not hold
+    auto q = singleton(FpQuery.init);
+    auto failing = use((bool _) { if (_) throw new Exception("evaluated"); return cast(FpAccount[]) null; },
+        constant(true, q));
+    FpAccount[] none = awaitSync(new Executor().execute(onlyIf(constant(false, q), failing), false));
+    assert(none.length == 0);
+}
