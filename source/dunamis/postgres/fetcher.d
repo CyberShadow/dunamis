@@ -245,22 +245,6 @@ class PostgresSession : RelationalSession {
             .then(() => executeSetupStatement(index + 1));
     }
 
-    /// Commit completed work and immediately begin a new transaction carrying
-    /// the same request-local settings. External mutation resolvers may call
-    /// back into GraphQL on another connection; retaining locks from earlier
-    /// top-level fields while waiting for that callback would deadlock.
-    Promise!void checkpoint() {
-        if (_conn is null || !_setupDepth)
-            return resolve();
-        auto conn = _conn;
-        return conn.query("COMMIT").array().then((PgSqlConnection.Row[] _) {
-            _transaction++;
-            return conn.query("BEGIN").array();
-        }).then((PgSqlConnection.Row[] _) {
-            return executeSetupStatement(0);
-        });
-    }
-
     /// An atomic section is a savepoint of the current transaction.
     override Promise!ulong beginAtomic() {
         // (A derived session's work is in the request's atomic sections.)
