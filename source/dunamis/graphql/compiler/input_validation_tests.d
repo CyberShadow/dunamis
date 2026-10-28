@@ -109,3 +109,33 @@ unittest {
     // Variables not declared by the operation are ignored (as the spec says).
     assert(errorsOf(query, `{"f": {}, "other": {"titel": 1}}`).length == 0);
 }
+
+// Variables in list literals are resolved and validated like the list's
+// other items, and empty input objects are input objects without fields.
+unittest {
+    import std.algorithm : map, sort;
+    import std.array : array;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core : Executor;
+
+    long[] bookIds(string query, string variables) {
+        ivDb = new MockDB!();
+        ivDb.setTableData("iv_books", `[{"id":1,"title":"a"},{"id":2,"title":"b"},{"id":3,"title":"c"}]`);
+        auto expression = compileQuery!IvSchema(query, parseJSON(variables));
+        auto result = awaitSync(new Executor().execute(expression));
+        return result["books"].array.map!(book => book["id"].integer).array.sort.release;
+    }
+
+    assert(bookIds(`query($a: String!) { books(filter: {title: {in: [$a, "c"]}}) { id } }`,
+        `{"a": "a"}`) == [1, 3]);
+    assert(bookIds(`query($a: String!, $b: String!) { books(filter: {title: {in: [$a, $b]}}) { id } }`,
+        `{"a": "b", "b": "c"}`) == [2, 3]);
+    assert(bookIds(`query($f: IvBookFilter!) { books(filter: {or: [$f, {title: {equalTo: "c"}}]}) { id } }`,
+        `{"f": {"title": {"equalTo": "a"}}}`) == [1, 3]);
+    assert(bookIds(`{ books(filter: {}) { id } }`, `{}`) == [1, 2, 3]);
+
+    expectError("query($f: IvBookFilter) {\n  books(filter: {or: [$f]}) { id }\n}",
+        `{"f": {"titel": {"equalTo": "x"}}}`,
+        `Variable "$f" got invalid value; Field "titel" is not defined by type "IvBookFilter".`, 2, 23);
+    assert(errorsOf(`{ books(filter: {or: [{}], title: {}}) { id } }`).length == 0);
+}
