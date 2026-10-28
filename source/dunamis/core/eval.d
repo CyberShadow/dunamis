@@ -123,23 +123,6 @@ class EvalContext {
         return scope_;
     }
 
-    /// Request-scoped string metadata for adapters (for example HTTP headers).
-    private string[string][string] _stringMaps;
-
-    void setStringMap(string name, string[string] values) {
-        if (_parent !is null)
-            return root.setStringMap(name, values);
-        _stringMaps[name] = values.dup;
-    }
-
-    string[string] getStringMap(string name) {
-        if (_parent !is null)
-            return root.getStringMap(name);
-        if (auto values = name in _stringMaps)
-            return (*values).dup;
-        return null;
-    }
-
     // ========================================================================
     // Data Session Management
     // ========================================================================

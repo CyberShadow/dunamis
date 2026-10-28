@@ -16,7 +16,6 @@ import dunamis.core.discovery : isObjectType, extractObjectFromType, getSchemaFi
     getAbstractTypeMembers, getSchemaObjectTypes;
 import dunamis.graphql.schema;
 import dunamis.graphql.compiler.values;
-import dunamis.graphql.compiler.extensions : extensionFieldExists;
 import dunamis.graphql.compiler.selection : abstractTypeNamesIn, typeConditionApplies;
 
 // ============================================================================
@@ -521,8 +520,6 @@ private ValidationError[] validateFieldAccess(T, alias SchemaSource)(Field field
         }
     }}
 
-    if (extensionFieldExists !is null &&
-        extensionFieldExists(getGraphQLTypeName!T, fieldName)) return [];
     return [fieldError("Unknown field '" ~ fieldName ~ "' on type " ~ getGraphQLTypeName!T, field)];
 }
 

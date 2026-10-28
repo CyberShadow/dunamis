@@ -30,7 +30,7 @@ import dunamis.relational.sql : toSQL;
 class PostgresSession : RelationalSession {
     private PgSqlConnection _conn;
     private Promise!PgSqlConnection delegate() _connFactory;
-    private Promise!void delegate(bool continuation) _acquireConnection;
+    private Promise!void delegate() _acquireConnection;
     private void delegate() _releaseConnection;
     private bool _hasConnectionPermit;
     private bool _disconnectOnTeardown;
@@ -161,7 +161,7 @@ class PostgresSession : RelationalSession {
     /// Create with a connection factory. The factory is called in setup().
     this(Promise!PgSqlConnection delegate() connFactory,
             bool disconnectOnTeardown,
-            Promise!void delegate(bool continuation) acquireConnection = null,
+            Promise!void delegate() acquireConnection = null,
             void delegate() releaseConnection = null) {
         _connFactory = connFactory;
         _acquireConnection = acquireConnection;
@@ -182,7 +182,7 @@ class PostgresSession : RelationalSession {
             return resolve();
         }
         super.setup(mode);
-        return acquireConnectionPermit(false).then(() => _connFactory()).then((PgSqlConnection conn) {
+        return acquireConnectionPermit().then(() => _connFactory()).then((PgSqlConnection conn) {
             _conn = conn;
             _transaction++;
             return connection().query("BEGIN").array();
@@ -196,10 +196,10 @@ class PostgresSession : RelationalSession {
         });
     }
 
-    private Promise!void acquireConnectionPermit(bool continuation) {
+    private Promise!void acquireConnectionPermit() {
         if (_hasConnectionPermit)
             return resolve();
-        auto acquired = _acquireConnection is null ? resolve() : _acquireConnection(continuation);
+        auto acquired = _acquireConnection is null ? resolve() : _acquireConnection();
         return acquired.then(() {
             _hasConnectionPermit = true;
         });
@@ -223,18 +223,16 @@ class PostgresSession : RelationalSession {
 
     /// The connection every statement of this session is issued on.
     ///
-    /// The session only has one between setup()/resume() and
-    /// suspend()/teardown(). Expression evaluation joins all the work it
-    /// starts before the request ends (see `dunamis.core.join`), so a
-    /// statement outside that window is an engine bug; report it as an
-    /// error of the statement instead of dereferencing a null connection.
+    /// The session only has one between setup() and teardown().
+    /// Expression evaluation joins all the work it starts before the
+    /// request ends (see `dunamis.core.join`), so a statement outside that
+    /// window is an engine bug; report it as an error of the statement
+    /// instead of dereferencing a null connection.
     private PgSqlConnection connection() {
         if (_base !is null)
             return _base.connection();
         if (_conn is null)
-            throw new Exception(_setupDepth
-                ? "PostgreSQL session used while suspended (it has released its connection)"
-                : "PostgreSQL session used outside of a request (it has no connection)");
+            throw new Exception("PostgreSQL session used outside of a request (it has no connection)");
         return _conn;
     }
 
@@ -263,37 +261,6 @@ class PostgresSession : RelationalSession {
             return execute("RELEASE SAVEPOINT dunamis_atomic");
         return execute("ROLLBACK TO SAVEPOINT dunamis_atomic")
             .then(() => execute("RELEASE SAVEPOINT dunamis_atomic"));
-    }
-
-    /// End the current read transaction and release its connection while an
-    /// expression waits for out-of-process work. Keeping the connection here
-    /// can deadlock recursive GraphQL evaluation when every PostgreSQL
-    /// connection is held by a parent waiting for its child.
-    override Promise!void suspend() {
-        if (_base !is null || _conn is null || !_setupDepth)
-            return resolve();
-        auto conn = _conn;
-        return conn.query("COMMIT").array().then((PgSqlConnection.Row[] _) {
-            if (_conn is conn)
-                discardConnection("Dunamis session suspended");
-        });
-    }
-
-    /// Reacquire a connection without resetting the logical session's caches
-    /// or pending evaluation state.
-    override Promise!void resume() {
-        if (_base !is null || _conn !is null || !_setupDepth)
-            return resolve();
-        return acquireConnectionPermit(true).then(() => _connFactory()).then((PgSqlConnection conn) {
-            _conn = conn;
-            _transaction++;
-            return conn.query("BEGIN").array();
-        }).then((PgSqlConnection.Row[] _) {
-            return executeSetupStatement(0);
-        }).except((Exception e) {
-            discardConnection("Dunamis session resume failed");
-            throw e;
-        });
     }
 
     /// Commit or rollback the transaction, then fire pending events.
@@ -865,7 +832,6 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataSource {
     private bool _disconnectSessions;
     private size_t _activeConnections;
     private size_t _maxConnections;
-    private Promise!void[] _continuationWaiters;
     private Promise!void[] _connectionWaiters;
 
     /// Create with a connection factory. Each session will call the factory
@@ -895,30 +861,18 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataSource {
             _disconnectSessions, &acquireConnection, &releaseConnection);
     }
 
-    private Promise!void acquireConnection(bool continuation) {
+    private Promise!void acquireConnection() {
         if (_activeConnections < _maxConnections) {
             _activeConnections++;
             return resolve();
         }
         auto waiter = new Promise!void;
-        if (continuation)
-            _continuationWaiters ~= waiter;
-        else
-            _connectionWaiters ~= waiter;
+        _connectionWaiters ~= waiter;
         return waiter;
     }
 
     private void releaseConnection() {
-        // A resumed session is already partway through a request and may
-        // suspend several times around recursive extension calls. Admit those
-        // continuations before starting more top-level work, otherwise a busy
-        // server can indefinitely push a single request to the back of the
-        // queue at every resume.
-        if (_continuationWaiters.length) {
-            auto waiter = _continuationWaiters[0];
-            _continuationWaiters = _continuationWaiters[1 .. $];
-            waiter.fulfill();
-        } else if (_connectionWaiters.length) {
+        if (_connectionWaiters.length) {
             auto waiter = _connectionWaiters[0];
             _connectionWaiters = _connectionWaiters[1 .. $];
             waiter.fulfill();

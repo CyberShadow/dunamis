@@ -280,19 +280,29 @@ unittest {
     ]`), type.toString());
 }
 
-// compileOperationField: one field of an operation, for adapters
+// Unknown fields, of the root types and of the objects of their fields,
+// are validation errors (on the field's line), and nothing is executed
 unittest {
-    import dunamis.core.expr : DynamicJsonObjectExpr, ExprBase;
-    import dunamis.graphql.operations : compileOperationField;
+    import dunamis.graphql.compiler.validation : ValidationException;
 
+    void expectUnknown(string query, string field, string type, size_t line) {
+        try {
+            compileQuery!RootSchema(query);
+            assert(false, "No validation error for " ~ query);
+        } catch (ValidationException e) {
+            assert(e.errors.length == 1, e.msg);
+            assert(e.errors[0].message == "Unknown field '" ~ field ~ "' on type " ~ type, e.errors[0].message);
+            assert(e.errors[0].line == line, e.errors[0].line.to!string);
+        }
+    }
     seed();
-    auto field = compileOperationField!RootSchema(`mutation { a: record(entry: "a") b: record(entry: $b) }`,
-        parseJSON(`{"b": "b"}`), 1);
-    auto ctx = new EvalContext();
-    ctx.setRequestContext(Greeting("Hi"));
-    auto result = awaitSync(new Executor().execute(new DynamicJsonObjectExpr(["b"], [field]), ctx));
-    assert(result == parseJSON(`{"b": "b"}`), result.toString());
-    assert(mutationLog == ["b"]);
+    expectUnknown("{\n  userCount\n  noSuchField\n}", "noSuchField", "Query", 3);
+    expectUnknown("{\n  firstUser {\n    name\n    noSuchField\n  }\n}", "noSuchField", "User", 4);
+    expectUnknown("mutation {\n  record(entry: \"a\")\n  noSuchMutation(entry: \"b\")\n}",
+        "noSuchMutation", "Mutation", 3);
+    expectUnknown("mutation {\n  recordFor(userId: 1) {\n    user { noSuchField }\n  }\n}",
+        "noSuchField", "User", 3);
+    assert(mutationLog == []);
 }
 
 // Nested input objects with three-state fields, literal and in variables

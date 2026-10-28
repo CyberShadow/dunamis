@@ -48,10 +48,6 @@ abstract class ExprBase {
     DataSource[] dataSources() {
         return [];
     }
-
-    /// Whether evaluating this expression may temporarily suspend a shared
-    /// DataSession while awaiting out-of-process work.
-    bool suspendsSession() { return false; }
 }
 
 /// A nesting level's index keys for error path tracking.

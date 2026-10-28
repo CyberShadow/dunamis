@@ -18,7 +18,6 @@ import dunamis.graphql.introspection;
 import dunamis.graphql.schema;
 import dunamis.graphql.compiler.values;
 import dunamis.graphql.compiler.fields;
-import dunamis.graphql.compiler.extensions : extensionFieldExists, compileExtensionField;
 
 // ============================================================================
 // Root Subscription Compilation
@@ -602,21 +601,6 @@ ExprBase compileFieldAccess(T, alias SchemaSource = void)(Expr!T ref_, Field fie
     // __typename: returns the GraphQL type name as a constant
     if (fieldName == "__typename") {
         return wrapAsJsonExpr(constant(getGraphQLTypeName!T, ref_));
-    }
-
-    if (extensionFieldExists !is null && compileExtensionField !is null &&
-        extensionFieldExists(getGraphQLTypeName!T, fieldName)) {
-        // Extension fields receive the object's id (none for objects
-        // without one, such as the root types' single instances)
-        ExprBase idExpr = null;
-        static foreach (member; getSchemaFields!T) {{
-            alias memberSym = __traits(getMember, T, member);
-            enum gqlName = getGqlName!(memberSym, member);
-            static if (gqlName == "id")
-                idExpr = callComputedField!(memberSym, T)(ref_, null, variables);
-        }}
-        return compileExtensionField(getGraphQLTypeName!T, fieldName,
-            idExpr, field.args, field.ss, variables);
     }
 
     throw new CompilerException("Unknown field '" ~ fieldName ~ "' on type " ~ T.stringof);

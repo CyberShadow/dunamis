@@ -226,27 +226,7 @@ class DynamicJsonObjectExpr : Expr!JSONValue {
         import std.conv : to;
 
         Result!(JSONValue[])[] results;
-        bool suspendsSession(ExprBase expr) {
-            if (expr.suspendsSession) return true;
-            foreach (dependency; expr.dependencies)
-                if (suspendsSession(dependency)) return true;
-            return false;
-        }
-        Promise!void evalNext(size_t index) {
-            if (index == _exprs.length) return resolve();
-            return evalToJson(_exprs[index], ctx).toResult()
-                .then((Result!(JSONValue[]) result) {
-                    results ~= result;
-                    return evalNext(index + 1);
-                });
-        }
         Promise!void evaluateFields() {
-            foreach (expr; _exprs)
-                if (suspendsSession(expr))
-                    // A DataSession owns one transaction/connection. Serialize
-                    // only objects containing external work, so suspension
-                    // cannot race a sibling relational field.
-                    return evalNext(0);
             Promise!(Result!(JSONValue[]))[] promises;
             foreach (expr; _exprs)
                 promises ~= evalToJson(expr, ctx).toResult();
