@@ -17,6 +17,7 @@ import dunamis.core.discovery : isObjectType, extractObjectFromType, getSchemaFi
 import dunamis.graphql.schema;
 import dunamis.graphql.compiler.values;
 import dunamis.graphql.compiler.extensions : extensionFieldExists;
+import dunamis.graphql.compiler.selection : abstractTypeNamesIn, typeConditionApplies;
 
 // ============================================================================
 // Types
@@ -475,7 +476,7 @@ private ValidationError[] validateSelectionSet(T, alias SchemaSource)(SelectionS
             auto fragDefPtr = fragName in fragments;
             if (fragDefPtr !is null) {
                 auto fragDef = *fragDefPtr;
-                if (fragDef.tc.value is null || fragDef.tc.value == getGraphQLTypeName!T) {
+                if (typeConditionApplies(fragDef.tc.value, getGraphQLTypeName!T, abstractTypeNamesIn!(T, SchemaSource))) {
                     visited[fragName] = true;
                     errors ~= validateSelectionSet!(T, SchemaSource)(fragDef.ss, fragments, visited, variables);
                 }
@@ -483,7 +484,7 @@ private ValidationError[] validateSelectionSet(T, alias SchemaSource)(SelectionS
         } else if (sel.ruleSelection == SelectionEnum.IFrag) {
             auto ifrag = sel.ifrag;
             if (ifrag is null) continue;
-            if (ifrag.tc.value is null || ifrag.tc.value == getGraphQLTypeName!T) {
+            if (typeConditionApplies(ifrag.tc.value, getGraphQLTypeName!T, abstractTypeNamesIn!(T, SchemaSource))) {
                 errors ~= validateSelectionSet!(T, SchemaSource)(ifrag.ss, fragments, visited, variables);
             }
         }

@@ -431,6 +431,33 @@ struct Implements(AbstractTypes...) {
     alias types = AbstractTypes;
 }
 
+/// UDA: placed on a type, makes the types `Types` types of the schema
+/// whenever it is one, as if one of its fields returned them: for types no
+/// field returns, such as an interface which only type conditions name
+/// (`fragment F on Node`).
+///
+/// Plugins remap it (see RemapTypeAttributes); `ComputedFieldsPlugin` puts
+/// it on the query root for the abstract types its sources declare.
+struct IncludesTypes(Types...) {
+    alias types = Types;
+}
+
+/// The types @IncludesTypes UDAs on type T name.
+template getIncludedTypes(T) {
+    alias getIncludedTypes = AliasSeq!();
+    static foreach (attr; __traits(getAttributes, T))
+        static if (is(attr == IncludesTypes!I, I...))
+            getIncludedTypes = AliasSeq!(getIncludedTypes, I);
+}
+
+unittest {
+    static struct A {}
+    static struct B {}
+    @IncludesTypes!A @IncludesTypes!(A, B) static struct C {}
+    static assert(is(getIncludedTypes!C == AliasSeq!(A, A, B)));
+    static assert(getIncludedTypes!A.length == 0);
+}
+
 /// Extract the member types from an @ImplementedBy UDA on type T.
 /// Walks the _normalizedSource chain for plugin compatibility.
 /// Returns an AliasSeq of member types, or empty AliasSeq if T has no @ImplementedBy.

@@ -1081,6 +1081,15 @@ Placed after another plugin, `ComputedFieldsPlugin` only knows that plugin's typ
 - A function is attached to the type of the given schema that it is written against, or that directly wraps the type it is written against (for the types `Schema!` produces, the user-declared type). Inside the function, `Entity` is seen exactly as declared (`u.posts` is `Expr!(Post[])`), and entity or POD results (`Expr!Post`, `Expr!(Post[])`, `Expr!(Nullable!DateRange)`, `Expr!(Nullable!(DateRange[]))` for a nullable list `[DateRange!]`, `Expr!(Nullable!Cell[])` for a list of nullable items `[Cell]!`, `Expr!(Nullable!Cell[][])` for a nested list `[[Cell]!]!`) are mapped to the schema's types likewise, including their own computed fields. Selection sets apply to the items of lists at any depth. (Lists of nullable items are not filtered by `FilterPlugin`.)
 - Result types that only computed fields return (a POD, or an entity reached through a computed relation such as `hasMany!(Like, "post_id")(p)`) are added to the schema. Their members are mapped likewise, so an entity member of a POD (`struct Audit { User user; }`, constructed as `User(id)`) is selectable as the schema's `User`. Such types pass through the plugins applied after `ComputedFieldsPlugin`, like the schema's own types.
 - The GraphQL field name is the function name; extra parameters become arguments (with defaults), and `@GqlName`, `@GqlDescription`, `@GqlDeprecated` on the function are honoured.
+- Abstract types (unions and interfaces, with `@ImplementedBy`) declared in a source module (public), or aliased by a field set, are types of the schema even if no field returns them, written against the user-declared types like the functions: e.g. an interface whose field is a computed field of each of its members, which clients name in fragments. (A type with `@IncludesTypes!(Types...)` makes `Types` part of any schema it is part of; the plugin puts that on the query root.) In the selection of an object, a fragment whose type condition is an abstract type the object's type is a member of applies to it.
+
+  ```d
+  @ImplementedBy!(User, Post)
+  struct Labelled { mixin AbstractField!("label", string); }
+  auto label(Expr!User u) => u.name;
+  auto label(Expr!Post p) => p.title;
+  // { users { ...L } posts { ...L } } fragment L on Labelled { label }
+  ```
 - A function whose entity is not a type of the given schema (nor wrapped by one), or whose name collides with an existing field, is a compile error.
 
 **Root fields:** the root types are types of the schema like any other, so functions written against the user-declared `Query` or `Mutation` become fields of the query or mutation root, with the same rules (arguments, results, plugins applied after the plugin):

@@ -4,6 +4,7 @@ module dunamis.schema.computed_tests;
 version (unittest):
 
 import std.json : JSONValue, parseJSON;
+import std.meta : AliasSeq;
 import std.typecons : Nullable;
 
 import ae.utils.promise.await : awaitSync;
@@ -110,6 +111,29 @@ unittest {
     static assert(sdl.canFind("  authorName: StringFilter\n"), sdl);
     // (but not those with required arguments)
     static assert(!sdl.canFind("  shout: StringFilter\n"), sdl);
+}
+
+// An abstract type declared in a source module, which no field returns: a
+// type of the schema (with its members, as the schema's types), which type
+// conditions name
+unittest {
+    import std.algorithm : canFind;
+    import dunamis.schema.computed : abstractTypesIn;
+
+    static assert(is(abstractTypesIn!fixture == AliasSeq!(fixture.Labelled)));
+    enum sdl = generateSchemaSDL!FinalSchema;
+    static assert(sdl.canFind("interface Labelled {\n  label: String!\n}"), sdl);
+    static assert(sdl.canFind("type User implements Labelled {"), sdl);
+    static assert(sdl.canFind("type Post implements Labelled {"), sdl);
+
+    seedFixture();
+    auto result = executeFixture(compileQuery!FinalSchema(`{
+        users(orderBy: [{field: id, direction: ASC}], first: 1) { name ...Label }
+        posts(orderBy: [{field: id, direction: ASC}], first: 1) { ... on Labelled { caption: label } }
+    }
+    fragment Label on Labelled { label }`));
+    assert(result == parseJSON(`{"users": [{"name": "Alice", "label": "Alice"}], "posts": [{"caption": "Hello"}]}`),
+        result.toString());
 }
 
 // Execution: sorting, pagination and nested filters apply.

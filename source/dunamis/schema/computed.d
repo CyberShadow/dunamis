@@ -50,7 +50,7 @@ import std.traits : Parameters;
 
 import dunamis.core.discovery : extractObjectFromType, getSchemaObjectTypes, SchemaRootTypes;
 import dunamis.core.expr : Expr, ExprResultType, isExpr;
-import dunamis.core.types : isAbstractType, isInternalMember;
+import dunamis.core.types : IncludesTypes, isAbstractType, isInternalMember;
 import dunamis.schema.plugin : isSchema, NormalizeFields, OriginalName, getOriginalTypeName, RemapTypeAttributes, WrapFields, ForwardField;
 import dunamis.schema.transform : isTypeInList;
 
@@ -67,6 +67,27 @@ static import dunamis.schema.transform;
 /// The free functions contributed by Sources (modules, function symbols and/or field sets).
 template computedFieldsIn(Sources...) {
     alias computedFieldsIn = staticMap!(_fieldsOf, Sources);
+}
+
+/// The abstract types (unions and interfaces, see ImplementedBy) declared
+/// by Sources: the public ones declared in source modules, and those field
+/// sets have public aliases of. Written against the user-declared types,
+/// like the functions, they are types of the schema (see IncludesTypes),
+/// whether or not a field returns them.
+template abstractTypesIn(Sources...) {
+    alias abstractTypesIn = staticMap!(_abstractTypesOf, Sources);
+}
+
+private template _abstractTypesOf(alias source) {
+    static if (__traits(isModule, source)) {
+        alias _abstractTypesOf = staticMap!(_ApplyModule!source._declaredAbstractTypes, __traits(allMembers, source));
+    } else static if (is(source == struct) && isAbstractType!source) {
+        alias _abstractTypesOf = AliasSeq!(source);
+    } else static if (is(source == struct)) {
+        alias _abstractTypesOf = staticMap!(_ApplyFieldSet!source._abstractTypesOfMember, __traits(allMembers, source));
+    } else {
+        alias _abstractTypesOf = AliasSeq!();
+    }
 }
 
 /// The type a computed field function is written against (its first parameter's).
@@ -90,6 +111,9 @@ private template _isFieldFunction(alias fn) {
 private template _fieldsOf(alias source) {
     static if (__traits(isModule, source)) {
         alias _fieldsOf = staticMap!(_ApplyModule!source._declaredFields, __traits(allMembers, source));
+    } else static if (is(source == struct) && isAbstractType!source) {
+        // (An abstract type, see abstractTypesIn)
+        alias _fieldsOf = AliasSeq!();
     } else static if (is(source == struct)) {
         alias _fieldsOf = staticMap!(_ApplyFieldSet!source._sourcesOf, __traits(allMembers, source));
     } else {
@@ -116,7 +140,19 @@ private template _ApplyFieldSet(F) {
             alias _sourcesOf = Filter!(_isFieldFunction, __traits(getOverloads, F, name));
             static assert(_sourcesOf.length,
                 F.stringof ~ "." ~ name ~ " is not a computed field source (a module, a field set, " ~
-                "or computed field functions)");
+                "an abstract type or computed field functions)");
+        }
+    }
+
+    // The abstract types of the public member `name` of F (see abstractTypesIn)
+    template _abstractTypesOfMember(string name) {
+        static if (isInternalMember!name || __traits(getVisibility, __traits(getMember, F, name)) != "public") {
+            alias _abstractTypesOfMember = AliasSeq!();
+        } else static if (__traits(isModule, __traits(getMember, F, name)) ||
+                          is(__traits(getMember, F, name) == struct)) {
+            alias _abstractTypesOfMember = _abstractTypesOf!(__traits(getMember, F, name));
+        } else {
+            alias _abstractTypesOfMember = AliasSeq!();
         }
     }
 }
@@ -128,6 +164,21 @@ private template _ApplyModule(alias M) {
             alias _declaredFields = AliasSeq!();
         } else {
             alias _declaredFields = Filter!(_isDeclaredField, __traits(getOverloads, M, name));
+        }
+    }
+
+    // Public abstract types declared in M itself (see abstractTypesIn).
+    template _declaredAbstractTypes(string name) {
+        static if (!isInternalMember!name && __traits(compiles, __traits(getMember, M, name)) &&
+                   is(__traits(getMember, M, name) == struct)) {
+            static if (__traits(isSame, __traits(parent, __traits(getMember, M, name)), M) &&
+                       __traits(getVisibility, __traits(getMember, M, name)) == "public" &&
+                       isAbstractType!(__traits(getMember, M, name)))
+                alias _declaredAbstractTypes = AliasSeq!(__traits(getMember, M, name));
+            else
+                alias _declaredAbstractTypes = AliasSeq!();
+        } else {
+            alias _declaredAbstractTypes = AliasSeq!();
         }
     }
 
@@ -204,6 +255,7 @@ template ComputedFieldCode(alias fn, string fnRef) {
 /// they cannot be expressed in SQL).
 template ComputedFieldsPlugin(Sources...) {
     private alias _fields = computedFieldsIn!Sources;
+    private alias _abstractTypes = abstractTypesIn!Sources;
 
     template ComputedFieldsPlugin(alias S) if (isSchema!S) {
         // The schema's object types: its root types (functions written
@@ -237,6 +289,7 @@ template ComputedFieldsPlugin(Sources...) {
             }
 
             @(RemapTypeAttributes!(EntityTypeMap, __traits(getAttributes, T)))
+            @(_includedTypes!T)
             @OriginalName(__traits(identifier, T))
             struct WithComputed {
                 mixin WrapFields!(T, EntityTypeMap, ForwardField);
@@ -244,6 +297,17 @@ template ComputedFieldsPlugin(Sources...) {
                     mixin(ComputedFieldCode!(fn, "_ownFields[" ~ i.stringof ~ "]"));
                 }
             }
+        }
+
+        /// The types the query root includes (see IncludesTypes): the
+        /// abstract types of the sources, normalized as result-only types
+        /// (so that their members are the schema's types).
+        template _includedTypes(T) {
+            static if (is(T == S.Query) && _abstractTypes.length > 0)
+                alias _includedTypes = AliasSeq!(IncludesTypes!(staticMap!(EntityTypeMap,
+                    staticMap!(_ResultOnlyType, _abstractTypes))));
+            else
+                alias _includedTypes = AliasSeq!();
         }
 
         /// Maps every object type of the input schema, and every result-only

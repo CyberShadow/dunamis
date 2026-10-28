@@ -307,7 +307,9 @@ template extractObjectFromType(T) {
 /// Get all object types directly referenced by a type (via field return types).
 /// For abstract types, also follows @ImplementedBy links to include member types.
 template getRelatedTypes(T) {
-    alias _fieldRelated = getRelatedTypesImpl!(T, 0, __traits(allMembers, T));
+    import dunamis.core.types : getIncludedTypes;
+    // (And the types it includes, see IncludesTypes)
+    alias _fieldRelated = AliasSeq!(getRelatedTypesImpl!(T, 0, __traits(allMembers, T)), getIncludedTypes!T);
     // For abstract types, also include member types from @ImplementedBy
     static if (isAbstractType!T) {
         alias getRelatedTypes = AliasSeq!(_fieldRelated, getImplementedByMembers!T);

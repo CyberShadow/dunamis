@@ -10,6 +10,7 @@ import std.uni : toUpper;
 
 import dunamis.core.expr : Expr, broadcast, constant, context, fieldAccess, map, singleton, use;
 import dunamis.core.filtering : filterBy;
+import dunamis.core.types : AbstractField, ImplementedBy;
 import dunamis.graphql.schema : GqlDescription;
 import dunamis.relational.demo : MockDB;
 import dunamis.relational.schema : BelongsTo, Col, Entity, ForeignKey, HasMany, PrimaryKey, Table, hasMany;
@@ -134,6 +135,13 @@ auto audit(Expr!Post p) {
 
 auto likes(Expr!Post p) {
     return hasMany!(Like, "post_id")(p);
+}
+
+/// An interface of users and posts, of their labels, which no field returns
+/// (it is a type of the schema as an abstract type of the plugin's source)
+@ImplementedBy!(User, Post)
+struct Labelled {
+    mixin AbstractField!("label", string);
 }
 
 /// One field name for several types

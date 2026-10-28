@@ -184,9 +184,46 @@ auto extractAllArgs(alias fn)(Arguments args, JSONValue variables) {
 // Fragment/Selection Processing
 // ============================================================================
 
+/// The GraphQL names of the abstract types (unions and interfaces) of
+/// AllTypes (a schema's object types) which have the object type T as a
+/// member: the type conditions which, besides T's own name, apply to T.
+template abstractTypeNamesOf(T, AllTypes...) {
+    enum string[] abstractTypeNamesOf = () {
+        string[] names;
+        static foreach (AbstractT; getAllAbstractTypes!AllTypes)
+            static foreach (Member; getAbstractTypeMembers!(AbstractT, AllTypes))
+                static if (is(Member == T))
+                    names ~= getGraphQLTypeName!AbstractT;
+        return names;
+    }();
+}
+
+/// The abstract type names (see abstractTypeNamesOf) of T in the schema
+/// SchemaSource (none without one).
+template abstractTypeNamesIn(T, alias SchemaSource) {
+    static if (is(SchemaSource == void))
+        enum string[] abstractTypeNamesIn = null;
+    else
+        enum string[] abstractTypeNamesIn = abstractTypeNamesOf!(T, getSchemaObjectTypes!SchemaSource);
+}
+
+/// Whether the type condition `condition` (null if none) of a fragment
+/// applies to the type `typeName`, which is a member of the abstract types
+/// `abstractNames`.
+bool typeConditionApplies(string condition, string typeName, const string[] abstractNames) {
+    if (condition is null || condition == typeName)
+        return true;
+    foreach (name; abstractNames)
+        if (condition == name)
+            return true;
+    return false;
+}
+
 /// Process a list of selections, handling Field, FragmentSpread, and InlineFragment.
-/// The processField delegate is called for each Field selection.
-void processSelections(string typeName)(
+/// The processField delegate is called for each Field selection. Fragments
+/// apply whose type condition is the type `typeName` or one of the abstract
+/// types `abstractNames` it is a member of.
+void processSelections(string typeName, string[] abstractNames = null)(
     Selection[] selections, JSONValue variables, FragmentMap fragments,
     ref string[] fieldNames, ref ExprBase[] fieldExprs,
     ExprBase delegate(Field) processField,
@@ -209,13 +246,13 @@ void processSelections(string typeName)(
                 throw new CompilerException("Unknown fragment: " ~ fragName);
             auto fragDef = *fragDefPtr;
             // Check type condition
-            if (fragDef.tc.value !is null && fragDef.tc.value != typeName)
+            if (!typeConditionApplies(fragDef.tc.value, typeName, abstractNames))
                 continue;
             if (expanding is null)
                 expanding = [fragName: true];
             else
                 expanding[fragName] = true;
-            processSelections!typeName(
+            processSelections!(typeName, abstractNames)(
                 iterateSelections(fragDef.ss), variables, fragments,
                 fieldNames, fieldExprs, processField, expanding
             );
@@ -224,9 +261,9 @@ void processSelections(string typeName)(
             auto ifrag = sel.ifrag;
             if (!shouldIncludeField(ifrag.dirs, variables)) continue;
             // Check type condition
-            if (ifrag.tc.value !is null && ifrag.tc.value != typeName)
+            if (!typeConditionApplies(ifrag.tc.value, typeName, abstractNames))
                 continue;
-            processSelections!typeName(
+            processSelections!(typeName, abstractNames)(
                 iterateSelections(ifrag.ss), variables, fragments,
                 fieldNames, fieldExprs, processField, expanding
             );
@@ -348,7 +385,7 @@ DynamicJsonObjectExpr compileFieldsToJsonObject(T, alias SchemaSource = void)(Ex
     // i.e. aliases where present).
     string[] schemaFieldNames;
 
-    processSelections!(getGraphQLTypeName!T)(
+    processSelections!(getGraphQLTypeName!T, abstractTypeNamesIn!(T, SchemaSource))(
         selections, variables, fragments, fieldNames, fieldExprs,
         (field) {
             schemaFieldNames ~= getFieldName(field);

@@ -13,7 +13,7 @@ import std.meta : AliasSeq, staticMap;
 import std.traits : Parameters, ReturnType, hasUDA;
 
 import dunamis.core.expr : Expr, ExprResultType, isExpr;
-import dunamis.core.types : ImplementedBy, Implements;
+import dunamis.core.types : ImplementedBy, Implements, IncludesTypes;
 
 // Re-export commonly needed utilities
 public import dunamis.core.types : isInternalMember;
@@ -161,7 +161,7 @@ template IdentityTypeMap(T) {
 // UDA Remapping for Abstract Types
 // ============================================================================
 
-/// Remap type references in @ImplementedBy and @Implements UDAs through a TypeMap.
+/// Remap type references in @ImplementedBy, @Implements and @IncludesTypes UDAs through a TypeMap.
 /// Non-matching attributes are passed through unchanged.
 ///
 /// Every plugin that wraps entity types should use this instead of raw
@@ -187,6 +187,8 @@ template RemapTypeAttributes(alias TypeMap, Attrs...) {
             alias RemapTypeAttributes = AliasSeq!(ImplementedBy!(staticMap!(TypeMap, M)), _Rest);
         } else static if (is(Attrs[0] == Implements!A, A...)) {
             alias RemapTypeAttributes = AliasSeq!(Implements!(staticMap!(TypeMap, A)), _Rest);
+        } else static if (is(Attrs[0] == IncludesTypes!I, I...)) {
+            alias RemapTypeAttributes = AliasSeq!(IncludesTypes!(staticMap!(TypeMap, I)), _Rest);
         } else {
             alias RemapTypeAttributes = AliasSeq!(Attrs[0], _Rest);
         }
