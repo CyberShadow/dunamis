@@ -444,10 +444,11 @@ struct IncludesTypes(Types...) {
 
 /// The types @IncludesTypes UDAs on type T name.
 template getIncludedTypes(T) {
+    import std.traits : isInstanceOf;
     alias getIncludedTypes = AliasSeq!();
     static foreach (attr; __traits(getAttributes, T))
-        static if (is(attr == IncludesTypes!I, I...))
-            getIncludedTypes = AliasSeq!(getIncludedTypes, I);
+        static if (is(attr) && isInstanceOf!(IncludesTypes, attr))
+            getIncludedTypes = AliasSeq!(getIncludedTypes, attr.types);
 }
 
 unittest {
