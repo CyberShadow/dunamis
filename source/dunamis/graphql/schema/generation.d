@@ -45,40 +45,45 @@ string generateObjectTypeSDL(T, AllAbstractTypes...)(string typeName) {
         foreach (field; fields) {
             // Skip hidden fields
             if (field.hidden) continue;
-
-            // Add description as doc string
-            result ~= sdlDescription(field.description, "  ");
-
-            // Field name
-            result ~= "  " ~ field.name;
-
-            // Add arguments if present
-            if (field.arguments.length > 0) {
-                result ~= "(";
-                foreach (i, arg; field.arguments) {
-                    if (i > 0) result ~= ", ";
-                    result ~= arg.name ~ ": " ~ arg.graphqlType;
-                    if (arg.hasDefault) {
-                        result ~= " = " ~ arg.defaultValue;
-                    }
-                }
-                result ~= ")";
-            }
-
-            // Return type
-            result ~= ": " ~ field.graphqlType;
-
-            // Add @deprecated directive if present
-            if (field.deprecation.length > 0) {
-                result ~= " @deprecated(reason: \"" ~ field.deprecation ~ "\")";
-            }
-
-            result ~= "\n";
+            result ~= fieldSDL(field);
         }
 
         result ~= "}\n";
         return result;
     }
+}
+
+/// The SDL of a field of an object or interface type (with its description,
+/// arguments unless `withArguments` is false, and deprecation)
+private string fieldSDL(FieldInfo field, bool withArguments = true) {
+    // Add description as doc string
+    string result = sdlDescription(field.description, "  ");
+
+    // Field name
+    result ~= "  " ~ field.name;
+
+    // Add arguments if present
+    if (withArguments && field.arguments.length > 0) {
+        result ~= "(";
+        foreach (i, arg; field.arguments) {
+            if (i > 0) result ~= ", ";
+            result ~= arg.name ~ ": " ~ arg.graphqlType;
+            if (arg.hasDefault) {
+                result ~= " = " ~ arg.defaultValue;
+            }
+        }
+        result ~= ")";
+    }
+
+    // Return type
+    result ~= ": " ~ field.graphqlType;
+
+    // Add @deprecated directive if present
+    if (field.deprecation.length > 0) {
+        result ~= " @deprecated(reason: \"" ~ field.deprecation ~ "\")";
+    }
+
+    return result ~ "\n";
 }
 
 // ============================================================================
@@ -301,13 +306,17 @@ string generateUnionTypeSDL(Union, AllTypes...)(string typeName) {
 }
 
 /// Generate GraphQL SDL for an interface type.
+///
+/// Its fields are presented without arguments, as in introspection: an
+/// interface field declares none (see AbstractField), and those the plugins
+/// give list fields (e.g. `orderBy`) have input types of each type of their
+/// own, which GraphQL would require the implementations to share.
 string generateInterfaceTypeSDL(T)(string typeName) {
     enum fields = getFields!T;
     string result = sdlDescription(getGqlDescription!T, "") ~ "interface " ~ typeName ~ " {\n";
     foreach (field; fields) {
         if (field.hidden) continue;
-        result ~= sdlDescription(field.description, "  ");
-        result ~= "  " ~ field.name ~ ": " ~ field.graphqlType ~ "\n";
+        result ~= fieldSDL(field, false);
     }
     result ~= "}\n";
     return result;
@@ -428,4 +437,23 @@ template generateSchemaSDL(alias SchemaOrQuery) {
 
         return result;
     }();
+}
+
+// The fields of interfaces are printed like those of objects, with their
+// descriptions and deprecations, but without arguments
+unittest {
+    static struct Shape {
+        @GqlDescription("The area")
+        static Expr!int area(Expr!Shape s, int scale = 1) { assert(0); }
+
+        @GqlDeprecated("Use area")
+        static Expr!(int[]) sizes(Expr!Shape s, Nullable!int first = Nullable!int.init) { assert(0); }
+    }
+
+    enum sdl = generateInterfaceTypeSDL!Shape("Shape");
+    static assert(sdl == "interface Shape {\n" ~
+        "  \"\"\"The area\"\"\"\n" ~
+        "  area: Int!\n" ~
+        "  sizes: [Int!]! @deprecated(reason: \"Use area\")\n" ~
+        "}\n", sdl);
 }

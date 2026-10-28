@@ -251,12 +251,24 @@ unittest {
     auto volume = typeNamed("DescVolume");
     assert(descriptionOf(volume) == "How loud a note is.");
     assert(descriptionOf(volume["enumValues"][0]) == "Barely audible.\nWhispered.");
-    assert(descriptionOf(volume["enumValues"][1]) is null);
-    assert(descriptionOf(typeNamed("DescNote")) == "A note,\nwith a volume.");
+    assert(volume["enumValues"][1]["description"].type == JSONType.null_);
+    auto note = typeNamed("DescNote");
+    assert(descriptionOf(note) == "A note,\nwith a volume.");
+    foreach (field; note["fields"].array) {
+        if (field["name"].str == "text")
+            assert(descriptionOf(field) == "The text");
+        else
+            assert(field["description"].type == JSONType.null_, field.toString);
+        // (Not deprecated: no reason)
+        assert(field["isDeprecated"] == JSONValue(false) && field["deprecationReason"].type == JSONType.null_,
+            field.toString);
+        foreach (arg; field["args"].array)
+            assert(arg["description"].type == JSONType.null_, arg.toString);
+    }
     auto options = typeNamed("DescEchoOptions");
     assert(descriptionOf(options) == "Options of `echo`");
     assert(descriptionOf(options["inputFields"][0]) == `Repeat "this" many times`);
-    assert(descriptionOf(options["inputFields"][1]) is null);
+    assert(options["inputFields"][1]["description"].type == JSONType.null_);
 }
 
 // Test Schema template

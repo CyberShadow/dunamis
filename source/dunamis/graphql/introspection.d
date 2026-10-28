@@ -753,15 +753,12 @@ private JSONValue buildUnionTypeJson(Union, AllTypes...)() {
 
 private JSONValue buildInterfaceTypeJson(T, AllTypes...)() {
     // Interface has fields from AbstractField
+    // (presented without arguments: see generateInterfaceTypeSDL)
     enum rtFields = getRuntimeFields!T;
     JSONValue[] fields;
     static foreach (f; rtFields) {{
         static if (!f.hidden) {
-            JSONValue[] argJsons;
-            static foreach (arg; f.args) {
-                argJsons ~= inputValueJson(arg.name, "", arg.typeJson, arg.defaultValue);
-            }
-            fields ~= fieldJsonFull(f.name, f.description, f.typeJson, f.deprecation, argJsons);
+            fields ~= fieldJsonFull(f.name, f.description, f.typeJson, f.deprecation, []);
         }
     }}
 
@@ -791,18 +788,18 @@ private JSONValue descriptionJson(string description) {
 private JSONValue fieldJsonFull(string name, string description, JSONValue typeJson, string deprecation, JSONValue[] argJsons) {
     return JSONValue([
         "name": JSONValue(name),
-        "description": JSONValue(description.length > 0 ? description : null),
+        "description": descriptionJson(description),
         "args": JSONValue(argJsons),
         "type": typeJson,
         "isDeprecated": JSONValue(deprecation.length > 0),
-        "deprecationReason": JSONValue(deprecation.length > 0 ? deprecation : null)
+        "deprecationReason": deprecation.length > 0 ? JSONValue(deprecation) : JSONValue(null)
     ]);
 }
 
 private JSONValue inputValueJson(string name, string description, JSONValue typeJson, string defaultValue) {
     return JSONValue([
         "name": JSONValue(name),
-        "description": JSONValue(description.length > 0 ? description : null),
+        "description": descriptionJson(description),
         "type": typeJson,
         "defaultValue": defaultValue.length > 0 ? JSONValue(defaultValue) : JSONValue(null)
     ]);
