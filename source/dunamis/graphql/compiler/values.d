@@ -265,16 +265,8 @@ JSONValue valueToJson(Value val, JSONValue variables = JSONValue.emptyObject) {
             if (objType !is null) {
                 auto vals = objType.vals;
                 while (vals !is null) {
-                    auto name = vals.name.value;
-                    auto vov = vals.val;
-                    if (vov !is null && vov.ruleSelection == ValueOrVariableEnum.Val && vov.val !is null) {
-                        obj[name] = valueToJson(vov.val, variables);
-                    } else if (vov !is null && vov.ruleSelection == ValueOrVariableEnum.Var && vov.var !is null) {
-                        auto variableName = vov.var.name.value;
-                        if (!(variableName in variables))
-                            throw new CompilerException("Missing variable $" ~ variableName);
-                        obj[name] = variables[variableName];
-                    }
+                    if (vals.val !is null)
+                        obj[vals.name.value] = valueToJson(vals.val, variables);
                     vals = vals.follow;
                 }
             }
@@ -293,6 +285,17 @@ JSONValue valueToJson(Value val, JSONValue variables = JSONValue.emptyObject) {
         default:
             throw new CompilerException("Unsupported value type: " ~ val.ruleSelection.to!string);
     }
+}
+
+/// ditto (for a literal value or a variable, e.g. an input object field)
+JSONValue valueToJson(ValueOrVariable vov, JSONValue variables = JSONValue.emptyObject) {
+    if (vov !is null && vov.ruleSelection == ValueOrVariableEnum.Var) {
+        auto variableName = vov.var.name.value;
+        if (variables.type != JSONType.object || variableName !in variables.object)
+            throw new CompilerException("Missing variable $" ~ variableName);
+        return variables.object[variableName];
+    }
+    return valueToJson(vov is null ? null : vov.val, variables);
 }
 
 // ============================================================================

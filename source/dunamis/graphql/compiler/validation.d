@@ -309,13 +309,13 @@ private void collectVariableReferences(
 private void collectVariableRefsFromArgs(Arguments args, ref Token[string] usedVars) {
     foreach (arg; iterateArguments(args)) {
         if (arg.vv !is null) {
-            collectVariableRefsFromValueOrVariable(arg.vv, usedVars);
+            collectVariableRefs(arg.vv, usedVars);
         }
     }
 }
 
 /// Collect variable references from a ValueOrVariable node.
-private void collectVariableRefsFromValueOrVariable(ValueOrVariable vov, ref Token[string] usedVars) {
+private void collectVariableRefs(ValueOrVariable vov, ref Token[string] usedVars) {
     if (vov is null) return;
     if (vov.ruleSelection == ValueOrVariableEnum.Var && vov.var !is null) {
         auto name = vov.var.name.value;
@@ -324,12 +324,12 @@ private void collectVariableRefsFromValueOrVariable(ValueOrVariable vov, ref Tok
         }
     } else if (vov.val !is null) {
         // Recurse into literal values to find nested variable references
-        collectVariableRefsFromValue(vov.val, usedVars);
+        collectVariableRefs(vov.val, usedVars);
     }
 }
 
 /// Collect variable references from a Value node (recursing into objects and arrays).
-private void collectVariableRefsFromValue(Value val, ref Token[string] usedVars) {
+private void collectVariableRefs(Value val, ref Token[string] usedVars) {
     if (val is null) return;
 
     if (val.ruleSelection == ValueEnum.O && val.obj !is null) {
@@ -337,7 +337,7 @@ private void collectVariableRefsFromValue(Value val, ref Token[string] usedVars)
         void walkObjectValues(ObjectValues ov) {
             if (ov is null) return;
             if (ov.val !is null) {
-                collectVariableRefsFromValueOrVariable(ov.val, usedVars);
+                collectVariableRefs(ov.val, usedVars);
             }
             if (ov.follow !is null) walkObjectValues(ov.follow);
         }
@@ -346,7 +346,7 @@ private void collectVariableRefsFromValue(Value val, ref Token[string] usedVars)
         // Array literal — recurse into each element
         void walkValues(Values v) {
             if (v is null) return;
-            if (v.val !is null) collectVariableRefsFromValue(v.val, usedVars);
+            if (v.val !is null) collectVariableRefs(v.val, usedVars);
             if (v.follow !is null) walkValues(v.follow);
         }
         if (val.arr.vals !is null) walkValues(val.arr.vals);
@@ -601,7 +601,7 @@ private ValidationError[] validateFieldArguments(alias fn)(Field field, JSONValu
         foreach (arg; iterateArguments(args)) {
             static foreach (i; 1 .. Params.length) {
                 if (arg.name.value == paramNames[i])
-                    validateInputValueOrVariable!(Params[i])(arg.vv, variables, errors);
+                    validateInputValue!(Params[i])(arg.vv, variables, errors);
             }
         }
 
@@ -833,7 +833,7 @@ private ValidationError[] validateTypeCondition(AbstractT, alias SchemaSource, M
 /// variable) of D type T: every field of an input object it contains must be
 /// a field of that input object's type. (Other errors in input values are
 /// reported when they are coerced to T.)
-private void validateInputValueOrVariable(T)(ValueOrVariable vov, JSONValue variables,
+private void validateInputValue(T)(ValueOrVariable vov, JSONValue variables,
         ref ValidationError[] errors) {
     if (vov is null) return;
     if (vov.ruleSelection == ValueOrVariableEnum.Var && vov.var !is null) {
@@ -863,7 +863,7 @@ private void validateInputValue(T)(Value val, JSONValue variables, ref Validatio
             static foreach (member; inputFieldMembers!T) {
                 if (name == getGqlName!(__traits(getMember, T, member), member)) {
                     known = true;
-                    validateInputValueOrVariable!(typeof(__traits(getMember, T, member)))(
+                    validateInputValue!(typeof(__traits(getMember, T, member)))(
                         field.val, variables, errors);
                 }
             }
