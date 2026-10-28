@@ -333,3 +333,37 @@ unittest {
     assert(awaitSync(inScopeAgain) == "1 users from #7", awaitSync(inScopeAgain));
     assert(ctx.getSession(fixtureDb) is session && ctx.allSessions == [session]);
 }
+
+// Asynchronous batch functions (useAsync): run once per batch, with nested
+// evaluations; a failing function fails the field; per-item errors
+// (GqlResult) at the items' paths
+unittest {
+    seed();
+    rootFixture.badgeBatches = null;
+    auto ctx = new EvalContext();
+    auto result = run(`{ users { id badge failingBadge } }`, ctx);
+    assert(result == parseJSON(`{"users": [
+        {"id": 1, "badge": "#1/3", "failingBadge": null},
+        {"id": 2, "badge": "#2/3", "failingBadge": null},
+        {"id": 3, "badge": "#3/3", "failingBadge": null}
+    ]}`), result.toString());
+    assert(rootFixture.badgeBatches == [[1, 2, 3]], rootFixture.badgeBatches.stringof);
+    assert(ctx.errors.length == 1 && ctx.errors[0].message == "badges failed", ctx.errors.stringof);
+    assert(ctx.errors[0].path == [JSONValue("users"), JSONValue("failingBadge")], ctx.errors.stringof);
+
+    // A per-item error, at the item's path (check is non-null: it nulls the data)
+    auto checkCtx = new EvalContext();
+    auto checked = run(`{ users { id check } }`, checkCtx);
+    assert(checked.isNull, checked.toString());
+    assert(checkCtx.errors.length == 1 && checkCtx.errors[0].message == "user 2 failed the check",
+        checkCtx.errors.stringof);
+    assert(checkCtx.errors[0].path == [JSONValue("users"), JSONValue(1), JSONValue("check")], checkCtx.errors.stringof);
+
+    // Other batches; an empty batch does not run the function
+    rootFixture.badgeBatches = null;
+    auto others = run(`{ usersExcept(name: "Alice") { badge } }`);
+    assert(others == parseJSON(`{"usersExcept": [{"badge": "#2/3"}, {"badge": "#3/3"}]}`), others.toString());
+    auto none = run(`{ users(filter: {id: {equalTo: 99}}) { badge } }`);
+    assert(none == parseJSON(`{"users": []}`), none.toString());
+    assert(rootFixture.badgeBatches == [[2, 3]], rootFixture.badgeBatches.stringof);
+}

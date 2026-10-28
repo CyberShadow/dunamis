@@ -144,3 +144,94 @@ Promise!T evaluateNested(T)(Expr!T expr, EvalContext ctx) {
         return values[0];
     });
 }
+
+/// Expression which runs an asynchronous batch function (see `useAsync`).
+///
+/// Not templated on the function, so that functions with the same argument
+/// and result types share one class. The expression holds no evaluation
+/// state.
+final class UseAsyncExpr(R, A) : Expr!R {
+    private R[] delegate(EvalContext, A[]) _fn;
+    private ExprBase _input;
+    private DataSource[] _sources;
+    private size_t _stackSize;
+
+    this(R[] delegate(EvalContext, A[]) fn, Expr!A input, DataSource[] sources, size_t stackSize) {
+        assert(fn !is null, "useAsync: null function");
+        _fn = fn;
+        _input = input;
+        _sources = sources;
+        _stackSize = stackSize;
+    }
+
+    override ExprBase[] dependencies() {
+        return [_input];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0)
+            _input = newDep;
+    }
+
+    override DataSource[] dataSources() {
+        return _sources;
+    }
+
+    override Expr!R optimize(OptimizeContext ctx) {
+        // (As an Expr!A: the type-erased optimizeExpr only knows some types.)
+        _input = (cast(Expr!A) _input).optimize(ctx);
+        return this;
+    }
+
+    override Promise!(R[]) eval(EvalContext ctx) {
+        import std.conv : to;
+        import ae.utils.promise.await : async;
+
+        auto fn = _fn;
+        auto stackSize = _stackSize;
+        return evalAs!A(_input, ctx).then((A[] items) {
+            if (!items.length)
+                return resolve(cast(R[]) null);
+            return async(() => fn(ctx, items), stackSize).then((R[] results) {
+                if (results.length != items.length)
+                    throw new Exception("useAsync: the function returned " ~ results.length.to!string ~
+                        " results for " ~ items.length.to!string ~ " items");
+                return results;
+            });
+        });
+    }
+}
+
+/// An expression which evaluates `input`, then runs `fn(EvalContext ctx,
+/// A[] items)`, which returns one result per item, once for each batch of
+/// `input`'s values (for a field, all the objects of the batch it is
+/// evaluated for), and evaluates to these results.
+///
+/// Like a procedure (see `perform`), `fn` runs in a fiber of its own (with a
+/// stack of `stackSize` bytes), so that it may `await` promises and evaluate
+/// expressions on the request's sessions with `evaluateNested`; `sources`
+/// are the data sources it uses, whose sessions the executor sets up. Unlike
+/// a procedure, it runs for each evaluation (it should not have side
+/// effects), with the values of the batch. If it throws, the evaluation
+/// fails (for a field, for every item of the batch); for errors of some
+/// items only, return `GqlResult!T` values (see "Per-Element Errors with
+/// GqlResult" in USAGE.md).
+///
+/// Example:
+/// ---
+/// Expr!Report report(Expr!Version v) {
+///     return useAsync!reports([cast(DataSource) db], fieldAccess!"id"(v));
+/// }
+/// Report[] reports(EvalContext ctx, int[] versionIds) @async { ... }
+/// ---
+auto useAsync(alias fn, A)(DataSource[] sources, Expr!A input) {
+    return useAsyncSized!(fn, A)(defaultProcedureStackSize, sources, input);
+}
+
+/// ditto
+auto useAsyncSized(alias fn, A)(size_t stackSize, DataSource[] sources, Expr!A input) {
+    import std.range.primitives : ElementType;
+    alias R = ElementType!(typeof(fn(EvalContext.init, (A[]).init)));
+    return cast(Expr!R) new UseAsyncExpr!(R, A)((EvalContext ctx, A[] items) => fn(ctx, items), input,
+        sources, stackSize);
+}

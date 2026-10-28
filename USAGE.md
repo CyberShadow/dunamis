@@ -1114,6 +1114,19 @@ AddPayload addUserProcedure(EvalContext ctx, string name) @async {
 }
 ```
 
+**Asynchronous batch functions:** a read-only field computed by code which awaits (for example, which evaluates expressions with `evaluateNested`) is written with `useAsync!fn(sources, input)`: it evaluates `input` (`Expr!A`), then runs `fn(EvalContext ctx, A[] items)`, which returns one result per item, once per batch (for a field, with the values of all the objects of the batch), in a fiber of its own (`useAsyncSized` sets the stack size), on the sessions of `sources`. Unlike a procedure, it runs for each evaluation. If it throws, the field fails for the whole batch; for errors of some items only, return `GqlResult!T` values (see [Per-Element Errors with GqlResult](#per-element-errors-with-gqlresult)).
+
+```d
+Expr!string badge(Expr!User u) {
+    return useAsync!badgesOf([cast(DataSource) db], fieldAccess!"id"(u));
+}
+
+string[] badgesOf(EvalContext ctx, int[] ids) @async {
+    auto count = evaluateNested(userCount(Query().singleton()), ctx).await;
+    return ids.map!(id => id.to!string ~ "/" ~ count.to!string).array;
+}
+```
+
 **Scoped sessions:** to evaluate expressions as of other database settings (for example, reading another version of versioned data whose views depend on configuration parameters), a procedure evaluates them in a scope of its context with sessions of its own: `ctx.createScope([db: session])` (`EvalContext.createScope(DataSession[DataSource])`) uses `session` for `db` in the scope and in its scopes, while the request's other evaluations keep the request's. `PostgresSession.withSettings(["app.version": "5"])` derives such a session from the request's: its statements are sent on the request's connection, in its transaction (so they see the request's writes, and the request's atomic sections cover them), each between one setting the parameters (`set_config(name, value, true)`) and one restoring the request's values, which the request sets with `PostgresSession.setSetting(name, value)` (`SET LOCAL`). The connection runs statements in the order they are sent, so the request's statements in flight at the same time are not affected.
 
 ```d

@@ -321,3 +321,52 @@ private string changesText(ref const Changes input) {
     }
     return result;
 }
+
+// ---- Asynchronous batch functions (useAsync) ----
+
+import dunamis.core.expr : useAsync;
+import dunamis.core.types : GqlResult;
+
+/// The batches of user IDs which badgesOf ran with.
+__gshared int[][] badgeBatches;
+
+/// A badge for each user, computed once per batch (see badgesOf).
+Expr!string badge(Expr!User u) {
+    return useAsync!badgesOf([cast(DataSource) fixtureDb], fieldAccess!"id"(u));
+}
+
+private string[] badgesOf(EvalContext ctx, int[] ids) @async {
+    badgeBatches ~= ids.dup;
+    resolve().await;
+    // A nested evaluation, on the request's session
+    auto count = evaluateNested(userCount(Query().singleton()), ctx).await;
+    string[] badges;
+    foreach (id; ids)
+        badges ~= "#" ~ id.stringOf ~ "/" ~ count.stringOf;
+    return badges;
+}
+
+/// A check of each user, which fails for the user 2 only.
+Expr!(GqlResult!string) check(Expr!User u) {
+    return useAsync!checksOf([cast(DataSource) fixtureDb], fieldAccess!"id"(u));
+}
+
+private GqlResult!string[] checksOf(EvalContext ctx, int[] ids) @async {
+    resolve().await;
+    GqlResult!string[] results;
+    foreach (id; ids)
+        results ~= id == 2 ? GqlResult!string.err("user 2 failed the check") : GqlResult!string.ok("ok");
+    return results;
+}
+
+/// A badge whose function fails (for the whole batch).
+Expr!(Nullable!string) failingBadge(Expr!User u) {
+    return useAsync!failingBadgesOf([cast(DataSource) fixtureDb], fieldAccess!"id"(u));
+}
+
+private Nullable!string[] failingBadgesOf(EvalContext ctx, int[] ids) @async {
+    resolve().await;
+    if (ctx !is null)
+        throw new Exception("badges failed");
+    return null;
+}
