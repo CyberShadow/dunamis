@@ -26,7 +26,7 @@ string generateObjectTypeSDL(T, AllAbstractTypes...)(string typeName) {
     static if (fields.length == 0) {
         return "";  // No fields defined
     } else {
-        string result = "type " ~ typeName;
+        string result = sdlDescription(getGqlDescription!T, "") ~ "type " ~ typeName;
 
         // Add implements clause for interface types
         static if (AllAbstractTypes.length > 0) {
@@ -47,9 +47,7 @@ string generateObjectTypeSDL(T, AllAbstractTypes...)(string typeName) {
             if (field.hidden) continue;
 
             // Add description as doc string
-            if (field.description.length > 0) {
-                result ~= "  \"\"\"" ~ field.description ~ "\"\"\"\n";
-            }
+            result ~= sdlDescription(field.description, "  ");
 
             // Field name
             result ~= "  " ~ field.name;
@@ -171,9 +169,11 @@ template getRootFieldArguments(alias member) {
 
 /// Generate GraphQL SDL for an input type
 string generateInputTypeSDL(T)() if (isInputType!T) {
-    string result = "input " ~ getGraphQLTypeName!T ~ " {\n";
+    string result = sdlDescription(getGqlDescription!T, "") ~
+        "input " ~ getGraphQLTypeName!T ~ " {\n";
 
     foreach (field; getInputTypeFields!T) {
+        result ~= sdlDescription(field.description, "  ");
         result ~= "  " ~ field.name ~ ": " ~ field.graphqlType;
         if (field.hasDefault) {
             result ~= " = " ~ field.defaultValue;
@@ -289,7 +289,7 @@ private template _staticContainsType(T, Types...) {
 string generateUnionTypeSDL(Union, AllTypes...)(string typeName) {
     alias Members = getAbstractTypeMembers!(Union, AllTypes);
 
-    string result = "union " ~ typeName ~ " =";
+    string result = sdlDescription(getGqlDescription!Union, "") ~ "union " ~ typeName ~ " =";
     static foreach (i, Member; Members) {
         static if (i > 0) {
             result ~= " |";
@@ -303,9 +303,10 @@ string generateUnionTypeSDL(Union, AllTypes...)(string typeName) {
 /// Generate GraphQL SDL for an interface type.
 string generateInterfaceTypeSDL(T)(string typeName) {
     enum fields = getFields!T;
-    string result = "interface " ~ typeName ~ " {\n";
+    string result = sdlDescription(getGqlDescription!T, "") ~ "interface " ~ typeName ~ " {\n";
     foreach (field; fields) {
         if (field.hidden) continue;
+        result ~= sdlDescription(field.description, "  ");
         result ~= "  " ~ field.name ~ ": " ~ field.graphqlType ~ "\n";
     }
     result ~= "}\n";

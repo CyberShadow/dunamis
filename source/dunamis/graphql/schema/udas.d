@@ -26,8 +26,9 @@ struct GqlName {
     string name;
 }
 
-/// UDA to add a description to a field or type.
-/// Rendered as a doc comment in GraphQL SDL.
+/// UDA to add a description to a field, an input object field, an enum
+/// member or a type (object, interface, union, input object or enum).
+/// Rendered as a doc string in GraphQL SDL, and given by introspection.
 ///
 /// Example:
 ///   @GqlDescription("The user's email address")
@@ -129,6 +130,37 @@ template getGqlDescription(alias member) {
         }
         return "";
     }();
+}
+
+/// The @GqlDescription text of the member named `name` of enum E, or ""
+template getEnumMemberDescription(E, string name) if (is(E == enum)) {
+    enum getEnumMemberDescription = getGqlDescription!(__traits(getMember, E, name));
+}
+
+/// The SDL doc string (a block string, on lines of its own indented by
+/// `indent`) of the description `text`, or "" if it is empty.
+/// A one-line description stays on the line of its quotes.
+string sdlDescription(string text, string indent) {
+    import std.algorithm : canFind, endsWith;
+    import std.array : replace, split, join;
+
+    if (text.length == 0) return "";
+    // (Within a block string, only `"""` needs to be escaped.)
+    auto escaped = text.replace(`"""`, `\"""`);
+    if (!escaped.canFind('\n') && !escaped.endsWith(`"`))
+        return indent ~ `"""` ~ escaped ~ `"""` ~ "\n";
+    string result = indent ~ `"""` ~ "\n";
+    foreach (line; escaped.split('\n'))
+        result ~= (line.length ? indent ~ line : "") ~ "\n";
+    return result ~ indent ~ `"""` ~ "\n";
+}
+
+unittest {
+    assert(sdlDescription("", "  ") == "");
+    assert(sdlDescription("One line", "  ") == "  \"\"\"One line\"\"\"\n");
+    assert(sdlDescription("Two\n\nlines", "  ") == "  \"\"\"\n  Two\n\n  lines\n  \"\"\"\n");
+    assert(sdlDescription(`Ends with "quotes"`, "") == "\"\"\"\nEnds with \"quotes\"\n\"\"\"\n");
+    assert(sdlDescription(`Has """ inside`, "") == "\"\"\"Has \\\"\"\" inside\"\"\"\n");
 }
 
 /// Get the @GqlDeprecated reason if present, otherwise return empty string

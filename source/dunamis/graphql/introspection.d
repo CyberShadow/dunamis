@@ -256,6 +256,7 @@ struct RuntimeInputFieldInfo {
     string name;
     JSONValue typeJson;
     string defaultValue;  // empty if no default
+    string description;   // @GqlDescription (empty if not set)
 }
 
 /// Extract runtime input field info from an input type struct.
@@ -288,7 +289,8 @@ private RuntimeInputFieldInfo[] buildRuntimeInputFields(T)() {
                     }
 
                     fields ~= RuntimeInputFieldInfo(getGqlName!(__traits(getMember, T, member), member), typeJson,
-                        getGqlDefault!(__traits(getMember, T, member)));
+                        getGqlDefault!(__traits(getMember, T, member)),
+                        getGqlDescription!(__traits(getMember, T, member)));
                 }
             }
         }
@@ -661,7 +663,7 @@ private JSONValue buildObjectTypeJsonFromFields(T, AllAbstractTypes...)(string t
         }
     }
 
-    return objectTypeJson(typeName, fields, interfaces);
+    return objectTypeJson(typeName, getGqlDescription!T, fields, interfaces);
 }
 
 /// Check if T is in a type tuple
@@ -681,7 +683,7 @@ private JSONValue buildEnumTypeJson(E)() {
     static foreach (member; EnumMembers!E) {
         enumValues ~= JSONValue([
             "name": JSONValue(__traits(identifier, member)),
-            "description": JSONValue(null),
+            "description": descriptionJson(getEnumMemberDescription!(E, __traits(identifier, member))),
             "isDeprecated": JSONValue(false),
             "deprecationReason": JSONValue(null)
         ]);
@@ -690,7 +692,7 @@ private JSONValue buildEnumTypeJson(E)() {
     return JSONValue([
         "kind": JSONValue("ENUM"),
         "name": JSONValue(getGraphQLTypeName!E),
-        "description": JSONValue(null),
+        "description": descriptionJson(getGqlDescription!E),
         "fields": JSONValue(null),
         "inputFields": JSONValue(null),
         "interfaces": JSONValue(null),
@@ -702,13 +704,13 @@ private JSONValue buildEnumTypeJson(E)() {
 private JSONValue buildInputObjectTypeJson(T)() {
     JSONValue[] inputFields;
     static foreach (f; getRuntimeInputFields!T) {
-        inputFields ~= inputValueJson(f.name, "", f.typeJson, f.defaultValue);
+        inputFields ~= inputValueJson(f.name, f.description, f.typeJson, f.defaultValue);
     }
 
     return JSONValue([
         "kind": JSONValue("INPUT_OBJECT"),
         "name": JSONValue(getGraphQLTypeName!T),
-        "description": JSONValue(null),
+        "description": descriptionJson(getGqlDescription!T),
         "fields": JSONValue(null),
         "inputFields": JSONValue(inputFields),
         "interfaces": JSONValue(null),
@@ -717,11 +719,11 @@ private JSONValue buildInputObjectTypeJson(T)() {
     ]);
 }
 
-private JSONValue objectTypeJson(string typeName, JSONValue[] fields, JSONValue[] interfaces = []) {
+private JSONValue objectTypeJson(string typeName, string description, JSONValue[] fields, JSONValue[] interfaces = []) {
     return JSONValue([
         "kind": JSONValue("OBJECT"),
         "name": JSONValue(typeName),
-        "description": JSONValue(null),
+        "description": descriptionJson(description),
         "fields": JSONValue(fields),
         "inputFields": JSONValue(null),
         "interfaces": JSONValue(interfaces),
@@ -740,7 +742,7 @@ private JSONValue buildUnionTypeJson(Union, AllTypes...)() {
     return JSONValue([
         "kind": JSONValue("UNION"),
         "name": JSONValue(getGraphQLTypeName!Union),
-        "description": JSONValue(null),
+        "description": descriptionJson(getGqlDescription!Union),
         "fields": JSONValue(null),
         "inputFields": JSONValue(null),
         "interfaces": JSONValue(null),
@@ -772,13 +774,18 @@ private JSONValue buildInterfaceTypeJson(T, AllTypes...)() {
     return JSONValue([
         "kind": JSONValue("INTERFACE"),
         "name": JSONValue(getGraphQLTypeName!T),
-        "description": JSONValue(null),
+        "description": descriptionJson(getGqlDescription!T),
         "fields": JSONValue(fields),
         "inputFields": JSONValue(null),
         "interfaces": JSONValue(null),
         "enumValues": JSONValue(null),
         "possibleTypes": JSONValue(possibleTypes)
     ]);
+}
+
+/// The introspection description of a @GqlDescription text (null if empty)
+private JSONValue descriptionJson(string description) {
+    return description.length > 0 ? JSONValue(description) : JSONValue(null);
 }
 
 private JSONValue fieldJsonFull(string name, string description, JSONValue typeJson, string deprecation, JSONValue[] argJsons) {

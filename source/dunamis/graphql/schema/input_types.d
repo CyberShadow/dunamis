@@ -56,8 +56,10 @@ template generateEnumTypeSDL(E) if (isGraphQLEnum!E) {
     import std.traits : EnumMembers;
 
     enum generateEnumTypeSDL = () {
-        string result = "enum " ~ getGraphQLTypeName!E ~ " {\n";
+        string result = sdlDescription(getGqlDescription!E, "") ~
+            "enum " ~ getGraphQLTypeName!E ~ " {\n";
         static foreach (member; EnumMembers!E) {
+            result ~= sdlDescription(getEnumMemberDescription!(E, __traits(identifier, member)), "  ");
             result ~= "  " ~ __traits(identifier, member) ~ "\n";
         }
         return result ~ "}\n";
@@ -70,6 +72,7 @@ struct InputFieldInfo {
     string graphqlType;
     bool hasDefault;
     string defaultValue;
+    string description;    // @GqlDescription (empty if not set)
 }
 
 /// Extract fields from an input type struct
@@ -113,6 +116,7 @@ template getInputTypeFields(T) if (isInputType!T) {
                             gqlType,
                             defaultValue !is null,
                             defaultValue,
+                            getGqlDescription!(__traits(getMember, T, member)),
                         );
                     }
                 }

@@ -185,6 +185,80 @@ unittest {
     assert(sdl.canFind("plain: String!"), "plain field should exist in SDL");
 }
 
+// Test @GqlDescription on types, enum members and input object fields,
+// through plugin wrappers, in the SDL and introspection
+unittest {
+    import std.algorithm : canFind;
+    import std.json : JSONValue, JSONType;
+    import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
+    import dunamis.relational.schema : Col, Table;
+    import dunamis.schema.filtering : FilterPlugin;
+    import dunamis.schema.sorting : SortingPlugin;
+    import dunamis.schema.pagination : PaginationPlugin;
+    import dunamis.schema.plugin : ApplyPlugins;
+    import dunamis.graphql.introspection : buildIntrospectionJson;
+    import dunamis.core.expr : Expr;
+
+    static MockDB!() db;
+
+    @GqlDescription("How loud a note is.")
+    enum DescVolume {
+        @GqlDescription("Barely audible.\nWhispered.") quiet,
+        loud,
+    }
+
+    @GqlDescription("Options of `echo`")
+    static struct DescEchoOptions {
+        @GqlDescription("Repeat \"this\" many times")
+        int times;
+        string separator;
+    }
+
+    @GqlDescription("A note,\nwith a volume.")
+    @DemoEntity!(db, "desc_notes")
+    static struct DescNote {
+        mixin DemoId;
+        @GqlDescription("The text")
+        mixin Col!("text", string);
+        mixin Col!("volume", DescVolume);
+
+        static auto echo(Expr!DescNote n, DescEchoOptions options) => n.text;
+    }
+
+    static struct DescQuery {
+        mixin Table!(DescNote, "desc_notes");
+    }
+
+    alias S = ApplyPlugins!(Schema!DescQuery, FilterPlugin, SortingPlugin, PaginationPlugin);
+    enum sdl = generateSchemaSDL!S;
+
+    static assert(sdl.canFind("\"\"\"How loud a note is.\"\"\"\nenum DescVolume {\n" ~
+        "  \"\"\"\n  Barely audible.\n  Whispered.\n  \"\"\"\n  quiet\n  loud\n}\n"), sdl);
+    static assert(sdl.canFind("\"\"\"\nA note,\nwith a volume.\n\"\"\"\ntype DescNote {\n"), sdl);
+    static assert(sdl.canFind("  \"\"\"The text\"\"\"\n  text: String!\n"), sdl);
+    static assert(sdl.canFind("\"\"\"Options of `echo`\"\"\"\ninput DescEchoOptions {\n" ~
+        "  \"\"\"Repeat \"this\" many times\"\"\"\n  times: Int!\n  separator: String!\n}\n"), sdl);
+
+    auto schemaJson = buildIntrospectionJson!S();
+    JSONValue typeNamed(string name) {
+        foreach (t; schemaJson["types"].array)
+            if (t["name"].str == name) return t;
+        assert(false, name);
+    }
+    string descriptionOf(JSONValue v) {
+        return v["description"].type == JSONType.null_ ? null : v["description"].str;
+    }
+    auto volume = typeNamed("DescVolume");
+    assert(descriptionOf(volume) == "How loud a note is.");
+    assert(descriptionOf(volume["enumValues"][0]) == "Barely audible.\nWhispered.");
+    assert(descriptionOf(volume["enumValues"][1]) is null);
+    assert(descriptionOf(typeNamed("DescNote")) == "A note,\nwith a volume.");
+    auto options = typeNamed("DescEchoOptions");
+    assert(descriptionOf(options) == "Options of `echo`");
+    assert(descriptionOf(options["inputFields"][0]) == `Repeat "this" many times`);
+    assert(descriptionOf(options["inputFields"][1]) is null);
+}
+
 // Test Schema template
 unittest {
     import dunamis.relational.demo : DemoEntity, DemoId, MockDB;
