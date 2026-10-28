@@ -20,7 +20,7 @@ buildType "ci-unittest" {
 
 sourcePaths "source"
 
-dependency "graphqld:parser" repository="git+https://github.com/vpanteleev-sym/graphqld" version="63f26f9509dda15de497a3d623a444014c84fc34"
+dependency "graphqld:parser" repository="git+https://github.com/vpanteleev-sym/graphqld" version="40ab74f387c31d2c63b557af72af621a146496ba"
 dependency "ae" repository="git+https://github.com/CyberShadow/ae.git" version="2e17121b89de34c127bb2b5e4496b6fbd0544390"
 
 # Exclude sqlite modules from main package (available via subpackage, requires ae:sqlite)
@@ -68,6 +68,6 @@ subPackage {
     # Exclude integration tests
     excludedSourceFiles "source/integration/*"
 
-    dependency "graphqld:parser" repository="git+https://github.com/vpanteleev-sym/graphqld" version="63f26f9509dda15de497a3d623a444014c84fc34"
+    dependency "graphqld:parser" repository="git+https://github.com/vpanteleev-sym/graphqld" version="40ab74f387c31d2c63b557af72af621a146496ba"
     dependency "ae:sqlite" repository="git+https://github.com/CyberShadow/ae.git" version="2e17121b89de34c127bb2b5e4496b6fbd0544390"
 }
