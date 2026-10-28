@@ -49,7 +49,7 @@ class Executor {
         if (sources.length == 0) {
             // No data sources — evaluate directly (no setup/teardown needed)
             evalCtx.setValues!AnyRef(null, [queryRoot]);
-            return toEval.eval(evalCtx).then((results) => results[0]);
+            return toEval.eval(evalCtx).then((T[] results) => results[0]);
         }
 
         // Create per-request sessions for each data source
