@@ -42,11 +42,120 @@ class PostgresSession : RelationalSession {
     /// Numbers the session's transactions (incremented at each BEGIN), to
     /// tell whether an atomic section's savepoint still exists.
     private ulong _transaction;
+    /// The configuration parameters set for the request (see setSetting).
+    private string[string] _settings;
+    /// For a session derived from another (see withSettings): the request's
+    /// session (which has the connection), the derived session's settings,
+    /// and the statements applying them and restoring the request's.
+    private PostgresSession _base;
+    private string[string] _scopeSettings;
+    private string _applySettings, _restoreSettings;
 
     /// Add transaction-local initialization SQL for this request (for
     /// example SET LOCAL application context values).
     void addSetupStatement(string sql) {
+        assert(_base is null, "addSetupStatement: a derived session has no setup of its own");
         _setupStatements ~= sql;
+    }
+
+    /// Set the configuration parameter `name` (as `SET LOCAL`) for the
+    /// request, to `value` (an empty value reads as unset with
+    /// `NULLIF(current_setting(name, true), '')`). Sessions derived with
+    /// `withSettings` restore the request's values of the parameters they
+    /// set from these, so the parameters they set must be set with this
+    /// (if at all) rather than with `addSetupStatement`.
+    void setSetting(string name, string value) {
+        assert(_base is null, "setSetting: a derived session has no setup of its own");
+        _settings[settingName(name)] = value;
+        addSetupStatement("SET LOCAL " ~ name ~ " = " ~ sqlLiteral(value));
+    }
+
+    /// A session of the same request whose statements see the configuration
+    /// parameters `settings` (instead of the request's values of these, see
+    /// setSetting), for evaluating expressions as of other settings in a
+    /// scope of the request's context (see `EvalContext.createScope`).
+    ///
+    /// The derived session issues its statements on this session's
+    /// connection, in its transaction (so it sees the request's writes, and
+    /// the request's atomic sections cover its work): each statement is sent
+    /// between one applying the settings (`set_config(name, value, true)`)
+    /// and one restoring the request's values. The connection runs
+    /// statements in the order they are sent, and the three are sent at
+    /// once, so that the statements of the request's other expressions,
+    /// which may be in flight at the same time, are not affected. The derived
+    /// session has result caches of its own; its setup and teardown,
+    /// suspension and atomic sections are the request's (its methods for
+    /// them do nothing).
+    ///
+    /// The settings of a session derived from a derived session are those of
+    /// the latter, with `settings` in addition.
+    PostgresSession withSettings(string[string] settings) {
+        import std.algorithm.sorting : sort;
+
+        auto base = _base is null ? this : _base;
+        auto derived = new PostgresSession(_connFactory, _disconnectOnTeardown, _acquireConnection, _releaseConnection);
+        derived._base = base;
+        derived._scopeSettings = _scopeSettings.dup;
+        foreach (name, value; settings)
+            derived._scopeSettings[settingName(name)] = value;
+        auto names = derived._scopeSettings.keys;
+        names.sort();
+        string apply, restore;
+        foreach (i, name; names) {
+            apply ~= (i ? ", " : "SELECT ") ~ "set_config(" ~ sqlLiteral(name) ~ ", " ~
+                sqlLiteral(derived._scopeSettings[name]) ~ ", true)";
+            restore ~= (i ? ", " : "SELECT ") ~ "set_config(" ~ sqlLiteral(name) ~ ", " ~
+                sqlLiteral(base._settings.get(name, "")) ~ ", true)";
+        }
+        derived._applySettings = apply;
+        derived._restoreSettings = restore;
+        return derived;
+    }
+
+    /// The settings of a derived session (see withSettings; empty for a
+    /// request's session).
+    @property const(string[string]) scopeSettings() const { return _scopeSettings; }
+
+    private static string settingName(string name) {
+        import std.ascii : isAlphaNum;
+        if (!name.length)
+            throw new Exception("Empty configuration parameter name");
+        foreach (c; name)
+            if (!isAlphaNum(c) && c != '_' && c != '.')
+                throw new Exception("Invalid configuration parameter name: " ~ name);
+        return name;
+    }
+
+    private static string sqlLiteral(string value) {
+        return "'" ~ value.replace("'", "''") ~ "'";
+    }
+
+    /// Send the statement `sql`, and collect its rows. A derived session
+    /// sends it between the statements applying its settings and restoring
+    /// the request's (see withSettings).
+    private Promise!(PgSqlConnection.Row[]) run(const(char)[] sql) {
+        auto conn = connection();
+        if (_base is null || !_applySettings.length)
+            return conn.query(sql).array();
+        return bracketed(conn, conn.query(sql));
+    }
+
+    /// ditto, with the Extended Query protocol and parameters
+    private Promise!(PgSqlConnection.Row[]) runExtended(Args...)(const(char)[] sql, Args args) {
+        auto conn = connection();
+        if (_base is null || !_applySettings.length)
+            return conn.extendedQuery(sql, args).array();
+        return bracketed(conn, conn.extendedQuery(sql, args));
+    }
+
+    private Promise!(PgSqlConnection.Row[]) bracketed(PgSqlConnection conn, PgSqlConnection.Result statement) {
+        // (A statement is sent when its rows are requested: here, the three
+        // one after the other.)
+        auto applied = conn.query(_applySettings).array();
+        auto rows = statement.array();
+        auto restored = conn.query(_restoreSettings).array();
+        return applied.then((PgSqlConnection.Row[] _) => rows)
+            .then((PgSqlConnection.Row[] result) => restored.then((PgSqlConnection.Row[] _) => result));
     }
 
     /// Create with a connection factory. The factory is called in setup().
@@ -62,6 +171,8 @@ class PostgresSession : RelationalSession {
 
     /// Acquire connection and begin a transaction.
     override Promise!void setup(SetupMode mode = SetupMode.query) {
+        if (_base !is null)
+            return resolve();
         // Executors may be nested while sharing an EvalContext (for example a
         // computed field can execute a selection against the current request
         // session).  The nested executor borrows the active transaction; it
@@ -118,6 +229,8 @@ class PostgresSession : RelationalSession {
     /// statement outside that window is an engine bug; report it as an
     /// error of the statement instead of dereferencing a null connection.
     private PgSqlConnection connection() {
+        if (_base !is null)
+            return _base.connection();
         if (_conn is null)
             throw new Exception(_setupDepth
                 ? "PostgreSQL session used while suspended (it has released its connection)"
@@ -150,7 +263,8 @@ class PostgresSession : RelationalSession {
 
     /// An atomic section is a savepoint of the current transaction.
     override Promise!ulong beginAtomic() {
-        if (_conn is null || !_setupDepth)
+        // (A derived session's work is in the request's atomic sections.)
+        if (_base !is null || _conn is null || !_setupDepth)
             return resolve(0UL);
         auto transaction = _transaction;
         return execute("SAVEPOINT dunamis_atomic").then(() => transaction);
@@ -172,7 +286,7 @@ class PostgresSession : RelationalSession {
     /// can deadlock recursive GraphQL evaluation when every PostgreSQL
     /// connection is held by a parent waiting for its child.
     override Promise!void suspend() {
-        if (_conn is null || !_setupDepth)
+        if (_base !is null || _conn is null || !_setupDepth)
             return resolve();
         auto conn = _conn;
         return conn.query("COMMIT").array().then((PgSqlConnection.Row[] _) {
@@ -184,7 +298,7 @@ class PostgresSession : RelationalSession {
     /// Reacquire a connection without resetting the logical session's caches
     /// or pending evaluation state.
     override Promise!void resume() {
-        if (_conn !is null || !_setupDepth)
+        if (_base !is null || _conn !is null || !_setupDepth)
             return resolve();
         return acquireConnectionPermit(true).then(() => _connFactory()).then((PgSqlConnection conn) {
             _conn = conn;
@@ -200,6 +314,8 @@ class PostgresSession : RelationalSession {
 
     /// Commit or rollback the transaction, then fire pending events.
     override Promise!void teardown(SetupMode mode = SetupMode.query, bool success = true) {
+        if (_base !is null)
+            return resolve();
         if (_setupDepth > 1) {
             _setupDepth--;
             return resolve();
@@ -227,7 +343,7 @@ class PostgresSession : RelationalSession {
 
     /// Execute raw SQL for session setup.
     override Promise!void execute(string sql) {
-        return connection().query(sql).array().then((PgSqlConnection.Row[] _) { });
+        return run(sql).then((PgSqlConnection.Row[] _) { });
     }
 
     /// Execute SQL which returns one integer column.  This is intentionally a
@@ -235,7 +351,7 @@ class PostgresSession : RelationalSession {
     /// semantics cannot be expressed as relational query nodes (for example
     /// versioned writes).
     Promise!(long[]) queryLongs(string sql) {
-        return connection().query(sql).array().then((PgSqlConnection.Row[] rows) {
+        return run(sql).then((PgSqlConnection.Row[] rows) {
             long[] values;
             values.reserve(rows.length);
             foreach (row; rows)
@@ -246,7 +362,7 @@ class PostgresSession : RelationalSession {
 
     /// Execute SQL which returns one text column.
     Promise!(string[]) queryStrings(string sql) {
-        return connection().query(sql).array().then((PgSqlConnection.Row[] rows) {
+        return run(sql).then((PgSqlConnection.Row[] rows) {
             string[] values;
             values.reserve(rows.length);
             foreach (row; rows)
@@ -261,7 +377,7 @@ class PostgresSession : RelationalSession {
     /// current transaction and request-local database settings, instead of
     /// recursively entering GraphQL over HTTP.
     Promise!(JSONValue[]) queryJson(string sql) {
-        return connection().query(sql).array().then((PgSqlConnection.Row[] rows) {
+        return run(sql).then((PgSqlConnection.Row[] rows) {
             JSONValue[] values;
             values.reserve(rows.length);
             foreach (row; rows)
@@ -316,11 +432,11 @@ class PostgresSession : RelationalSession {
 
         if (idValues.length > 0) {
             // PostgreSQL array as string: {1,2,3}
-            return connection().extendedQuery(sql, "{" ~ idValues.join(",") ~ "}").array()
+            return runExtended(sql, "{" ~ idValues.join(",") ~ "}")
                 .then((PgSqlConnection.Row[] rows) => parseQueryResult(rows, allNodes));
         }
 
-        return connection().extendedQuery(sql).array()
+        return runExtended(sql)
             .then((PgSqlConnection.Row[] rows) => parseQueryResult(rows, allNodes));
     }
 
@@ -405,7 +521,7 @@ class PostgresSession : RelationalSession {
         auto pkCount = pkColumns.length;
         auto sql = buildFetchColumnSQL(table, column, validIds);
 
-        return connection().query(sql).array().then((PgSqlConnection.Row[] rows) {
+        return run(sql).then((PgSqlConnection.Row[] rows) {
             // Build lookup map
             string[string] values;
             foreach (row; rows) {
@@ -440,7 +556,7 @@ class PostgresSession : RelationalSession {
         auto pkCount = pkColumns.length;
         auto sql = buildFetchColumnSQL(table, column, validIds);
 
-        return connection().query(sql).array().then((PgSqlConnection.Row[] rows) {
+        return run(sql).then((PgSqlConnection.Row[] rows) {
             // Build lookup map
             long[string] values;
             foreach (row; rows) {
@@ -459,7 +575,7 @@ class PostgresSession : RelationalSession {
         auto sql = "SELECT " ~ pkColumns.join(", ") ~ " FROM " ~ table;
 
         auto numPkCols = pkColumns.length;
-        return connection().query(sql).array().then((PgSqlConnection.Row[] rows) {
+        return run(sql).then((PgSqlConnection.Row[] rows) {
             return rows.map!((r) {
                 if (numPkCols == 1) {
                     return r.column!string(0);
@@ -505,7 +621,7 @@ class PostgresSession : RelationalSession {
         if (orderBy.length)
             sql ~= " ORDER BY " ~ orderBy.join(", ");
 
-        return connection().query(sql).array().then((PgSqlConnection.Row[] rows) {
+        return run(sql).then((PgSqlConnection.Row[] rows) {
             // Group children by parent
             AnyRef[][string] childrenByParent;
             foreach (row; rows) {
@@ -559,7 +675,7 @@ class PostgresSession : RelationalSession {
         auto pkCount = pkColumns.length;
         auto sql = buildFetchColumnSQL(childTable, fk, validIds);
 
-        return connection().query(sql).array().then((PgSqlConnection.Row[] rows) {
+        return run(sql).then((PgSqlConnection.Row[] rows) {
             import std.typecons : Nullable;
             // Build lookup map
             string[string] fkValues;
@@ -637,7 +753,7 @@ class PostgresSession : RelationalSession {
         auto pkCount = pkColumns.length;
         auto sql = buildFetchColumnSQL(table, asJson ? "to_json(" ~ column ~ ")::text" : column, validIds);
 
-        return connection().query(sql).array().then((PgSqlConnection.Row[] rows) {
+        return run(sql).then((PgSqlConnection.Row[] rows) {
             // Build lookup map
             JSONValue[string] values;
             foreach (row; rows) {
@@ -682,7 +798,7 @@ class PostgresSession : RelationalSession {
         _cachedSQL = sql;
 
         // No parameters needed - values are embedded in SQL
-        return connection().query(sql).array().then((PgSqlConnection.Row[] rows) {
+        return run(sql).then((PgSqlConnection.Row[] rows) {
             return parseInsertResult(rows, typeName, pkColumns);
         });
     }
@@ -694,7 +810,7 @@ class PostgresSession : RelationalSession {
         _cachedSQL = sql;
 
         // No parameters needed - values are embedded in SQL
-        return connection().query(sql).array().then((PgSqlConnection.Row[] rows) {
+        return run(sql).then((PgSqlConnection.Row[] rows) {
             return parseUpdateResult(rows, typeName, pkColumns);
         });
     }
@@ -706,7 +822,7 @@ class PostgresSession : RelationalSession {
         _cachedSQL = sql;
 
         // No parameters needed - IDs are embedded in SQL
-        return connection().query(sql).array().then((PgSqlConnection.Row[] rows) {
+        return run(sql).then((PgSqlConnection.Row[] rows) {
             if (rows.length > 0) {
                 return rows[0].column!int(0);
             }

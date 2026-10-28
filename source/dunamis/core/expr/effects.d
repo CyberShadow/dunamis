@@ -124,7 +124,9 @@ auto performSized(alias fn, Args...)(size_t stackSize, ExprBase lengthSource, Da
 /// of the request, so that it sees the request's writes so far.
 ///
 /// The sessions of its data sources must have been set up for the request
-/// (for a procedure, by naming them in perform's `sources`).
+/// (for a procedure, by naming them in perform's `sources`). In a scope with
+/// sessions of its own (see `EvalContext.createScope`), it is evaluated on
+/// these: e.g. as of other database settings.
 Promise!T evaluateNested(T)(Expr!T expr, EvalContext ctx) {
     import dunamis.core.executor : Executor;
     import dunamis.core.types : AnyRef, queryRoot;

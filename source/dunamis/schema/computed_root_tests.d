@@ -309,3 +309,27 @@ unittest {
     auto viaVariables = awaitSync(new Executor().execute(query, ctx));
     assert(viaVariables == parseJSON(`{"v": "-1:-/3;new:-/-;", "w": "-1:-/3;new:-/-;"}`), viaVariables.toString());
 }
+
+// Nested evaluations in a scope with a session of its own (EvalContext.
+// createScope(overrides)) read through it; sibling evaluations in the
+// request read through the request's session
+unittest {
+    import dunamis.core.datasource : DataSource;
+    import dunamis.core.expr : evaluateNested, singleton;
+    import dunamis.relational.demo : MockDB;
+
+    seed();
+    auto other = new MockDB!();
+    other.setTableData("users", `[{"id": 7, "name": "Zed"}]`);
+    auto ctx = new EvalContext();
+    auto session = ctx.getSession(fixtureDb);
+    auto scope_ = ctx.createScope([cast(DataSource) fixtureDb: other.createSession()]);
+
+    auto inScope = evaluateNested(rootFixture.userCount(Query().singleton()), scope_);
+    auto inRequest = evaluateNested(rootFixture.userCount(Query().singleton()), ctx);
+    auto inScopeAgain = evaluateNested(rootFixture.census(Query().singleton()), scope_.createScope());
+    assert(awaitSync(inScope) == 1);
+    assert(awaitSync(inRequest) == 3);
+    assert(awaitSync(inScopeAgain) == "1 users from #7", awaitSync(inScopeAgain));
+    assert(ctx.getSession(fixtureDb) is session && ctx.allSessions == [session]);
+}

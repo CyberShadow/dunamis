@@ -78,7 +78,8 @@ struct GraphQLError {
 /// A context may be a scope of another (see `createScope`): a scope has its
 /// own value bindings and memoized evaluations, and shares everything
 /// request-scoped (sessions, request contexts, string maps, errors) with the
-/// context it was created from.
+/// context it was created from, except for the data sessions it was given
+/// to use instead of the request's.
 class EvalContext {
     /// The context this one is a scope of (null for a request's context).
     private EvalContext _parent;
@@ -103,6 +104,22 @@ class EvalContext {
     EvalContext createScope() {
         auto scope_ = new EvalContext();
         scope_._parent = this;
+        return scope_;
+    }
+
+    /// Create a scope of this context in which the data sources of
+    /// `overrides` have the sessions given there instead of the request's
+    /// (and of this context's): expressions evaluated in the scope (and in
+    /// scopes of it), e.g. with `evaluateNested`, use them. For example, a
+    /// PostgreSQL session derived from the request's with other settings
+    /// (`PostgresSession.withSettings`) evaluates expressions as of these
+    /// settings, while sibling evaluations in the request see the request's.
+    ///
+    /// The overriding sessions belong to the scope: the executor does not
+    /// set them up or tear them down (`allSessions` is the request's).
+    EvalContext createScope(DataSession[DataSource] overrides) {
+        auto scope_ = createScope();
+        scope_._overrides = overrides.dup;
         return scope_;
     }
 
@@ -133,12 +150,17 @@ class EvalContext {
     /// Created lazily via getSession() and managed by the Executor.
     private DataSession[DataSource] _sessions;
 
+    /// The sessions a scope uses instead of the request's (see createScope).
+    private DataSession[DataSource] _overrides;
+
     /// Get or create a per-request session for a data source.
     /// Sessions are cached: calling getSession(ds) twice returns the same session.
     /// The Executor calls setup()/teardown() on all sessions.
     DataSession getSession(DataSource ds) {
+        if (auto s = ds in _overrides)
+            return *s;
         if (_parent !is null)
-            return root.getSession(ds);
+            return _parent.getSession(ds);
         if (auto s = ds in _sessions)
             return *s;
         auto s = ds.createSession();
@@ -149,12 +171,15 @@ class EvalContext {
     /// Whether the request has a session for the data source `ds` (that
     /// is, `getSession(ds)` was called, normally by the executor).
     bool hasSession(DataSource ds) {
+        if (ds in _overrides)
+            return true;
         if (_parent !is null)
-            return root.hasSession(ds);
+            return _parent.hasSession(ds);
         return (ds in _sessions) !is null;
     }
 
-    /// Get all sessions (for Executor lifecycle management).
+    /// Get all sessions of the request (for Executor lifecycle management;
+    /// without the sessions of scopes, see createScope).
     @property DataSession[] allSessions() {
         if (_parent !is null)
             return root.allSessions;
@@ -422,4 +447,27 @@ unittest {
     import ae.utils.promise.await : awaitSync;
     assert(awaitSync(ctx.getCachedEval!int(other)) == [2]);
     assert(awaitSync(scope_.getCachedEval!int(key)) == [10]);
+}
+
+unittest {
+    // Scopes with sessions of their own: used in the scope and its scopes,
+    // not in the request's context or its other scopes
+    import dunamis.core.datasource : DataSession, DataSource;
+
+    auto ds = new DataSource();
+    auto other = new DataSource();
+    auto ctx = new EvalContext();
+    auto session = ctx.getSession(ds);
+    auto override_ = new DataSession();
+
+    auto scope_ = ctx.createScope([ds: override_]);
+    assert(scope_.getSession(ds) is override_);
+    assert(scope_.hasSession(ds) && !scope_.hasSession(other));
+    assert(scope_.createScope().getSession(ds) is override_);
+    assert(ctx.getSession(ds) is session);
+    assert(ctx.createScope().getSession(ds) is session);
+    assert(ctx.allSessions == [session] && scope_.allSessions == [session]);
+    // Other data sources: the request's sessions (created in the request)
+    auto otherSession = scope_.getSession(other);
+    assert(ctx.getSession(other) is otherSession);
 }

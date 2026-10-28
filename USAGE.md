@@ -1114,6 +1114,14 @@ AddPayload addUserProcedure(EvalContext ctx, string name) @async {
 }
 ```
 
+**Scoped sessions:** to evaluate expressions as of other database settings (for example, reading another version of versioned data whose views depend on configuration parameters), a procedure evaluates them in a scope of its context with sessions of its own: `ctx.createScope([db: session])` (`EvalContext.createScope(DataSession[DataSource])`) uses `session` for `db` in the scope and in its scopes, while the request's other evaluations keep the request's. `PostgresSession.withSettings(["app.version": "5"])` derives such a session from the request's: its statements are sent on the request's connection, in its transaction (so they see the request's writes, and the request's atomic sections cover them), each between one setting the parameters (`set_config(name, value, true)`) and one restoring the request's values, which the request sets with `PostgresSession.setSetting(name, value)` (`SET LOCAL`). The connection runs statements in the order they are sent, so the request's statements in flight at the same time are not affected.
+
+```d
+auto session = cast(PostgresSession) ctx.getSession(db);
+auto asOfVersion = ctx.createScope([cast(DataSource) db: session.withSettings(["app.version": "5"])]);
+auto oldCount = evaluateNested(userCount(Query().singleton()), asOfVersion).await;
+```
+
 **Atomic mutation fields:** each mutation field is an atomic section of the request's sessions (`DataSession.beginAtomic`/`endAtomic`; for PostgreSQL, a savepoint): if the field fails (it fails, or is null with errors recorded while it was evaluated, such as a failing non-null field of its value), its work is undone, and the request's other fields' work is kept.
 
 Each request has one instance of each root type, from which root fields are evaluated; that is the only difference between root types and other types, and it is handled where the request is compiled (the GraphQL compiler), not by the plugins. Root fields return scalars, entities, nullable entities, lists or PODs (types only mutation fields return, such as `RenamePayload`, are part of the schema like those of any other field), with selection sets as for any field. Mutation fields are evaluated one after the other, in the order of the request; a failing nullable mutation field is null, with the error at its path, and the fields after it still run; a null (or failing) non-null mutation field makes the whole result null, as for query fields, and the fields after it are not evaluated. In GraphQL, the root types are named after their role (`Query`, `Mutation`, `Subscription`), whatever the D names of the user-declared types.
