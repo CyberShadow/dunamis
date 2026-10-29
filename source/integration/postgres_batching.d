@@ -276,6 +276,32 @@ private void checkRootFilterWithoutColumns(PostgresSession session, EvalContext 
         sent.to!string);
 }
 
+/// A root collection filtered by membership tests (`isAmong`) of a column and
+/// of the primary key column: one statement, in whose WHERE clause they are
+/// (as `= ANY(...)`), rather than a read of the whole table filtered in D.
+private void checkRootMembershipFilter(PostgresSession session, EvalContext ctx, Data data) {
+    import std.algorithm.searching : canFind;
+    import dunamis.core.expr : isAmong;
+    import dunamis.relational.schema : column;
+
+    string[] sent;
+    session.statementObserver = (const(char)[] sql) { sent ~= sql.idup; };
+    scope (exit) session.statementObserver = null;
+    auto ids = evaluateNested(map!((Expr!Parent p) => fieldAccess!"id"(p))(
+        filterBy!((Expr!Parent p) => isAmong(p.name, ["p1", "p3", "p99"]).and(
+            isAmong(column!int(p, "id"), [3, 1, 2]).and(isAmong(p.name, ["p2"]).not())))(getAll!Parent())), ctx).await;
+    int[] expected;
+    foreach (id; [1, 3])
+        if (id <= data.n)
+            expected ~= id;
+    assertTrue(ids == expected, "Root membership filter: " ~ ids.to!string);
+    assertTrue(sent.length == 1, "Root membership filter: " ~ sent.length.to!string ~ " statements: " ~
+        sent.to!string);
+    assertTrue(sent[0].canFind(`.name = ANY('{"p1","p3","p99"}')`) && sent[0].canFind(`.id = ANY('{3,1,2}')`) &&
+        sent[0].canFind(`NOT (batching_parents.name = ANY('{"p2"}'))`),
+        "Root membership filter not in the WHERE clause: " ~ sent[0]);
+}
+
 /// A query of more layers than SQL functions take arguments for (see
 /// `dunamis.relational.sql.layerGroupSize`) reads all of them.
 private void checkManyLayers(PostgresSession session, Data data) {
@@ -416,6 +442,7 @@ void testStatementCountsOfComputedFields() {
                 });
             inRequest((PostgresSession session, EvalContext) => checkManyLayers(session, data));
             inRequest((PostgresSession session, EvalContext ctx) => checkRootFilterWithoutColumns(session, ctx, data));
+            inRequest((PostgresSession session, EvalContext ctx) => checkRootMembershipFilter(session, ctx, data));
         }
 
         string report;

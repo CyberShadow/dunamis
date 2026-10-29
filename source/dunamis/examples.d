@@ -45,6 +45,11 @@ private class TestDialect : SqlDialect {
     override string notExistsSubquery(string subquery) {
         return "NOT EXISTS (" ~ subquery ~ ")";
     }
+    override string membershipOp(string operandSql, TypeInfo valueType, string[] values) {
+        import dunamis.relational.sql_dialect : inListSql;
+        return inListSql(operandSql, valueType, values);
+    }
+
     override string likeOp(string operandSql, string pattern, bool caseInsensitive) {
         if (caseInsensitive) {
             return "(LOWER(" ~ operandSql ~ ") LIKE LOWER('" ~ pattern ~ `') ESCAPE '\')`;

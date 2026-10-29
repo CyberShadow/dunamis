@@ -53,6 +53,13 @@ interface SqlDialect {
     ///   - MySQL/SQLite use LOWER() wrapper
     string likeOp(string operandSql, string pattern, bool caseInsensitive);
 
+    /// Generate SQL for a membership test (see `isAmong`): whether the
+    /// operand is among `values`, of the type `valueType` (as
+    /// ConstantInfo.valueAsString represents them; there is at least one).
+    ///   PostgreSQL: operand = ANY('{"v1","v2"}') (one array literal)
+    ///   SQLite/MySQL: operand IN (v1, v2) (see `inListSql`)
+    string membershipOp(string operandSql, TypeInfo valueType, string[] values);
+
     /// Get the dialect name for debugging
     string name();
 
@@ -117,3 +124,41 @@ interface SqlDialect {
 /// SQL text whose rendering depends on the target dialect. Used for
 /// fragments generated during optimization, before the dialect is known.
 alias DialectSql = string delegate(SqlDialect dialect);
+
+/// Whether constants of the type `type` are rendered as bare SQL numbers.
+bool isSqlNumericType(TypeInfo type) {
+    return type == typeid(int) || type == typeid(long) ||
+        type == typeid(float) || type == typeid(double) ||
+        type == typeid(uint) || type == typeid(ulong) ||
+        type == typeid(short) || type == typeid(ushort);
+}
+
+/// The SQL literal of a constant of the type `type`, given as
+/// ConstantInfo.valueAsString represents it: a quoted string (also for
+/// types other than strings, booleans and numbers), TRUE/FALSE, or a number.
+string sqlLiteral(TypeInfo type, string value) {
+    import std.array : replace;
+
+    if (type == typeid(bool))
+        return value == "true" ? "TRUE" : "FALSE";
+    if (isSqlNumericType(type))
+        return value;
+    return "'" ~ value.replace("'", "''") ~ "'";
+}
+
+/// A membership test (see SqlDialect.membershipOp) as `operand IN (...)`
+/// with the values' literals (see `sqlLiteral`).
+string inListSql(string operandSql, TypeInfo valueType, string[] values) {
+    import std.algorithm.iteration : map;
+    import std.array : join;
+
+    return "(" ~ operandSql ~ " IN (" ~ values.map!(v => sqlLiteral(valueType, v)).join(", ") ~ "))";
+}
+
+unittest {
+    assert(sqlLiteral(typeid(string), "it's") == "'it''s'");
+    assert(sqlLiteral(typeid(bool), "true") == "TRUE");
+    assert(sqlLiteral(typeid(long), "-3") == "-3");
+    assert(inListSql("t.id", typeid(int), ["1", "2"]) == "(t.id IN (1, 2))");
+    assert(inListSql("t.name", typeid(string), ["a"]) == "(t.name IN ('a'))");
+}

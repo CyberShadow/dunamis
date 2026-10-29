@@ -755,7 +755,7 @@ Expr!bool buildColumnCondition(ColExpr, ColumnFilter)(ColExpr colExpr, const Col
 /// `isNull`) put on non-null column values, or null if they put none.
 private Expr!bool buildValueCondition(T, ColumnFilter)(Expr!T colExpr, const ColumnFilter filter,
         ExprBase lengthSource, string fieldName) {
-    import dunamis.core.expr : constant;
+    import dunamis.core.expr : constant, isAmong;
     import dunamis.core.types : isCustomScalar;
 
     // Custom scalar columns are filtered through StringFilter (their wire
@@ -769,11 +769,22 @@ private Expr!bool buildValueCondition(T, ColumnFilter)(Expr!T colExpr, const Col
             return S.fromJsonValue(JSONValue(value));
     }
 
-    auto operand(V)(V value) {
+    T operandValue(V)(V value) {
         static if (isCustomScalar!T)
-            return constant(scalarOperand!T(value), lengthSource);
+            return scalarOperand!T(value);
         else
-            return constant(cast(T) value, lengthSource);
+            return cast(T) value;
+    }
+
+    auto operand(V)(V value) {
+        return constant(operandValue(value), lengthSource);
+    }
+
+    T[] operandValues(V)(const(V)[] values) {
+        T[] result;
+        foreach (value; values)
+            result ~= operandValue(value);
+        return result;
     }
 
     Expr!bool[] conditions;
@@ -800,22 +811,16 @@ private Expr!bool buildValueCondition(T, ColumnFilter)(Expr!T colExpr, const Col
                 conditions ~= colExpr.ne(operand(filter.notEqualTo.get));
         }
 
+        // (Membership tests, which data sources can evaluate as such, e.g.
+        // as one SQL `= ANY(...)`, rather than as chains of comparisons.)
         static if (__traits(hasMember, ColumnFilter, "in_")) {
-            if (!filter.in_.isNull) {
-                Expr!bool membership = constant(false, lengthSource);
-                foreach (value; filter.in_.get)
-                    membership = membership.or(colExpr.eq(operand(value)));
-                conditions ~= membership;
-            }
+            if (!filter.in_.isNull)
+                conditions ~= isAmong(colExpr, operandValues(filter.in_.get));
         }
 
         static if (__traits(hasMember, ColumnFilter, "notIn")) {
-            if (!filter.notIn.isNull) {
-                Expr!bool membership = constant(true, lengthSource);
-                foreach (value; filter.notIn.get)
-                    membership = membership.and(colExpr.ne(operand(value)));
-                conditions ~= membership;
-            }
+            if (!filter.notIn.isNull)
+                conditions ~= isAmong(colExpr, operandValues(filter.notIn.get)).not();
         }
 
         static foreach (op; ["lessThan", "lessThanOrEqualTo", "greaterThan", "greaterThanOrEqualTo"]) {

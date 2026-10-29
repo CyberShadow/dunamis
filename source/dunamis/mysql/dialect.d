@@ -42,6 +42,11 @@ class MySQLDialect : SqlDialect {
         return "NOT EXISTS (" ~ subquery ~ ")";
     }
 
+    override string membershipOp(string operandSql, TypeInfo valueType, string[] values) {
+        import dunamis.relational.sql_dialect : inListSql;
+        return inListSql(operandSql, valueType, values);
+    }
+
     override string likeOp(string operandSql, string pattern, bool caseInsensitive) {
         // Backslash is also the string-literal escape character in MySQL, so
         // double it for the pattern's escapes to reach LIKE intact.

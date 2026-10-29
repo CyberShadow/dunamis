@@ -37,6 +37,18 @@ class PostgresDialect : SqlDialect {
         return "NOT EXISTS (" ~ subquery ~ ")";
     }
 
+    override string membershipOp(string operandSql, TypeInfo valueType, string[] values) {
+        import std.array : join, replace;
+        import dunamis.relational.sql_dialect : isSqlNumericType;
+
+        // One array literal (whose type PostgreSQL infers from the
+        // operand's), with the elements quoted unless they are numbers
+        string[] elements;
+        foreach (v; values)
+            elements ~= isSqlNumericType(valueType) ? v : `"` ~ v.replace(`\`, `\\`).replace(`"`, `\"`) ~ `"`;
+        return "(" ~ operandSql ~ " = ANY('{" ~ elements.join(",").replace("'", "''") ~ "}'))";
+    }
+
     override string likeOp(string operandSql, string pattern, bool caseInsensitive) {
         string op = caseInsensitive ? "ILIKE" : "LIKE";
         return "(" ~ operandSql ~ " " ~ op ~ " '" ~ pattern ~ `' ESCAPE '\')`;
@@ -168,4 +180,9 @@ unittest {
            "EXISTS (SELECT 1 FROM posts WHERE author_id = users.id)");
     assert(dialect.notExistsSubquery("SELECT 1 FROM posts WHERE author_id = users.id") ==
            "NOT EXISTS (SELECT 1 FROM posts WHERE author_id = users.id)");
+
+    // Membership: one array literal
+    assert(dialect.membershipOp("t.id", typeid(int), ["1", "-2"]) == "(t.id = ANY('{1,-2}'))");
+    assert(dialect.membershipOp("t.name", typeid(string), [`it's`, `a"b`, `c\d`, "x,y"]) ==
+           `(t.name = ANY('{"it''s","a\"b","c\\d","x,y"}'))`);
 }

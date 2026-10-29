@@ -206,6 +206,106 @@ class IsNullExpr(T) : Expr!bool, IsNullInfo {
 }
 
 // ============================================================================
+// Membership Expression
+// ============================================================================
+
+/// Interface for membership expressions (`isAmong`) - allows optimizers to
+/// render them, e.g. as `operand = ANY(<array>)` in SQL.
+interface MembershipInfo {
+    /// The operand whose values are looked up (type-erased)
+    ExprBase operand();
+
+    /// The type of the values
+    TypeInfo valueType();
+
+    /// The values (as ConstantInfo.valueAsString represents them), in order
+    string[] valuesAsStrings();
+}
+
+/// Expression which is true for the values of an operand that are among a
+/// list of values (constant data, fixed when the expression is built).
+class IsAmongExpr(T) : Expr!bool, MembershipInfo {
+    private ExprBase _operand;
+    private const(T)[] _values;
+
+    this(Expr!T operand, const(T)[] values) {
+        _operand = operand;
+        _values = values.dup;
+    }
+
+    override ExprBase[] dependencies() {
+        return [_operand];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0)
+            _operand = newDep;
+    }
+
+    override Expr!bool optimize(OptimizeContext ctx) {
+        _operand = cast(ExprBase) (cast(Expr!T) _operand).optimize(ctx);
+        return this;
+    }
+
+    override Promise!(bool[]) eval(EvalContext ctx) {
+        auto values = _values;
+        return evalAs!T(_operand, ctx).then((T[] vals) {
+            bool[] result = new bool[vals.length];
+            static if (__traits(compiles, { bool[T] set; set[T.init] = true; })) {
+                bool[T] set;
+                foreach (v; values)
+                    set[v] = true;
+                foreach (i, v; vals)
+                    result[i] = (v in set) !is null;
+            } else {
+                import std.algorithm.searching : canFind;
+                foreach (i, v; vals)
+                    result[i] = values.canFind(v);
+            }
+            return result;
+        });
+    }
+
+    // MembershipInfo implementation
+    override ExprBase operand() { return _operand; }
+    override TypeInfo valueType() { return typeid(T); }
+    override string[] valuesAsStrings() {
+        import dunamis.core.expr.primitives : constantValueString;
+        string[] strings;
+        foreach (v; _values)
+            strings ~= constantValueString(v);
+        return strings;
+    }
+}
+
+/// Whether each value of `operand` is among `values` (constant data). Data
+/// sources can evaluate this where the operand is (e.g. as SQL
+/// `operand = ANY(...)` in a WHERE clause), unlike a chain of `||`-ed
+/// equalities or an opaque function.
+Expr!bool isAmong(T)(Expr!T operand, const(T)[] values) {
+    return new IsAmongExpr!T(operand, values);
+}
+
+unittest {
+    import ae.utils.promise.await : awaitSync;
+
+    static class Values(T) : Expr!T {
+        T[] values;
+        this(T[] values) { this.values = values; }
+        override ExprBase[] dependencies() { return []; }
+        override void replaceDependency(size_t, ExprBase) {}
+        override Promise!(T[]) eval(EvalContext ctx) { return resolve(values); }
+    }
+    auto ctx = new EvalContext();
+    assert(isAmong(new Values!int([1, 2, 3, 4]), [4, 2]).eval(ctx).awaitSync == [false, true, false, true]);
+    assert(isAmong(new Values!int([1]), cast(int[]) null).eval(ctx).awaitSync == [false]);
+    auto names = isAmong(new Values!string(["a", "b"]), ["b", "c"]);
+    assert(names.eval(ctx).awaitSync == [false, true]);
+    auto info = cast(MembershipInfo) names;
+    assert(info.valueType == typeid(string) && info.valuesAsStrings == ["b", "c"]);
+}
+
+// ============================================================================
 // LIKE Pattern Expressions (for string filtering)
 // ============================================================================
 

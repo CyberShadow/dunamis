@@ -69,16 +69,23 @@ class ConstExpr(T) : Expr!T, ConstantInfo {
     override TypeInfo valueType() { return typeid(T); }
 
     override string valueAsString() {
-        import std.conv : to;
-        static if (is(T == string)) {
-            return _value;
-        } else static if (is(T == enum)) {
-            // As data sources store it
-            import dunamis.core.types : storedLabel;
-            return storedLabel(_value);
-        } else {
-            return _value.to!string;
-        }
+        return constantValueString(_value);
+    }
+}
+
+/// The string representation of a constant value (see
+/// ConstantInfo.valueAsString): a string itself, an enum member as data
+/// sources store it, other values as `to!string` converts them.
+string constantValueString(T)(T value) {
+    import std.conv : to;
+    static if (is(T == string)) {
+        return value;
+    } else static if (is(T == enum)) {
+        // As data sources store it
+        import dunamis.core.types : storedLabel;
+        return storedLabel(value);
+    } else {
+        return value.to!string;
     }
 }
 

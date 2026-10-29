@@ -43,26 +43,8 @@ string toSqlLiteral(T)(T value) {
 
 /// Convert a ConstantInfo to SQL literal using runtime type dispatch
 string constantToSqlLiteral(ConstantInfo info) {
-    auto type = info.valueType;
-    auto strValue = info.valueAsString;
-
-    // Check for string types
-    if (type == typeid(string)) {
-        return "'" ~ strValue.replace("'", "''") ~ "'";
-    }
-    // Check for bool
-    if (type == typeid(bool)) {
-        return strValue == "true" ? "TRUE" : "FALSE";
-    }
-    // Numeric types pass through as-is
-    if (type == typeid(int) || type == typeid(long) ||
-        type == typeid(float) || type == typeid(double) ||
-        type == typeid(uint) || type == typeid(ulong) ||
-        type == typeid(short) || type == typeid(ushort)) {
-        return strValue;
-    }
-    // Default: quote as string
-    return "'" ~ strValue.replace("'", "''") ~ "'";
+    import dunamis.relational.sql_dialect : sqlLiteral;
+    return sqlLiteral(info.valueType, info.valueAsString);
 }
 
 // ============================================================================
@@ -1105,6 +1087,22 @@ private struct WhereContext {
             }));
         }
 
+        // Handle membership tests of columns (isAmong)
+        if (auto membership = cast(MembershipInfo) expr) {
+            RowPath path;
+            string column;
+            if (resolveColumn(membership.operand, filterItem, path, column)) {
+                auto valueType = membership.valueType;
+                auto values = membership.valuesAsStrings;
+                if (values.length == 0)
+                    return dialectAgnostic("1=0");
+                return Nullable!DialectSql(onRow(path, table, (string rowTable) {
+                    auto columnSql = qualified(rowTable, column);
+                    return (SqlDialect d) => d.membershipOp(columnSql, valueType, values);
+                }));
+            }
+        }
+
         // Handle constant true/false
         if (auto constInfo = cast(ConstantInfo) expr) {
             if (constInfo.valueType == typeid(bool)) {
@@ -1211,6 +1209,11 @@ unittest {
         override string notExistsSubquery(string subquery) {
             return "NOT EXISTS (" ~ subquery ~ ")";
         }
+        override string membershipOp(string operandSql, TypeInfo valueType, string[] values) {
+            import dunamis.relational.sql_dialect : inListSql;
+            return inListSql(operandSql, valueType, values);
+        }
+
         override string likeOp(string operandSql, string pattern, bool caseInsensitive) {
             if (caseInsensitive) {
                 return "(LOWER(" ~ operandSql ~ ") LIKE LOWER('" ~ pattern ~ `') ESCAPE '\')`;
@@ -1281,6 +1284,11 @@ unittest {
         override string notExistsSubquery(string subquery) {
             return "NOT EXISTS (" ~ subquery ~ ")";
         }
+        override string membershipOp(string operandSql, TypeInfo valueType, string[] values) {
+            import dunamis.relational.sql_dialect : inListSql;
+            return inListSql(operandSql, valueType, values);
+        }
+
         override string likeOp(string operandSql, string pattern, bool caseInsensitive) {
             if (caseInsensitive) {
                 return "(LOWER(" ~ operandSql ~ ") LIKE LOWER('" ~ pattern ~ `') ESCAPE '\')`;
