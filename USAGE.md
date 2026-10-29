@@ -1317,6 +1317,7 @@ Errors are collected on `EvalContext` during evaluation. The server includes bot
 - **Path tracking** — error paths trace through nested selections (e.g., `["users", "posts", "title"]`)
 - **Transparent** — no changes needed to entity definitions or computed fields; error catching is automatic
 - **Sequential mutations** — mutation fields also catch errors independently and continue to the next field; a null in a non-null mutation field makes the whole result null (null bubbling, as for query fields), and the fields after it are not evaluated
+- **Bugs fail too** — a D `Error` (a failed assertion, a range violation, ...) thrown during evaluation is logged to stderr and fails what it was evaluating like an `Exception` would, as an `EvaluationError` ("Internal error: ..."), rather than leaving the evaluation pending forever (`dunamis.core.errors` sets `ae.utils.promise.errorRejection` for the process)
 
 ### Per-Element Errors with GqlResult
 

@@ -3,6 +3,8 @@ module dunamis.core.executor;
 import ae.utils.promise;
 import ae.utils.promise.await : awaitSync;
 
+// (Errors thrown during evaluation fail it: see dunamis.core.errors)
+import dunamis.core.errors : EvaluationError;
 import dunamis.core.datasource : ChangeEvent, DataSource, DataSession, SetupMode;
 import dunamis.core.eval;
 import dunamis.core.expr;
