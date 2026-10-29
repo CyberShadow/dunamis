@@ -123,11 +123,14 @@ static this() {
         &testDerivedSessionSettings);
     registerTest("Conditional collections (onlyIf) of root collections", "postgres",
         &testOnlyIfRootCollection);
+    import integration.postgres_batching : testStatementCountsOfComputedFields;
+    registerTest("Statement counts of computed fields do not depend on the data", "postgres",
+        &testStatementCountsOfComputedFields);
 }
 
 /// Run `fn` in a fiber of the event loop's thread (where the data source's
 /// sessions live), and wait for it; rethrows its failure as a test failure.
-private void onEventLoop(void delegate() fn) {
+package void onEventLoop(void delegate() fn) {
     import core.atomic : atomicLoad, atomicStore;
     import core.thread : Thread;
     import core.time : msecs;

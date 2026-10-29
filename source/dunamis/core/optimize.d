@@ -23,6 +23,26 @@ interface ExprOptimizer {
 ///   auto node = relCtx.getOrCreateNode(mapExpr, typeName, table);
 class OptimizeContext {
     mixin SourceContextRegistry;
+
+    /// Maps whose elements placeholders range over (see elementOwner).
+    private Object[void*] _elementOwners;
+
+    /// Record that the placeholder `placeholder` (e.g. a filter predicate's
+    /// item) ranges over rows of the collection of the map `owner` (see
+    /// `dunamis.core.elements.registerElementOwner`). The first
+    /// registration of a placeholder wins.
+    void setElementOwner(Object placeholder, Object owner) {
+        auto key = cast(void*) placeholder;
+        if (key !in _elementOwners)
+            _elementOwners[key] = owner;
+    }
+
+    /// The map over whose collection's rows `placeholder` ranges, if
+    /// recorded (else null): what an optimizer fetches for that map's
+    /// elements also serves the placeholder's.
+    Object elementOwner(Object placeholder) {
+        return _elementOwners.get(cast(void*) placeholder, null);
+    }
 }
 
 // ============================================================================

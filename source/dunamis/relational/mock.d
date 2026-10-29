@@ -105,7 +105,7 @@ class MockDBImpl : RelationalSession {
         } else {
             // Child node: get children via parent
             if (parentResult !is null) {
-                auto parentRefs = parentResult.allRefs();
+                auto parentRefs = linkedParentRefs(node, parentResult);
                 auto childGroups = fetchChildrenSync(
                     node.table, node.typeName, node.parentFk, parentRefs);
 
@@ -182,6 +182,38 @@ class MockDBImpl : RelationalSession {
         }
 
         return result;
+    }
+
+    /// The parents a child node's rows are selected for: the parent
+    /// layer's rows, or, for a hasMany reached through belongsTo hops (whose
+    /// parents are a table the parent layer joins, see
+    /// `QueryNode.parentLinkColumns`), the distinct joined rows.
+    private AnyRef[] linkedParentRefs(QueryNode node, QueryResult parentResult) {
+        import dunamis.core.types : encodeCompositeKey;
+        auto parentRefs = parentResult.allRefs();
+        if (node.parentLinkColumns == node.parent.pkColumns)
+            return parentRefs;
+        AnyRef[] linked;
+        bool[string] seen;
+        foreach (r; parentRefs) {
+            string[] parts;
+            foreach (col; node.parentLinkColumns) {
+                auto v = parentResult.getColumnRaw(col, [r])[0];
+                if (v.type == JSONType.null_) {
+                    parts = null;
+                    break;
+                }
+                parts ~= jsonIdToString(v);
+            }
+            if (!parts.length)
+                continue;
+            auto linkRef = makeAnyRef(node.parentTypeName, encodeCompositeKey(parts));
+            if (linkRef.id !in seen) {
+                seen[linkRef.id] = true;
+                linked ~= linkRef;
+            }
+        }
+        return linked;
     }
 
     override Promise!(string[]) fetchColumnString(string table, string column, AnyRef[] refs) {

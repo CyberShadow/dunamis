@@ -5,6 +5,7 @@ import std.array;
 import std.typecons : Nullable;
 
 import dunamis.core.expr.base : ExprBase;
+import dunamis.core.optimize : OptimizeContext;
 import dunamis.relational.schema.interfaces;
 
 // ============================================================================
@@ -19,8 +20,15 @@ import dunamis.relational.schema.interfaces;
 /// Expr!AnyRef that converts the base entity to AnyRef with the correct type.
 ///
 /// Accepts ExprBase to work with any Expr!Entity type.
-Object findMapExprFromChain(ExprBase expr, ref JoinHop[] joinPath, out ExprBase baseInput, out ExprBase baseInputAsAnyRef) {
+///
+/// The items of filter predicates and sort comparisons are rows of the map
+/// whose collection they filter or sort, if `ctx` records one (see
+/// `OptimizeContext.elementOwner`): for them, that map is returned.
+Object findMapExprFromChain(ExprBase expr, ref JoinHop[] joinPath, out ExprBase baseInput, out ExprBase baseInputAsAnyRef,
+        OptimizeContext ctx = null) {
     import dunamis.core.expr : EveryItemOfExprInfo, UnwrapNullableInfo, EntityCastInfo;
+    import dunamis.core.filtering : FilterItemInfo;
+    import dunamis.core.sorting : SortItemInfo;
 
     // Track the first expression before any belongsTo chain starts
     // This produces refs for the query node's base table
@@ -41,6 +49,14 @@ Object findMapExprFromChain(ExprBase expr, ref JoinHop[] joinPath, out ExprBase 
             baseInput = inBelongsToChain ? lastBeforeBelongsTo : initialExpr;
             baseInputAsAnyRef = inBelongsToChain ? lastBeforeBelongsToAsAnyRef : null;
             return every.parentMap;
+        }
+        if (cast(FilterItemInfo) expr || cast(SortItemInfo) expr) {
+            auto owner = ctx is null ? null : ctx.elementOwner(expr);
+            if (owner is null)
+                break;
+            baseInput = inBelongsToChain ? lastBeforeBelongsTo : initialExpr;
+            baseInputAsAnyRef = inBelongsToChain ? lastBeforeBelongsToAsAnyRef : null;
+            return owner;
         }
 
         // Walk through access expressions using interfaces

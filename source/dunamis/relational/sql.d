@@ -18,6 +18,14 @@ string toSQL(QueryNode[] nodes) {
     return toSQL(nodes, null);
 }
 
+/// The most layers the final SELECT of a query puts into one JSON object;
+/// the layers of a query with more are grouped into objects (of at most as
+/// many) under the keys `layerGroupKey ~ n` (see loadLayerResults).
+enum size_t layerGroupSize = 40;
+
+/// ditto
+enum string layerGroupKey = "layers";
+
 /// Generate a complete CTE-based SQL query with computed columns.
 /// Root nodes are filtered by their own root filter.
 string toSQL(QueryNode[] nodes, SqlDialect dialect) {
@@ -52,7 +60,6 @@ private string toSQL(QueryNode[] nodes, SqlDialect dialect,
     sql ~= ctes.join(",\n");
 
     // Final SELECT: aggregate all layers into JSON
-    sql ~= format("\nSELECT %s(\n", dialect.jsonObjectFunc());
     string[] jsonParts;
     foreach (node; nodes) {
         string orderByClause;
@@ -66,8 +73,20 @@ private string toSQL(QueryNode[] nodes, SqlDialect dialect,
         jsonParts ~= format("  'layer%d', %s",
             node.id.value, dialect.aggregateLayerJson(node.id.value, orderByClause));
     }
-    sql ~= jsonParts.join(",\n");
-    sql ~= "\n)\n";
+    // (Functions take at most 100 arguments in PostgreSQL: more layers are
+    // grouped into objects of `layerGroupSize` layers, see layerGroupKey.)
+    string object(string[] parts) {
+        return format("%s(\n%s\n)", dialect.jsonObjectFunc(), parts.join(",\n"));
+    }
+    if (jsonParts.length > layerGroupSize) {
+        string[] groups;
+        for (size_t i = 0; i < jsonParts.length; i += layerGroupSize) {
+            auto end = i + layerGroupSize < jsonParts.length ? i + layerGroupSize : jsonParts.length;
+            groups ~= format("  '%s%d', %s", layerGroupKey, i / layerGroupSize, object(jsonParts[i .. end]));
+        }
+        jsonParts = groups;
+    }
+    sql ~= "\nSELECT " ~ object(jsonParts) ~ "\n";
 
     auto result = sql.data;
 

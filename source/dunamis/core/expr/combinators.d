@@ -237,6 +237,7 @@ class BroadcastExpr(T) : Expr!T {
 
     override Expr!T optimize(OptimizeContext ctx) {
         _source = _source.optimize(ctx);
+        _sizeReference = optimizeExpr(_sizeReference, ctx);
         return this;
     }
 
@@ -374,7 +375,9 @@ class ContextExpr(T) : Expr!T if (is(T == struct)) {
     }
 
     override Expr!T optimize(OptimizeContext ctx) {
-        return this;  // Context values are runtime data, not optimizable
+        // Context values are runtime data; the batch is the reference's
+        _batchRef = optimizeExpr(_batchRef, ctx);
+        return this;
     }
 
     override Promise!(T[]) eval(EvalContext ctx) {
@@ -641,6 +644,12 @@ class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
     }
 
     override Expr!(R[]) optimize(OptimizeContext ctx) {
+        import dunamis.core.elements : registerElementOwner;
+
+        // The items of the filters and sorts of the collection range over
+        // rows of it, as this map's own item does
+        registerElementOwner(ctx, this, _collection);
+
         // Optimize body FIRST - this creates QueryNodes for column access
         // Then optimize collection - it can find and use the same QueryNode
         _body = (cast(Expr!R) _body).optimize(ctx);

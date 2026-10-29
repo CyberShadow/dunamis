@@ -206,6 +206,9 @@ abstract class RelationalSession : DataSession {
     /// Stored by PrefetchExpr after query execution, read by ProjectColumnExpr.
     private QueryResult[QueryNodeId] _queryResults;
 
+    /// The queries of QueryNodes' own rows sent (see pendingQueryResult).
+    private Promise!QueryResult[QueryNodeId] _pendingQueryResults;
+
     /// Mutation results, keyed by entity type name.
     /// Stored by InsertExpr/UpdateExpr, read by ColumnAccessExpr.
     private QueryResult[string] _mutationResults;
@@ -238,6 +241,7 @@ abstract class RelationalSession : DataSession {
     override Promise!void setup(SetupMode mode = SetupMode.query) {
         _pendingEvents = [];
         _queryResults.clear();
+        _pendingQueryResults.clear();
         _mutationResults.clear();
         return resolve();
     }
@@ -274,6 +278,19 @@ abstract class RelationalSession : DataSession {
     void storeQueryResult(QueryNodeId queryNodeId, QueryResult result) {
         assert(result !is null, "Cannot store null QueryResult");
         _queryResults[queryNodeId] = result;
+    }
+
+    /// The result of the query of the rows of the query node `queryNodeId`
+    /// selects by itself, if it was sent in this session (it may still be
+    /// pending), or null: evaluations of the node's PrefetchExpr in different
+    /// scopes of a request share it.
+    Promise!QueryResult pendingQueryResult(QueryNodeId queryNodeId) {
+        return _pendingQueryResults.get(queryNodeId, null);
+    }
+
+    /// Record the query of the rows of a query node (see pendingQueryResult).
+    void setPendingQueryResult(QueryNodeId queryNodeId, Promise!QueryResult result) {
+        _pendingQueryResults[queryNodeId] = result;
     }
 
     /// Check if we have results for a query node
@@ -775,6 +792,25 @@ class QueryResult {
 /// Returns the root node's result (or an empty result if absent).
 QueryResult loadLayerResults(JSONValue layers, QueryNode[] nodes,
         ref QueryResult[QueryNode] cache) {
+    import dunamis.relational.sql : layerGroupKey;
+    import std.algorithm.searching : startsWith;
+
+    // The layers of a query with many are grouped (see layerGroupSize)
+    if (layers.type == JSONType.object) {
+        JSONValue[string] flat;
+        bool grouped;
+        foreach (key, value; layers.object) {
+            if (key.startsWith(layerGroupKey) && value.type == JSONType.object) {
+                grouped = true;
+                foreach (k, v; value.object)
+                    flat[k] = v;
+            } else
+                flat[key] = value;
+        }
+        if (grouped)
+            layers = JSONValue(flat);
+    }
+
     QueryResult rootResult;
     QueryResult[QueryNode] loaded;
     foreach (node; nodes) {

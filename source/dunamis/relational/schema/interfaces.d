@@ -54,6 +54,12 @@ interface HasManyInfo {
     /// Parent entity type name (for ref encoding)
     @property string parentTypeName();
 
+    /// Parent table name (empty if unknown)
+    @property string parentTable();
+
+    /// The parent entity's data source (null if unknown)
+    @property DataSource parentDataSource();
+
     /// Primary key columns of the parent table, which the child table's
     /// foreign key refers to (empty if unknown)
     @property string[] parentPkColumns();

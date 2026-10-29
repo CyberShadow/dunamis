@@ -74,8 +74,13 @@ class PrefetchExpr : Expr!(AnyRef[]) {
             return resolve([session.getQueryResult(_node.id).allRefs()]);
         }
 
-        // Note: Expression memoization is handled by evalAs(), so we don't need
-        // to cache the Promise here. Multiple callers will get the same Promise.
+        // A query of the node's own rows already sent in this session (e.g.
+        // from a scope of the evaluation, such as a filter predicate's,
+        // whose memo the other scopes do not see) is not sent again.
+        bool ownRows = root.filter == _node.rootFilter && root.refs is _node.rootFilterRefs;
+        if (ownRows)
+            if (auto pending = session.pendingQueryResult(_node.id))
+                return pending.then((QueryResult result) => [result.allRefs()]);
 
         // Ensure parent is fetched first
         Promise!void parentReady;
@@ -88,7 +93,7 @@ class PrefetchExpr : Expr!(AnyRef[]) {
         // Capture node for use in closure
         auto node = _node;
 
-        return parentReady.then(() {
+        auto query = parentReady.then(() {
             // Get parent result for child nodes
             QueryResult parentResult = null;
             if (node.parent !is null) {
@@ -99,8 +104,11 @@ class PrefetchExpr : Expr!(AnyRef[]) {
             return session.executeQueryNode(node, parentResult, root);
         }).then((QueryResult result) {
             session.storeQueryResult(node.id, result);
-            return [result.allRefs()];
+            return result;
         });
+        if (ownRows)
+            session.setPendingQueryResult(node.id, query);
+        return query.then((QueryResult result) => [result.allRefs()]);
     }
 
     @property QueryNode node() { return _node; }

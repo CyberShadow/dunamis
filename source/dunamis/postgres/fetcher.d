@@ -130,11 +130,25 @@ class PostgresSession : RelationalSession {
         return "'" ~ value.replace("'", "''") ~ "'";
     }
 
+    /// Called with the text of each statement the session sends (other than
+    /// the BEGIN and COMMIT/ROLLBACK of its transaction, and the statements
+    /// applying a derived session's settings), e.g. to count the database
+    /// round trips of an evaluation. Sessions derived from this one (see
+    /// withSettings) report their statements here too.
+    void delegate(const(char)[] sql) statementObserver;
+
+    private void observe(const(char)[] sql) {
+        auto observer = (_base is null ? this : _base).statementObserver;
+        if (observer !is null)
+            observer(sql);
+    }
+
     /// Send the statement `sql`, and collect its rows. A derived session
     /// sends it between the statements applying its settings and restoring
     /// the request's (see withSettings).
     private Promise!(PgSqlConnection.Row[]) run(const(char)[] sql) {
         auto conn = connection();
+        observe(sql);
         if (_base is null || !_applySettings.length)
             return conn.query(sql).array();
         return bracketed(conn, conn.query(sql));
@@ -143,6 +157,7 @@ class PostgresSession : RelationalSession {
     /// ditto, with the Extended Query protocol and parameters
     private Promise!(PgSqlConnection.Row[]) runExtended(Args...)(const(char)[] sql, Args args) {
         auto conn = connection();
+        observe(sql);
         if (_base is null || !_applySettings.length)
             return conn.extendedQuery(sql, args).array();
         return bracketed(conn, conn.extendedQuery(sql, args));
@@ -411,6 +426,19 @@ class PostgresSession : RelationalSession {
     // These return Promises to support async database operations.
     // =========================================================================
 
+    /// The ids of the valid refs among `refs`, each once (a batch may
+    /// hold the same row several times).
+    private static string[] distinctValidIds(AnyRef[] refs) {
+        string[] ids;
+        bool[string] seen;
+        foreach (r; refs)
+            if (r.isValid && r.localId.length > 0 && r.localId !in seen) {
+                seen[r.localId] = true;
+                ids ~= r.localId;
+            }
+        return ids;
+    }
+
     /// Generate SQL to fetch a column value, keyed by PK columns.
     private string buildFetchColumnSQL(string table, string column, string[] validIds) {
         import std.format : format;
@@ -453,13 +481,8 @@ class PostgresSession : RelationalSession {
     override Promise!(string[]) fetchColumnString(string table, string column, AnyRef[] refs) {
         if (refs.length == 0) return resolve(cast(string[])[]);
 
-        // Filter to valid refs only
-        string[] validIds;
-        foreach (r; refs) {
-            if (r.isValid && r.localId.length > 0) {
-                validIds ~= r.localId;
-            }
-        }
+        // The valid refs' ids, once each
+        string[] validIds = distinctValidIds(refs);
 
         if (validIds.length == 0) {
             // All refs were invalid - return empty strings
@@ -488,13 +511,8 @@ class PostgresSession : RelationalSession {
     override Promise!(long[]) fetchColumnLong(string table, string column, AnyRef[] refs) {
         if (refs.length == 0) return resolve(cast(long[])[]);
 
-        // Filter to valid refs only
-        string[] validIds;
-        foreach (r; refs) {
-            if (r.isValid && r.localId.length > 0) {
-                validIds ~= r.localId;
-            }
-        }
+        // The valid refs' ids, once each
+        string[] validIds = distinctValidIds(refs);
 
         if (validIds.length == 0) {
             // All refs were invalid - return zeros
@@ -551,13 +569,8 @@ class PostgresSession : RelationalSession {
             return resolve(cast(AnyRef[][])[]);
         }
 
-        // Filter to valid parent refs only
-        string[] validIds;
-        foreach (r; parentRefs) {
-            if (r.isValid && r.localId.length > 0) {
-                validIds ~= r.localId;
-            }
-        }
+        // The valid refs' ids, once each
+        string[] validIds = distinctValidIds(parentRefs);
 
         if (validIds.length == 0) {
             // All refs were invalid - return empty arrays
@@ -608,13 +621,8 @@ class PostgresSession : RelationalSession {
             }
         }
 
-        // Filter to valid child refs only
-        string[] validIds;
-        foreach (r; childRefs) {
-            if (r.isValid && r.localId.length > 0) {
-                validIds ~= r.localId;
-            }
-        }
+        // The valid refs' ids, once each
+        string[] validIds = distinctValidIds(childRefs);
 
         if (validIds.length == 0) {
             // All refs were invalid - return invalid refs
@@ -684,13 +692,8 @@ class PostgresSession : RelationalSession {
             return resolve(cast(JSONValue[])[]);
         }
 
-        // Filter to valid refs only
-        string[] validIds;
-        foreach (r; refs) {
-            if (r.isValid && r.localId.length > 0) {
-                validIds ~= r.localId;
-            }
-        }
+        // The valid refs' ids, once each
+        string[] validIds = distinctValidIds(refs);
 
         if (validIds.length == 0) {
             // All refs were invalid - return nulls

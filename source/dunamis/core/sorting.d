@@ -92,12 +92,11 @@ class SortItemExpr(Entity) : Expr!Entity, SortItemInfo {
     }
 
     override Promise!(Entity[]) eval(EvalContext ctx) {
-        // During naive path sorting, the predicate is evaluated with comparison items.
-        // Get the current comparison item (left or right) from context.
-        auto vals = ctx.getValues!Entity(_parentSort);
-        if (vals.length >= 2) {
-            return resolve([vals[_isLeftItem ? 0 : 1]]);
-        }
+        // The items compared: those SortByExpr.eval binds to this side of
+        // the comparisons it evaluates (one comparison, or a batch of them).
+        Entity[] vals;
+        if (ctx.tryGetValues!Entity(this, vals))
+            return resolve(vals);
         throw new Exception("SortItemExpr: no comparison items in context - " ~
             "ensure SortByExpr.eval() sets up sort items before predicate evaluation");
     }
@@ -129,12 +128,17 @@ class SortByExpr(Entity, Pred) : Expr!(Entity[]), SortByInfo
     SortItemExpr!Entity _itemA;  // Left item (a)
     SortItemExpr!Entity _itemB;  // Right item (b)
     private ExprBase _predicate;
+    /// Whether comparisons must be evaluated one at a time (see
+    /// `evaluatesPerItem`).
+    private bool _perItem;
 
     this(Expr!(Entity[]) source, SortItemExpr!Entity a, SortItemExpr!Entity b, Pred pred) {
+        import dunamis.core.elements : evaluatesPerItem;
         _source = source;
         _itemA = a;
         _itemB = b;
         _predicate = pred;
+        _perItem = evaluatesPerItem(pred, a, b);
     }
 
     // SortByInfo implementation
@@ -158,68 +162,129 @@ class SortByExpr(Entity, Pred) : Expr!(Entity[]), SortByInfo
     }
 
     override Expr!(Entity[]) optimize(OptimizeContext ctx) {
+        import dunamis.core.elements : evaluatesPerItem;
+
+        // Optimize the predicate (first: see FilterByExpr.optimize), for its
+        // in-memory evaluation
+        _predicate = (cast(Pred) _predicate).optimize(ctx);
+        _perItem = evaluatesPerItem(_predicate, _itemA, _itemB);
         // Optimize source - pattern matching for SQL push-down happens
         // in the relational layer (schema.d), not here in core
         _source = source.optimize(ctx);
         return this;
     }
 
+    /// The most comparisons evaluated as one batch (see eval).
+    enum size_t maxBatchedComparisons = 1 << 20;
+
+    /// In-memory sorting (stable). The comparisons of all the pairs of items
+    /// of each group are evaluated at once, as one batch of the predicate
+    /// (in a scope binding the items, see FilterByExpr.eval), unless there
+    /// are more than `maxBatchedComparisons` of them, or the predicate must
+    /// be evaluated one pair at a time (see `evaluatesPerItem`): then the
+    /// comparisons the sort needs are evaluated one at a time.
     override Promise!(Entity[][]) eval(EvalContext ctx) {
-        import ae.utils.promise.await : async;
+        auto self = this;
+        return evalAs!(Entity[])(_source, ctx).then((Entity[][] groups) {
+            size_t pairs;
+            foreach (group; groups)
+                pairs += group.length > 1 ? group.length * (group.length - 1) : 0;
+            if (pairs == 0)
+                return resolve(groups);
+            if (_perItem || pairs > maxBatchedComparisons)
+                return self.sortComparingEach(ctx, groups);
+            return self.sortComparingAll(ctx, groups, pairs);
+        });
+    }
+
+    /// Whether a comparison result means "less than".
+    private static bool isLess(R)(R r) {
+        static if (is(R == bool)) return r;
+        else return r < 0;
+    }
+
+    private alias PredResult = Pred.ResultType;
+
+    private Promise!(Entity[][]) sortComparingAll(EvalContext ctx, Entity[][] groups, size_t pairs) {
+        import std.algorithm.sorting : sort;
+        import std.algorithm.mutation : SwapStrategy;
+        import std.conv : to;
+
+        Entity[] lefts, rights;
+        lefts.reserve(pairs);
+        rights.reserve(pairs);
+        foreach (group; groups)
+            if (group.length > 1)
+                foreach (i, a; group)
+                    foreach (j, b; group)
+                        if (i != j) {
+                            lefts ~= a;
+                            rights ~= b;
+                        }
+        auto pairCtx = ctx.createScope();
+        pairCtx.setValues!Entity(_itemA, lefts);
+        pairCtx.setValues!Entity(_itemB, rights);
+        return evalAs!PredResult(_predicate, pairCtx).then((PredResult[] results) {
+            if (results.length != pairs)
+                throw new Exception("Batch size mismatch in sort of " ~ Entity.stringof ~
+                    ": its predicate produced " ~ results.length.to!string ~ " results for " ~
+                    pairs.to!string ~ " comparisons (use broadcast() to replicate a single value " ~
+                    "across a batch)");
+            auto sorted = new Entity[][](groups.length);
+            size_t offset;
+            foreach (gi, group; groups) {
+                auto n = group.length;
+                if (n <= 1) {
+                    sorted[gi] = group;
+                    continue;
+                }
+                auto base = offset;
+                // (The comparison of i with j: pair i*(n-1) + j - (j > i).)
+                bool less(size_t i, size_t j) {
+                    return i != j && isLess(results[base + i * (n - 1) + j - (j > i ? 1 : 0)]);
+                }
+                auto order = new size_t[n];
+                foreach (i; 0 .. n)
+                    order[i] = i;
+                order.sort!(less, SwapStrategy.stable);
+                foreach (i; order)
+                    sorted[gi] ~= group[i];
+                offset += n * (n - 1);
+            }
+            return sorted;
+        });
+    }
+
+    private Promise!(Entity[][]) sortComparingEach(EvalContext ctx, Entity[][] groups) {
+        import std.algorithm.sorting : sort;
+        import std.algorithm.mutation : SwapStrategy;
         import dunamis.core.awaiting : await;
 
-        // Naive path: in-memory sorting using predicate evaluation
-        // Uses fibers via async/await for clean sequential code
         auto predicate = _predicate;
-        auto self = this;
-
+        auto itemA = _itemA, itemB = _itemB;
         return async({
-            // Evaluate source to get entity groups
-            Entity[][] groups = evalAs!(Entity[])(_source, ctx).await;
-
-            // Sort each group using insertion sort with async comparisons
             foreach (ref group; groups) {
                 if (group.length <= 1) continue;
-
-                // Insertion sort with async predicate evaluation
-                Entity[] sorted;
-                sorted.reserve(group.length);
-                sorted ~= group[0];
-
-                foreach (item; group[1 .. $]) {
-                    // Find insertion position
-                    size_t pos = 0;
-                    while (pos < sorted.length) {
-                        // Compare: is item < sorted[pos]?
-                        // Evaluated in a scope of its own (see FilterByExpr)
-                        auto pairCtx = ctx.createScope();
-                        pairCtx.setValues!Entity(self, [item, sorted[pos]]);
-
-                        bool itemIsLess;
-                        static if (is(Pred : Expr!bool)) {
-                            bool[] results = evalAs!bool(predicate, pairCtx).await;
-                            itemIsLess = results.length > 0 ? results[0] : false;
-                        } else static if (is(Pred : Expr!int)) {
-                            int[] results = evalAs!int(predicate, pairCtx).await;
-                            itemIsLess = results.length > 0 ? results[0] < 0 : false;
-                        }
-
-                        if (itemIsLess) break;
-                        pos++;
-                    }
-
-                    // Insert at position
-                    Entity[] newSorted;
-                    newSorted.reserve(sorted.length + 1);
-                    newSorted ~= sorted[0 .. pos];
-                    newSorted ~= item;
-                    newSorted ~= sorted[pos .. $];
-                    sorted = newSorted;
+                auto items = group;
+                bool less(size_t i, size_t j) {
+                    if (i == j) return false;
+                    // Evaluated in a scope of its own (see FilterByExpr)
+                    auto pairCtx = ctx.createScope();
+                    pairCtx.setValues!Entity(itemA, [items[i]]);
+                    pairCtx.setValues!Entity(itemB, [items[j]]);
+                    PredResult[] results = evalAs!PredResult(predicate, pairCtx).await;
+                    return results.length > 0 && isLess(results[0]);
                 }
-
+                auto order = new size_t[items.length];
+                foreach (i; 0 .. items.length)
+                    order[i] = i;
+                order.sort!(less, SwapStrategy.stable);
+                Entity[] sorted;
+                sorted.reserve(items.length);
+                foreach (i; order)
+                    sorted ~= items[i];
                 group = sorted;
             }
-
             return groups;
         });
     }
@@ -321,4 +386,44 @@ unittest {
     // Placeholders should have no dependencies
     assert(itemA.dependencies.length == 0);
     assert(itemB.dependencies.length == 0);
+}
+
+// The comparisons of all the pairs of each group are evaluated at once; the
+// sort is stable
+unittest {
+    import ae.utils.promise.await : awaitSync;
+
+    static struct Item { int id; int key; }
+
+    static class Groups : Expr!(Item[]) {
+        override ExprBase[] dependencies() { return []; }
+        override void replaceDependency(size_t, ExprBase) {}
+        override Promise!(Item[][]) eval(EvalContext) {
+            return resolve([[Item(1, 3), Item(2, 1), Item(3, 3), Item(4, 2)], [Item(5, 0)], []]);
+        }
+    }
+
+    static class KeyLess : Expr!bool {
+        ExprBase a, b;
+        int* evaluations;
+        this(ExprBase a, ExprBase b, int* evaluations) { this.a = a; this.b = b; this.evaluations = evaluations; }
+        override ExprBase[] dependencies() { return [a, b]; }
+        override void replaceDependency(size_t i, ExprBase dep) { if (i == 0) a = dep; else b = dep; }
+        override Promise!(bool[]) eval(EvalContext ctx) {
+            (*evaluations)++;
+            return evalAs!Item(a, ctx).then((Item[] as) => evalAs!Item(b, ctx).then((Item[] bs) {
+                bool[] r;
+                foreach (i, x; as)
+                    r ~= x.key < bs[i].key;
+                return r;
+            }));
+        }
+    }
+
+    int evaluations;
+    auto sorted = sortBy!((Expr!Item a, Expr!Item b) => cast(Expr!bool) new KeyLess(a, b, &evaluations))(new Groups());
+    import std.conv : to;
+    auto got = awaitSync(evalAs!(Item[])(sorted, new EvalContext())) ;
+    assert(got.to!string == "[[Item(2, 1), Item(4, 2), Item(1, 3), Item(3, 3)], [Item(5, 0)], []]", got.to!string);
+    assert(evaluations == 1, "evaluations: " ~ evaluations.to!string);
 }

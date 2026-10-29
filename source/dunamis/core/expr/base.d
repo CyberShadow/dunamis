@@ -34,6 +34,13 @@ abstract class ExprBase {
     /// Used by ConstExpr to derive batch size from another expression.
     abstract Promise!size_t evalResultLength(EvalContext ctx);
 
+    /// Optimize this expression and its children (type-erased: see
+    /// `Expr.optimize`, which typed expressions implement this with).
+    /// Returns: the optimized expression (this or a replacement).
+    ExprBase optimizeBase(OptimizeContext ctx) {
+        return this;
+    }
+
     /// Get optimizers this expression needs.
     /// Override in expressions tied to specific data sources.
     /// Executor walks the tree and collects these.
@@ -107,6 +114,10 @@ abstract class Expr(T) : ExprBase {
     /// Returns: optimized expression (may be this or a replacement).
     Expr!T optimize(OptimizeContext ctx) {
         return this;  // Default: no optimization
+    }
+
+    override final ExprBase optimizeBase(OptimizeContext ctx) {
+        return optimize(ctx);
     }
 
     /// Evaluate for the current batch of entity references.
@@ -438,28 +449,7 @@ package(dunamis.core) template toArray(T) {
     alias toArray = T[];
 }
 
-/// Optimize an ExprBase by dispatching to common result types.
+/// Optimize an expression of any result type (see `ExprBase.optimizeBase`).
 ExprBase optimizeExpr(ExprBase expr, OptimizeContext ctx) {
-    import std.json : JSONValue;
-    import dunamis.core.types : GqlResult;
-    // Try GqlResult types
-    if (auto e = cast(Expr!(GqlResult!string)) expr) return e.optimize(ctx);
-    if (auto e = cast(Expr!(GqlResult!long)) expr) return e.optimize(ctx);
-    if (auto e = cast(Expr!(GqlResult!double)) expr) return e.optimize(ctx);
-    if (auto e = cast(Expr!(GqlResult!bool)) expr) return e.optimize(ctx);
-    // Try Nullable types
-    if (auto e = cast(Expr!(Nullable!string)) expr) return e.optimize(ctx);
-    if (auto e = cast(Expr!(Nullable!long)) expr) return e.optimize(ctx);
-    if (auto e = cast(Expr!(Nullable!double)) expr) return e.optimize(ctx);
-    if (auto e = cast(Expr!(Nullable!bool)) expr) return e.optimize(ctx);
-    // Try common types
-    if (auto e = cast(Expr!string) expr) return e.optimize(ctx);
-    if (auto e = cast(Expr!long) expr) return e.optimize(ctx);
-    if (auto e = cast(Expr!bool) expr) return e.optimize(ctx);
-    if (auto e = cast(Expr!double) expr) return e.optimize(ctx);
-    if (auto e = cast(Expr!JSONValue) expr) return e.optimize(ctx);
-    if (auto e = cast(Expr!(JSONValue[])) expr) return e.optimize(ctx);
-    if (auto e = cast(Expr!(AnyRef[])) expr) return e.optimize(ctx);
-    // Fallback - return as-is
-    return expr;
+    return expr is null ? null : expr.optimizeBase(ctx);
 }

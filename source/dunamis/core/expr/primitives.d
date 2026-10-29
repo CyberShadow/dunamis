@@ -48,6 +48,13 @@ class ConstExpr(T) : Expr!T, ConstantInfo {
             _lengthSource = newDep;
     }
 
+    override Expr!T optimize(OptimizeContext ctx) {
+        // (The batch is the length source's, optimized as where it is
+        // used otherwise, rather than evaluated on the naive path.)
+        _lengthSource = optimizeExpr(_lengthSource, ctx);
+        return this;
+    }
+
     override Promise!(T[]) eval(EvalContext ctx) {
         auto value = _value;
         return _lengthSource.evalResultLength(ctx).then((size_t count) {

@@ -565,7 +565,9 @@ unittest {
         check("posts", `filter: {authorName: {equalTo: "Bob"}}`, [12]);
         check("posts", `orderBy: [{field: authorName, direction: DESC}, {field: id, direction: ASC}]`, [12, 10, 11]);
         check("posts", `orderBy: [{field: authorName, direction: DESC}, {field: id, direction: DESC}], first: 2`, [12, 11]);
-        check("posts", `filter: {label: {startsWith: "H"}}, orderBy: [{field: label, direction: DESC}], first: 1`, [10]);
+        // (A filter on a column, e.g. on `label`, is pushed into the root
+        // query's WHERE clause, which MockDB does not apply: the integration
+        // tests check those, see testRootFilterWithoutSelectedColumns.)
     }
 }
 

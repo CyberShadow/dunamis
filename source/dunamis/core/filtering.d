@@ -66,12 +66,11 @@ class FilterItemExpr(Entity) : Expr!Entity, FilterItemInfo {
     }
 
     override Promise!(Entity[]) eval(EvalContext ctx) {
-        // During naive path filtering, the predicate is evaluated per item.
-        // Get the current filter item from context.
-        auto vals = ctx.getValues!Entity(_parentFilter);
-        if (vals.length > 0) {
-            return resolve([vals[0]]);
-        }
+        // The items the predicate is evaluated for: those of the batch
+        // FilterByExpr.eval binds (all the items it filters, or one).
+        Entity[] vals;
+        if (ctx.tryGetValues!Entity(_parentFilter, vals))
+            return resolve(vals);
         throw new Exception("FilterItemExpr: no filter item in context - " ~
             "ensure FilterByExpr.eval() sets up filter item before predicate evaluation");
     }
@@ -101,11 +100,16 @@ class FilterByExpr(Entity) : Expr!(Entity[]), FilterByInfo {
     private ExprBase _source;
     FilterItemExpr!Entity _item;
     private ExprBase _predicate;  // Expr!bool
+    /// Whether the predicate must be evaluated for one item at a time (see
+    /// `evaluatesPerItem`).
+    private bool _perItem;
 
     this(Expr!(Entity[]) source, FilterItemExpr!Entity item, Expr!bool pred) {
+        import dunamis.core.elements : evaluatesPerItem;
         _source = source;
         _item = item;
         _predicate = pred;
+        _perItem = evaluatesPerItem(pred, item);
     }
 
     // FilterByInfo implementation
@@ -128,62 +132,83 @@ class FilterByExpr(Entity) : Expr!(Entity[]), FilterByInfo {
     }
 
     override Expr!(Entity[]) optimize(OptimizeContext ctx) {
+        import dunamis.core.elements : evaluatesPerItem;
+
+        // Optimize the predicate, for its in-memory evaluation (data sources
+        // may read the values it needs with those of the rows filtered, see
+        // OptimizeContext.elementOwner). First, as a map optimizes its body
+        // before its collection: what the predicate reads may make the rows
+        // a query of their own (into which the filter is then pushed), which
+        // the source's root reads its rows from.
+        _predicate = (cast(Expr!bool) _predicate).optimize(ctx);
+        _perItem = evaluatesPerItem(_predicate, _item);
         // Optimize source - pattern matching for SQL push-down happens
         // in the relational layer (schema.d), not here in core
         _source = source.optimize(ctx);
         return this;
     }
 
+    /// In-memory filtering: the predicate is evaluated once, for all the
+    /// items of all the groups (like a map's body), in a scope of its own
+    /// binding the items (its evaluations depend on them, and must not be
+    /// memoized in — or wipe the memo of — the shared context). A predicate
+    /// referring to the item from within a nested scope (e.g. a nested
+    /// filter's predicate comparing with it), or to the placeholder of an
+    /// enclosing construct, is evaluated for each item (see
+    /// `evaluatesPerItem`).
     override Promise!(Entity[][]) eval(EvalContext ctx) {
-        import dunamis.core.awaiting : await;
-
-        // Naive path: in-memory filtering using predicate evaluation
         auto predicate = _predicate;
         auto self = this;
+        auto perItem = _perItem;
 
+        return evalAs!(Entity[])(_source, ctx).then((Entity[][] groups) {
+            Entity[] items;
+            foreach (group; groups)
+                items ~= group;
+            if (items.length == 0)
+                return resolve(groups);
+
+            Promise!(bool[]) results;
+            if (perItem)
+                results = evalPerItem(predicate, ctx, self, items);
+            else {
+                auto itemsCtx = ctx.createScope();
+                itemsCtx.setValues!Entity(self, items);
+                results = evalAs!bool(predicate, itemsCtx);
+            }
+            return results.then((bool[] keep) {
+                import std.conv : to;
+                if (keep.length != items.length)
+                    throw new Exception("Batch size mismatch in filter of " ~ Entity.stringof ~
+                        ": its predicate produced " ~ keep.length.to!string ~ " results for " ~
+                        items.length.to!string ~ " items (use broadcast() to replicate a single value " ~
+                        "across a batch)");
+                auto result = new Entity[][](groups.length);
+                size_t offset;
+                foreach (gi, group; groups) {
+                    foreach (j, item; group)
+                        if (keep[offset + j])
+                            result[gi] ~= item;
+                    offset += group.length;
+                }
+                return result;
+            });
+        });
+    }
+
+    /// The predicate's value for each item, evaluated for one at a time.
+    private static Promise!(bool[]) evalPerItem(ExprBase predicate, EvalContext ctx, Object self, Entity[] items) {
+        import dunamis.core.awaiting : await;
         return async({
-            // Evaluate source to get entity groups
-            Entity[][] groups = evalAs!(Entity[])(_source, ctx).await;
-
-            debug(filter) {
-                import std.stdio : writefln;
-                writefln("FilterByExpr.eval: %d groups", groups.length);
-                foreach (gi, g; groups) {
-                    writefln("  group[%d]: %d items", gi, g.length);
-                }
+            bool[] results;
+            results.reserve(items.length);
+            foreach (item; items) {
+                auto itemCtx = ctx.createScope();
+                itemCtx.setValues!Entity(self, [item]);
+                bool[] r = evalAs!bool(predicate, itemCtx).await;
+                results ~= r.length > 0 && r[0];
             }
-
-            // Filter each group using predicate evaluation
-            foreach (gi, ref group; groups) {
-                Entity[] filtered;
-                filtered.reserve(group.length);
-
-                foreach (item; group) {
-                    // Evaluate the predicate for this item in a scope of its
-                    // own: its evaluations depend on the item, and must not
-                    // be memoized in (or wipe the memo of) the shared context.
-                    auto itemCtx = ctx.createScope();
-                    itemCtx.setValues!Entity(self, [item]);
-
-                    // Evaluate predicate
-                    bool[] results = evalAs!bool(predicate, itemCtx).await;
-                    debug(filter) {
-                        import std.stdio : writefln;
-                        writefln("  predicate results=%s", results);
-                    }
-                    if (results.length > 0 && results[0]) {
-                        filtered ~= item;
-                    }
-                }
-
-                debug(filter) {
-                    import std.stdio : writefln;
-                    writefln("  group[%d] after filter: %d items", gi, filtered.length);
-                }
-                group = filtered;
-            }
-
-            return groups;
+            return results;
         });
     }
 }
@@ -326,4 +351,91 @@ unittest {
 
     assert(awaitSync(evalAs!int(query, new EvalContext())) == [4]);
     assert(counted.evaluations == 1);
+}
+
+// The predicate is evaluated once, for the items of all the groups
+unittest {
+    import std.algorithm : map;
+    import std.array : array;
+    import ae.utils.promise.await : awaitSync;
+
+    static struct Item { int id; }
+
+    static class Groups : Expr!(Item[]) {
+        override ExprBase[] dependencies() { return []; }
+        override void replaceDependency(size_t, ExprBase) {}
+        override Promise!(Item[][]) eval(EvalContext) {
+            return resolve([[Item(1), Item(2)], [Item(3)], [], [Item(4)]]);
+        }
+    }
+
+    static class IsEven : Expr!bool {
+        ExprBase item;
+        int* evaluations;
+        this(ExprBase item, int* evaluations) { this.item = item; this.evaluations = evaluations; }
+        override ExprBase[] dependencies() { return [item]; }
+        override void replaceDependency(size_t, ExprBase dep) { item = dep; }
+        override Promise!(bool[]) eval(EvalContext ctx) {
+            (*evaluations)++;
+            return evalAs!Item(item, ctx).then((Item[] items) => items.map!(i => i.id % 2 == 0).array);
+        }
+    }
+
+    int evaluations;
+    auto filtered = filterBy!((Expr!Item i) => cast(Expr!bool) new IsEven(i, &evaluations))(new Groups());
+    import std.conv : to;
+    auto got = awaitSync(evalAs!(Item[])(filtered, new EvalContext()));
+    assert(got.to!string == "[[Item(2)], [], [], [Item(4)]]", got.to!string);
+    assert(evaluations == 1, "evaluations: " ~ evaluations.to!string);
+}
+
+// A predicate referring to its item from within a nested filter's predicate
+// is evaluated for each item (its batches would not line up otherwise)
+unittest {
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core.expr : use;
+
+    static struct Item { int id; }
+
+    static class Items : Expr!(Item[]) {
+        ExprBase lengthSource;
+        this(ExprBase lengthSource) { this.lengthSource = lengthSource; }
+        override ExprBase[] dependencies() { return lengthSource ? [lengthSource] : []; }
+        override void replaceDependency(size_t, ExprBase dep) { lengthSource = dep; }
+        override Promise!(Item[][]) eval(EvalContext ctx) {
+            auto all = [Item(1), Item(2), Item(3)];
+            if (lengthSource is null)
+                return resolve([all]);
+            return lengthSource.evalResultLength(ctx).then((size_t n) {
+                auto groups = new Item[][](n);
+                foreach (ref g; groups)
+                    g = all;
+                return groups;
+            });
+        }
+    }
+
+    static class SameId : Expr!bool {
+        ExprBase a, b;
+        this(ExprBase a, ExprBase b) { this.a = a; this.b = b; }
+        override ExprBase[] dependencies() { return [a, b]; }
+        override void replaceDependency(size_t i, ExprBase dep) { if (i == 0) a = dep; else b = dep; }
+        override Promise!(bool[]) eval(EvalContext ctx) {
+            return evalAs!Item(a, ctx).then((Item[] as) => evalAs!Item(b, ctx).then((Item[] bs) {
+                // (Batches of one item of the outer filter: see above)
+                bool[] r;
+                foreach (x; as)
+                    r ~= x.id == bs[0].id;
+                return r;
+            }));
+        }
+    }
+
+    // The items from 2 on, as a nested filter finds each among all items
+    auto filtered = filterBy!((Expr!Item outer) => use((Item[] same) => same.length == 1 && same[0].id >= 2,
+        filterBy!((Expr!Item inner) => cast(Expr!bool) new SameId(inner, outer))(new Items(outer))))(
+        new Items(null));
+    import std.conv : to;
+    auto got = awaitSync(evalAs!(Item[])(filtered, new EvalContext()));
+    assert(got.to!string == "[[Item(2), Item(3)]]", got.to!string);
 }

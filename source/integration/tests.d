@@ -1589,6 +1589,32 @@ void testFilterContainsInsensitive() {
     }
 }
 
+/// A root filter, sort and window apply alike whether or not the selection
+/// reads a column of the rows (when it does not, the filter's predicate is
+/// what makes the rows a query of their own, into which they are pushed).
+void testRootFilterWithoutSelectedColumns() {
+    import std.algorithm.searching : all;
+    void check(string args, bool delegate(JSONValue[]) expect) {
+        auto withTitle = graphql(`{ posts(` ~ args ~ `) { id title } }`);
+        auto idOnly = graphql(`{ posts(` ~ args ~ `) { id } }`);
+        assertNoErrors(withTitle);
+        assertNoErrors(idOnly);
+        auto expected = withTitle["data"]["posts"].array;
+        auto found = idOnly["data"]["posts"].array;
+        assertTrue(expect(expected), args ~ ": unexpected posts: " ~ withTitle.toString());
+        bool same = found.length == expected.length;
+        foreach (i; 0 .. same ? found.length : 0)
+            same = same && found[i]["id"] == expected[i]["id"];
+        assertTrue(same, args ~ ": selecting only the id found " ~ idOnly.toString() ~
+            ", with the title " ~ withTitle.toString());
+    }
+    check(`filter: {title: {notEqualTo: "Hello World"}}, orderBy: [{field: title, direction: DESC}], first: 1`,
+        (JSONValue[] posts) => posts.length == 1 && posts[0]["title"].str != "Hello World");
+    // A relationship (belongsTo) filter beside a column's
+    check(`first: 10, filter: {title: {containsInsensitive: "PROGRAM"}, author: {firstName: {equalTo: "Bob"}}}`,
+        (JSONValue[] posts) => posts.length >= 1 && posts.all!(p => p["title"].str == "D Programming"));
+}
+
 void testFilterStartsWithInsensitive() {
     // Filter users whose firstName starts with "a" (case-insensitive, should match "Alice")
     auto response = graphql(`{
@@ -2635,6 +2661,7 @@ static this() {
     // Case-insensitive filtering tests
     registerTest("Filter containsInsensitive", "tests", &testFilterContainsInsensitive);
     registerTest("Filter startsWithInsensitive", "tests", &testFilterStartsWithInsensitive);
+    registerTest("Root filter, sort and window without selected columns", "tests", &testRootFilterWithoutSelectedColumns);
     registerTest("Filter endsWithInsensitive", "tests", &testFilterEndsWithInsensitive);
     registerTest("Filter case-sensitive vs insensitive", "tests", &testFilterCaseSensitiveVsInsensitive);
 

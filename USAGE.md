@@ -856,6 +856,20 @@ SQL as a whole (e.g. a relationship filter) is evaluated in memory, its
 SQL-expressible `AND` conditions still narrow the query (when no window is
 beneath the filter), and a window above it is then applied in memory too.
 
+**Filters and sorts evaluated in memory** (those of nested fields, and those
+not pushed into SQL) are evaluated in batches, as a map's body is: a
+`filterBy` predicate once for all the items of all the lists it filters, a
+`sortBy` comparison once for all the pairs of items of each list (or, for
+lists with more than `SortByExpr.maxBatchedComparisons` pairs, one comparison
+at a time). The values a predicate reads are fetched with the rows of the
+collection it applies to: its columns (and those of rows reached through
+`BelongsTo`) are columns of that collection's query. So, as in a map's body,
+a value in a predicate which is not derived from the item (e.g. read from a
+root collection) must be aligned with the batch with `broadcast()`. A
+predicate which refers to its item from within a scope of its own (e.g. a
+nested filter's predicate comparing with it) is evaluated for one item (or
+pair) at a time.
+
 ## Introspection
 
 Runtime introspection is built in. The standard `__schema`, `__type`, and `__typename` meta-fields work out of the box:

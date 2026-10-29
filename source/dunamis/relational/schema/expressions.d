@@ -57,9 +57,22 @@ Expr!ResultType belongsTo(Parent, ResultType = Parent, string fk, Child)(Expr!Ch
 // Entity Population Utilities
 // ============================================================================
 
+/// Whether the plain field `fieldName` of `Entity` is (part of) its primary key.
+private enum bool isPrimaryKeyField(Entity, string fieldName) = (() {
+    import dunamis.relational.schema.attrs : getPrimaryKeyFieldNames;
+    foreach (f; getPrimaryKeyFieldNames!Entity)
+        if (f == fieldName)
+            return true;
+    return false;
+})();
+
 /// Populate plain field values into entities by fetching from database.
 /// Used by GetByIdsExpr and GetAllExpr in naive mode to pre-populate fields.
-private Promise!(Entity[]) populatePlainFields(Entity)(RelationalSession session, Entity[] entities) {
+/// If `fetched`, the entities are rows read from the table, whose primary
+/// key fields (made from their refs) need not be read again; otherwise (as
+/// for entities of any ids) they are read too (a missing row's are reset).
+private Promise!(Entity[]) populatePlainFields(Entity)(RelationalSession session, Entity[] entities,
+        bool fetched = false) {
     import dunamis.core.join : joinAll;
     import dunamis.core.types : AnyRef;
 
@@ -81,6 +94,7 @@ private Promise!(Entity[]) populatePlainFields(Entity)(RelationalSession session
         // Fetch all plain fields in parallel
         Promise!void[] fetches;
         static foreach (fieldName; plainFields) {{
+          if (!fetched || !isPrimaryKeyField!(Entity, fieldName)) {
             enum columnName = getPlainFieldColumnName!(Entity, fieldName);
             alias FieldType = typeof(__traits(getMember, Entity.init, fieldName));
 
@@ -90,6 +104,7 @@ private Promise!(Entity[]) populatePlainFields(Entity)(RelationalSession session
                         __traits(getMember, e, fieldName) = values[i];
                     }
                 });
+          }
         }}
 
         // joinAll(Promise!void[]) returns Promise!void, then we return entities
@@ -202,6 +217,144 @@ private void pushDownRootCollection(QueryNode node, Object mapExpr) {
     }
 }
 
+/// Whether `node` was configured to select rows of its own: as a root
+/// query, or as a child layer of another node.
+private bool isConfigured(QueryNode node) {
+    return node.rootFilter != FilterType.none || node.parent !is null;
+}
+
+/// The QueryNode of the elements of the map `mapExpr` (rows of `table`, of
+/// the entity `typeName`, from `db`), created if need be, and configured from
+/// the map's collection if it is not yet: for a root collection, as a root
+/// query (into which the wrappers of the collection are pushed, see
+/// `pushDownRootCollection`); for a HasMany of the elements of another map,
+/// as a child layer of that map's node (which is created and configured
+/// likewise if need be, so that a HasMany is fetched with its parents also
+/// when nothing reads a column of the parents themselves).
+///
+/// The node returned is unconfigured (see `isConfigured`) if the map's rows
+/// cannot be selected by a query of its own; its fields are then evaluated
+/// on the naive path.
+private QueryNode configuredNode(OptimizeContext ctx, Object mapExpr, string typeName, string table,
+        string[] pkColumns, DataSource db) {
+    import dunamis.core.pagination : LimitInfo, OffsetInfo;
+    import dunamis.core.sorting : SortByInfo;
+    import dunamis.core.filtering : FilterByInfo;
+
+    auto relCtx = ctx.getSourceContext!RelationalOptimizeContext();
+    auto node = relCtx.getOrCreateNode(mapExpr, typeName, table, pkColumns);
+
+    // Set the data source on the node (for mutation-returned entities that bypass GetByIdsExpr)
+    if (node.dataSource is null && db !is null)
+        node.dataSource = db;
+
+    if (isConfigured(node))
+        return node;
+    auto mapInfo = cast(MapExprInfo) mapExpr;
+    if (mapInfo is null)
+        return node;
+    Object coll = mapInfo.collection;
+
+    // Peek through the entire collection chain (read-only) to determine
+    // if this is a root or child collection, BEFORE modifying the tree.
+    Object underlyingColl;
+    {
+        Object peek = coll;
+        while (true) {
+            if (auto l = cast(LimitInfo) peek) { peek = l.limitSource; continue; }
+            if (auto o = cast(OffsetInfo) peek) { peek = o.offsetSource; continue; }
+            if (auto s = cast(SortByInfo) peek) { peek = s.sortSource; continue; }
+            if (auto f = cast(FilterByInfo) peek) { peek = f.filterSource; continue; }
+            // Only maps that preserve the rows: the elements
+            // of any other map are not the root's rows.
+            if (auto m = cast(MapExprInfo) peek) {
+                if (!preservesElements(m)) break;
+                auto inner = m.collection;
+                if (inner is peek) break;
+                peek = inner;
+                continue;
+            }
+            // Conditional collections: all or none of the rows
+            if (auto onlyIfInfo = cast(OnlyIfInfo) peek) {
+                auto inner = onlyIfInfo.onlyIfSource;
+                if (inner is null || inner is peek) break;
+                peek = inner;
+                continue;
+            }
+            // Walk through transparent wrappers (e.g., OverrideExpr)
+            if (auto castInfo = cast(EntityCastInfo) peek) {
+                auto inner = castInfo.inputExpr;
+                if (inner is null || inner is peek) break;
+                peek = inner;
+                continue;
+            }
+            break;
+        }
+        underlyingColl = peek;
+    }
+
+    if (auto rootExpr = cast(RootExprInfo) underlyingColl) {
+        // For root collections: unwrap pagination/sorting/filtering from the
+        // expression tree and push to the QueryNode for SQL-level execution.
+        pushDownRootCollection(node, mapExpr);
+        relCtx.setRootNode(underlyingColl, node);
+        if (rootExpr.filterType == FilterType.byIds) {
+            node.setRootFilter(FilterType.byIds, rootExpr.filterRefs);
+        } else if (rootExpr.filterType == FilterType.all) {
+            node.setRootFilter(FilterType.all);
+        }
+    }
+    else if (auto hasManyExpr = cast(HasManyInfo) underlyingColl) {
+        // Child of a hasMany relationship — pagination/sorting/filtering
+        // stays in the expression tree (applied at eval time, as
+        // HasManyAccessExpr evaluates naively), not pushed to the QueryNode.
+        JoinHop[] parentJoinPath;
+        ExprBase parentBaseInput;
+        ExprBase parentBaseInputAsAnyRef;
+        auto parentMapExpr = findMapExprFromChain(hasManyExpr.inputExpr, parentJoinPath, parentBaseInput,
+            parentBaseInputAsAnyRef, ctx);
+        if (parentMapExpr is null)
+            return node;
+        auto parentNode = relCtx.getNode(parentMapExpr);
+        if (parentNode is null) {
+            // Nothing read the parents' columns: select the parents in a
+            // query of their own, for their children to be selected with
+            if (parentJoinPath.length)
+                parentNode = configuredNode(ctx, parentMapExpr, parentJoinPath[0].sourceType,
+                    parentJoinPath[0].sourceTable, parentJoinPath[0].sourcePkColumns, db);
+            else if (hasManyExpr.parentTable.length && hasManyExpr.parentDataSource is db)
+                parentNode = configuredNode(ctx, parentMapExpr, hasManyExpr.parentTypeName,
+                    hasManyExpr.parentTable, hasManyExpr.parentPkColumns, db);
+            if (parentNode is null || !isConfigured(parentNode))
+                return node;
+        }
+        string[] parentLinkColumns;
+        Nullable!JoinAlias lastAlias;
+        foreach (hop; parentJoinPath) {
+            if (lastAlias.isNull)
+                parentNode.addColumn(hop.fk);
+            else
+                parentNode.addJoinedColumn(lastAlias.get, hop.fk);
+            lastAlias = parentNode.addJoin(hop.targetTable,
+                hop.targetType, hop.fk,
+                hop.targetPkColumns, lastAlias);
+        }
+        if (!lastAlias.isNull) {
+            foreach (pk; parentJoinPath[$ - 1].targetPkColumns) {
+                parentNode.addJoinedColumn(lastAlias.get, pk);
+                parentLinkColumns ~= lastAlias.get.value ~ "__" ~ pk;
+            }
+        }
+        node.setParent(parentNode, hasManyExpr.fkColumn,
+            hasManyExpr.parentTypeName, parentLinkColumns);
+        foreach (column; hasManyExpr.orderColumns) {
+            node.addColumn(column);
+            node.addOrderBy(column);
+        }
+    }
+    return node;
+}
+
 /// Expression that reads a column from entities.
 /// Takes typed Expr!Entity for type safety.
 class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
@@ -239,131 +392,19 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
         JoinHop[] joinPath;
         ExprBase baseInput;
         ExprBase baseInputAsAnyRef;
-        auto mapExpr = findMapExprFromChain(_input, joinPath, baseInput, baseInputAsAnyRef);
+        auto mapExpr = findMapExprFromChain(_input, joinPath, baseInput, baseInputAsAnyRef, ctx);
 
         if (mapExpr is null) {
             // Can't optimize, use naive path
             return this;
         }
 
-        // Get the relational optimization context for this data source
         auto relCtx = ctx.getSourceContext!RelationalOptimizeContext();
-
-        // Get or create QueryNode for this MapExpr
         auto node = joinPath.length
-            ? relCtx.getOrCreateNode(mapExpr, joinPath[0].sourceType,
-                joinPath[0].sourceTable, joinPath[0].sourcePkColumns)
-            : relCtx.getOrCreateNode(mapExpr, EntityID!Entity.typeName,
-                EntityID!Entity.table, getPkColumns!Entity);
-
-        // Set the data source on the node (for mutation-returned entities that bypass GetByIdsExpr)
-        if (node.dataSource is null && EntityID!Entity.db !is null) {
-            node.dataSource = EntityID!Entity.db;
-        }
-
-        // Configure the node based on collection type (if not already configured)
-        if (node.rootFilter == FilterType.none && node.parent is null) {
-            if (auto mapInfo = cast(MapExprInfo) mapExpr) {
-                Object coll = mapInfo.collection;
-
-                import dunamis.core.pagination : LimitInfo, OffsetInfo;
-                import dunamis.core.sorting : SortByInfo;
-                import dunamis.core.filtering : FilterByInfo;
-
-                // Peek through the entire collection chain (read-only) to determine
-                // if this is a root or child collection, BEFORE modifying the tree.
-                Object underlyingColl;
-                {
-                    Object peek = coll;
-                    while (true) {
-                        if (auto l = cast(LimitInfo) peek) { peek = l.limitSource; continue; }
-                        if (auto o = cast(OffsetInfo) peek) { peek = o.offsetSource; continue; }
-                        if (auto s = cast(SortByInfo) peek) { peek = s.sortSource; continue; }
-                        if (auto f = cast(FilterByInfo) peek) { peek = f.filterSource; continue; }
-                        // Only maps that preserve the rows: the elements
-                        // of any other map are not the root's rows.
-                        if (auto m = cast(MapExprInfo) peek) {
-                            if (!preservesElements(m)) break;
-                            auto inner = m.collection;
-                            if (inner is peek) break;
-                            peek = inner;
-                            continue;
-                        }
-                        // Conditional collections: all or none of the rows
-                        if (auto onlyIfInfo = cast(OnlyIfInfo) peek) {
-                            auto inner = onlyIfInfo.onlyIfSource;
-                            if (inner is null || inner is peek) break;
-                            peek = inner;
-                            continue;
-                        }
-                        // Walk through transparent wrappers (e.g., OverrideExpr)
-                        if (auto castInfo = cast(EntityCastInfo) peek) {
-                            auto inner = castInfo.inputExpr;
-                            if (inner is null || inner is peek) break;
-                            peek = inner;
-                            continue;
-                        }
-                        break;
-                    }
-                    underlyingColl = peek;
-                }
-
-                bool isRootCollection = cast(RootExprInfo) underlyingColl !is null;
-
-                // For root collections: unwrap pagination/sorting/filtering from the
-                // expression tree and push to the QueryNode for SQL-level execution.
-                // For child collections (HasMany): leave wrappers in the expression tree
-                // so they're applied at eval time, since HasManyAccessExpr evaluates naively.
-                if (isRootCollection)
-                    pushDownRootCollection(node, mapExpr);
-
-                // Configure the node based on collection type
-                if (auto rootExpr = cast(RootExprInfo) underlyingColl) {
-                    relCtx.setRootNode(underlyingColl, node);
-                    if (rootExpr.filterType == FilterType.byIds) {
-                        node.setRootFilter(FilterType.byIds, rootExpr.filterRefs);
-                    } else if (rootExpr.filterType == FilterType.all) {
-                        node.setRootFilter(FilterType.all);
-                    }
-                }
-                else if (auto hasManyExpr = cast(HasManyInfo) underlyingColl) {
-                    // Child of a hasMany relationship — pagination/sorting stays in the
-                    // expression tree (not pushed to QueryNode)
-                    JoinHop[] parentJoinPath;
-                    ExprBase parentBaseInput;
-                    ExprBase parentBaseInputAsAnyRef;
-                    auto parentMapExpr = findMapExprFromChain(hasManyExpr.inputExpr, parentJoinPath, parentBaseInput, parentBaseInputAsAnyRef);
-                    if (parentMapExpr !is null) {
-                        auto parentNode = relCtx.getNode(parentMapExpr);
-                        if (parentNode !is null) {
-                            string[] parentLinkColumns;
-                            Nullable!JoinAlias lastAlias;
-                            foreach (hop; parentJoinPath) {
-                                if (lastAlias.isNull)
-                                    parentNode.addColumn(hop.fk);
-                                else
-                                    parentNode.addJoinedColumn(lastAlias.get, hop.fk);
-                                lastAlias = parentNode.addJoin(hop.targetTable,
-                                    hop.targetType, hop.fk,
-                                    hop.targetPkColumns, lastAlias);
-                            }
-                            if (!lastAlias.isNull) {
-                                foreach (pk; parentJoinPath[$ - 1].targetPkColumns) {
-                                    parentNode.addJoinedColumn(lastAlias.get, pk);
-                                    parentLinkColumns ~= lastAlias.get.value ~ "__" ~ pk;
-                                }
-                            }
-                            node.setParent(parentNode, hasManyExpr.fkColumn,
-                                hasManyExpr.parentTypeName, parentLinkColumns);
-                            foreach (column; hasManyExpr.orderColumns) {
-                                node.addColumn(column);
-                                node.addOrderBy(column);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+            ? configuredNode(ctx, mapExpr, joinPath[0].sourceType,
+                joinPath[0].sourceTable, joinPath[0].sourcePkColumns, EntityID!Entity.db)
+            : configuredNode(ctx, mapExpr, EntityID!Entity.typeName,
+                EntityID!Entity.table, getPkColumns!Entity, EntityID!Entity.db);
 
         // If the node wasn't configured with a valid root filter and has no parent,
         // fall back to naive path
@@ -651,7 +692,7 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
                 enum plainFields = getPlainFieldNames!Entity;
                 static if (plainFields.length > 0) {
                     if (entities.length > 0) {
-                        return populatePlainFields!Entity(session, entities)
+                        return populatePlainFields!Entity(session, entities, true)
                             .then((Entity[] populated) => [populated]);
                     }
                 }
@@ -667,7 +708,7 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
             enum plainFields = getPlainFieldNames!Entity;
             static if (plainFields.length > 0) {
                 if (entities.length > 0) {
-                    return populatePlainFields!Entity(session, entities)
+                    return populatePlainFields!Entity(session, entities, true)
                         .then((Entity[] populated) => [populated]);
                 }
             }
@@ -790,9 +831,13 @@ class HasManyAccessExpr(Parent, Child, string fk, string[] orderBy = null) : Exp
     @property string fkColumn() { return fk; }
     static if (!is(Parent == void)) {
         @property string parentTypeName() { return EntityID!Parent.typeName; }
+        @property string parentTable() { return EntityID!Parent.table; }
+        @property DataSource parentDataSource() { return EntityID!Parent.db; }
         @property string[] parentPkColumns() { return getPkColumns!Parent; }
     } else {
         @property string parentTypeName() { return ""; }
+        @property string parentTable() { return ""; }
+        @property DataSource parentDataSource() { return null; }
         @property string[] parentPkColumns() { return []; }
     }
     @property string[] orderColumns() { return orderBy.dup; }
@@ -837,23 +882,39 @@ class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultTyp
                 JoinHop[] joinPath;
                 ExprBase baseInput;
                 ExprBase baseInputAsAnyRef;
-                auto mapExpr = findMapExprFromChain(_input, joinPath, baseInput, baseInputAsAnyRef);
+                auto mapExpr = findMapExprFromChain(_input, joinPath, baseInput, baseInputAsAnyRef, ctx);
 
                 if (mapExpr is null) {
                     return this;
                 }
 
                 auto relCtx = ctx.getSourceContext!RelationalOptimizeContext();
-                if (relCtx is null) {
+                auto node = joinPath.length
+                    ? configuredNode(ctx, mapExpr, joinPath[0].sourceType,
+                        joinPath[0].sourceTable, joinPath[0].sourcePkColumns, EntityID!Child.db)
+                    : configuredNode(ctx, mapExpr, EntityID!Child.typeName,
+                        EntityID!Child.table, getPkColumns!Child, EntityID!Child.db);
+                if (!isConfigured(node)) {
                     return this;
                 }
 
-                auto node = relCtx.getNode(mapExpr);
-                if (node is null) {
-                    return this;
-                }
-
-                node.addColumn(fk);
+                // The FK: a column of the node's rows, or of the table the
+                // belongsTo chain reaching the child joins
+                string fkColumn = fk;
+                if (joinPath.length) {
+                    Nullable!JoinAlias lastAlias;
+                    foreach (hop; joinPath) {
+                        if (lastAlias.isNull)
+                            node.addColumn(hop.fk);
+                        else
+                            node.addJoinedColumn(lastAlias.get, hop.fk);
+                        lastAlias = node.addJoin(hop.targetTable, hop.targetType, hop.fk,
+                            hop.targetPkColumns, lastAlias);
+                    }
+                    node.addJoinedColumn(lastAlias.get, fk);
+                    fkColumn = lastAlias.get.value ~ "__" ~ fk;
+                } else
+                    node.addColumn(fk);
 
                 auto prefetch = relCtx.getPrefetchExpr(node);
 
@@ -861,7 +922,7 @@ class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultTyp
                 auto refBaseInput = baseInputAsAnyRef !is null
                     ? baseInputAsAnyRef
                     : cast(ExprBase) new EntityToAnyRefExpr!Child(baseInput);
-                auto innerProj = new ProjectBelongsToExpr(node.id, fk, EntityID!Parent.typeName, refBaseInput, prefetch);
+                auto innerProj = new ProjectBelongsToExpr(node.id, fkColumn, EntityID!Parent.typeName, refBaseInput, prefetch);
                 return new ProjectTypedBelongsToExpr!(Child, Parent, ResultType, fk)(innerProj, refBaseInput);
             }
         }
