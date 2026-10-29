@@ -958,7 +958,8 @@ class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultTyp
                     return session.fetchBelongsTo(EntityID!Child.table, fk, EntityID!Parent.typeName, childRefs)
                         .then((AnyRef[] parentRefs) {
                             static if (is(ResultType == Parent)) {
-                                return parentRefs.map!(r => makeEntityFromRef!Parent(r)).array;
+                                return requiredParents!(Child, Parent)(parentRefs, childRefs,
+                                    EntityID!Child.typeName ~ "." ~ fk);
                             } else static if (is(ResultType == Nullable!Parent)) {
                                 return parentRefs.map!(r => r.isValid ? Nullable!Parent(makeEntityFromRef!Parent(r)) : Nullable!Parent.init).array;
                             } else {

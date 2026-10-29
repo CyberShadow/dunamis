@@ -94,6 +94,35 @@ bool isValid(T)(T entity) {
     return true;
 }
 
+/// The parents a required (non-nullable) BelongsTo yields for children with
+/// the refs `childRefs`, of which `parentRefs` are those of the parents found
+/// (an invalid ref where none was).
+///
+/// A child which is a placeholder (an invalid ref, or an entity without a
+/// valid primary key, such as the `T.init` a null object's selection set is
+/// evaluated for in its batch, see `NullableObjectExpr`) has no parent: its
+/// parent is a placeholder (`Parent.init`) too, whose fields are then
+/// evaluated for placeholders as well. A missing parent of any other child
+/// is an error (of the field), as for a null in a non-null field.
+Parent[] requiredParents(Child, Parent)(AnyRef[] parentRefs, AnyRef[] childRefs, string relation) {
+    auto result = new Parent[](parentRefs.length);
+    foreach (i, parentRef; parentRefs) {
+        if (parentRef.isValid && parentRef.localId.length) {
+            result[i] = makeEntityFromRef!Parent(parentRef);
+            continue;
+        }
+        if (i >= childRefs.length)
+            throw new Exception("No " ~ EntityID!Parent.typeName ~ " for the required " ~ relation);
+        auto childRef = childRefs[i];
+        bool placeholder = !childRef.isValid || !childRef.localId.length ||
+            !makeEntityFromRef!Child(childRef).isValid;
+        if (!placeholder)
+            throw new Exception("No " ~ EntityID!Parent.typeName ~ " for the required " ~ relation ~
+                " of " ~ childRef.id);
+    }
+    return result;
+}
+
 // ============================================================================
 // Foreign Key Type
 // ============================================================================

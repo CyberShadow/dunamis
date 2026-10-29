@@ -1319,6 +1319,8 @@ Errors are collected on `EvalContext` during evaluation. The server includes bot
 - **Sequential mutations** — mutation fields also catch errors independently and continue to the next field; a null in a non-null mutation field makes the whole result null (null bubbling, as for query fields), and the fields after it are not evaluated
 - **Bugs fail too** — a D `Error` (a failed assertion, a range violation, ...) thrown during evaluation is logged to stderr and fails what it was evaluating like an `Exception` would, as an `EvaluationError` ("Internal error: ..."), rather than leaving the evaluation pending forever (`dunamis.core.errors` sets `ae.utils.promise.errorRejection` for the process)
 
+The selection set of a nullable object is evaluated for the whole batch, with placeholders (`T.init`) for the null objects, whose results are then discarded. A required `BelongsTo` of a placeholder yields a placeholder parent; a missing parent of any other row is an error of the field.
+
 ### Per-Element Errors with GqlResult
 
 For computed fields that can fail independently per element in a batch, use `GqlResult!T`:

@@ -451,18 +451,24 @@ class ProjectTypedBelongsToExpr(Child, Parent, ResultType, string fk) : Expr!Res
     }
 
     override Promise!(ResultType[]) eval(EvalContext ctx) {
-        import dunamis.relational.schema.types : makeEntityFromRef;
-        return _inner.eval(ctx).then((AnyRef[] refs) {
-            static if (is(ResultType == Parent)) {
-                // Required FK - convert AnyRef to Parent
-                return refs.map!(r => makeEntityFromRef!Parent(r)).array;
-            } else static if (is(ResultType == Nullable!Parent)) {
-                // Optional FK - wrap valid refs in Nullable, invalid as null
-                return refs.map!(r => r.isValid ? Nullable!Parent(makeEntityFromRef!Parent(r)) : Nullable!Parent.init).array;
-            } else {
-                static assert(false, "ResultType must be Parent or Nullable!Parent");
-            }
-        });
+        import dunamis.relational.schema.types : makeEntityFromRef, requiredParents;
+        static if (is(ResultType == Parent)) {
+            // Required FK - convert AnyRef to Parent; a missing one is of a
+            // placeholder child, or an error (see requiredParents)
+            auto baseInput = _baseInput;
+            return _inner.eval(ctx).then((AnyRef[] refs) {
+                if (refs.all!(r => r.isValid && r.localId.length))
+                    return resolve(refs.map!(r => makeEntityFromRef!Parent(r)).array);
+                return evalAs!AnyRef(baseInput, ctx).then((AnyRef[] childRefs) =>
+                    requiredParents!(Child, Parent)(refs, childRefs, EntityID!Child.typeName ~ "." ~ fk));
+            });
+        } else static if (is(ResultType == Nullable!Parent)) {
+            // Optional FK - wrap valid refs in Nullable, invalid as null
+            return _inner.eval(ctx).then((AnyRef[] refs) =>
+                refs.map!(r => r.isValid ? Nullable!Parent(makeEntityFromRef!Parent(r)) : Nullable!Parent.init).array);
+        } else {
+            static assert(false, "ResultType must be Parent or Nullable!Parent");
+        }
     }
 
     // BelongsToInfo implementation for nested BelongsTo chain traversal

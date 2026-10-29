@@ -377,6 +377,15 @@ mixin template TestSchema(alias db) {
                 u.firstName, map!((Expr!Post p) => p.title)(u.posts)));
         }
 
+        /// The user's latest post, if any: a nullable object built by use(),
+        /// whose selection set is evaluated for placeholders of users without
+        /// posts too (in the batch of all users)
+        static auto latestPost(Expr!User u) {
+            import dunamis.core.expr : map;
+            return use((long[] ids) => ids.length ? Nullable!Post(Post(Int64(ids[$ - 1]))) : Nullable!Post.init,
+                map!((Expr!Post p) => use((Post x) => x.id.value, p))(u.posts));
+        }
+
         /// Every user's full name (a root collection with an SQL computed
         /// column), for a single user.
         static auto everyonesFullName(Expr!User u) {

@@ -230,6 +230,23 @@ void testQueryTaskWithNullableAssignee() {
     assertTrue(foundWithAssignee, "Expected at least one task with an assignee");
 }
 
+void testNullableObjectWithRequiredBelongsTo() {
+    // A required relation of a nullable object, null for some of the batch:
+    // the selection set is evaluated for placeholders of the null ones too,
+    // whose parents are placeholders (it failed on their missing parents)
+    auto response = graphql(`{ users(filter: {` ~ seededUsers ~ `}, orderBy: [{field: firstName, direction: ASC}]) {
+        firstName latestPost { author { firstName latestPost { author { lastName } } } }
+    } }`);
+    assertNoErrors(response);
+    assertEqual(response["data"]["users"], `[
+        {"firstName": "Alice", "latestPost": {
+            "author": {"firstName": "Alice", "latestPost": {"author": {"lastName": "Smith"}}}}},
+        {"firstName": "Bob", "latestPost": {
+            "author": {"firstName": "Bob", "latestPost": {"author": {"lastName": "Jones"}}}}},
+        {"firstName": "Charlie", "latestPost": null}
+    ]`);
+}
+
 void testCreateTaskWithEnumStatus() {
     auto response = graphql(`
         mutation {
@@ -2583,6 +2600,7 @@ static this() {
     registerTest("Query tasks with enum status", "tests", &testQueryTasksWithEnumStatus);
     registerTest("Query task fields", "tests", &testQueryTaskFields);
     registerTest("Query task with nullable assignee", "tests", &testQueryTaskWithNullableAssignee);
+    registerTest("Nullable object with a required belongs-to", "tests", &testNullableObjectWithRequiredBelongsTo);
     registerTest("Mutation: create task with enum", "tests", &testCreateTaskWithEnumStatus);
     registerTest("Enum persistence", "tests", &testEnumPersistence);
 
