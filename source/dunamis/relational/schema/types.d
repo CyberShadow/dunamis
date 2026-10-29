@@ -68,12 +68,18 @@ AnyRef entityToRef(T)(T entity) {
     import std.conv : to;
     import dunamis.core.types : encodeCompositeKey;
     import dunamis.relational.schema.attrs : getPrimaryKeyFieldNames;
+    import std.traits : isIntegral;
     enum pkFields = getPrimaryKeyFieldNames!T;
-    string[] values;
-    static foreach (f; pkFields) {
-        values ~= __traits(getMember, entity, f).to!string;
+    // (The key of an integer is its decimal text, which needs no quoting)
+    static if (pkFields.length == 1 && isIntegral!(typeof(__traits(getMember, entity, pkFields[0]))))
+        return AnyRef(EntityID!T.typeName ~ ":" ~ __traits(getMember, entity, pkFields[0]).to!string);
+    else {
+        string[] values;
+        static foreach (f; pkFields) {
+            values ~= __traits(getMember, entity, f).to!string;
+        }
+        return AnyRef(EntityID!T.typeName ~ ":" ~ encodeCompositeKey(values));
     }
-    return AnyRef(EntityID!T.typeName ~ ":" ~ encodeCompositeKey(values));
 }
 
 /// Check if an entity has a valid (non-default) primary key.

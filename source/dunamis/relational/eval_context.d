@@ -572,11 +572,17 @@ class QueryResult {
         // First pass: collect all refs and build parent grouping
         foreach (row; rows) {
             // Build composite key from all ID columns
-            string[] keyParts;
-            foreach (col; idColumns) {
-                keyParts ~= jsonValToString(row[col]);
+            string idStr;
+            if (idColumns.length == 1 && row[idColumns[0]].type == JSONType.integer) {
+                // (The key of an integer is its decimal text, which needs no quoting)
+                idStr = jsonValToString(row[idColumns[0]]);
+            } else {
+                string[] keyParts;
+                foreach (col; idColumns) {
+                    keyParts ~= jsonValToString(row[col]);
+                }
+                idStr = encodeCompositeKey(keyParts);
             }
-            string idStr = encodeCompositeKey(keyParts);
             auto refId = typeName ~ ":" ~ idStr;
             _allRefs ~= AnyRef(refId);
 

@@ -20,6 +20,7 @@ import dunamis.relational.query_node;
 import dunamis.relational.sql_optimizer;
 import dunamis.postgres.dialect : postgresDialect;
 import dunamis.relational.sql : toSQL;
+import dunamis.core.json_text : parseJsonText;
 
 // ============================================================================
 // PostgreSQL Session (Per-Request)
@@ -347,7 +348,7 @@ class PostgresSession : RelationalSession {
             JSONValue[] values;
             values.reserve(rows.length);
             foreach (row; rows)
-                values ~= parseJSON(row.column!string(0));
+                values ~= parseJsonText(row.column!string(0));
             return values;
         });
     }
@@ -418,7 +419,7 @@ class PostgresSession : RelationalSession {
         auto jsonStr = rows[0].column!string(0);
         // Parse each layer and cache results (root results too, so that
         // fetchBelongsTo can find FK columns)
-        return loadLayerResults(parseJSON(jsonStr), nodes, _cachedResults);
+        return loadLayerResults(parseJsonText(jsonStr), nodes, _cachedResults);
     }
 
     // =========================================================================
@@ -726,7 +727,7 @@ class PostgresSession : RelationalSession {
                     }
                 }
                 if (asJson && values[key].type == JSONType.string)
-                    values[key] = parseJSON(values[key].str);
+                    values[key] = parseJsonText(values[key].str);
             }
             // Return in ref order (invalid refs get null)
             JSONValue[] result;
@@ -792,7 +793,7 @@ class PostgresSession : RelationalSession {
         }
 
         auto jsonStr = rows[0].column!string(0);
-        auto jsonData = parseJSON(jsonStr);
+        auto jsonData = parseJsonText(jsonStr);
 
         // Single row - wrap in array for loadFromRows
         result.loadFromRows([jsonData], typeName, pkColumns);
@@ -807,7 +808,7 @@ class PostgresSession : RelationalSession {
         }
 
         auto jsonStr = rows[0].column!string(0);
-        auto jsonData = parseJSON(jsonStr);
+        auto jsonData = parseJsonText(jsonStr);
 
         // json_agg returns an array
         if (jsonData.type == JSONType.array) {
