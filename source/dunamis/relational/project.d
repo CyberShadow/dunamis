@@ -274,97 +274,6 @@ class ProjectJoinedColumnExpr(T) : Expr!T, ProjectJoinedColumnInfo {
     @property string column() { return _column; }
 }
 
-/// Projects refs from a QueryResult (for root expressions).
-/// Replaces GetByIdsExpr/GetAllExpr in optimized path.
-/// At the root level, there's always exactly 1 parent (queryRoot).
-class ProjectRefsExpr : Expr!(AnyRef[]) {
-    private {
-        QueryNodeId _queryNodeId;
-        ExprBase _prefetch;  // PrefetchExpr - ensures data is loaded
-    }
-
-    this(QueryNodeId queryNodeId, PrefetchExpr prefetch) {
-        _queryNodeId = queryNodeId;
-        _prefetch = prefetch;
-    }
-
-    override ExprBase[] dependencies() {
-        return [_prefetch];
-    }
-
-    override void replaceDependency(size_t index, ExprBase newDep) {
-        if (index == 0)
-            _prefetch = newDep;
-    }
-
-    override Promise!(AnyRef[][]) eval(EvalContext ctx) {
-        auto queryNodeId = _queryNodeId;
-        auto prefetch = cast(PrefetchExpr) _prefetch;
-
-        // Ensure data is prefetched, then read refs
-        return evalAs!(AnyRef[])(_prefetch, ctx).then((_) {
-            auto session = cast(RelationalSession) ctx.getSession(prefetch.node.dataSource);
-            auto result = session.getQueryResult(queryNodeId);
-            if (result is null) {
-                return [cast(AnyRef[])[]];  // Single empty result for the single root parent
-            }
-            auto refs = result.allRefs();
-            // Return single result for the single root parent
-            return [refs];
-        });
-    }
-
-    @property QueryNodeId queryNodeId() { return _queryNodeId; }
-}
-
-/// Projects child refs grouped by parent from a QueryResult.
-/// Used for hasMany relationships in optimized path.
-class ProjectChildRefsExpr : Expr!(AnyRef[]) {
-    private {
-        QueryNodeId _queryNodeId;
-        ExprBase _parentInput;  // Expression that yields parent refs
-        ExprBase _prefetch;     // PrefetchExpr - ensures data is loaded
-    }
-
-    /// Accepts ExprBase to work with both typed Expr!Entity and untyped Expr!AnyRef
-    this(QueryNodeId queryNodeId, ExprBase parentInput, PrefetchExpr prefetch) {
-        _queryNodeId = queryNodeId;
-        _parentInput = parentInput;
-        _prefetch = prefetch;
-    }
-
-    override ExprBase[] dependencies() {
-        return [_parentInput, _prefetch];
-    }
-
-    override void replaceDependency(size_t index, ExprBase newDep) {
-        if (index == 0)
-            _parentInput = newDep;
-        else if (index == 1)
-            _prefetch = newDep;
-    }
-
-    override Promise!(AnyRef[][]) eval(EvalContext ctx) {
-        auto queryNodeId = _queryNodeId;
-        auto parentInput = _parentInput;
-        auto prefetch = cast(PrefetchExpr) _prefetch;
-
-        // Ensure data is prefetched, then get parent refs, then lookup children
-        return evalAs!(AnyRef[])(_prefetch, ctx).then((_) {
-            return evalAs!AnyRef(parentInput, ctx);
-        }).then((AnyRef[] parentRefs) {
-            auto session = cast(RelationalSession) ctx.getSession(prefetch.node.dataSource);
-            auto result = session.getQueryResult(queryNodeId);
-            if (result is null) {
-                return parentRefs.map!(_ => cast(AnyRef[])[]).array;
-            }
-            return result.getChildRefs(parentRefs);
-        });
-    }
-
-    @property QueryNodeId queryNodeId() { return _queryNodeId; }
-}
-
 /// Projects parent ref for each child (belongsTo).
 /// Reads FK from the child's query result and encodes as parent ref.
 class ProjectBelongsToExpr : Expr!AnyRef {
@@ -541,40 +450,6 @@ unittest {
     auto names = awaitSync(proj.eval(ctx));
     assert(names == ["Alice", "Bob"]);
 }
-
-unittest {
-    import std.json : parseJSON;
-    import dunamis.relational.mock : MockDB;
-    static MockDB!() _testRefsDb;
-
-    // Test ProjectRefsExpr
-    _testRefsDb = new MockDB!();
-    auto ctx = new EvalContext();
-    auto session = cast(RelationalSession) ctx.getSession(_testRefsDb);
-
-    auto result = new QueryResult();
-    auto rows = [
-        parseJSON(`{"id": 1}`),
-        parseJSON(`{"id": 2}`),
-        parseJSON(`{"id": 3}`)
-    ];
-    result.loadFromRows(rows, "User", ["id"]);
-    session.storeQueryResult(QueryNodeId(0), result);
-
-    // Create mock QueryNode and PrefetchExpr
-    auto node = new QueryNode(QueryNodeId(0), "User", "users", ["id"]);
-    node.dataSource = _testRefsDb;
-    auto prefetch = new PrefetchExpr(node);
-
-    auto proj = new ProjectRefsExpr(QueryNodeId(0), prefetch);
-    ctx.setValues!AnyRef(null, [queryRoot]);
-    auto refArrays = awaitSync(proj.eval(ctx));
-
-    assert(refArrays.length == 1);
-    assert(refArrays[0] == [AnyRef("User:1"), AnyRef("User:2"), AnyRef("User:3")]);
-}
-
-// ProjectChildRefsExpr is tested via executor.d hasMany tests
 
 unittest {
     import std.json : parseJSON;

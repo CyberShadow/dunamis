@@ -14,7 +14,7 @@ import std.array : array;
 import ae.utils.promise;
 import ae.utils.promise.await : async;
 
-import dunamis.core.expr : Expr, ExprBase, evalAs;
+import dunamis.core.expr : CollectionEntityType, Expr, ExprBase, evalAs;
 import dunamis.core.eval;
 import dunamis.core.optimize;
 import dunamis.core.types : AnyRef;
@@ -256,15 +256,6 @@ auto filterBy(alias pred, Coll)(Coll collection)
     item._parentFilter = filterExpr;
 
     return filterExpr;
-}
-
-/// Extract the entity type from an expression yielding an entity collection.
-private template CollectionEntityType(Coll) {
-    static if (is(Coll : Expr!(E[]), E)) {
-        alias CollectionEntityType = E;
-    } else {
-        static assert(false, "Expected Expr!(Entity[]), got " ~ Coll.stringof);
-    }
 }
 
 // ============================================================================

@@ -346,14 +346,6 @@ Expr!(E[]) sortByField(string member, SortDirection dir, E)(Expr!(E[]) source) {
         return sortBy!((a, b) => mixin("a." ~ member ~ ".gt(b." ~ member ~ ")"))(source);
 }
 
-private template CollectionEntityType(Coll) {
-    static if (is(Coll : Expr!(E[]), E)) {
-        alias CollectionEntityType = E;
-    } else {
-        static assert(false, "Expected Expr!(Entity[]), got " ~ Coll.stringof);
-    }
-}
-
 // ============================================================================
 // Unit Tests
 // ============================================================================

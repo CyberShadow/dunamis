@@ -142,8 +142,7 @@ private void pushDownRootCollection(QueryNode node, Object mapExpr, RootExprInfo
     import dunamis.core.sorting : SortByInfo;
     import dunamis.core.filtering : FilterByInfo;
     import dunamis.relational.native : sqlDialectOf;
-    import dunamis.relational.sql_optimizer : extractFilterWhereClause,
-        extractFilterConjunctsWhereClause, extractNativeSortKey;
+    import dunamis.relational.sql_optimizer : extractFilterWhereClause, extractNativeSortKey;
 
     // The dialect of the node's query (for native predicates)
     auto dialect = sqlDialectOf(node.dataSource);
@@ -182,15 +181,12 @@ private void pushDownRootCollection(QueryNode node, Object mapExpr, RootExprInfo
         if (auto filter = cast(FilterByInfo) link) {
             if (!windowBeneath) {
                 auto where = extractFilterWhereClause(filter, node.table, dialect, &rootExpr.plainFieldColumn);
-                if (!where.isNull) {
-                    node.addWhereClause(where.get);
+                if (!where.sql.isNull)
+                    node.addWhereClause(where.sql.get);
+                if (where.complete) {
                     splice(filter.filterSource);
                     continue;
                 }
-                auto narrowing = extractFilterConjunctsWhereClause(filter, node.table, dialect,
-                    &rootExpr.plainFieldColumn);
-                if (!narrowing.isNull)
-                    node.addWhereClause(narrowing.get);
             }
             allPushed = false;
         } else if (auto sort = cast(SortByInfo) link) {

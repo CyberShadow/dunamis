@@ -361,13 +361,6 @@ abstract class RelationalSession : DataSession {
         return (typeName in _mutationResults) !is null;
     }
 
-    /// Returns true if this session supports the naive (unoptimized) evaluation path.
-    /// Some async databases (PostgreSQL, MySQL) only support the optimized path.
-    /// Default: true (assumes naive path is supported).
-    bool supportsNaivePath() {
-        return true;
-    }
-
     /// Execute raw SQL for session setup (SET LOCAL, SET TRANSACTION, etc.).
     /// Override in subclasses to execute against the actual database connection.
     /// Default: no-op.

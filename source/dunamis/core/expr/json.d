@@ -747,9 +747,7 @@ class NullableObjectExpr(T) : Expr!JSONValue {
         // The selection set first, while chain traversal through the
         // unwrapper still sees the input as compiled (as with ObjectExpr).
         _innerExpr = (cast(Expr!JSONValue) _innerExpr).optimize(ctx);
-        // As an Expr!(Nullable!T): the type-erased optimizeExpr would return
-        // it unoptimized (see ObjectExpr.optimize).
-        _nullableInput = (cast(Expr!(Nullable!T)) _nullableInput).optimize(ctx);
+        _nullableInput = optimizeExpr(_nullableInput, ctx);
         return this;
     }
 
@@ -916,12 +914,7 @@ class ObjectExpr(T) : Expr!JSONValue {
         _innerExpr = (cast(Expr!JSONValue) _innerExpr).optimize(ctx);
         if (!dependsOn(_innerExpr, _bound))
             return cast(Expr!JSONValue) _innerExpr;
-        // Optimize the input as an Expr!T: the type-erased optimizeExpr knows
-        // only a few result types, and returns any other expression (such
-        // as one of a struct) unoptimized, so that e.g. a struct column
-        // would be fetched by the naive per-column path instead of the
-        // batched query.
-        _input = (cast(Expr!T) _input).optimize(ctx);
+        _input = optimizeExpr(_input, ctx);
         return this;
     }
 

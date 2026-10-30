@@ -118,6 +118,15 @@ auto performSized(alias fn, Args...)(size_t stackSize, ExprBase lengthSource, Da
     return cast(Expr!R) new PerformExpr!R((EvalContext ctx) => fn(ctx, args), lengthSource, sources, stackSize);
 }
 
+/// An expression which runs the procedure `fn()`, which uses neither the
+/// request's context nor data sources (see `perform`), and evaluates to its
+/// result, for every item of `lengthSource`'s batch (or once, if null).
+auto effect(Fn)(Fn fn, ExprBase lengthSource = null) {
+    alias R = typeof(fn());
+    return cast(Expr!R) new PerformExpr!R((EvalContext _) => fn(), lengthSource, null,
+        defaultProcedureStackSize);
+}
+
 /// Evaluate the expression `expr` within the evaluation in `ctx` (for
 /// example from a procedure, see `perform`): optimized as its own tree, and
 /// evaluated once, as a root expression, in a scope of `ctx`, on the sessions
@@ -178,8 +187,7 @@ final class UseAsyncExpr(R, A) : Expr!R {
     }
 
     override Expr!R optimize(OptimizeContext ctx) {
-        // (As an Expr!A: the type-erased optimizeExpr only knows some types.)
-        _input = (cast(Expr!A) _input).optimize(ctx);
+        _input = optimizeExpr(_input, ctx);
         return this;
     }
 

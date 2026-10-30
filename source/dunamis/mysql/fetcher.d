@@ -31,7 +31,6 @@ import dunamis.mysql.sql;
 class MySQLSession : RelationalSession {
     private MySqlConnection _conn;
     private Promise!MySqlConnection delegate() _connFactory;
-    private QueryNode[] _executedNodes;
     private string _cachedSQL;
     private QueryResult[QueryNode] _cachedResults;
 
@@ -81,7 +80,6 @@ class MySQLSession : RelationalSession {
 
         // Root node: generate CTE for entire tree (including all children)
         auto allNodes = node.allNodesInTree();
-        _executedNodes = allNodes;
 
         // Generate the full CTE query for entire node tree
         auto sql = toSQL(allNodes, mysqlDialect(), root.filter);

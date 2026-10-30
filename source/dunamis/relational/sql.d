@@ -54,12 +54,8 @@ private string toSQL(QueryNode[] nodes, SqlDialect dialect,
 
     string[] ctes;
     foreach (node; nodes) {
-        if (node.useWindowFunction) {
-            ctes ~= toCTEWithWindowFunction(node, dialect);
-        } else {
-            ctes ~= toCTE(node, dialect,
-                rootFilter.isNull ? node.rootFilter : rootFilter.get);
-        }
+        ctes ~= toCTE(node, dialect,
+            rootFilter.isNull ? node.rootFilter : rootFilter.get);
     }
     sql ~= ctes.join(",\n");
 
@@ -187,91 +183,11 @@ private string toCTE(QueryNode node, SqlDialect dialect,
     return sql.data;
 }
 
-/// Generate CTE for a child node with per-parent pagination using window functions.
-private string toCTEWithWindowFunction(QueryNode node, SqlDialect dialect) {
-    assert(!node.isRoot, "Window function pagination only applies to child nodes");
-
-    auto sql = appender!string;
-
-    // Build ORDER BY for window function (defaults to id if not specified)
-    string windowOrderBy;
-    if (node.orderBy_.length > 0) {
-        string[] orderParts;
-        foreach (spec; node.orderBy_) {
-            orderParts ~= format("%s%s", spec.column, spec.descending ? " DESC" : "");
-        }
-        windowOrderBy = orderParts.join(", ");
-    } else {
-        windowOrderBy = node.pkColumns.join(", ");
-    }
-
-    sql ~= format("  layer%d AS (\n", node.id.value);
-
-    // Outer SELECT: project needed columns from the windowed subquery
-    sql ~= "    SELECT ";
-    sql ~= buildSelectColumns(node, dialect, "_inner");
-
-    // Add per-row JSON wrapping if needed (for SQLite/MySQL style)
-    auto rowJsonFunc = dialect.rowJsonFunc();
-    if (rowJsonFunc.length > 0) {
-        sql ~= format(",\n           %s(%s) AS row_json",
-            rowJsonFunc, buildJsonObjectArgs(node, "_inner"));
-    }
-
-    sql ~= " FROM (\n";
-
-    // Inner SELECT: compute row numbers partitioned by parent FK
-    sql ~= format("      SELECT %s.*, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS _rn\n",
-        node.table, node.parentFk, windowOrderBy);
-    sql ~= format("      FROM %s\n", node.table);
-
-    // JOINs in the inner query
-    foreach (joinInfo; node.joins) {
-        auto sourceRef = !joinInfo.sourceAlias.isNull ? joinInfo.sourceAlias.get.value : node.table;
-        auto targetPk = joinInfo.targetPkColumns.length > 0 ? joinInfo.targetPkColumns[0] : "id";
-        sql ~= format("      LEFT JOIN %s %s ON %s.%s = %s.%s\n",
-            joinInfo.targetTable, joinInfo.alias_.value,
-            sourceRef, joinInfo.fk, joinInfo.alias_.value, targetPk);
-    }
-
-    // WHERE clause for inner query
-    auto parentPkCols = node.parentLinkColumns;
-    auto parentPkSelect = parentPkCols.length == 1 ? parentPkCols[0] : parentPkCols.join(", ");
-    sql ~= format("      WHERE %s.%s IN (SELECT %s FROM layer%d)",
-        node.table, node.parentFk, parentPkSelect, node.parent.layerNode.id.value);
-
-    // Custom WHERE clause
-    if (auto where = node.whereClause(dialect)) {
-        sql ~= format("\n        AND (%s)", where);
-    }
-
-    sql ~= "\n    ) _inner\n";
-
-    // WHERE clause for outer query: filter by row number
-    sql ~= "    WHERE ";
-    if (!node.perParentOffset_.isNull && !node.perParentLimit_.isNull) {
-        auto offset = node.perParentOffset_.get;
-        auto limit = node.perParentLimit_.get;
-        sql ~= format("_rn > %d AND _rn <= %d", offset, offset + limit);
-    } else if (!node.perParentOffset_.isNull) {
-        sql ~= format("_rn > %d", node.perParentOffset_.get);
-    } else if (!node.perParentLimit_.isNull) {
-        sql ~= format("_rn <= %d", node.perParentLimit_.get);
-    } else {
-        sql ~= "1=1";
-    }
-
-    sql ~= "\n  )";
-    return sql.data;
-}
-
 /// Generate SQL SELECT clause including computed columns.
-/// If tableAlias is provided, uses that instead of node.table for column references
-/// (used for window function CTEs where the outer SELECT references the inner subquery).
-string buildSelectColumns(QueryNode node, SqlDialect dialect, string tableAlias = null) {
+string buildSelectColumns(QueryNode node, SqlDialect dialect) {
     string[] selectParts;
 
-    auto tableName = tableAlias !is null ? tableAlias : node.table;
+    auto tableName = node.table;
 
     // Regular columns from main table
     foreach (col; node.columns) {
@@ -287,28 +203,19 @@ string buildSelectColumns(QueryNode node, SqlDialect dialect, string tableAlias 
                 bool isStringColumn;
                 if (auto stringCols = joinInfo.alias_ in node.joinedStringColumns)
                     isStringColumn = (col in *stringCols) !is null;
-                if (tableAlias !is null) {
-                    // From window subquery: columns are already aliased
-                    selectParts ~= format("%s.%s__%s AS %s__%s",
-                        tableName, joinInfo.alias_.value, col, joinInfo.alias_.value, col);
-                } else {
-                    selectParts ~= isStringColumn
-                        ? format("%s AS %s__%s",
-                            dialect.castToText(joinInfo.alias_.value ~ "." ~ col),
-                            joinInfo.alias_.value, col)
-                        : format("%s.%s AS %s__%s",
-                            joinInfo.alias_.value, col, joinInfo.alias_.value, col);
-                }
+                selectParts ~= isStringColumn
+                    ? format("%s AS %s__%s",
+                        dialect.castToText(joinInfo.alias_.value ~ "." ~ col),
+                        joinInfo.alias_.value, col)
+                    : format("%s.%s AS %s__%s",
+                        joinInfo.alias_.value, col, joinInfo.alias_.value, col);
             }
         }
     }
 
     // Computed columns
-    // Not supported with window functions yet (computed columns come from base table)
-    if (tableAlias is null) {
-        foreach (computed; node.computedColumns) {
-            selectParts ~= format("%s AS %s", computed.sqlExpr, computed.alias_);
-        }
+    foreach (computed; node.computedColumns) {
+        selectParts ~= format("%s AS %s", computed.sqlExpr, computed.alias_);
     }
 
     return selectParts.join(", ");
@@ -316,10 +223,10 @@ string buildSelectColumns(QueryNode node, SqlDialect dialect, string tableAlias 
 
 /// Build key-value argument pairs for json_object/JSON_OBJECT row wrapping.
 /// Returns "'col1', table.col1, 'col2', table.col2, ..." format.
-string buildJsonObjectArgs(QueryNode node, string tableAlias = null) {
+string buildJsonObjectArgs(QueryNode node) {
     string[] args;
 
-    auto tableName = tableAlias !is null ? tableAlias : node.table;
+    auto tableName = node.table;
 
     // Regular columns from main table
     foreach (col; node.columns) {
@@ -330,22 +237,15 @@ string buildJsonObjectArgs(QueryNode node, string tableAlias = null) {
     foreach (joinInfo; node.joins) {
         if (auto cols = joinInfo.alias_ in node.joinedColumns) {
             foreach (col; *cols) {
-                if (tableAlias !is null) {
-                    args ~= format("'%s__%s', %s.%s__%s",
-                        joinInfo.alias_.value, col, tableName, joinInfo.alias_.value, col);
-                } else {
-                    args ~= format("'%s__%s', %s.%s",
-                        joinInfo.alias_.value, col, joinInfo.alias_.value, col);
-                }
+                args ~= format("'%s__%s', %s.%s",
+                    joinInfo.alias_.value, col, joinInfo.alias_.value, col);
             }
         }
     }
 
     // Computed columns
-    if (tableAlias is null) {
-        foreach (computed; node.computedColumns) {
-            args ~= format("'%s', %s", computed.alias_, computed.sqlExpr);
-        }
+    foreach (computed; node.computedColumns) {
+        args ~= format("'%s', %s", computed.alias_, computed.sqlExpr);
     }
 
     return args.join(", ");

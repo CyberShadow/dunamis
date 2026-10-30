@@ -38,7 +38,6 @@ class PostgresSession : RelationalSession {
     private bool _hasConnectionPermit;
     private bool _disconnectOnTeardown;
     private size_t _setupDepth;
-    private QueryNode[] _executedNodes;
     private string _cachedSQL;
     private QueryResult[QueryNode] _cachedResults;
     private string[] _setupStatements;
@@ -453,7 +452,6 @@ class PostgresSession : RelationalSession {
 
         // Root node: generate CTE for entire tree (including all children)
         auto allNodes = node.allNodesInTree();
-        _executedNodes = allNodes;
 
         // Generate the full CTE query for entire node tree
         auto sql = toSQL(allNodes, postgresDialect(), root.filter);

@@ -208,52 +208,6 @@ class SqlOptimizer : ExprOptimizer {
         }
     }
 
-    /// Check if an expression tree contains any ProjectJoinedColumnExpr
-    private bool hasJoinedColumnExpr(ExprBase expr) {
-        if (expr is null) return false;
-
-        // Check if this is a joined column
-        if (cast(ProjectJoinedColumnInfo) expr !is null) {
-            return true;
-        }
-
-        // Recurse into binary ops
-        if (auto binOp = cast(BinaryOpInfo) expr) {
-            return hasJoinedColumnExpr(binOp.left) || hasJoinedColumnExpr(binOp.right);
-        }
-
-        // Recurse into unary ops
-        if (auto unaryOp = cast(UnaryOpInfo) expr) {
-            return hasJoinedColumnExpr(unaryOp.operand);
-        }
-
-        // Recurse into ternary ops
-        if (auto ternaryOp = cast(TernaryInfo) expr) {
-            return hasJoinedColumnExpr(ternaryOp.condition) ||
-                   hasJoinedColumnExpr(ternaryOp.trueExpr) ||
-                   hasJoinedColumnExpr(ternaryOp.falseExpr);
-        }
-
-        // Recurse into isNull ops
-        if (auto isNullOp = cast(IsNullInfo) expr) {
-            return hasJoinedColumnExpr(isNullOp.operand);
-        }
-
-        // Constants don't have joined columns
-        if (cast(ConstantInfo) expr !is null) {
-            return false;
-        }
-
-        // Check dependencies
-        foreach (dep; expr.dependencies()) {
-            if (hasJoinedColumnExpr(dep)) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
     /// Try to push down a binary operation to SQL
     protected ExprBase tryPushDownBinaryOp(ExprBase expr, BinaryOpInfo binOp, OptimizeContext ctx) {
         // Check if both operands can be translated to SQL
@@ -574,30 +528,6 @@ class SqlOptimizer : ExprOptimizer {
         }
 
         return false;
-    }
-
-    /// Extract input expression from a chain (for computed column lookup).
-    private ExprBase extractInputFromChain(ExprBase expr) {
-        // Walk through the chain to find EveryItemOfExpr
-        while (expr !is null) {
-            if (cast(EveryItemOfExprInfo) expr !is null) {
-                return expr;
-            }
-            if (auto colAccess = cast(ColumnAccessInfo) expr) {
-                expr = colAccess.inputExpr;
-                continue;
-            }
-            if (auto hasManyAccess = cast(HasManyInfo) expr) {
-                expr = hasManyAccess.inputExpr;
-                continue;
-            }
-            if (auto belongsTo = cast(BelongsToInfo) expr) {
-                expr = belongsTo.inputExpr;
-                continue;
-            }
-            break;
-        }
-        return expr;
     }
 
     /// Extract the input expression from a projection, binary op, unary op, or ternary op.
@@ -947,46 +877,45 @@ class ProjectComputedExpr(T) : Expr!T, ProjectComputedInfo {
 // Filter WHERE Clause Generation
 // ============================================================================
 
+/// The WHERE SQL of a filter predicate (see `extractFilterWhereClause`).
+struct FilterWhereClause {
+    /// The SQL condition, or null if no part of the predicate can be
+    /// expressed in SQL.
+    Nullable!DialectSql sql;
+    /// Whether `sql` is equivalent to the whole predicate; otherwise it is
+    /// only implied by it (it is the conjunction of those top-level `&&`
+    /// conjuncts of the predicate which can be expressed in SQL), so it can
+    /// only narrow the rows that the whole predicate is then evaluated on.
+    bool complete;
+}
+
 /// Extract WHERE clause SQL from a FilterByInfo by pattern-matching its predicate.
 /// `dialect` is the dialect of the query (null if unknown, e.g. not a SQL
 /// data source's): native SQL expressions (see `NativeSqlInfo`) are only
 /// expressed in a dialect which has a native form of them. `plainFieldColumn`
 /// (if not null) gives the columns of the plain fields of the filtered entity
 /// (see `PlainFieldInfo`), so that conditions on them can be expressed too.
-Nullable!DialectSql extractFilterWhereClause(FilterByInfo filterInfo, string table = null,
-        SqlDialect dialect = null, string delegate(string) plainFieldColumn = null) {
-    auto predicate = filterInfo.filterPredicate;
-    auto filterItem = filterInfo.filterItem;
-
-    return extractWhereFromExpr(predicate, filterItem, table, dialect, plainFieldColumn);
-}
-
-/// Extract WHERE SQL for those top-level `&&` conjuncts of a filter predicate
-/// that can be expressed in SQL, or null if none can.  The result is implied
-/// by the predicate (but, unlike `extractFilterWhereClause`, not equivalent to
-/// it), so it can only narrow the rows that the whole predicate is then
-/// evaluated on.
-Nullable!DialectSql extractFilterConjunctsWhereClause(FilterByInfo filterInfo, string table = null,
+FilterWhereClause extractFilterWhereClause(FilterByInfo filterInfo, string table = null,
         SqlDialect dialect = null, string delegate(string) plainFieldColumn = null) {
     auto filterItem = filterInfo.filterItem;
-    DialectSql[] conjuncts;
-    void collect(Object expr) {
+    FilterWhereClause extract(Object expr) {
         if (auto binOp = cast(BinaryOpInfo) expr) {
             if (binOp.operator == "&&") {
-                collect(binOp.left);
-                collect(binOp.right);
-                return;
+                auto left = extract(binOp.left), right = extract(binOp.right);
+                if (left.sql.isNull)
+                    return FilterWhereClause(right.sql, false);
+                if (right.sql.isNull)
+                    return FilterWhereClause(left.sql, false);
+                // (As extractWhereFromExpr renders a conjunction)
+                auto l = left.sql.get, r = right.sql.get;
+                return FilterWhereClause(Nullable!DialectSql((SqlDialect d) => "(" ~ l(d) ~ " AND " ~ r(d) ~ ")"),
+                    left.complete && right.complete);
             }
         }
         auto sql = extractWhereFromExpr(expr, filterItem, table, dialect, plainFieldColumn);
-        if (!sql.isNull)
-            conjuncts ~= sql.get;
+        return FilterWhereClause(sql, !sql.isNull);
     }
-    collect(filterInfo.filterPredicate);
-    if (conjuncts.length == 0)
-        return Nullable!DialectSql.init;
-    return Nullable!DialectSql((SqlDialect d) =>
-        "(" ~ conjuncts.map!(c => c(d)).join(" AND ") ~ ")");
+    return extract(filterInfo.filterPredicate);
 }
 
 /// Recursively extract WHERE SQL from an expression tree: the condition the

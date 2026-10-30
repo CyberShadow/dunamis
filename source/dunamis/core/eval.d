@@ -281,11 +281,6 @@ class EvalContext {
             _exprCache[key] = SealedArray([promise]);
     }
 
-    /// Clear the cached eval for a specific expression (in this context).
-    void clearCachedEval(Object expr) {
-        _exprCache.remove(cast(void*) expr);
-    }
-
     // ========================================================================
     // Request Context Storage
     // ========================================================================

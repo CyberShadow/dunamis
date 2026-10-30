@@ -31,7 +31,6 @@ import dunamis.sqlite.sql;
 /// Holds cached results and per-query state for a single evaluation.
 class SQLiteSession : RelationalSession {
     private SQLite _db;
-    private QueryNode[] _executedNodes;
     private string _cachedSQL;
     private QueryResult[QueryNode] _cachedResults;
 
@@ -75,7 +74,6 @@ class SQLiteSession : RelationalSession {
 
         // Root node: generate CTE for entire tree
         auto allNodes = node.allNodesInTree();
-        _executedNodes = allNodes;
 
         // Generate the full CTE query
         auto sql = toSQL(allNodes, sqliteDialect(), root.filter);
