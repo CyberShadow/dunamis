@@ -81,7 +81,7 @@ class SQLiteSession : RelationalSession {
         // Substitute IDs if needed
         if (root.filter == FilterType.byId || root.filter == FilterType.byIds) {
             auto idValues = root.refs.map!(r => r.localId).array;
-            sql = sql.replace("{{IDS}}", idValues.join(","));
+            sql = sql.replace("{{IDS}}", idValues.map!(id => sqliteDialect().escapeSqlString(id)).join(","));
         } else {
             // No filter - remove the placeholder
             sql = sql.replace("{{IDS}}", "");
@@ -138,7 +138,7 @@ class SQLiteSession : RelationalSession {
         auto pkColumns = getPkColumnsForTable(table);
 
         if (pkColumns.length == 1) {
-            auto idList = validIds.join(",");
+            auto idList = validIds.map!(id => sqliteDialect().escapeSqlString(id)).join(",");
             return format("SELECT %s, %s FROM %s WHERE %s IN (%s)",
                 pkColumns[0], column, table, pkColumns[0], idList);
         } else {
@@ -299,7 +299,7 @@ class SQLiteSession : RelationalSession {
 
         if (validIds.length > 0) {
             auto childPkColumns = getPkColumnsForTable(childTable);
-            auto idList = validIds.join(",");
+            auto idList = validIds.map!(id => sqliteDialect().escapeSqlString(id)).join(",");
             auto sql = format("SELECT %s, %s FROM %s WHERE %s IN (%s)",
                 childPkColumns.join(", "), fk, childTable, fk, idList);
             if (orderBy.length)

@@ -479,7 +479,7 @@ class PostgresSession : RelationalSession {
 
         if (idValues.length > 0) {
             // PostgreSQL array as string: {1,2,3}
-            return runExtended(sql, "{" ~ idValues.join(",") ~ "}")
+            return runExtended(sql, arrayLiteral(idValues))
                 .then((PgSqlConnection.Row[] rows) => parseQueryResult(rows, allNodes));
         }
 
@@ -520,6 +520,19 @@ class PostgresSession : RelationalSession {
         return ids;
     }
 
+    /// The keys `ids` as a list of SQL string literals (which compare with
+    /// columns of any key type).
+    private static string sqlLiterals(string[] ids) {
+        auto dialect = postgresDialect();
+        return ids.map!(id => dialect.escapeSqlString(id)).join(",");
+    }
+
+    /// The keys `ids` as a PostgreSQL array literal (of quoted elements).
+    private static string arrayLiteral(string[] ids) {
+        import std.array : replace;
+        return "{" ~ ids.map!(id => `"` ~ id.replace(`\`, `\\`).replace(`"`, `\"`) ~ `"`).join(",") ~ "}";
+    }
+
     /// Generate SQL to fetch a column value, keyed by PK columns.
     private string buildFetchColumnSQL(string table, string column, string[] validIds) {
         import std.format : format;
@@ -528,7 +541,7 @@ class PostgresSession : RelationalSession {
 
         if (pkColumns.length == 1) {
             return format("SELECT %s, %s FROM %s WHERE %s IN (%s)",
-                pkColumns[0], column, table, pkColumns[0], validIds.join(","));
+                pkColumns[0], column, table, pkColumns[0], sqlLiterals(validIds));
         } else {
             auto dialect = postgresDialect();
             string[] conditions;
@@ -664,7 +677,7 @@ class PostgresSession : RelationalSession {
         auto childPkColumns = getPkColumnsForTable(childTable);
         auto childPkCount = childPkColumns.length;
         auto sql = "SELECT " ~ childPkColumns.join(", ") ~ ", " ~ fk ~ " FROM " ~ childTable ~
-                   " WHERE " ~ fk ~ " IN (" ~ validIds.join(",") ~ ")";
+                   " WHERE " ~ fk ~ " IN (" ~ sqlLiterals(validIds) ~ ")";
         if (orderBy.length)
             sql ~= " ORDER BY " ~ orderBy.join(", ");
 

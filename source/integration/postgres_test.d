@@ -125,6 +125,8 @@ static this() {
         &testDerivedSessionSettings);
     registerTest("Conditional collections (onlyIf) of root collections", "postgres",
         &testOnlyIfRootCollection);
+    registerTest("Naive-path fetches by string keys", "postgres",
+        &testNaiveFetchesByStringKeys);
     import integration.postgres_batching : testStatementCountsOfComputedFields;
     registerTest("Statement counts of computed fields do not depend on the data", "postgres",
         &testStatementCountsOfComputedFields);
@@ -368,6 +370,35 @@ void testOnlyIfRootCollection() {
                 assertTrue(sent.any!(sql => sql.canFind("WHERE") && sql.canFind("Alice")),
                     "The filter over onlyIf was not pushed into the query: " ~ sent.to!string);
         }
+    });
+}
+
+/// The naive path's fetches by the refs' keys (of columns, and of children
+/// by their foreign key) quote the keys: string keys, also with quotes,
+/// select their rows.
+void testNaiveFetchesByStringKeys() {
+    onEventLoop(() {
+        import dunamis.core.eval : EvalContext;
+        import dunamis.core.types : AnyRef;
+        import integration.test_framework : assertTrue;
+
+        auto ctx = new EvalContext();
+        auto session = cast(PostgresSession) ctx.getSession(db);
+        session.setup().await;
+        scope (exit) session.teardown(SetupMode.query, false).await;
+
+        session.execute("CREATE TEMP TABLE strkey_parents (code text PRIMARY KEY, label text)").await;
+        session.execute("CREATE TEMP TABLE strkey_children (id integer PRIMARY KEY, parent_code text)").await;
+        session.execute("INSERT INTO strkey_parents VALUES ('a-1', 'first'), ('o''k', 'second'), ('a', 'other')").await;
+        session.execute("INSERT INTO strkey_children VALUES (1, 'a-1'), (2, 'o''k'), (3, 'a')").await;
+        session.notePkColumns("strkey_parents", ["code"]);
+
+        auto parents = [AnyRef("StrParent:a-1"), AnyRef("StrParent:o'k")];
+        auto labels = session.fetchColumnString("strkey_parents", "label", parents).await;
+        assertTrue(labels == ["first", "second"], "Columns by string keys: " ~ labels.to!string);
+        auto children = session.fetchChildren("strkey_children", "StrChild", "parent_code", parents).await;
+        assertTrue(children == [[AnyRef("StrChild:1")], [AnyRef("StrChild:2")]],
+            "Children by string keys: " ~ children.to!string);
     });
 }
 

@@ -87,7 +87,7 @@ class MySQLSession : RelationalSession {
         // Substitute IDs if needed
         if (root.filter == FilterType.byId || root.filter == FilterType.byIds) {
             auto idValues = root.refs.map!(r => r.localId).array;
-            sql = sql.replace("{{IDS}}", idValues.join(","));
+            sql = sql.replace("{{IDS}}", idValues.map!(id => mysqlDialect().escapeSqlString(id)).join(","));
         } else {
             // No filter - remove the placeholder
             sql = sql.replace("{{IDS}}", "");
@@ -144,7 +144,8 @@ class MySQLSession : RelationalSession {
 
         if (pkColumns.length == 1) {
             return format("SELECT %s, %s FROM %s WHERE %s IN (%s)",
-                pkColumns[0], column, table, pkColumns[0], validIds.join(","));
+                pkColumns[0], column, table, pkColumns[0],
+                validIds.map!(id => mysqlDialect().escapeSqlString(id)).join(","));
         } else {
             auto dialect = mysqlDialect();
             string[] conditions;
@@ -295,7 +296,7 @@ class MySQLSession : RelationalSession {
         auto childPkColumns = getPkColumnsForTable(childTable);
         auto childPkCount = childPkColumns.length;
         auto sql = "SELECT " ~ childPkColumns.join(", ") ~ ", " ~ fk ~ " FROM " ~ childTable ~
-                   " WHERE " ~ fk ~ " IN (" ~ validIds.join(",") ~ ")";
+                   " WHERE " ~ fk ~ " IN (" ~ validIds.map!(id => mysqlDialect().escapeSqlString(id)).join(",") ~ ")";
         if (orderBy.length)
             sql ~= " ORDER BY " ~ orderBy.join(", ");
 
