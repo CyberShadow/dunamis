@@ -6,13 +6,12 @@ import graphql.lexer : Lexer;
 import graphql.parser : Parser;
 
 import dunamis.graphql.compiler.values : findOperation, iterateSelections,
-    getFieldName, getOutputName, findArgumentValue, valueToJson;
+    getFieldName, getOutputName;
 import dunamis.graphql.compiler.selection : compileRootSelectionSet;
 
 struct OperationField {
     string name;
     string outputName;
-    JSONValue input;
     SelectionSet selection;
 }
 
@@ -49,10 +48,9 @@ auto compileQuerySelection(alias SchemaType)(SelectionSet selection,
         selection, variables, null);
 }
 
-/// Parse top-level operation fields and resolve their `input` argument.  This
-/// is useful to application adapters which intentionally live below the
-/// compile-time schema (such as generated database mutation shims).
-OperationField[] parseOperationFields(string document, JSONValue variables) {
+/// Parse top-level operation fields, for application adapters which
+/// intentionally live below the compile-time schema.
+OperationField[] parseOperationFields(string document) {
     auto parser = Parser(Lexer(document));
     auto operation = findOperation(parser.parseDocument());
     OperationField[] result;
@@ -60,16 +58,7 @@ OperationField[] parseOperationFields(string document, JSONValue variables) {
     foreach (selection; iterateSelections(operation.ss)) {
         if (selection.field is null) continue;
         auto field = selection.field;
-        auto argument = findArgumentValue(field.args, "input");
-        JSONValue input = JSONValue(null);
-        if (argument.isVariable) {
-            if (!(argument.variableName in variables))
-                throw new Exception("Missing variable $" ~ argument.variableName);
-            input = variables[argument.variableName];
-        } else if (argument.value !is null) {
-            input = valueToJson(argument.value, variables);
-        }
-        result ~= OperationField(getFieldName(field), getOutputName(field), input, field.ss);
+        result ~= OperationField(getFieldName(field), getOutputName(field), field.ss);
     }
     return result;
 }

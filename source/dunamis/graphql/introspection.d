@@ -1020,8 +1020,7 @@ unittest {
     import dunamis.graphql.operations : parseOperationFields;
 
     auto selection = parseOperationFields(
-        "query { root { cells { value } } }",
-        JSONValue.emptyObject)[0].selection;
+        "query { root { cells { value } } }")[0].selection;
     auto data = JSONValue([
         "cells": JSONValue([
             JSONValue([JSONValue(["value": JSONValue(1), "ignored": JSONValue(2)])]),
