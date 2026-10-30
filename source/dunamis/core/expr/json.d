@@ -565,8 +565,7 @@ Promise!(JSONValue[]) evalToJson(ExprBase expr, EvalContext ctx) {
         });
     }
 
-    // Fallback - return null values
-    return resolve(cast(JSONValue[]) null);
+    assert(false, "evalToJson: unsupported result type " ~ expr.resultType.toString());
 }
 
 // ============================================================================

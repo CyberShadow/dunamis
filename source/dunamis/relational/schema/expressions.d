@@ -179,7 +179,9 @@ private void pushDownRootCollection(QueryNode node, Object mapExpr, RootExprInfo
         }
 
         if (auto filter = cast(FilterByInfo) link) {
-            if (!windowBeneath) {
+            // (A data source whose queries are not SQL, e.g. an in-memory
+            // one, evaluates no WHERE clauses: the filter stays in memory)
+            if (!windowBeneath && dialect !is null) {
                 auto where = extractFilterWhereClause(filter, node.table, dialect, &rootExpr.plainFieldColumn);
                 if (!where.sql.isNull)
                     node.addWhereClause(where.sql.get);

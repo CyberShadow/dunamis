@@ -76,11 +76,12 @@ unittest {
     mvDb.setTableData("mv_authors", `[{"id": 1, "nick": "al"}, {"id": 2, "nick": "bo"}]`);
     mvDb.setTableData("mv_posts", `[{"id": 10, "author_id": 2}]`);
 
-    // (Only naive: MockDB ignores the WHERE clauses filters are pushed into.)
-    auto filtered = awaitSync(new Executor().execute(compileQuery!MvSchema(
-        `{ authors(filter: {_nick: {equalTo: "bo"}}) { id _nick } }`), false));
-    assert(filtered["authors"] == JSONValue([JSONValue(["id": JSONValue(2), "_nick": JSONValue("bo")])]),
-        filtered.toString());
+    foreach (optimize; [false, true]) {
+        auto filtered = awaitSync(new Executor().execute(compileQuery!MvSchema(
+            `{ authors(filter: {_nick: {equalTo: "bo"}}) { id _nick } }`), optimize));
+        assert(filtered["authors"] == JSONValue([JSONValue(["id": JSONValue(2), "_nick": JSONValue("bo")])]),
+            filtered.toString());
+    }
 
     foreach (optimize; [false, true]) {
         auto result = awaitSync(new Executor().execute(compileQuery!MvSchema(

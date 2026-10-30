@@ -1293,15 +1293,16 @@ unittest {
         {"id":4,"title":"Goodbye","author_id":2}
     ]`);
 
-    // Naive evaluation: MockDB ignores the SQL WHERE clauses these filters
-    // are pushed into when optimizing (see the Postgres integration suite).
+    // (The Postgres integration suite covers these filters' SQL.)
     static void check(alias S)(string postsFilter, string[] expected) {
-        auto result = awaitSync(new Executor().execute(compileQuery!S(
-            `{ users(filter: {posts: ` ~ postsFilter ~ `}) { firstName } }`), false));
-        string[] found;
-        foreach (user; result["users"].array)
-            found ~= user["firstName"].str;
-        assert(found == expected, postsFilter ~ ": " ~ found.to!string);
+        foreach (optimize; [false, true]) {
+            auto result = awaitSync(new Executor().execute(compileQuery!S(
+                `{ users(filter: {posts: ` ~ postsFilter ~ `}) { firstName } }`), optimize));
+            string[] found;
+            foreach (user; result["users"].array)
+                found ~= user["firstName"].str;
+            assert(found == expected, postsFilter ~ ": " ~ found.to!string);
+        }
     }
 
     static foreach (S; AliasSeq!(

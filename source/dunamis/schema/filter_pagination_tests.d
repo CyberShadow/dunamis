@@ -98,18 +98,16 @@ private alias FilterLast = ApplyPlugins!(Schema!FpQuery, SortingPlugin, Paginati
 /// Check a query against each plugin order: `filtered` is the expected
 /// result where the filter applies before the window, `windowed` where it
 /// applies to the window.
-/// When optimizing, only the window-then-filter order is checked: MockDB
-/// ignores the SQL WHERE clauses that filters beneath the window are pushed
-/// into (the Postgres integration suite covers them).
+/// (MockDB, not a SQL data source, evaluates no WHERE clauses: optimized,
+/// filters are evaluated in memory too; the Postgres integration suite
+/// covers their SQL.)
 private void checkOrders(string field, string args, long[] filtered, long[] windowed, bool optimize) {
-    if (!optimize) {
-        check!FilterFirst(field, args, filtered, optimize);
-        check!FilterMiddle(field, args, filtered, optimize);
-    }
+    check!FilterFirst(field, args, filtered, optimize);
+    check!FilterMiddle(field, args, filtered, optimize);
     check!FilterLast(field, args, windowed, optimize);
 }
 
-/// Relationship filters (see checkOrders for the optimized mode).
+/// Relationship filters.
 unittest {
     foreach (optimize; [false, true]) {
         seed();
@@ -139,15 +137,16 @@ unittest {
     }
 }
 
-/// Scalar root filters.  MockDB ignores SQL WHERE clauses, so these only run
-/// naively here; the optimized path is covered by the Postgres integration suite.
+/// Scalar root filters.
 unittest {
-    seed();
-    checkOrders("accounts", `first: 2, filter: {category: {equalTo: "M"}}`, [12], [], false);
-    checkOrders("accounts", `first: 2, offset: 10, filter: {category: {equalTo: "R"}}`, [11], [11], false);
-    checkOrders("accounts", `first: 2, filter: {category: {equalTo: "R"}}, orderBy: [{field: id, direction: DESC}]`,
-        [11, 10], [11], false);
-    checkOrders("customers", `first: 1, filter: {name: {equalTo: "v13"}}`, [13], [], false);
+    foreach (optimize; [false, true]) {
+        seed();
+        checkOrders("accounts", `first: 2, filter: {category: {equalTo: "M"}}`, [12], [], optimize);
+        checkOrders("accounts", `first: 2, offset: 10, filter: {category: {equalTo: "R"}}`, [11], [11], optimize);
+        checkOrders("accounts", `first: 2, filter: {category: {equalTo: "R"}}, orderBy: [{field: id, direction: DESC}]`,
+            [11, 10], [11], optimize);
+        checkOrders("customers", `first: 1, filter: {name: {equalTo: "v13"}}`, [13], [], optimize);
+    }
 }
 
 /// Nested (HasMany) fields follow the plugin order too.
@@ -163,19 +162,12 @@ unittest {
         }`;
         static foreach (S; AliasSeq!(FilterFirst, FilterMiddle, FilterLast)) {{
             auto result = awaitSync(new Executor().execute(compileQuery!S(query), optimize));
-            // MockDB ignores the root WHERE when optimizing; look up customers 1 and 12.
-            int seen;
-            foreach (v; result["customers"].array) {
-                auto id = v["id"].integer;
-                if (id != 1 && id != 12) continue;
-                seen++;
-                auto cs = v["accounts"].array;
-                if (id == 12)
-                    assert(cs.length == 1 && cs[0]["id"].integer == 12, S.stringof ~ ": " ~ result.toString());
-                else
-                    assert(cs.length == 0, S.stringof ~ ": " ~ result.toString());
-            }
-            assert(seen == 2, result.toString());
+            auto customers = result["customers"].array;
+            assert(customers.length == 2 && customers[0]["id"].integer == 1 && customers[1]["id"].integer == 12,
+                S.stringof ~ ": " ~ result.toString());
+            assert(customers[0]["accounts"].array.length == 0, S.stringof ~ ": " ~ result.toString());
+            auto cs = customers[1]["accounts"].array;
+            assert(cs.length == 1 && cs[0]["id"].integer == 12, S.stringof ~ ": " ~ result.toString());
         }}
     }
 }
@@ -196,12 +188,11 @@ unittest {
 private alias AliasSeq(T...) = T;
 
 /// A conditional collection (onlyIf) of a root collection: the collection,
-/// or nothing (without evaluating it); a filter over it is pushed into the
-/// root collection's query as over the collection itself.
+/// or nothing (without evaluating it) (the Postgres integration suite
+/// covers a filter over it being pushed into the root collection's query).
 unittest {
-    import dunamis.core.expr : Expr, MapExprInfo, OnlyIfInfo, constant, fieldAccess, map, onlyIf, singleton, use;
+    import dunamis.core.expr : Expr, constant, fieldAccess, map, onlyIf, singleton, use;
     import dunamis.core.filtering : filterBy;
-    import dunamis.relational.schema.interfaces : RootExprInfo;
 
     seed();
     foreach (optimize; [false, true])
@@ -212,17 +203,9 @@ unittest {
                     onlyIf(constant(condition, q), FpQuery.accounts(q))));
             auto executor = new Executor();
             if (optimize) {
-                // (As without onlyIf: the map's collection is then the root collection.)
-                auto plain = executor.optimize(map!((Expr!FpAccount c) => FpAccount.category(c))(
-                    filterBy!((Expr!FpAccount c) => FpAccount.category(c).eq("M"))(FpQuery.accounts(q))));
-                assert(cast(RootExprInfo) (cast(MapExprInfo) plain).collection);
-                auto optimized = executor.optimize(tree);
-                // (The filter was pushed into the query, whose WHERE clause
-                // MockDB ignores: all accounts.)
-                assert(cast(OnlyIfInfo) (cast(MapExprInfo) optimized).collection,
-                    "The filter over onlyIf was not pushed into the root collection's query");
-                auto found = awaitSync(executor.execute(optimized, false));
-                assert(found.length == (condition ? 12 : 0), found.to!string);
+                auto found = awaitSync(executor.execute(tree));
+                string[] expected = condition ? ["M"] : null;
+                assert(found == expected, found.to!string);
             } else {
                 auto found = awaitSync(executor.execute(tree, false));
                 string[] expected = condition ? ["M"] : null;

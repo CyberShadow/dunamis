@@ -247,7 +247,7 @@ class SqlOptimizer : ExprOptimizer {
         auto alias_ = addComputedColumn(prefetch.node, sqlExpr, expr.resultType, ctx);
 
         // Create and return projection for computed column
-        return createProjectComputedExpr(queryNodeId, alias_, expr.resultType, input, prefetch);
+        return createProjectComputedExpr(queryNodeId, alias_, expr.resultType, input, prefetch, expr);
     }
 
     /// Try to push down a unary operation to SQL
@@ -279,7 +279,7 @@ class SqlOptimizer : ExprOptimizer {
         auto alias_ = addComputedColumn(prefetch.node, sqlExpr, expr.resultType, ctx);
 
         // Create and return projection for computed column
-        return createProjectComputedExpr(queryNodeId, alias_, expr.resultType, input, prefetch);
+        return createProjectComputedExpr(queryNodeId, alias_, expr.resultType, input, prefetch, expr);
     }
 
     /// Try to push down a ternary operation to SQL
@@ -325,7 +325,7 @@ class SqlOptimizer : ExprOptimizer {
         auto alias_ = addComputedColumn(prefetch.node, sqlExpr, expr.resultType, ctx);
 
         // Create and return projection for computed column
-        return createProjectComputedExpr(queryNodeId, alias_, expr.resultType, input, prefetch);
+        return createProjectComputedExpr(queryNodeId, alias_, expr.resultType, input, prefetch, expr);
     }
 
     /// Try to push down an isNull check to SQL
@@ -357,7 +357,7 @@ class SqlOptimizer : ExprOptimizer {
         auto alias_ = addComputedColumn(prefetch.node, sqlExpr, typeid(bool), ctx);
 
         // Create and return projection for computed column
-        return createProjectComputedExpr(queryNodeId, alias_, typeid(bool), input, prefetch);
+        return createProjectComputedExpr(queryNodeId, alias_, typeid(bool), input, prefetch, expr);
     }
 
     /// Try to push down a native SQL expression (see `NativeSqlInfo`) to a
@@ -453,7 +453,7 @@ class SqlOptimizer : ExprOptimizer {
         auto alias_ = addComputedColumn(parentNode, sqlExpr, typeid(bool), ctx);
 
         // Create and return projection for computed column
-        return createProjectComputedExpr(parentNode.id, alias_, typeid(bool), input, prefetch);
+        return createProjectComputedExpr(parentNode.id, alias_, typeid(bool), input, prefetch, expr);
     }
 
     /// Try to convert a predicate expression to SQL for use in EXISTS subquery.
@@ -729,69 +729,36 @@ class SqlOptimizer : ExprOptimizer {
         return Nullable!string.init;
     }
 
-    /// Create a ProjectComputedExpr for the given result type.
+    /// Create a ProjectComputedExpr for the given result type, replacing
+    /// the expression `original`.
     /// Since we need to create a typed expression but only have TypeInfo at runtime,
     /// we use a factory approach with common types.
-    private ExprBase createProjectComputedExpr(QueryNodeId queryNodeId, string alias_, TypeInfo type, ExprBase input, PrefetchExpr prefetch) {
+    private ExprBase createProjectComputedExpr(QueryNodeId queryNodeId, string alias_, TypeInfo type, ExprBase input,
+            PrefetchExpr prefetch, ExprBase original) {
         // Handle common types
         if (type == typeid(string)) {
-            return new ProjectComputedExpr!string(queryNodeId, alias_, input, prefetch);
+            return new ProjectComputedExpr!string(queryNodeId, alias_, input, prefetch, original);
         }
         if (type == typeid(int)) {
-            return new ProjectComputedExpr!int(queryNodeId, alias_, input, prefetch);
+            return new ProjectComputedExpr!int(queryNodeId, alias_, input, prefetch, original);
         }
         if (type == typeid(long)) {
-            return new ProjectComputedExpr!long(queryNodeId, alias_, input, prefetch);
+            return new ProjectComputedExpr!long(queryNodeId, alias_, input, prefetch, original);
         }
         if (type == typeid(float)) {
-            return new ProjectComputedExpr!float(queryNodeId, alias_, input, prefetch);
+            return new ProjectComputedExpr!float(queryNodeId, alias_, input, prefetch, original);
         }
         if (type == typeid(double)) {
-            return new ProjectComputedExpr!double(queryNodeId, alias_, input, prefetch);
+            return new ProjectComputedExpr!double(queryNodeId, alias_, input, prefetch, original);
         }
         if (type == typeid(bool)) {
-            return new ProjectComputedExpr!bool(queryNodeId, alias_, input, prefetch);
+            return new ProjectComputedExpr!bool(queryNodeId, alias_, input, prefetch, original);
         }
 
         // Unsupported type - return null (caller should keep original expression)
         return null;
     }
 
-}
-
-// ============================================================================
-// Capturing SQL Optimizer (for MockDB compatibility)
-// ============================================================================
-
-/// SQL optimizer that captures original expressions before replacing them.
-/// Used by DebugSqlDB to enable SQL push-down while still being able
-/// to evaluate computed columns using the original D expressions.
-///
-/// Production data sources should use plain SqlOptimizer (no capture overhead).
-class CapturingSqlOptimizer : SqlOptimizer {
-    /// Create a CapturingSqlOptimizer with a specific dialect
-    this(SqlDialect dialect) {
-        super(dialect);
-    }
-
-    /// Override to capture original expression before replacement
-    override protected ExprBase tryPushDownBinaryOp(ExprBase expr, BinaryOpInfo binOp, OptimizeContext ctx) {
-        return capture(expr, super.tryPushDownBinaryOp(expr, binOp, ctx));
-    }
-
-    /// Override to capture original expression before replacement (for some/every)
-    override protected ExprBase tryPushDownCollectionPredicate(ExprBase expr, CollectionPredicateInfo collPred, OptimizeContext ctx) {
-        return capture(expr, super.tryPushDownCollectionPredicate(expr, collPred, ctx));
-    }
-
-    /// Keep the original expression in its replacement, for evaluation in
-    /// memory when the computed column is not fetched.
-    private static ExprBase capture(ExprBase original, ExprBase replacement) {
-        if (replacement !is null && replacement !is original)
-            if (auto projComputed = cast(ProjectComputedInfo) replacement)
-                projComputed.inMemoryFallback = original;
-        return replacement;
-    }
 }
 
 // ============================================================================
@@ -802,11 +769,6 @@ class CapturingSqlOptimizer : SqlOptimizer {
 interface ProjectComputedInfo {
     @property QueryNodeId queryNodeId();
     @property string columnAlias();
-
-    /// The original expression, evaluated in memory if the computed column
-    /// was not fetched (set by CapturingSqlOptimizer, at optimization time).
-    @property ExprBase inMemoryFallback();
-    @property void inMemoryFallback(ExprBase original);
 }
 
 /// Projection expression that reads a computed column from QueryResult.
@@ -816,14 +778,20 @@ class ProjectComputedExpr(T) : Expr!T, ProjectComputedInfo {
     private string _alias;
     private ExprBase _input;     // The input chain (for deriving refs)
     private ExprBase _prefetch;  // PrefetchExpr - ensures data is loaded
-    private ExprBase _inMemoryFallback;  // See ProjectComputedInfo.inMemoryFallback
+    private ExprBase _inMemory;  // The expression computed, as evaluated in memory
 
-    /// Accepts ExprBase to work with both typed Expr!Entity and untyped Expr!AnyRef
-    this(QueryNodeId queryNodeId, string alias_, ExprBase input, PrefetchExpr prefetch) {
+    /// Accepts ExprBase to work with both typed Expr!Entity and untyped Expr!AnyRef.
+    /// `inMemory` is the expression (an Expr!T) the computed column is the
+    /// value of: it is evaluated in memory on a session which does not
+    /// compute columns (see `RelationalSession.computesColumns`).
+    this(QueryNodeId queryNodeId, string alias_, ExprBase input, PrefetchExpr prefetch, ExprBase inMemory) {
+        assert(inMemory !is null && cast(Expr!T) inMemory !is null,
+            "ProjectComputedExpr: the in-memory form must be an Expr!" ~ T.stringof);
         _queryNodeId = queryNodeId;
         _alias = alias_;
         _input = input;
         _prefetch = prefetch;
+        _inMemory = inMemory;
     }
 
     override ExprBase[] dependencies() {
@@ -842,7 +810,7 @@ class ProjectComputedExpr(T) : Expr!T, ProjectComputedInfo {
         auto alias_ = _alias;
         auto input = _input;
         auto prefetch = cast(PrefetchExpr) _prefetch;
-        auto fallback = _inMemoryFallback;
+        auto inMemory = _inMemory;
 
         // Ensure data is prefetched, then evaluate input refs, then read
         return evalAs!(AnyRef[])(_prefetch, ctx).then((_) {
@@ -851,25 +819,17 @@ class ProjectComputedExpr(T) : Expr!T, ProjectComputedInfo {
             auto session = cast(RelationalSession) ctx.getSession(prefetch.node.dataSource);
             auto queryResult = session.getQueryResult(queryNodeId);
 
-            // Fast path: computed column exists in QueryResult (real DB)
-            if (queryResult !is null && queryResult.hasColumn(alias_)) {
+            if (session.computesColumns) {
+                assert(queryResult !is null && queryResult.hasColumn(alias_),
+                    "Computed column " ~ alias_ ~ " was not fetched");
                 return resolve(session.getColumnValues!T(queryNodeId, alias_, refs));
             }
-
-            // Fallback path: evaluate original expression (MockDB)
-            if (fallback !is null) {
-                return evalAs!T(fallback, ctx);
-            }
-
-            // No column and no fallback - return defaults
-            return resolve(refs.map!(_ => T.init).array);
+            return evalAs!T(inMemory, ctx);
         });
     }
 
     @property QueryNodeId queryNodeId() { return _queryNodeId; }
     @property string columnAlias() { return _alias; }
-    @property ExprBase inMemoryFallback() { return _inMemoryFallback; }
-    @property void inMemoryFallback(ExprBase original) { _inMemoryFallback = original; }
 }
 
 
@@ -1529,7 +1489,8 @@ unittest {
     auto node = new QueryNode(QueryNodeId(0), "User", "users", ["id"]);
     auto prefetch = new PrefetchExpr(node);
     auto item = new EveryItemOfExpr!TestUser();
-    auto proj = new ProjectComputedExpr!string(QueryNodeId(0), "computed_0", item, prefetch);
+    auto proj = new ProjectComputedExpr!string(QueryNodeId(0), "computed_0", item, prefetch,
+        constant("computed", item));
     assert(proj.queryNodeId == QueryNodeId(0));
     assert(proj.columnAlias == "computed_0");
     assert(proj.dependencies().length == 2);  // input and prefetch

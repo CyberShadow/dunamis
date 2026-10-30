@@ -72,6 +72,12 @@ class MockDBImpl : RelationalSession {
         _tableData[table] = parseJSON(jsonStr);
     }
 
+    /// The computed columns of query nodes (SQL expressions) are not
+    /// computed, but evaluated in memory.
+    override bool computesColumns() {
+        return false;
+    }
+
     /// Execute a QueryNode by filtering in-memory data
     override Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult,
             RootSelection root) {
@@ -82,6 +88,17 @@ class MockDBImpl : RelationalSession {
     /// Synchronous implementation of executeQueryNode
     package QueryResult executeQueryNodeSync(QueryNode node, QueryResult parentResult,
             RootSelection root) {
+        // A clause the in-memory store cannot evaluate (SQL) is rejected,
+        // not ignored (which would give rows the query does not select).
+        // (Computed columns are not computed, see computesColumns.)
+        if (node.whereClauses_.length)
+            throw new Exception("MockDB cannot evaluate the WHERE clauses of a query of " ~ node.table);
+        if (!node.isRoot && (!node.limit_.isNull || !node.offset_.isNull))
+            throw new Exception("MockDB cannot paginate the child rows of a query of " ~ node.table);
+        foreach (spec; node.orderBy_)
+            if (!node.columns.canFind(spec.column))
+                throw new Exception("MockDB cannot order a query of " ~ node.table ~ " by " ~ spec.column);
+
         auto result = new QueryResult();
         AnyRef[] refs;
 
@@ -110,7 +127,8 @@ class MockDBImpl : RelationalSession {
                     node.table, node.typeName, node.parentFk, parentRefs);
 
                 foreach (group; childGroups) {
-                    refs ~= group;
+                    // (Each parent's children in the node's order)
+                    refs ~= node.orderBy_.length ? sortRefs(node.table, group, node.orderBy_) : group;
                 }
 
                 auto fkValues = fetchColumnJsonSync(node.table, node.parentFk, refs);
@@ -277,9 +295,16 @@ class MockDBImpl : RelationalSession {
         return result;
     }
 
-    // Like WHERE clauses, ordering is not emulated: rows keep table order.
     override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns, string[] orderBy = null) {
-        return resolve(fetchAllIdsStringSync(table));
+        auto ids = fetchAllIdsStringSync(table);
+        if (orderBy.length)
+            ids = sortRefs(table, ids.map!(id => AnyRef(":" ~ id)).array, ascendingBy(orderBy))
+                .map!(r => r.localId).array;
+        return resolve(ids);
+    }
+
+    private static OrderBySpec[] ascendingBy(string[] columns) {
+        return columns.map!(column => OrderBySpec(column)).array;
     }
 
     /// Synchronous implementation of fetchAllIdsString (used internally)
@@ -288,10 +313,13 @@ class MockDBImpl : RelationalSession {
         return _tableData[table].array.map!(row => buildKeyFromRow(table, row)).array;
     }
 
-    // Like WHERE clauses, ordering is not emulated: children keep table order.
     override Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs,
             string[] orderBy = null) {
-        return resolve(fetchChildrenSync(childTable, childType, fk, parentRefs));
+        auto groups = fetchChildrenSync(childTable, childType, fk, parentRefs);
+        if (orderBy.length)
+            foreach (ref group; groups)
+                group = sortRefs(childTable, group, ascendingBy(orderBy));
+        return resolve(groups);
     }
 
     /// Synchronous implementation of fetchChildren (used internally by executeQueryNodeSync)
@@ -453,7 +481,8 @@ class MockDBImpl : RelationalSession {
         // Create array of (index, ref) pairs to sort
         auto indexed = refs.length.iota.map!(i => tuple(i, refs[i])).array;
 
-        // Sort using multi-key comparison
+        // Sort using multi-key comparison (stably, as rows the ORDER BY
+        // leaves tied keep the order beneath it)
         indexed.sort!((a, b) {
             auto refA = a[1];
             auto refB = b[1];
@@ -461,10 +490,9 @@ class MockDBImpl : RelationalSession {
             auto rowPtrA = refA.localId in rowByKey;
             auto rowPtrB = refB.localId in rowByKey;
 
-            // Handle missing rows
-            if (rowPtrA is null && rowPtrB is null) return false;
-            if (rowPtrA is null) return true;  // Nulls last
-            if (rowPtrB is null) return false;
+            // Missing rows last
+            if (rowPtrA is null) return false;
+            if (rowPtrB is null) return true;
 
             auto rowA = *rowPtrA;
             auto rowB = *rowPtrB;
@@ -483,7 +511,7 @@ class MockDBImpl : RelationalSession {
                 }
             }
             return false;  // Equal
-        });
+        }, SwapStrategy.stable);
 
         return indexed.map!(t => t[1]).array;
     }
@@ -506,21 +534,23 @@ class MockDBImpl : RelationalSession {
             if (a.integer > b.integer) return 1;
             return 0;
         }
-        if (a.type == JSONType.float_ && b.type == JSONType.float_) {
-            if (a.floating < b.floating) return -1;
-            if (a.floating > b.floating) return 1;
+        if ((a.type == JSONType.float_ || a.type == JSONType.integer) &&
+                (b.type == JSONType.float_ || b.type == JSONType.integer)) {
+            double x = a.type == JSONType.float_ ? a.floating : a.integer;
+            double y = b.type == JSONType.float_ ? b.floating : b.integer;
+            if (x < y) return -1;
+            if (x > y) return 1;
             return 0;
         }
-        if (a.type == JSONType.true_ || a.type == JSONType.false_ ||
-            b.type == JSONType.true_ || b.type == JSONType.false_) {
+        if ((a.type == JSONType.true_ || a.type == JSONType.false_) &&
+            (b.type == JSONType.true_ || b.type == JSONType.false_)) {
             bool aVal = (a.type == JSONType.true_);
             bool bVal = (b.type == JSONType.true_);
             if (aVal < bVal) return -1;
             if (aVal > bVal) return 1;
             return 0;
         }
-        // Incompatible types - compare as strings
-        return 0;
+        throw new Exception("MockDB cannot compare " ~ a.toString() ~ " with " ~ b.toString());
     }
 
     // =========================================================================
@@ -676,13 +706,10 @@ class MockDB(DBConfig config = defaultDBConfig) : DataSource {
 ///
 /// Call printSQL() after query execution to see the combined CTE query.
 ///
-/// This fetcher uses CapturingSqlOptimizer to enable SQL push-down while
-/// still being able to evaluate computed columns.
-///
 /// Parameterized by DBConfig for compile-time feature configuration.
 class DebugSqlDB(DBConfig config = defaultDBConfig) : DataSource {
     import std.stdio : writeln;
-    import dunamis.relational.sql_optimizer : SqlOptimizer, CapturingSqlOptimizer;
+    import dunamis.relational.sql_optimizer : SqlOptimizer;
     import dunamis.relational.sql_dialect : SqlDialect;
     import dunamis.core.optimize : ExprOptimizer;
     import dunamis.core.expr : ExprBase;
@@ -693,22 +720,22 @@ class DebugSqlDB(DBConfig config = defaultDBConfig) : DataSource {
     private DataSource _delegate;
     private QueryNode[] _executedNodes;
     private string _cachedSQL;  // Cached to avoid duplicate debug output
-    private CapturingSqlOptimizer _sqlOptimizer;
+    private SqlOptimizer _sqlOptimizer;
     private SqlDialect _dialect;
 
     this(DataSource delegate_, SqlDialect dialect) {
         _delegate = delegate_;
         _dialect = dialect;
-        _sqlOptimizer = new CapturingSqlOptimizer(dialect);
+        _sqlOptimizer = new SqlOptimizer(dialect);
     }
 
-    /// Return the CapturingSqlOptimizer to enable SQL push-down
+    /// Return the SqlOptimizer to enable SQL push-down
     override ExprOptimizer[] requestedOptimizers() {
         return [_sqlOptimizer];
     }
 
     /// Get the SQL optimizer (for accessing computed columns info)
-    @property CapturingSqlOptimizer sqlOptimizer() {
+    @property SqlOptimizer sqlOptimizer() {
         return _sqlOptimizer;
     }
 
@@ -742,7 +769,7 @@ class DebugSqlDB(DBConfig config = defaultDBConfig) : DataSource {
     void reset() {
         _executedNodes = [];
         _cachedSQL = "";
-        _sqlOptimizer = new CapturingSqlOptimizer(_dialect);
+        _sqlOptimizer = new SqlOptimizer(_dialect);
     }
 
     /// Create a session that wraps the delegate's session.
@@ -770,6 +797,10 @@ private class DebugSqlSession : RelationalSession {
     }
 
     // Delegate all other methods to wrapped session
+    override bool computesColumns() {
+        return _inner.computesColumns;
+    }
+
     override Promise!(string[]) fetchColumnString(string table, string column, AnyRef[] refs) {
         return _inner.fetchColumnString(table, column, refs);
     }

@@ -353,12 +353,20 @@ void testOnlyIfRootCollection() {
         session.setup().await;
         scope (exit) session.teardown(SetupMode.query, false).await;
 
+        string[] sent;
+        session.statementObserver = (const(char)[] sql) { sent ~= sql.idup; };
+        scope (exit) session.statementObserver = null;
         foreach (condition; [true, false]) {
             auto q = Query().singleton();
+            sent = null;
             auto names = evaluateNested(map!((Expr!User u) => u.firstName)(
                 filterBy!((Expr!User u) => u.firstName.eq("Alice"))(onlyIf(constant(condition, q), Query.users(q)))),
                 ctx).await;
             assertTrue(condition ? names.length && names.all!(n => n == "Alice") : !names.length, "onlyIf(" ~ condition.to!string ~ "): " ~ names.to!string);
+            // (The filter is in the query's WHERE clause)
+            if (condition)
+                assertTrue(sent.any!(sql => sql.canFind("WHERE") && sql.canFind("Alice")),
+                    "The filter over onlyIf was not pushed into the query: " ~ sent.to!string);
         }
     });
 }

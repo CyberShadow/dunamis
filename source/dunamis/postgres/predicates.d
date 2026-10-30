@@ -75,11 +75,7 @@ final class PostgresSqlExpr(T) : Expr!T, NativeSqlInfo {
     ExprBase projectComputed(QueryNodeId queryNodeId, string alias_, ExprBase input, ExprBase prefetch) {
         import dunamis.relational.project : PrefetchExpr;
         import dunamis.relational.sql_optimizer : ProjectComputedExpr;
-        auto projection = new ProjectComputedExpr!T(queryNodeId, alias_, input, cast(PrefetchExpr) prefetch);
-        // (Where the query has no such column, e.g. one paginated per
-        // parent, the expression is evaluated in memory.)
-        projection.inMemoryFallback = _inMemory;
-        return projection;
+        return new ProjectComputedExpr!T(queryNodeId, alias_, input, cast(PrefetchExpr) prefetch, _inMemory);
     }
 }
 

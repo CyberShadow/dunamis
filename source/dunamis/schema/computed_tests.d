@@ -137,7 +137,6 @@ unittest {
 }
 
 // Execution: sorting, pagination and nested filters apply.
-// (MockDB ignores SQL WHERE clauses, so root filters are covered by the Postgres integration suite.)
 unittest {
     seedFixture();
     auto result = executeFixture(compileQuery!FinalSchema(`{

@@ -100,9 +100,8 @@ private void seed() {
 }
 
 private void check(string field, string filter, long[] expected) {
-    // Naive evaluation: when optimizing, these filters are pushed into SQL
-    // WHERE clauses, which MockDB ignores (see the Postgres integration suite).
-    foreach (optimize; [false]) {
+    // (The Postgres integration suite covers these filters' SQL.)
+    foreach (optimize; [false, true]) {
         seed();
         auto result = awaitSync(new Executor().execute(compileQuery!NfSchema(
             `{ ` ~ field ~ `(filter: ` ~ filter ~ `, orderBy: [{field: id, direction: ASC}]) { id } }`), optimize));

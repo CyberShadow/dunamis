@@ -314,14 +314,14 @@ abstract class RelationalSession : DataSession {
     /// Get column values from pre-fetched results
     T[] getColumnValues(T)(QueryNodeId queryNodeId, string column, AnyRef[] refs) {
         auto result = _queryResults.get(queryNodeId, null);
-        if (result is null) return refs.map!(_ => T.init).array;
+        assert(result !is null, "No query result for query node " ~ queryNodeId.value.to!string);
         return result.getColumn!T(column, refs);
     }
 
     /// Get column values from a JOINed table
     T[] getJoinedColumnValues(T)(QueryNodeId queryNodeId, JoinAlias joinAlias, string column, AnyRef[] refs) {
         auto result = _queryResults.get(queryNodeId, null);
-        if (result is null) return refs.map!(_ => T.init).array;
+        assert(result !is null, "No query result for query node " ~ queryNodeId.value.to!string);
         return result.getJoinedColumn!T(joinAlias, column, refs);
     }
 
@@ -352,13 +352,21 @@ abstract class RelationalSession : DataSession {
     /// Used by ColumnAccessExpr when evaluating fields on mutation results.
     T[] getMutationColumnValues(T)(string typeName, string column, AnyRef[] refs) {
         auto result = _mutationResults.get(typeName, null);
-        if (result is null) return refs.map!(_ => T.init).array;
+        assert(result !is null, "No mutation result for " ~ typeName);
         return result.getColumn!T(column, refs);
     }
 
     /// Check if we have mutation results for a type
     bool hasMutationResult(string typeName) {
         return (typeName in _mutationResults) !is null;
+    }
+
+    /// Whether the session's queries compute the computed columns of query
+    /// nodes (SQL expressions, see `QueryNode.computedColumns`). Those of a
+    /// session which does not (an in-memory one, such as MockDB's) are
+    /// evaluated in memory instead (see `ProjectComputedExpr`).
+    bool computesColumns() {
+        return true;
     }
 
     /// Execute raw SQL for session setup (SET LOCAL, SET TRANSACTION, etc.).
