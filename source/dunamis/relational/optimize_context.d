@@ -108,20 +108,6 @@ class RelationalOptimizeContext {
         return _rootNodes.get(cast(void*) root, null);
     }
 
-    /// Find a root node by typeName and table (for GetAllExpr to find its QueryNode)
-    /// Returns the first matching root node, or null if not found.
-    /// Nodes never configured as roots (e.g. of a hasMany whose parent could
-    /// not be resolved, which falls back to the naive path) are not roots.
-    QueryNode findRootNode(string typeName, string table) {
-        foreach (node; _queryNodes.values) {
-            if (node.isRoot && node.rootFilter != FilterType.none &&
-                    node.typeName == typeName && node.table == table) {
-                return node;
-            }
-        }
-        return null;
-    }
-
     /// Get or create a PrefetchExpr for a QueryNode.
     /// Called by access expressions to get the prefetch dependency.
     PrefetchExpr getPrefetchExpr(QueryNode node) {

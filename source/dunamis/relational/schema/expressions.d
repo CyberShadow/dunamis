@@ -683,13 +683,11 @@ class GetAllExpr(Entity, string[] orderBy = null) : Expr!(Entity[]), RootExprInf
 
         auto relCtx = ctx.getSourceContext!RelationalOptimizeContext();
 
-        // The node configured for this root collection (another root field
-        // may query the same table differently); failing that, any root node
-        // of the table.
+        // The node configured for this root collection, if a map over it
+        // reads its rows' columns; otherwise it is read on the naive path.
+        // (Not another root node of the table: another root field may
+        // query it differently, e.g. filtered or paginated.)
         auto node = relCtx.rootNodeOf(this);
-        if (node is null)
-            node = relCtx.findRootNode(EntityID!Entity.typeName, EntityID!Entity.table);
-
         if (node is null) {
             return this;
         }
