@@ -64,9 +64,12 @@ JSONValue toJsonValue(T)(T value) {
         return arr;
     } else static if (is(T == struct)) {
         import std.traits : FieldNameTuple;
+        // (Of its public fields: others are internal state, as for the
+        // plain fields of entities, see isPlainField.)
         JSONValue object = JSONValue.emptyObject;
         static foreach (fieldName; FieldNameTuple!T)
-            object[fieldName] = toJsonValue(__traits(getMember, value, fieldName));
+            static if (__traits(getVisibility, __traits(getMember, T, fieldName)) == "public")
+                object[fieldName] = toJsonValue(__traits(getMember, value, fieldName));
         return object;
     } else {
         static assert(false, "Cannot convert " ~ T.stringof ~ " to JSONValue");
@@ -1052,6 +1055,18 @@ private class FailingExpr : Expr!JSONValue {
         p.reject(new Exception(_message));
         return p;
     }
+}
+
+// A struct's JSON value has its public fields (not its internal state)
+unittest {
+    static struct Value {
+        int a;
+        string b;
+        package bool internal;
+        private int hidden;
+    }
+    auto json = toJsonValue(Value(1, "x", true, 2));
+    assert(json.toString() == `{"a":1,"b":"x"}`, json.toString());
 }
 
 /// Expression that returns fixed values (for testing)
