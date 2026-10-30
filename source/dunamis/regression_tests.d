@@ -70,3 +70,13 @@ unittest {
         assert(result == parseJSON(`{"people": [{"name": "Ann"}], "peopleCount": 3}`), result.toString());
     }
 }
+
+// The fields of an object a mutation did not write, read after a mutation
+// of an object of the same type, are its own
+unittest {
+    seed();
+    auto result = awaitSync(new Executor().execute(compileQuery!RegSchema(
+        `mutation { createPerson(name: "Dee") { name } firstPerson { name } }`)));
+    assert(result == parseJSON(`{"createPerson": {"name": "Dee"}, "firstPerson": {"name": "Ann"}}`),
+        result.toString());
+}

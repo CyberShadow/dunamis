@@ -356,9 +356,10 @@ abstract class RelationalSession : DataSession {
         return result.getColumn!T(column, refs);
     }
 
-    /// Check if we have mutation results for a type
-    bool hasMutationResult(string typeName) {
-        return (typeName in _mutationResults) !is null;
+    /// Whether the last mutation result of a type holds all of `refs`
+    bool mutationResultHolds(string typeName, AnyRef[] refs) {
+        auto result = _mutationResults.get(typeName, null);
+        return result !is null && result.containsAllRefs(refs);
     }
 
     /// Whether the session's queries compute the computed columns of query

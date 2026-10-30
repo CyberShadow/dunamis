@@ -565,7 +565,16 @@ class MockDBImpl : RelationalSession {
         // Auto-generate integer ID for auto-increment columns
         if (isAutoIncrement) {
             auto pkCol = pkColumns[0];
+            // (After the rows the table was given)
+            long maxId;
+            if (auto rows = table in _tableData)
+                foreach (row; rows.array)
+                    if (auto id = pkCol in row)
+                        if (id.type == JSONType.integer && id.integer > maxId)
+                            maxId = id.integer;
             auto nextId = _nextId.get(table, 1);
+            if (nextId <= maxId)
+                nextId = maxId + 1;
             _nextId[table] = nextId + 1;
             newRow[pkCol] = JSONValue(nextId);
         }
