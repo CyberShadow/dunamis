@@ -342,7 +342,7 @@ Each mixin produces exactly one user-visible symbol (the field name the user cho
 | `Col!("name", T)` | `name` (static method) | `@SqlColumn`, `@ForeignKeyRef` |
 | `HasMany!("posts", Post, "fk")` | `posts` (static method) | `@HasManyFK`, `@HasManyChild` |
 | `BelongsTo!("author", "fkField")` | `author` (static method) | `@BelongsToFK`, `@BelongsToParent` |
-| `Table!(Entity, "users")` | `users` (static method) | `@TableEntity` |
+| `Table!(Entity, "users")` | `users` (static method) | `@StoredEntities` |
 | `DemoId` | `id` (field) | `@PrimaryKey`, `@AutoIncrement`, `@SqlColumn` |
 
 **What the plugin chain adds internally:**

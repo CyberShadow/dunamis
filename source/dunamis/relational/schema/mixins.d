@@ -130,11 +130,12 @@ template BelongsToCode(string fieldName, string fkFieldName) {
 /// Example: mixin Table!(User, "users", ["id"]);
 mixin template Table(Entity, string fieldName, string[] orderBy = null) {
     import dunamis.core.expr : Expr;
-    import dunamis.relational.schema.attrs : TableEntity;
+    import dunamis.core.stored : StoredEntities;
+    import dunamis.relational.crud : CrudWrites;
     import dunamis.relational.schema.expressions : getAll;
 
     // Method with UDA - follows unified root field signature
-    @TableEntity!Entity
+    @StoredEntities!(Entity, CrudWrites)
     mixin("static auto " ~ fieldName ~ "(Expr!(typeof(this)) parent) {
         return getAll!(Entity, orderBy)();
     }");

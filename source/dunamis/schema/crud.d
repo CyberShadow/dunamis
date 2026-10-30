@@ -1,14 +1,17 @@
 /// Optional plugin that auto-generates CRUD mutations for entities.
 ///
-/// Discovers entities via `@TableEntity` UDAs on the Query type (from `Table` mixin)
-/// and generates `create<Entity>`, `update<Entity>`, `delete<Entity>` methods
-/// on the Mutation type.
+/// Discovers the stored entities of the Query type's root fields (their
+/// `@StoredEntities` UDAs, see `dunamis.core.stored`; e.g. those of the
+/// relational `Table` mixin) and generates the write fields their data
+/// sources declare for them (e.g. `create<Entity>`, `update<Entity>`,
+/// `delete<Entity>` for relational entities with single-column
+/// `@AutoIncrement` primary keys, see `dunamis.relational.crud`) on the
+/// Mutation type.
 ///
-/// Only entities with single-column `@AutoIncrement` primary keys get CRUD methods.
-/// Entities with composite keys, non-auto-increment keys, or manually defined
-/// mutations are skipped. Users can write custom mutation plugins for other patterns
-/// (batch inserts, per-table mutations, etc.) using the building blocks in
-/// `dunamis.relational.mutation`.
+/// Mutations defined manually are not overwritten. Users can write custom
+/// mutation plugins for other patterns (batch inserts, per-table mutations,
+/// etc.) using the building blocks of their data source (e.g.
+/// `dunamis.relational.mutation`).
 ///
 /// Example:
 /// ---
@@ -18,227 +21,6 @@
 module dunamis.schema.crud;
 
 import dunamis.schema.plugin : isSchema;
-
-// ============================================================================
-// Utilities
-// ============================================================================
-
-/// Convert a PK value to string for mutation calls.
-/// Handles CustomScalar types (accesses .value) and regular types.
-string pkValueToString(T)(T val) {
-    import std.conv : to;
-    import dunamis.core.types : isCustomScalar;
-    static if (isCustomScalar!T) {
-        return val.value.to!string;
-    } else {
-        return val.to!string;
-    }
-}
-
-/// Convert a D value to JSONValue for mutation column data.
-/// Handles: strings, integers, floats, bools, CustomScalars, enums, Nullable.
-auto _fieldToJson(T)(T val) {
-    import std.conv : to;
-    import std.json : JSONValue;
-    import std.traits : isIntegral, isFloatingPoint, isSomeString;
-    import std.typecons : Nullable;
-    import dunamis.core.types : isCustomScalar;
-
-    static if (is(T == Nullable!U, U)) {
-        if (val.isNull) return JSONValue(null);
-        return _fieldToJson(val.get);
-    } else static if (isCustomScalar!T) {
-        return JSONValue(val.value);
-    } else static if (is(T == enum)) {
-        import dunamis.core.types : storedLabel;
-        return JSONValue(storedLabel(val));
-    } else static if (is(T == bool)) {
-        return JSONValue(val);
-    } else static if (isSomeString!T) {
-        return JSONValue(val);
-    } else static if (isIntegral!T) {
-        return JSONValue(val);
-    } else static if (isFloatingPoint!T) {
-        return JSONValue(val);
-    } else {
-        static assert(false, "Unsupported type for CRUD field conversion: " ~ T.stringof);
-    }
-}
-
-// ============================================================================
-// Column Introspection Helpers
-// ============================================================================
-
-/// Check if a member is a non-PK database column suitable for CRUD input.
-/// Matches Col fields (have @SqlColumn) and plain fields (struct instance fields).
-template _isInputColumn(Entity, string member) {
-    import dunamis.relational.schema.attrs : hasSqlColumn, hasPrimaryKeyAttr;
-    import dunamis.core.types : isPlainField;
-
-    enum _isInputColumn = () {
-        static if (!__traits(compiles, __traits(getMember, Entity, member)))
-            return false;
-        else static if (__traits(compiles, hasPrimaryKeyAttr!(Entity, member)) &&
-                       hasPrimaryKeyAttr!(Entity, member))
-            return false;
-        else static if (__traits(compiles, hasSqlColumn!(__traits(getMember, Entity, member))) &&
-                       hasSqlColumn!(__traits(getMember, Entity, member)))
-            return true;
-        else static if (isPlainField!(Entity, member))
-            return true;
-        else
-            return false;
-    }();
-}
-
-/// Check if a column member is a static method (Col mixin) vs a plain field.
-template _isColMethod(Entity, string member) {
-    static if (__traits(compiles, __traits(isStaticFunction, __traits(getMember, Entity, member)))) {
-        enum _isColMethod = __traits(isStaticFunction, __traits(getMember, Entity, member));
-    } else {
-        enum _isColMethod = false;
-    }
-}
-
-/// Get the SQL column name for a CRUD input column.
-template _inputColumnSqlName(Entity, string member) {
-    import dunamis.relational.schema.attrs : hasSqlColumn, getSqlColumn, getPlainFieldColumnName;
-
-    enum _inputColumnSqlName = () {
-        static if (__traits(compiles, hasSqlColumn!(__traits(getMember, Entity, member))) &&
-                   hasSqlColumn!(__traits(getMember, Entity, member)))
-            return getSqlColumn!(__traits(getMember, Entity, member));
-        else
-            return getPlainFieldColumnName!(Entity, member);
-    }();
-}
-
-/// Get the field name for a CRUD input field.
-/// Uses the D field name directly — the GraphQL layer resolves presentation
-/// names via @GqlName on the original entity field, whose attributes the
-/// input field carries.
-template _inputFieldGqlName(Entity, string member) {
-    enum _inputFieldGqlName = member;
-}
-
-// ============================================================================
-// CRUD Methods Mixin
-// ============================================================================
-
-/// Mixin template that generates create/update/delete methods for an entity.
-///
-/// Uses the CTFE lambda pattern (like FilteredArrayField) to build method strings
-/// without leaking intermediate symbols. Template parameters OriginalEntity and
-/// NormalizedEntity are in scope at the mixin site.
-///
-/// Generates input structs and methods:
-/// - Create<Entity>Input: one field per non-PK column (direct types)
-/// - Update<Entity>Input: one Nullable-wrapped field per non-PK column (optional)
-/// - create<Entity>(parent, input): takes Create<Entity>Input
-/// - update<Entity>(parent, id, input): takes PK + Update<Entity>Input
-/// - delete<Entity>(parent, id): takes PK only
-///
-/// Only generates methods for entities with single-column @AutoIncrement PKs.
-/// Skips methods that already exist on MutationType (conflict detection).
-mixin template _CrudMethods(OriginalEntity, NormalizedEntity, MutationType) {
-    static import std.json;
-    static import dunamis.core.expr;
-    static import std.traits;
-    static import std.typecons;
-    static import dunamis.schema.crud;
-    static import dunamis.schema.entity_cast;
-    static import dunamis.relational.mutation;
-    mixin(() {
-        import dunamis.relational.schema.attrs : getEntityTypeName, getPrimaryKeyFieldNames, hasAutoIncrement;
-
-        enum typeName = getEntityTypeName!OriginalEntity;
-        enum string[] pkFields = getPrimaryKeyFieldNames!OriginalEntity;
-
-        // Only generate for single-PK auto-increment entities
-        static if (pkFields.length != 1 || !hasAutoIncrement!OriginalEntity) {
-            return "";
-        } else {
-            enum pkFieldName = pkFields[0];
-            string result = "";
-
-            // Build input struct fields and method bodies
-            string createStructFields = "";
-            string updateStructFields = "";
-            string createBody = "    std.json.JSONValue[string] _cols;\n";
-            string updateBody = "    std.json.JSONValue[string] _cols;\n";
-
-            static foreach (_m; __traits(allMembers, OriginalEntity)) {{
-                static if (_isInputColumn!(OriginalEntity, _m)) {
-                    enum _sqlCol = _inputColumnSqlName!(OriginalEntity, _m);
-
-                    // Type expression: ExprResultType for Col methods, typeof for plain fields
-                    static if (_isColMethod!(OriginalEntity, _m)) {
-                        enum _typeExpr = "dunamis.core.expr.ExprResultType!(" ~
-                            "std.traits.ReturnType!(__traits(getMember, OriginalEntity, \"" ~ _m ~ "\")))";
-                    } else {
-                        enum _typeExpr = "typeof(__traits(getMember, OriginalEntity.init, \"" ~ _m ~ "\"))";
-                    }
-
-                    // Create input: direct type
-                    // The input field carries the entity field's attributes
-                    // (e.g. a presentation name).
-                    enum _name = "@(__traits(getAttributes, __traits(getMember, OriginalEntity, \"" ~ _m ~ "\"))) ";
-                    createStructFields ~= "    " ~ _name ~ _typeExpr ~ " " ~ _m ~ ";\n";
-
-                    // Update input: Nullable-wrapped type
-                    updateStructFields ~= "    " ~ _name ~
-                        "std.typecons.Nullable!(" ~ _typeExpr ~ ") " ~ _m ~ ";\n";
-
-                    // Create body: always set column
-                    createBody ~= "    _cols[\"" ~ _sqlCol ~ "\"] = " ~
-                        "dunamis.schema.crud._fieldToJson(input." ~ _m ~ ");\n";
-
-                    // Update body: only set column if not null (absent = don't update)
-                    updateBody ~= "    if (!input." ~ _m ~ ".isNull) _cols[\"" ~ _sqlCol ~ "\"] = " ~
-                        "dunamis.schema.crud._fieldToJson(input." ~ _m ~ ".get);\n";
-                }
-            }}
-
-            // Generate input structs
-            result ~= "struct Create" ~ typeName ~ "Input {\n" ~ createStructFields ~ "}\n\n";
-            result ~= "struct Update" ~ typeName ~ "Input {\n" ~ updateStructFields ~ "}\n\n";
-
-            // create<Entity>(parent, input) -> insert!OE(columns)
-            static if (!__traits(hasMember, MutationType, "create" ~ typeName)) {
-                result ~= "static auto create" ~ typeName ~ "(" ~
-                    "dunamis.core.expr.Expr!(typeof(this)) parent, " ~
-                    "Create" ~ typeName ~ "Input input) {\n" ~
-                    createBody ~
-                    "    return dunamis.schema.entity_cast.pluginEntityCast!NormalizedEntity(" ~
-                    "dunamis.relational.mutation.insert!OriginalEntity(_cols));\n}\n\n";
-            }
-
-            // update<Entity>(parent, id, input) -> update!OE([id], columns)
-            static if (!__traits(hasMember, MutationType, "update" ~ typeName)) {
-                result ~= "static auto update" ~ typeName ~ "(" ~
-                    "dunamis.core.expr.Expr!(typeof(this)) parent, " ~
-                    "typeof(__traits(getMember, OriginalEntity, \"" ~ pkFieldName ~ "\")) id, " ~
-                    "Update" ~ typeName ~ "Input input) {\n" ~
-                    updateBody ~
-                    "    return dunamis.schema.entity_cast.pluginEntityCast!NormalizedEntity(" ~
-                    "dunamis.relational.mutation.update!OriginalEntity(" ~
-                    "[dunamis.schema.crud.pkValueToString(id)], _cols).single());\n}\n\n";
-            }
-
-            // delete<Entity>(parent, id) -> delete_!OE([id])
-            static if (!__traits(hasMember, MutationType, "delete" ~ typeName)) {
-                result ~=
-                    "static auto delete" ~ typeName ~ "(" ~
-                    "dunamis.core.expr.Expr!(typeof(this)) parent, " ~
-                    "typeof(__traits(getMember, OriginalEntity, \"" ~ pkFieldName ~ "\")) id) { " ~
-                    "return dunamis.relational.mutation.delete_!OriginalEntity(" ~
-                    "[dunamis.schema.crud.pkValueToString(id)]); }\n";
-            }
-
-            return result;
-        }
-    }());
-}
 
 // ============================================================================
 // Normalized Entity Extraction
@@ -260,13 +42,21 @@ template _extractNormalizedEntity(alias QueryType, string member) {
     }
 }
 
+/// Mix in the write fields `Writes` generates (see
+/// `dunamis.core.stored.StoredEntities`).
+mixin template _StoredWrites(alias Writes, Args...) {
+    mixin Writes!Args;
+}
+
 // ============================================================================
 // CrudMutationPlugin
 // ============================================================================
 
-/// Plugin that auto-generates CRUD mutations for all entities with `Table` entries
-/// in the Query type. Entities are detected via `@TableEntity` UDAs (generated by
-/// the `Table` mixin), which store the original (pre-normalization) entity type.
+/// Plugin that auto-generates CRUD mutations for all entities listed by root
+/// fields of the Query type (e.g. by `Table` entries). Entities are detected
+/// via `@StoredEntities` UDAs (generated by the `Table` mixin), which store
+/// the original (pre-normalization) entity type and the data source's write
+/// fields for it.
 ///
 /// Must be applied before Filter/Sort/Pagination plugins:
 /// ---
@@ -276,11 +66,13 @@ template _extractNormalizedEntity(alias QueryType, string member) {
 /// The plugin:
 /// - Passes Query through unchanged
 /// - Forwards all existing Mutation fields
-/// - Generates create/update/delete for each entity with single-PK + @AutoIncrement
-/// - Skips CRUD generation if the method name already exists on S.Mutation (user override)
+/// - Generates the write fields of each entity listed by a Query field (for
+///   relational entities, create/update/delete for each entity with single-PK + @AutoIncrement)
+/// - Skips generating a field if its name already exists on S.Mutation (user override)
 template CrudMutationPlugin(alias S) if (isSchema!S) {
     import dunamis.schema.plugin : WrapFields, IdentityTypeMap, ForwardField, OriginalName, RemapTypeAttributes;
-    import dunamis.relational.schema.attrs : hasTableEntity, extractTableEntity;
+    import dunamis.core.stored : hasStoredEntities, StoredEntitiesOf;
+    static import dunamis.schema.entity_cast;
 
     alias Query = S.Query;
     alias Subscription = S.Subscription;
@@ -292,14 +84,16 @@ template CrudMutationPlugin(alias S) if (isSchema!S) {
         // Forward all existing mutation fields from the source schema
         mixin WrapFields!(S.Mutation, IdentityTypeMap, ForwardField);
 
-        // Generate CRUD for each entity discovered from Query's @TableEntity UDAs
+        // Generate the write fields of each entity discovered from Query's @StoredEntities UDAs
         static foreach (_member; __traits(allMembers, S.Query)) {
-            static if (__traits(compiles, hasTableEntity!(__traits(getMember, S.Query, _member))) &&
-                       hasTableEntity!(__traits(getMember, S.Query, _member))) {
-                mixin _CrudMethods!(
-                    extractTableEntity!(__traits(getMember, S.Query, _member)),
+            static if (__traits(compiles, hasStoredEntities!(__traits(getMember, S.Query, _member))) &&
+                       hasStoredEntities!(__traits(getMember, S.Query, _member))) {
+                mixin _StoredWrites!(
+                    StoredEntitiesOf!(__traits(getMember, S.Query, _member)).Writes,
+                    StoredEntitiesOf!(__traits(getMember, S.Query, _member)).entityType,
                     _extractNormalizedEntity!(S.Query, _member),
-                    S.Mutation
+                    S.Mutation,
+                    dunamis.schema.entity_cast.pluginEntityCast
                 );
             }
         }
