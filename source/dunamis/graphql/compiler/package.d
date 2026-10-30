@@ -1145,7 +1145,7 @@ unittest {
     }
 }
 
-// Test mutation returning custom payload type (Postgraphile pattern)
+// Test mutation returning custom payload type (relay-style payload pattern)
 unittest {
     import std.json;
     import ae.utils.promise.await : awaitSync;
@@ -1226,7 +1226,7 @@ unittest {
     assert(payload["user"]["name"].str == "Alice");
 }
 
-// Test mutation payload returning Query type (full Postgraphile pattern)
+// Test mutation payload returning Query type (full relay-style payload pattern)
 unittest {
     import std.json;
     import ae.utils.promise.await : awaitSync;

@@ -26,7 +26,7 @@ import dunamis.graphql.schema.udas : GqlName;
 // isSchema imported via dunamis.schema.plugin wildcard import above
 
 // ============================================================================
-// Scalar Filter Input Types (PostGraphile-style)
+// Scalar Filter Input Types (connection-filter style)
 // ============================================================================
 
 /// String filter input type.
@@ -569,7 +569,7 @@ private template entityFilterFieldsCode(Entity) {
 // ============================================================================
 
 /// Build an Expr!bool predicate from an entity filter.
-/// This converts the PostGraphile-style nested filter to an expression tree.
+/// This converts the connection-filter style nested filter to an expression tree.
 /// The item can be any Expr!Entity (FilterItemExpr, EveryItemOfExpr, a
 /// relationship of another item, etc.).
 ///
@@ -884,7 +884,7 @@ private Expr!bool buildValueCondition(T, ColumnFilter)(Expr!T colExpr, const Col
 // ============================================================================
 
 /// Build an Expr!bool predicate from a JSON filter object.
-/// This converts the PostGraphile-style nested filter to an expression tree.
+/// This converts the connection-filter style nested filter to an expression tree.
 ///
 /// Example input JSON:
 ///   { "firstName": { "equalTo": "Alice" }, "age": { "greaterThan": 18 } }
