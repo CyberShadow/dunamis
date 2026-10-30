@@ -69,18 +69,32 @@ class PrefetchExpr : Expr!(AnyRef[]) {
             }
         }
 
-        // Fast-path: data already stored from a previous evaluation
-        if (session.getQueryResult(_node.id) !is null) {
-            return resolve([session.getQueryResult(_node.id).allRefs()]);
-        }
-
         // A query of the node's own rows already sent in this session (e.g.
         // from a scope of the evaluation, such as a filter predicate's,
         // whose memo the other scopes do not see) is not sent again.
         bool ownRows = root.filter == _node.rootFilter && root.refs is _node.rootFilterRefs;
-        if (ownRows)
+        auto requested = root.refs;
+        auto stored = session.getQueryResult(_node.id);
+        if (ownRows) {
+            if (stored !is null)
+                return resolve([stored.allRefs()]);
             if (auto pending = session.pendingQueryResult(_node.id))
                 return pending.then((QueryResult result) => [result.allRefs()]);
+        } else if (stored !is null) {
+            // Rows selected by the refs bound in this evaluation (of a
+            // mutation's objects): those of an earlier evaluation, e.g. in
+            // another scope with other refs, only if they hold these refs.
+            // Otherwise the query selects both (the projections of the
+            // earlier evaluation read the result stored, which replaces it).
+            assert(root.filter == FilterType.byIds, "A node's stored result of other rows");
+            if (stored.containsAllRefs(requested))
+                return resolve([requested.dup]);
+            auto all = stored.allRefs();
+            foreach (r; requested)
+                if (!stored.hasRef(r))
+                    all ~= r;
+            root = RootSelection(FilterType.byIds, all);
+        }
 
         // Ensure parent is fetched first
         Promise!void parentReady;
@@ -106,9 +120,11 @@ class PrefetchExpr : Expr!(AnyRef[]) {
             session.storeQueryResult(node.id, result);
             return result;
         });
-        if (ownRows)
+        if (ownRows) {
             session.setPendingQueryResult(node.id, query);
-        return query.then((QueryResult result) => [result.allRefs()]);
+            return query.then((QueryResult result) => [result.allRefs()]);
+        }
+        return query.then((QueryResult _) => [requested]);
     }
 
     @property QueryNode node() { return _node; }
@@ -519,4 +535,19 @@ unittest {
     assert(fetch([AnyRef("User:1")]) == [AnyRef("User:1")]);
     assert(fetch([AnyRef("User:2")]) == [AnyRef("User:2")]);
     assert(node.rootFilter == FilterType.none);
+
+    // Also in scopes of one request (one session), which bind other refs:
+    // each gets the rows of its refs, not those of the first evaluation
+    auto ctx = new EvalContext();
+    awaitSync(ctx.getSession(_testDb3).setup());
+    AnyRef[] fetchIn(AnyRef[] bound) {
+        auto scope_ = ctx.createScope();
+        scope_.setValues!AnyRef(mapKey, bound);
+        return awaitSync(prefetch.eval(scope_))[0];
+    }
+    assert(fetchIn([AnyRef("User:1")]) == [AnyRef("User:1")]);
+    assert(fetchIn([AnyRef("User:2")]) == [AnyRef("User:2")]);
+    // (The session's result holds the rows of both)
+    auto session = cast(RelationalSession) ctx.getSession(_testDb3);
+    assert(session.getQueryResult(node.id).containsAllRefs([AnyRef("User:1"), AnyRef("User:2")]));
 }
