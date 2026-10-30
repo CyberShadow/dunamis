@@ -250,10 +250,12 @@ class SQLiteSession : RelationalSession {
         return resolve(refs.map!(r => r.isValid ? values.get(r.localId, 0L) : 0L).array);
     }
 
-    override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns) {
+    override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns, string[] orderBy = null) {
         import dunamis.core.types : encodeCompositeKey;
 
         auto sql = format("SELECT %s FROM %s", pkColumns.join(", "), table);
+        if (orderBy.length)
+            sql ~= " ORDER BY " ~ orderBy.join(", ");
         string[] result;
 
         foreach (cells, columns; _db.query(sql)) {

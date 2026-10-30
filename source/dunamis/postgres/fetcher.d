@@ -539,10 +539,12 @@ class PostgresSession : RelationalSession {
         });
     }
 
-    override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns) {
+    override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns, string[] orderBy = null) {
         import dunamis.core.types : encodeCompositeKey;
 
         auto sql = "SELECT " ~ pkColumns.join(", ") ~ " FROM " ~ table;
+        if (orderBy.length)
+            sql ~= " ORDER BY " ~ orderBy.join(", ");
 
         auto numPkCols = pkColumns.length;
         return run(sql).then((PgSqlConnection.Row[] rows) {

@@ -104,6 +104,12 @@ struct Query {
 }
 ```
 
+A table's rows are unordered unless the field names columns to order them by. A sort applied to the field (e.g. the `orderBy` of `SortingPlugin`) takes precedence over that order, which orders the rows the sort leaves tied (sorts are stable); filters and the `first`/`offset` window apply as usual (the window after the sorts):
+
+```d
+mixin Table!(User, "users", ["id"]);   // SQL: ... ORDER BY <sorts>, id
+```
+
 ## Relationships
 
 ### BelongsTo (Many-to-One)

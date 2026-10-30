@@ -124,8 +124,11 @@ template BelongsToCode(string fieldName, string fkFieldName) {
 // ============================================================================
 
 /// Mixin to define a root query field that returns all entities of a type.
-/// Used in a Query struct to define the schema's entry points.
-mixin template Table(Entity, string fieldName) {
+/// Used in a Query struct to define the schema's entry points. The entities
+/// are ordered by the `orderBy` columns, if given (as a sort beneath any
+/// applied to the field: their order among the entities a sort leaves tied).
+/// Example: mixin Table!(User, "users", ["id"]);
+mixin template Table(Entity, string fieldName, string[] orderBy = null) {
     import dunamis.core.expr : Expr;
     import dunamis.relational.schema.attrs : TableEntity;
     import dunamis.relational.schema.expressions : getAll;
@@ -133,7 +136,7 @@ mixin template Table(Entity, string fieldName) {
     // Method with UDA - follows unified root field signature
     @TableEntity!Entity
     mixin("static auto " ~ fieldName ~ "(Expr!(typeof(this)) parent) {
-        return getAll!Entity();
+        return getAll!(Entity, orderBy)();
     }");
 }
 

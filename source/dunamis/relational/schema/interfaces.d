@@ -89,6 +89,11 @@ interface RootExprInfo {
 
     /// The data source for this root (may be null for legacy usage)
     DataSource dataSource();
+
+    /// Columns which order the root's rows (empty: unordered, or for byIds
+    /// the order of the refs). Sorts applied to the collection take
+    /// precedence: these columns order the rows they leave tied.
+    string[] orderColumns();
 }
 
 /// Source ID for an entity - uses table name as unique identifier.

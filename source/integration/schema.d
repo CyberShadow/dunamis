@@ -493,7 +493,8 @@ mixin template TestSchema(alias db) {
         mixin Table!(Comment, "comments");
         mixin Table!(Task, "tasks");
         mixin Table!(Tag, "tags");
-        mixin Table!(UserBadge, "userBadges");
+        // (Ordered by name, then user: not the order of the key, nor of insertion)
+        mixin Table!(UserBadge, "userBadges", ["badge_name", "user_id"]);
 
         /// Returns all users and posts as a union
         static auto search(Expr!Query q) {

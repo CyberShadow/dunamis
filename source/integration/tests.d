@@ -1979,6 +1979,31 @@ void testUserBadgesRelation() {
     assertTrue(users[0]["badges"][0]["description"].str == "Early", "Expected the badge's columns: " ~ response.toString());
 }
 
+void testUserBadgesTableOrder() {
+    import std.algorithm.mutation : SwapStrategy;
+    import std.algorithm.sorting : isSorted, sort;
+    import std.typecons : tuple;
+
+    // The table's own order: by name, then user
+    auto all = graphql(`{ userBadges { userId badgeName } }`);
+    assertNoErrors(all);
+    auto badges = all["data"]["userBadges"].array;
+    assertTrue(badges.length >= 3, "Expected the user badges: " ~ all.toString());
+    typeof(tuple(string.init, long.init))[] keys;
+    foreach (badge; badges)
+        keys ~= tuple(badge["badgeName"].str, badge["userId"].integer);
+    assertTrue(keys.isSorted, "Expected badges ordered by name, then user: " ~ all.toString());
+
+    // A sort takes precedence, the table's order breaking its ties; the
+    // window applies after both
+    auto sorted = graphql(`{ userBadges(orderBy: [{field: userId, direction: DESC}], first: 3) { userId badgeName } }`);
+    assertNoErrors(sorted);
+    auto expected = badges.dup;
+    expected.sort!((a, b) => a["userId"].integer > b["userId"].integer, SwapStrategy.stable);
+    assertTrue(sorted["data"]["userBadges"] == JSONValue(expected[0 .. 3]),
+        "Expected the first 3 by user (descending), then name: " ~ sorted.toString());
+}
+
 void testCreateUserBadgeMutation() {
     // Test creating a new user badge with composite PK (use mode suffix for uniqueness)
     auto suffix = modeSuffix();
@@ -2703,6 +2728,7 @@ static this() {
     registerTest("Query user badge values", "tests", &testQueryUserBadgeValues);
     registerTest("Create user badge mutation (composite PK)", "tests", &testCreateUserBadgeMutation);
     registerTest("HasMany and BelongsTo with composite-key children", "tests", &testUserBadgesRelation);
+    registerTest("Root table ordered by columns, beneath sorts and windows", "tests", &testUserBadgesTableOrder);
     registerTest("Composite PK persistence", "tests", &testCompositePkPersistence);
     registerTest("Sort tags by name (composite PK)", "tests", &testSortTagsByName);
     registerTest("Filter tags by category (composite PK)", "tests", &testFilterTagsByCategory);

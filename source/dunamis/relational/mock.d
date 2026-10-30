@@ -277,7 +277,8 @@ class MockDBImpl : RelationalSession {
         return result;
     }
 
-    override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns) {
+    // Like WHERE clauses, ordering is not emulated: rows keep table order.
+    override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns, string[] orderBy = null) {
         return resolve(fetchAllIdsStringSync(table));
     }
 
@@ -777,8 +778,8 @@ private class DebugSqlSession : RelationalSession {
         return _inner.fetchColumnLong(table, column, refs);
     }
 
-    override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns) {
-        return _inner.fetchAllIdsString(table, pkColumns);
+    override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns, string[] orderBy = null) {
+        return _inner.fetchAllIdsString(table, pkColumns, orderBy);
     }
 
     override Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs,

@@ -297,6 +297,12 @@ private QueryNode configuredNode(OptimizeContext ctx, Object mapExpr, string typ
         // For root collections: unwrap pagination/sorting/filtering from the
         // expression tree and push to the QueryNode for SQL-level execution.
         pushDownRootCollection(node, mapExpr);
+        // The root's own order, beneath the sorts pushed (which are stable
+        // in memory: it orders the rows they leave tied)
+        foreach (column; rootExpr.orderColumns) {
+            node.addColumn(column);
+            node.addOrderBy(column);
+        }
         relCtx.setRootNode(underlyingColl, node);
         if (rootExpr.filterType == FilterType.byIds) {
             node.setRootFilter(FilterType.byIds, rootExpr.filterRefs);
@@ -551,6 +557,7 @@ class GetByIdsExpr(Entity) : Expr!(Entity[]), RootExprInfo {
 
     // RootExprInfo implementation
     FilterType filterType() { return FilterType.byIds; }
+    string[] orderColumns() { return []; }
     AnyRef[] filterRefs() { return _entities.map!(e => entityToRef(e)).array; }
     string entityTypeName() { return EntityID!Entity.typeName; }
     string entityTable() { return EntityID!Entity.table; }
@@ -617,8 +624,9 @@ auto entityById(Entity, IdType)(Expr!IdType id) {
     return new EntityByIdExpr!(Entity, IdType)(id);
 }
 
-/// Root expression that fetches all entities of a type.
-class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
+/// Root expression that fetches all entities of a type, ordered by the
+/// `orderBy` columns if any (unordered if empty).
+class GetAllExpr(Entity, string[] orderBy = null) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
     import dunamis.core.optimize : ExprOptimizer, OptimizeContext;
     import dunamis.core.datasource : DataSource;
 
@@ -702,7 +710,8 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
         }
 
         // Fallback: naive path using fetchAllIdsString
-        return session.fetchAllIdsAsRefs(EntityID!Entity.table, EntityID!Entity.typeName, getPkColumns!Entity).then((AnyRef[] refs) {
+        return session.fetchAllIdsAsRefs(EntityID!Entity.table, EntityID!Entity.typeName, getPkColumns!Entity,
+                orderBy).then((AnyRef[] refs) {
             auto entities = refs.map!(r => makeEntityFromRef!Entity(r)).array;
 
             enum plainFields = getPlainFieldNames!Entity;
@@ -719,6 +728,7 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
 
     // RootExprInfo implementation
     FilterType filterType() { return FilterType.all; }
+    string[] orderColumns() { return orderBy.dup; }
     AnyRef[] filterRefs() { return []; }
     string entityTypeName() { return EntityID!Entity.typeName; }
     string entityTable() { return EntityID!Entity.table; }
@@ -729,9 +739,10 @@ class GetAllExpr(Entity) : Expr!(Entity[]), RootExprInfo, MapExprInfo {
     ExprBase bodyExpr() { return null; }
 }
 
-/// Factory function to create GetAllExpr
-auto getAll(Entity)() {
-    return new GetAllExpr!Entity();
+/// Factory function to create GetAllExpr: all the entities, ordered by the
+/// `orderBy` columns if any.
+auto getAll(Entity, string[] orderBy = null)() {
+    return new GetAllExpr!(Entity, orderBy)();
 }
 
 // ============================================================================

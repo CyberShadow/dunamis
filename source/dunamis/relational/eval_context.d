@@ -317,11 +317,13 @@ abstract class RelationalSession : DataSession {
         return result.getJoinedColumn!T(joinAlias, column, refs);
     }
 
-    /// Fetch all IDs for a table as strings, wrapped in AnyRef
-    Promise!(AnyRef[]) fetchAllIdsAsRefs(string table, string typeName, string[] pkColumns) {
+    /// Fetch all IDs for a table as strings, wrapped in AnyRef, ordered by
+    /// the `orderBy` columns (unordered if empty)
+    Promise!(AnyRef[]) fetchAllIdsAsRefs(string table, string typeName, string[] pkColumns,
+            string[] orderBy = null) {
         // Cache PK columns for later use by fetchColumn* methods
         _pkColumnsByTable[table] = pkColumns;
-        return fetchAllIdsString(table, pkColumns).then((string[] ids) {
+        return fetchAllIdsString(table, pkColumns, orderBy).then((string[] ids) {
             return ids.map!(id => makeAnyRef(typeName, id)).array;
         });
     }
@@ -470,8 +472,9 @@ abstract class RelationalSession : DataSession {
         return resolve(result);
     }
 
-    /// Fetch all IDs from a table as strings (supports any ID type including composite keys)
-    abstract Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns);
+    /// Fetch all IDs from a table as strings (supports any ID type including
+    /// composite keys), ordered by the `orderBy` columns (unordered if empty)
+    abstract Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns, string[] orderBy = null);
 
     /// Fetch children for parent refs (hasMany), each parent's children
     /// ordered by the `orderBy` child columns (unordered if empty).
