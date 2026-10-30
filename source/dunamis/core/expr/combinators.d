@@ -650,6 +650,7 @@ class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
     private ExprBase _body;              // expression built using _item (type-erased)
     private Object _indexKey;            // key for local element index storage
     private Object _groupIndexKey;       // key for group (parent) index storage
+    private Object _dedupKey;            // key for the deduplication of a batch (MapDedup)
 
     this(Expr!(Entity[]) collection, EveryItemOfExpr!Entity item, Body body_) {
         _collection = collection;
@@ -657,6 +658,7 @@ class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
         _body = body_;  // Implicit upcast to ExprBase
         _indexKey = new Object();
         _groupIndexKey = new Object();
+        _dedupKey = new Object();
     }
 
     /// Key used to look up element indices from EvalContext.
@@ -666,6 +668,10 @@ class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
     /// Key used to look up group indices from EvalContext.
     /// Each element maps to its parent group's position in the outer batch.
     @property Object groupIndexKey() { return _groupIndexKey; }
+
+    /// Key used to look up the deduplication of a batch (MapDedup) from
+    /// EvalContext, if the batch had repeated elements.
+    @property Object dedupKey() { return _dedupKey; }
 
     override ExprBase[] dependencies() {
         return [_collection, _body];
@@ -694,12 +700,19 @@ class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
 
     /// Batched eval: evaluates all items at once.
     /// Works correctly for both naive and optimized paths.
+    ///
+    /// A batch with repeated elements (e.g. the same parent reached from
+    /// many children) evaluates the body once per distinct element, if the
+    /// body is a function of its element only (see `bodyReadsOnlyOwnItems`):
+    /// the repeated elements share the results of the first. Per-element
+    /// errors are still reported at each element's path (see MapDedup).
     override Promise!(R[][]) eval(EvalContext ctx) {
         // Capture for use in closures
         auto bodyExpr = _body;
         auto self = this;  // Key for refs map
         auto indexKey = _indexKey;
         auto groupIndexKey = _groupIndexKey;
+        auto dedupKey = _dedupKey;
 
         // 1. Evaluate collection for each parent ref
         return evalAs!(Entity[])(_collection, ctx).then((Entity[][] collectionResults) {
@@ -721,6 +734,46 @@ class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
                 // No items to process - return empty array for each parent
                 return resolve(std.algorithm.map!(_ => cast(R[])[])(iota(collectionResults.length)).array);
             }
+
+            static if (isDeduplicable!Entity) {
+                if (flatEntities.length > 1) {
+                    auto dedup = deduplicate(flatEntities, localIndices, groupIndices);
+                    if (dedup.distinct.length < flatEntities.length && bodyReadsOnlyOwnItems(self)) {
+                        size_t[] distinctLocal, distinctGroup;
+                        foreach (positions; dedup.info.occurrences) {
+                            distinctLocal ~= localIndices[positions[0]];
+                            distinctGroup ~= groupIndices[positions[0]];
+                        }
+                        ctx.setValues!Entity(self, dedup.distinct);
+                        ctx.setValues!size_t(indexKey, distinctLocal);
+                        ctx.setValues!size_t(groupIndexKey, distinctGroup);
+                        ctx.setValues!MapDedup(dedupKey, [dedup.info]);
+                        return evalAs!R(bodyExpr, ctx).then((R[] distinctResults) {
+                            if (distinctResults.length != dedup.distinct.length)
+                                throw new Exception("Batch size mismatch in map over " ~ Entity.stringof ~
+                                    ": its body produced " ~ distinctResults.length.to!string ~
+                                    " results for " ~ dedup.distinct.length.to!string ~ " elements (use " ~
+                                    "broadcast() to replicate a single value across a batch)");
+                            R[] flatResults = new R[flatEntities.length];
+                            foreach (d, positions; dedup.info.occurrences)
+                                foreach (position; positions)
+                                    flatResults[position] = distinctResults[d];
+                            R[][] result;
+                            size_t offset = 0;
+                            foreach (len; lengths) {
+                                result ~= flatResults[offset .. offset + len];
+                                offset += len;
+                            }
+                            return result;
+                        });
+                    }
+                }
+            }
+
+            // (Not deduplicated: unlike that of another evaluation of the map,
+            // e.g. in the context this one is a scope of)
+            if (ctx.getValues!MapDedup(dedupKey).length)
+                ctx.setValues!MapDedup(dedupKey, []);
 
             // 3. Store values for EveryItemOfExpr to retrieve
             ctx.setValues!Entity(self, flatEntities);
@@ -757,6 +810,80 @@ class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
     ExprBase bodyExpr() { return _body; }
 }
 
+/// Whether the elements of a map over `Entity` values can be told equal (and
+/// hashed): those of a batch equal to each other are evaluated once.
+private enum isDeduplicable(Entity) = is(Entity == struct) &&
+    __traits(compiles, (Entity e) { size_t[Entity] positions; positions[e] = 0; });
+
+/// The distinct elements of `elements` (in the order of their first
+/// occurrence) and their positions (`info`, only if some are repeated).
+private auto deduplicate(Entity)(Entity[] elements, size_t[] localIndices, size_t[] groupIndices) {
+    static struct Result {
+        Entity[] distinct;
+        MapDedup info;
+    }
+    Result result;
+    size_t[Entity] distinctIndex;
+    auto distinctOf = new size_t[elements.length];
+    foreach (i, e; elements) {
+        if (auto d = e in distinctIndex)
+            distinctOf[i] = *d;
+        else {
+            distinctOf[i] = distinctIndex[e] = result.distinct.length;
+            result.distinct ~= e;
+        }
+    }
+    if (result.distinct.length < elements.length) {
+        result.info.occurrences = new size_t[][result.distinct.length];
+        foreach (i, d; distinctOf)
+            result.info.occurrences[d] ~= i;
+        result.info.localIndices = localIndices;
+        result.info.groupIndices = groupIndices;
+    }
+    return result;
+}
+
+/// Whether the body of the map `map` is a function of its element only,
+/// so that equal elements yield equal results: the placeholders in the body
+/// (of the items of maps, collection predicates, filters and sorts) are all
+/// bound by the map itself or by expressions within the body, not by an
+/// enclosing expression (e.g. an outer map's item), whose values differ
+/// between equal elements. (The inputs of other bound values, such as an
+/// object's, lead to the placeholders they derive from.)
+private bool bodyReadsOnlyOwnItems(Object map) {
+    import dunamis.core.filtering : FilterByInfo, FilterItemInfo;
+    import dunamis.core.sorting : SortByInfo, SortItemInfo;
+
+    bool[Object] binders, visited;
+    binders[map] = true;
+    ExprBase[] nodes;
+    void collect(ExprBase e) {
+        if (e is null || cast(Object) e in visited)
+            return;
+        visited[cast(Object) e] = true;
+        nodes ~= e;
+        if (cast(MapExprInfo) e || cast(CollectionPredicateInfo) e || cast(FilterByInfo) e || cast(SortByInfo) e)
+            binders[cast(Object) e] = true;
+        foreach (dependency; e.dependencies())
+            collect(dependency);
+    }
+    collect((cast(MapExprInfo) map).bodyExpr);
+    foreach (e; nodes) {
+        Object binder;
+        if (auto item = cast(EveryItemOfExprInfo) e)
+            binder = item.parentMap;
+        else if (auto item = cast(FilterItemInfo) e)
+            binder = item.parentFilter;
+        else if (auto item = cast(SortItemInfo) e)
+            binder = item.parentSort;
+        else
+            continue;
+        if (binder !in binders)
+            return false;
+    }
+    return true;
+}
+
 /// Extract the Entity type from an Expr!(Entity[]) type
 template CollectionEntityType(Coll) {
     static if (is(Coll : Expr!(E[]), E)) {
@@ -785,7 +912,7 @@ auto map(alias fn, Coll)(Coll collection)
     item._parentMap = mapExpr;
 
     // 5. Auto-link index sources for error path tracking
-    linkIndexSources(body_, IndexLevel(mapExpr.indexKey, mapExpr.groupIndexKey));
+    linkIndexSources(body_, IndexLevel(mapExpr.indexKey, mapExpr.groupIndexKey, mapExpr.dedupKey));
 
     return mapExpr;
 }
@@ -1591,6 +1718,92 @@ unittest {
     assert(!result[0][0].isError && result[0][0].value == 20);
     assert(result[0][1].isError);  // "bad" can't be converted to int
     assert(!result[0][2].isError && result[0][2].value == 10);
+}
+
+// A map evaluates each distinct element of a batch once (the repeated
+// elements sharing its results), unless its body reads more than its element
+version (unittest) private string[] testErrorPaths(EvalContext ctx) {
+    import std.array : join;
+    string[] paths;
+    foreach (e; ctx.errors) {
+        string[] parts;
+        foreach (p; e.path)
+            parts ~= p.toString();
+        paths ~= e.message ~ " [" ~ parts.join(",") ~ "]";
+    }
+    return paths;
+}
+
+unittest {
+    // Distinct elements once
+    int calls;
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("a"), TestEntity("b"), TestEntity("a"),
+        TestEntity("a")]);
+    auto query = map!((Expr!TestEntity item) => use((TestEntity e) { calls++; return e.id ~ "!"; }, item))(collection);
+    auto ctx = new EvalContext();
+    assert(awaitSync(query.eval(ctx)) == [["a!", "b!", "a!", "a!"]]);
+    assert(calls == 2);
+
+    // Not when the body reads an enclosing expression's item (e.g. an outer
+    // map's): equal elements may then give different results
+    auto outerItem = new EveryItemOfExpr!TestEntity();
+    outerItem._parentMap = new Object();
+    auto reading = map!((Expr!TestEntity child) =>
+        use((TestEntity c, TestEntity p) => c.id ~ p.id, child, outerItem))(collection);
+    assert(!bodyReadsOnlyOwnItems(reading));
+    assert(bodyReadsOnlyOwnItems(query));
+    // (Items of maps, predicates, filters within the body are its own)
+    auto inner = map!((Expr!TestEntity item) => some!((Expr!TestEntity c) => use((TestEntity e) => e.id == "x", c))(
+        use((TestEntity e) => [e], item)))(collection);
+    assert(bodyReadsOnlyOwnItems(inner));
+}
+
+unittest {
+    import std.conv : to;
+    import std.json : JSONValue;
+    import dunamis.core.expr.json : materializeResult;
+
+    // Per-element errors of repeated elements are reported at each
+    // element's path, in the order of the elements
+    int calls;
+    auto failing(Expr!TestEntity child) {
+        return materializeResult(tryUse((TestEntity c) {
+            calls++;
+            if (c.id == "x") throw new Exception("bad " ~ c.id);
+            return c.id;
+        }, child), [JSONValue("parents"), JSONValue("children"), JSONValue("value")]);
+    }
+
+    // Repeated children (within and across parents)
+    auto parents = new MockCollectionExpr!TestEntity([TestEntity("p"), TestEntity("q")]);
+    auto query = map!((Expr!TestEntity parent) => map!((Expr!TestEntity child) => failing(child))(
+        use((TestEntity p) => p.id == "p" ? [TestEntity("x"), TestEntity("y")] :
+            [TestEntity("y"), TestEntity("x"), TestEntity("x")], parent)))(parents);
+    auto ctx = new EvalContext();
+    auto result = awaitSync(query.eval(ctx));
+    assert(result[0].length == 2 && result[0][0].length == 2 && result[0][1].length == 3);
+    assert(result[0][0][0].isNull && result[0][0][1].get == "y" && result[0][1][0].get == "y" &&
+        result[0][1][1].isNull && result[0][1][2].isNull);
+    assert(testErrorPaths(ctx) == [
+        `bad x ["parents",0,"children",0,"value"]`,
+        `bad x ["parents",1,"children",1,"value"]`,
+        `bad x ["parents",1,"children",2,"value"]`,
+    ], testErrorPaths(ctx).to!string);
+    assert(calls == 2);  // (x and y)
+
+    // Repeated parents
+    auto repeated = new MockCollectionExpr!TestEntity([TestEntity("p"), TestEntity("q"), TestEntity("p")]);
+    auto query2 = map!((Expr!TestEntity parent) => map!((Expr!TestEntity child) => failing(child))(
+        use((TestEntity p) => p.id == "p" ? [TestEntity("y"), TestEntity("x")] : [TestEntity("x")], parent)))(
+        repeated);
+    auto ctx2 = new EvalContext();
+    awaitSync(query2.eval(ctx2));
+    assert(testErrorPaths(ctx2) == [
+        `bad x ["parents",0,"children",1,"value"]`,
+        `bad x ["parents",1,"children",0,"value"]`,
+        `bad x ["parents",2,"children",1,"value"]`,
+    ], testErrorPaths(ctx2).to!string);
+    assert(calls == 4);  // (p's y and x; q's x is p's)
 }
 
 unittest {

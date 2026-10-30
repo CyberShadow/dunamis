@@ -620,20 +620,38 @@ class MaterializeGqlResultExpr(T) : Expr!(Nullable!T), IndexSourceConsumer {
             // Collect index arrays from each nesting level
             size_t[][] allLocalIndices;
             size_t[][] allGroupIndices;
+            MapDedup[] dedups;  // (per level; empty `occurrences` if none)
+            bool anyDedup;
             foreach (level; indexSources) {
                 allLocalIndices ~= ctx.getValues!size_t(level.localKey);
                 allGroupIndices ~= ctx.getValues!size_t(level.groupKey);
+                auto dedup = level.dedupKey is null ? null : ctx.getValues!MapDedup(level.dedupKey);
+                dedups ~= dedup.length ? dedup[0] : MapDedup.init;
+                anyDedup |= dedup.length > 0;
             }
 
             Nullable!T[] result = new Nullable!T[vals.length];
+            IndexedPath[] errors;
             foreach (i, v; vals) {
                 if (v.isError) {
                     result[i] = Nullable!T.init;
-                    ctx.addError(v.error,
-                        buildIndexedPath(errorPath, i, allLocalIndices, allGroupIndices));
+                    if (anyDedup)
+                        errors ~= buildIndexedPaths(errorPath, i, allLocalIndices, allGroupIndices, dedups, v.error);
+                    else
+                        ctx.addError(v.error,
+                            buildIndexedPath(errorPath, i, allLocalIndices, allGroupIndices));
                 } else {
                     result[i] = Nullable!T(v.value);
                 }
+            }
+            // An element of a deduplicated batch stands for all the elements
+            // equal to it: its error is theirs too, in the order of the
+            // elements as a batch without deduplication would have them.
+            if (errors.length) {
+                import std.algorithm.sorting : sort;
+                errors.sort!((a, b) => a.order < b.order);
+                foreach (e; errors)
+                    ctx.addError(e.message, e.path);
             }
             return result;
         });
@@ -938,6 +956,69 @@ class BoundObjectExpr(T) : BoundValueExpr!T {
     protected override Promise!(T[]) evalUnbound(EvalContext ctx) {
         return evalAs!T(_input, ctx);
     }
+}
+
+/// An error at the path of an element, and the element's position in the
+/// order of a batch without deduplication (see buildIndexedPaths).
+private struct IndexedPath {
+    size_t[] order;
+    string message;
+    JSONValue[] path;
+}
+
+/// `buildIndexedPath` for the element `elementIdx` of a batch some of whose
+/// levels were deduplicated (see MapDedup; `dedups[level].occurrences` is
+/// empty for a level that was not): one path for each element of the
+/// batches without deduplication that the element stands for, with its
+/// position in their order (the outermost level's position in its batch,
+/// then the local indices of the levels within it, compared
+/// lexicographically: the order in which batches flatten their groups).
+private IndexedPath[] buildIndexedPaths(JSONValue[] basePath, size_t elementIdx,
+    size_t[][] allLocalIndices, size_t[][] allGroupIndices, MapDedup[] dedups, string message)
+{
+    size_t numLevels = allLocalIndices.length;
+    if (numLevels == 0 || basePath.length == 0)
+        return [IndexedPath([], message, basePath)];
+
+    IndexedPath[] result;
+    size_t[] levelIndices = new size_t[numLevels];
+
+    // Resolve the levels from the innermost outwards, branching at each
+    // deduplicated level into the elements its element stands for
+    void resolveLevel(size_t level, size_t batchIdx) {
+        void visit(size_t localIdx, size_t groupIdx, bool hasGroup) {
+            levelIndices[level] = localIdx;
+            if (level > 0)
+                resolveLevel(level - 1, hasGroup ? groupIdx : batchIdx);
+            else {
+                size_t numInserts = numLevels < basePath.length ? numLevels : basePath.length - 1;
+                JSONValue[] path;
+                foreach (j; 0 .. basePath.length) {
+                    path ~= basePath[j];
+                    if (j < numInserts)
+                        path ~= JSONValue(cast(long) levelIndices[j]);
+                }
+                result ~= IndexedPath(batchIdx ~ levelIndices[1 .. $].dup, message, path);
+            }
+        }
+
+        auto dedup = dedups[level];
+        if (dedup.occurrences.length && batchIdx < dedup.occurrences.length) {
+            foreach (position; dedup.occurrences[batchIdx]) {
+                auto savedBatchIdx = batchIdx;
+                batchIdx = position;  // (the outermost level's order is its position)
+                visit(dedup.localIndices[position], position < dedup.groupIndices.length ?
+                    dedup.groupIndices[position] : 0, position < dedup.groupIndices.length);
+                batchIdx = savedBatchIdx;
+            }
+        } else {
+            visit(batchIdx < allLocalIndices[level].length ? allLocalIndices[level][batchIdx] : levelIndices[level],
+                batchIdx < allGroupIndices[level].length ? allGroupIndices[level][batchIdx] : 0,
+                batchIdx < allGroupIndices[level].length);
+        }
+    }
+    resolveLevel(numLevels - 1, elementIdx);
+    return result;
 }
 
 // ============================================================================

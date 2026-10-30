@@ -897,6 +897,15 @@ predicate which refers to its item from within a scope of its own (e.g. a
 nested filter's predicate comparing with it) is evaluated for one item (or
 pair) at a time.
 
+**Repeated items:** a map's batch may hold the same item many times, e.g.
+the author of each of many posts (`posts { author { posts {
+... } } }`). The map then evaluates its body once per distinct item (items
+are compared with `==`, so this applies to entity structs and other hashable
+struct values), and the repeated items share its results, provided the body
+reads no item of an enclosing map, filter or sort (whose values would differ
+between equal items). Per-element errors (`GqlResult`) are still reported at
+the path of every item, in the same order.
+
 ## Introspection
 
 Runtime introspection is built in. The standard `__schema`, `__type`, and `__typename` meta-fields work out of the box:

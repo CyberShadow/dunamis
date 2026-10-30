@@ -63,6 +63,22 @@ abstract class ExprBase {
 struct IndexLevel {
     Object localKey;   /// ctx.getValues!size_t(localKey) → local index within parent
     Object groupKey;   /// ctx.getValues!size_t(groupKey) → which parent group
+    /// ctx.getValues!MapDedup(dedupKey) → the deduplication of the level's
+    /// batch, if its map evaluated each distinct element once (see MapDedup)
+    Object dedupKey;
+}
+
+/// How a map (MapExpr) evaluated a batch with repeated elements: its body
+/// was evaluated once per distinct element, the batch's elements sharing
+/// the results of their distinct element. Bound (as a single value) to the
+/// map's dedupKey; the map's local and group indices are then those of the
+/// distinct elements' first occurrences.
+struct MapDedup {
+    /// For each distinct element (in the order of their first occurrence),
+    /// the positions in the batch of the elements equal to it.
+    size_t[][] occurrences;
+    /// The local and group indices of every element of the batch.
+    size_t[] localIndices, groupIndices;
 }
 
 /// Interface for expressions that track element indices in error paths.
