@@ -165,6 +165,11 @@ class QueryNode {
     /// state.
     ComputedColumn[] computedColumns;
 
+    /// The node whose layer holds this node's rows, if it is not its own
+    /// (see `mergeFrom`): set at optimization time, when another node of
+    /// the tree selects the same rows.
+    QueryNode sameRowsAs;
+
     /// Next join alias counter
     private int _nextJoinAlias = 0;
 
@@ -313,6 +318,73 @@ class QueryNode {
         return result;
     }
 
+    /// The node whose SQL layer holds this node's rows: itself, or the node
+    /// it was merged into (see `mergeFrom`).
+    @property QueryNode layerNode() {
+        auto node = this;
+        while (node.sameRowsAs !is null)
+            node = node.sameRowsAs;
+        return node;
+    }
+
+    /// Whether this node and `other` (both child layers) select the same
+    /// rows: of the same table and type, of the same parent rows (the
+    /// layers of their parents being the same), through the same link,
+    /// with the same conditions (`dialect` rendering their WHERE clauses),
+    /// order and window; and whether `other`'s rows can be read from this
+    /// node's layer (see `mergeFrom`): its JOINs are the same as this
+    /// node's, or extend them (or are extended by them).
+    bool selectsSameRowsAs(QueryNode other, SqlDialect dialect) {
+        if (other is this || isRoot || other.isRoot)
+            return false;
+        if (other.dataSource !is dataSource || other.typeName != typeName || other.table != table ||
+                other.pkColumns != pkColumns)
+            return false;
+        if (other.parent.layerNode !is parent.layerNode || other.parentFk != parentFk ||
+                other.parentTypeName != parentTypeName || other.parentLinkColumns != parentLinkColumns)
+            return false;
+        if (useWindowFunction || other.useWindowFunction || other.orderBy_ != orderBy_ ||
+                other.limit_ != limit_ || other.offset_ != offset_ ||
+                other.perParentLimit_ != perParentLimit_ || other.perParentOffset_ != perParentOffset_)
+            return false;
+        if (other.whereClauses_.length != whereClauses_.length ||
+                (whereClauses_.length && other.whereClause(dialect) != whereClause(dialect)))
+            return false;
+        // (LEFT JOINs of belongs-to parents by their keys select no other
+        // rows; the joins of both are named alike)
+        auto common = joins.length < other.joins.length ? joins.length : other.joins.length;
+        return joins[0 .. common] == other.joins[0 .. common];
+    }
+
+    /// Merge `other` (which selects the same rows, see
+    /// `selectsSameRowsAs`) into this node: this node's layer then also
+    /// fetches what `other` reads (its columns, JOINs and computed
+    /// columns), and holds `other`'s rows (`other.sameRowsAs`). Done at
+    /// optimization time, once the tree's nodes are complete.
+    void mergeFrom(QueryNode other) {
+        assert(other.sameRowsAs is null && sameRowsAs is null, "Merging merged query nodes");
+        foreach (column; other.columns)
+            addColumn(column);
+        foreach (column, _; other.stringColumns)
+            markStringColumn(column);
+        foreach (join; other.joins[joins.length < other.joins.length ? joins.length : $ .. $]) {
+            joins ~= join;
+            joinedColumns[join.alias_] = join.targetPkColumns.dup;
+        }
+        if (_nextJoinAlias < other._nextJoinAlias)
+            _nextJoinAlias = other._nextJoinAlias;
+        foreach (alias_, cols; other.joinedColumns)
+            foreach (column; cols)
+                addJoinedColumn(alias_, column);
+        foreach (alias_, cols; other.joinedStringColumns)
+            foreach (column, _; cols)
+                markJoinedStringColumn(alias_, column);
+        foreach (computed; other.computedColumns)
+            if (!computedColumns.canFind!(c => c.alias_ == computed.alias_))
+                addComputedColumn(computed);
+        other.sameRowsAs = this;
+    }
+
     /// Get all nodes in the tree rooted at this node (including self).
     /// Returns nodes in BFS order (parents before children).
     QueryNode[] allNodesInTree() {
@@ -403,4 +475,50 @@ unittest {
     assert(node.orderBy_[0].direction == SortDirection.ASC);
     assert(node.orderBy_[1].column == "first_name");
     assert(node.orderBy_[1].direction == SortDirection.DESC);
+}
+
+unittest {
+    import dunamis.postgres.dialect : postgresDialect;
+
+    // Child layers of the same parent rows, link, order and conditions
+    // select the same rows: one layer reads what both read
+    auto users = new QueryNode(QueryNodeId(0), "User", "users", ["id"]);
+    auto posts1 = new QueryNode(QueryNodeId(1), "Post", "posts", ["id"]);
+    auto posts2 = new QueryNode(QueryNodeId(2), "Post", "posts", ["id"]);
+    auto otherPosts = new QueryNode(QueryNodeId(3), "Post", "posts", ["id"]);
+    posts1.setParent(users, "author_id", "User");
+    posts2.setParent(users, "author_id", "User");
+    otherPosts.setParent(users, "editor_id", "User");
+    posts1.addColumn("title");
+    auto j = posts1.addJoin("categories", "Category", "category_id", ["id"]);
+    posts1.addJoinedColumn(j, "name");
+    posts2.addColumn("body");
+    posts2.markStringColumn("body");
+    posts2.addComputedColumn(ComputedColumn("computed_0", "length(body)", typeid(int)));
+
+    auto dialect = postgresDialect();
+    assert(posts1.selectsSameRowsAs(posts2, dialect) && posts2.selectsSameRowsAs(posts1, dialect));
+    assert(!posts1.selectsSameRowsAs(otherPosts, dialect));
+    assert(!users.selectsSameRowsAs(posts1, dialect));
+    posts2.addWhereClause("posts.draft");
+    assert(!posts1.selectsSameRowsAs(posts2, dialect));
+    posts2.whereClauses_ = null;
+    // Other JOINs under the same name: other columns
+    auto k = posts2.addJoin("users", "User", "editor_id", ["id"]);
+    assert(k == j && !posts1.selectsSameRowsAs(posts2, dialect));
+    posts2.joins = null;
+    posts2.joinedColumns = null;
+
+    posts1.mergeFrom(posts2);
+    assert(posts2.sameRowsAs is posts1 && posts2.layerNode is posts1 && posts1.layerNode is posts1);
+    assert(posts1.columns == ["id", "author_id", "title", "body"] && "body" in posts1.stringColumns);
+    assert(posts1.joins.length == 1 && posts1.joinedColumns[j] == ["id", "name"]);
+    assert(posts1.computedColumns.length == 1);
+
+    // Children of merged nodes have the same parent rows
+    auto comments1 = new QueryNode(QueryNodeId(4), "Comment", "comments", ["id"]);
+    auto comments2 = new QueryNode(QueryNodeId(5), "Comment", "comments", ["id"]);
+    comments1.setParent(posts1, "post_id", "Post");
+    comments2.setParent(posts2, "post_id", "Post");
+    assert(comments1.selectsSameRowsAs(comments2, dialect));
 }

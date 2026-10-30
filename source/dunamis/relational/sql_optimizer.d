@@ -82,6 +82,54 @@ class SqlOptimizer : ExprOptimizer {
     /// This should be called AFTER the standard optimizer has run.
     override void optimize(ExprBase expr, OptimizeContext ctx) {
         optimizeRecursive(expr, ctx);
+        mergeSameRowNodes(ctx);
+    }
+
+    /// Merge the query nodes of the data sources this optimizer serves
+    /// which select the same rows as another node of their tree (see
+    /// `QueryNode.selectsSameRowsAs`) into that node, so that their rows
+    /// are selected by one SQL layer rather than by several identical ones
+    /// (as when several fields map over the same relationship). Done once
+    /// the tree's nodes are complete (their columns, JOINs and computed
+    /// columns), in an order which does not depend on the tree's
+    /// traversal: by node id, parents first, so that the children of
+    /// merged nodes are merged in turn.
+    private void mergeSameRowNodes(OptimizeContext ctx) {
+        import dunamis.relational.optimize_context : RelationalOptimizeContext;
+
+        auto relCtx = ctx.getSourceContext!RelationalOptimizeContext();
+        auto nodes = relCtx.allNodes();
+        nodes.sort!((a, b) => a.id.value < b.id.value);
+        QueryNode[] ordered;
+        bool[QueryNode] added;
+        void add(QueryNode node) {
+            if (node in added)
+                return;
+            if (node.parent !is null)
+                add(node.parent);
+            added[node] = true;
+            ordered ~= node;
+        }
+        foreach (node; nodes)
+            add(node);
+
+        // Layers selecting each table's rows, by parent layer
+        QueryNode[][string] layers;
+        foreach (node; ordered) {
+            if (node.isRoot || node.sameRowsAs !is null || node.dataSource is null ||
+                    !node.dataSource.requestedOptimizers().canFind!(o => cast(Object) o is this))
+                continue;
+            auto key = node.table ~ "\0" ~ node.parent.layerNode.id.value.to!string;
+            bool merged;
+            foreach (layer; layers.get(key, null))
+                if (layer.selectsSameRowsAs(node, _dialect)) {
+                    layer.mergeFrom(node);
+                    merged = true;
+                    break;
+                }
+            if (!merged)
+                layers[key] ~= node;
+        }
     }
 
     /// Register a computed column on `node`, returning its alias.

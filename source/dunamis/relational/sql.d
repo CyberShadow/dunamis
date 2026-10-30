@@ -48,6 +48,10 @@ private string toSQL(QueryNode[] nodes, SqlDialect dialect,
     // Build CTEs for each layer
     sql ~= "WITH\n";
 
+    // Nodes whose rows another node's layer holds have no layer of their
+    // own (see QueryNode.mergeFrom)
+    nodes = nodes.filter!(node => node.sameRowsAs is null).array;
+
     string[] ctes;
     foreach (node; nodes) {
         if (node.useWindowFunction) {
@@ -148,7 +152,7 @@ private string toCTE(QueryNode node, SqlDialect dialect,
         auto parentPkCols = node.parentLinkColumns;
         auto parentPkSelect = parentPkCols.length == 1 ? parentPkCols[0] : parentPkCols.join(", ");
         sql ~= format("%s.%s IN (SELECT %s FROM layer%d)",
-            node.table, node.parentFk, parentPkSelect, node.parent.id.value);
+            node.table, node.parentFk, parentPkSelect, node.parent.layerNode.id.value);
     }
 
     // Custom WHERE clause from filter predicates
@@ -234,7 +238,7 @@ private string toCTEWithWindowFunction(QueryNode node, SqlDialect dialect) {
     auto parentPkCols = node.parentLinkColumns;
     auto parentPkSelect = parentPkCols.length == 1 ? parentPkCols[0] : parentPkCols.join(", ");
     sql ~= format("      WHERE %s.%s IN (SELECT %s FROM layer%d)",
-        node.table, node.parentFk, parentPkSelect, node.parent.id.value);
+        node.table, node.parentFk, parentPkSelect, node.parent.layerNode.id.value);
 
     // Custom WHERE clause
     if (auto where = node.whereClause(dialect)) {
@@ -428,4 +432,27 @@ unittest {
 
     assert(sql.canFind("ANY($1)"), "PostgreSQL should use ANY($1): " ~ sql);
     assert(!sql.canFind("row_json"), "PostgreSQL should not have row_json in CTE: " ~ sql);
+}
+
+unittest {
+    import dunamis.postgres.dialect : postgresDialect;
+
+    // A node merged into another (see QueryNode.mergeFrom) has no layer of
+    // its own; its children are selected against that node's layer
+    auto users = new QueryNode(QueryNodeId(0), "User", "users", ["id"]);
+    users.setRootFilter(FilterType.all);
+    auto posts1 = new QueryNode(QueryNodeId(1), "Post", "posts", ["id"]);
+    auto posts2 = new QueryNode(QueryNodeId(2), "Post", "posts", ["id"]);
+    posts1.setParent(users, "author_id", "User");
+    posts2.setParent(users, "author_id", "User");
+    posts1.addColumn("title");
+    posts2.addColumn("body");
+    auto comments = new QueryNode(QueryNodeId(3), "Comment", "comments", ["id"]);
+    comments.setParent(posts2, "post_id", "Post");
+    posts1.mergeFrom(posts2);
+
+    auto sql = toSQL(users.allNodesInTree(), postgresDialect());
+    assert(sql.canFind("layer1 AS") && !sql.canFind("layer2") && sql.canFind("layer3 AS"), sql);
+    assert(sql.canFind("posts.title, posts.body"), sql);
+    assert(sql.canFind("comments.post_id IN (SELECT id FROM layer1)"), sql);
 }

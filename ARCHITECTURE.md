@@ -74,6 +74,7 @@ For relational databases, the library uses a two-phase approach:
 - Track columns needed from each table
 - Build JOINs for belongsTo relationships
 - Create child QueryNodes for hasMany relationships
+- Merge the QueryNodes of a query which select the same rows (e.g. of several maps over one relationship) into one layer
 
 **Phase 2: Evaluation** — Execute prefetch queries (CTE-based SQL for all layers), evaluate expressions against fetched data, and assemble the response.
 

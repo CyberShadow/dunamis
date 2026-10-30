@@ -831,6 +831,8 @@ QueryResult loadLayerResults(JSONValue layers, QueryNode[] nodes,
     QueryResult rootResult;
     QueryResult[QueryNode] loaded;
     foreach (node; nodes) {
+        if (node.sameRowsAs !is null)
+            continue;
         auto layerKey = "layer" ~ node.id.value.to!string;
         auto layerRows = layerKey in layers;
         if (layerRows is null)
@@ -846,8 +848,15 @@ QueryResult loadLayerResults(JSONValue layers, QueryNode[] nodes,
         loaded[node] = result;
         cache[node] = result;
     }
+    // Nodes merged into another hold its layer's rows (see QueryNode.mergeFrom)
+    foreach (node; nodes)
+        if (node.sameRowsAs !is null)
+            if (auto layer = node.layerNode in loaded) {
+                loaded[node] = *layer;
+                cache[node] = *layer;
+            }
     foreach (node, result; loaded)
-        if (!node.isRoot)
+        if (!node.isRoot && node.sameRowsAs is null)
             if (auto parentResult = node.parent in loaded)
                 result.recordCoveredParents(*parentResult, node.parentLinkColumns);
     return rootResult !is null ? rootResult : new QueryResult();

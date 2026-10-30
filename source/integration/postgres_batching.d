@@ -422,6 +422,50 @@ private void checkRootNativePredicateFilter(PostgresSession session, EvalContext
         "Root native predicate filter not in the WHERE clause: " ~ sent[0]);
 }
 
+/// Several maps over the same relationship, reading different columns (and
+/// relationships of its rows): one layer selects its rows (and one each
+/// those of the relationships of its rows), reading all the columns,
+/// rather than one layer per map.
+private void checkSameRowLayers(PostgresSession session, EvalContext ctx, Data data) {
+    import std.algorithm.searching : count;
+
+    string[] sent;
+    session.statementObserver = (const(char)[] sql) { sent ~= sql.idup; };
+    scope (exit) session.statementObserver = null;
+    auto result = evaluateNested(map!((Expr!Parent p) => use(
+        (int[] amounts, bool[] flags, bool[][] itemFlags, int[][] itemIds) =>
+            format("%s %s %s %s", amounts, flags, itemFlags, itemIds),
+        map!((Expr!Child c) => c.amount)(p.children),
+        map!((Expr!Child c) => c.flag)(p.children),
+        map!((Expr!Child c) => map!((Expr!Item i) => i.flag)(c.items))(p.children),
+        map!((Expr!Child c) => map!((Expr!Item i) => fieldAccess!"id"(i))(c.items))(p.children)))(
+        getAll!Parent()), ctx).await;
+    foreach (p; 1 .. data.n + 1) {
+        int[] amounts;
+        bool[] flags;
+        bool[][] itemFlags;
+        int[][] itemIds;
+        foreach (c; data.childIds(p)) {
+            amounts ~= c * 10;
+            flags ~= data.flagged(c);
+            bool[] f;
+            int[] ids;
+            foreach (m; 1 .. data.k + 1) {
+                f ~= m % 2 == 1;
+                ids ~= (c - 1) * data.k + m;
+            }
+            itemFlags ~= f;
+            itemIds ~= ids;
+        }
+        auto expected = format("%s %s %s %s", amounts, flags, itemFlags, itemIds);
+        assertTrue(result[p - 1] == expected, format("Same-row layers: parent %d: %s, expected %s",
+            p, result[p - 1], expected));
+    }
+    assertTrue(sent.length == 1, "Same-row layers: " ~ sent.length.to!string ~ " statements: " ~ sent.to!string);
+    assertTrue(sent[0].count("FROM batching_children") == 1 && sent[0].count("FROM batching_items") == 1,
+        "Same-row layers: one layer each expected: " ~ sent[0]);
+}
+
 /// Expressions PostgreSQL computes natively (see `NativeSqlInfo`), in each
 /// position the SQL optimizer puts expressions: one statement each, in
 /// whose SELECT, WHERE or ORDER BY clause they are, rather than in-memory
@@ -653,6 +697,7 @@ void testStatementCountsOfComputedFields() {
             inRequest((PostgresSession session, EvalContext ctx) => checkRootNativePredicateFilter(session, ctx, data));
             inRequest((PostgresSession session, EvalContext ctx) => checkRootPrimaryKeyFilter(session, ctx, data));
             inRequest((PostgresSession session, EvalContext ctx) => checkNativeSqlExpressions(session, ctx, data));
+            inRequest((PostgresSession session, EvalContext ctx) => checkSameRowLayers(session, ctx, data));
         }
 
         string report;
