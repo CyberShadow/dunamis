@@ -38,6 +38,32 @@ class RelationalOptimizeContext {
 
         /// Next computed column alias number
         int _nextComputedAlias = 0;
+
+        /// The refs of entity expressions (see refsOf)
+        ExprBase[TypeInfo][void*] _refExprs;
+    }
+
+    /// The expression of the refs (`AnyRef`s) of the entities `input`
+    /// yields, as `Entity`s: one per entity expression, seen through entity
+    /// casts (which preserve rows), so that the projections of the columns
+    /// of the same rows (e.g. of several fields of a map's elements) share
+    /// it, and so evaluate the refs once rather than once per column.
+    ExprBase refsOf(Entity)(ExprBase input) {
+        import dunamis.relational.project : EntityToAnyRefExpr;
+        ExprBase base = input;
+        while (auto entityCast = cast(EntityCastInfo) base) {
+            auto inner = entityCast.inputExpr;
+            if (inner is null || inner is base)
+                break;
+            base = inner;
+        }
+        auto key = cast(void*) base;
+        if (auto byType = key in _refExprs)
+            if (auto refs = typeid(Entity) in *byType)
+                return *refs;
+        auto refs = new EntityToAnyRefExpr!Entity(input);
+        _refExprs[key][typeid(Entity)] = refs;
+        return refs;
     }
 
     /// Allocate a computed column alias, unique within this optimization.

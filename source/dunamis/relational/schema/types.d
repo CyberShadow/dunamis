@@ -66,12 +66,15 @@ T makeEntityFromRef(T)(AnyRef ref_) {
 /// Extract an AnyRef from an entity (reads @PrimaryKey field(s)).
 AnyRef entityToRef(T)(T entity) {
     import std.conv : to;
-    import dunamis.core.types : encodeCompositeKey;
+    import dunamis.core.types : encodeCompositeKey, makeAnyRef;
     import dunamis.relational.schema.attrs : getPrimaryKeyFieldNames;
     import std.traits : isIntegral;
     enum pkFields = getPrimaryKeyFieldNames!T;
     // (The key of an integer is its decimal text, which needs no quoting)
-    static if (pkFields.length == 1 && isIntegral!(typeof(__traits(getMember, entity, pkFields[0]))))
+    static if (pkFields.length == 1 && isIntegral!(typeof(__traits(getMember, entity, pkFields[0]))) &&
+            !is(typeof(__traits(getMember, entity, pkFields[0])) == ulong))
+        return makeAnyRef(EntityID!T.typeName, cast(long) __traits(getMember, entity, pkFields[0]));
+    else static if (pkFields.length == 1 && isIntegral!(typeof(__traits(getMember, entity, pkFields[0]))))
         return AnyRef(EntityID!T.typeName ~ ":" ~ __traits(getMember, entity, pkFields[0]).to!string);
     else {
         string[] values;

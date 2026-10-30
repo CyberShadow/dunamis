@@ -317,6 +317,26 @@ AnyRef makeAnyRef(string typeName, string id) {
     return AnyRef(typeName ~ ":" ~ id);
 }
 
+/// Create an untyped AnyRef from type name and an integer ID (its decimal
+/// text, as `to!string` renders it), allocating only the ref's id.
+AnyRef makeAnyRef(string typeName, long id) pure nothrow @safe {
+    char[20] buffer;
+    size_t start = buffer.length;
+    ulong magnitude = id < 0 ? -cast(ulong) id : id;
+    do {
+        buffer[--start] = cast(char) ('0' + magnitude % 10);
+        magnitude /= 10;
+    } while (magnitude);
+    if (id < 0)
+        buffer[--start] = '-';
+    auto digits = buffer[start .. $];
+    auto result = new char[typeName.length + 1 + digits.length];
+    result[0 .. typeName.length] = typeName;
+    result[typeName.length] = ':';
+    result[typeName.length + 1 .. $] = digits;
+    return AnyRef((() @trusted => cast(string) result)());
+}
+
 /// Create an untyped AnyRef from type name and composite key parts.
 /// Encodes the parts into a single key string.
 /// For single-element arrays, produces the same result as makeAnyRef(typeName, keyValues[0]).
@@ -1016,6 +1036,9 @@ unittest {
     // Test makeAnyRef
     auto anyRef = makeAnyRef("User", "42");
     assert(anyRef.id == "User:42");
+    assert(makeAnyRef("User", 42L) == anyRef);
+    foreach (long n; [0L, -1L, 7L, 1234567890123L, long.max, long.min])
+        assert(makeAnyRef("T", n).id == "T:" ~ n.to!string);
     auto compositeRef = makeAnyRef("OrderItem", ["order-1", "prod-2"]);
     assert(compositeRef.id == "OrderItem:order-1,prod-2");
 

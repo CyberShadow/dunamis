@@ -446,7 +446,7 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
             node.addColumn(_column);
             static if (isStringBacked!T)
                 node.markStringColumn(_column);
-            auto refInput = new EntityToAnyRefExpr!Entity(_input);
+            auto refInput = relCtx.refsOf!Entity(_input);
             return new ProjectColumnExpr!T(node.id, _column, refInput, prefetch);
         }
 
@@ -952,7 +952,7 @@ class BelongsToAccessExpr(Child, Parent, ResultType, string fk) : Expr!ResultTyp
                 import dunamis.relational.project : ProjectBelongsToExpr, ProjectTypedBelongsToExpr, EntityToAnyRefExpr;
                 auto refBaseInput = baseInputAsAnyRef !is null
                     ? baseInputAsAnyRef
-                    : cast(ExprBase) new EntityToAnyRefExpr!Child(baseInput);
+                    : relCtx.refsOf!Child(baseInput);
                 auto innerProj = new ProjectBelongsToExpr(node.id, fkColumn, EntityID!Parent.typeName, refBaseInput, prefetch);
                 return new ProjectTypedBelongsToExpr!(Child, Parent, ResultType, fk)(innerProj, refBaseInput);
             }

@@ -529,43 +529,200 @@ abstract class RelationalSession : DataSession {
 // TODO: Rename to better indicate this holds aggregated query results
 // (e.g., BatchResult, AggregatedResult)
 
+/// Keys of the rows of one entity type (or of their parents), as the local
+/// ids (the part after "Type:") of their refs: integers (see
+/// `isIntegerLocalId`) keyed as such, others (strings, composite keys) by
+/// their text. Neither building nor looking up keys allocates strings or
+/// hashes refs' full ids.
+private struct LocalKeys(V) {
+    V[long] byInt;
+    V[string] byText;
+
+    /// The value of the local id `text` (null if none).
+    V* find(const(char)[] text) {
+        long n;
+        if (parseIntegerLocalId(text, n))
+            return n in byInt;
+        return text in byText;
+    }
+
+    /// The value of the local id `text`, added (as `V.init`) if need be.
+    ref V require(string text) {
+        long n;
+        if (parseIntegerLocalId(text, n))
+            return byInt.require(n);
+        return byText.require(text);
+    }
+
+    /// ditto, of the local id of the integer `n` (its decimal text)
+    ref V require(long n) {
+        if (isIntegerLocalId(n))
+            return byInt.require(n);
+        return byText.require(n.to!string);
+    }
+}
+
+/// Whether the decimal text of `n` is keyed as an integer (see
+/// `parseIntegerLocalId`): if it has at most 18 digits.
+private bool isIntegerLocalId(long n) pure nothrow @nogc @safe {
+    enum long limit = 1_000_000_000_000_000_000L;
+    return n > -limit && n < limit;
+}
+
+/// Parse the local id `text` as an integer, if it is the decimal text of one
+/// as `to!string` renders it (no plus sign or leading zeros) of at most 18
+/// digits; other texts are keyed as text.
+private bool parseIntegerLocalId(const(char)[] text, out long n) pure nothrow @nogc @safe {
+    size_t i;
+    bool negative;
+    if (text.length && text[0] == '-') {
+        negative = true;
+        i = 1;
+    }
+    auto digits = text.length - i;
+    if (digits == 0 || digits > 18 || (text[i] == '0' && (digits > 1 || negative)))
+        return false;
+    long value;
+    foreach (c; text[i .. $]) {
+        if (c < '0' || c > '9')
+            return false;
+        value = value * 10 + (c - '0');
+    }
+    n = negative ? -value : value;
+    return true;
+}
+
+/// The local id of the ref `id` (`"Type:local"`) if it is of `typeName`, or
+/// null.
+private const(char)[] localIdOf(string id, string typeName) pure nothrow @nogc @safe {
+    if (id.length > typeName.length && id[typeName.length] == ':' && id[0 .. typeName.length] == typeName)
+        return id[typeName.length + 1 .. $];
+    return null;
+}
+
 /// Results from executing a QueryNode.
 /// Column-oriented storage for efficient per-column access.
+///
+/// The rows are numbered in result order; refs map to their rows by their
+/// local ids (see `LocalKeys`), and the values of a column are an array
+/// indexed by row, built when the column is first read (from the rows of
+/// `loadFromRows`) or loaded (`loadColumn`).
 class QueryResult {
     private {
         string _typeName;
 
-        /// Column data: column name → (ref id → value)
-        JSONValue[string][string] _columns;
-
-        /// All refs in result order
+        /// All refs in result order (one per row)
         AnyRef[] _allRefs;
 
-        /// For child layers: groups of child refs by parent ref id
-        AnyRef[][string] _childRefsByParent;
+        /// The row of each ref (the last, for a ref repeated); refs not of
+        /// the result's type (as `initialize` may be given) by their ids.
+        LocalKeys!size_t _rowOf;
+        size_t[string] _rowOfOtherType;
+
+        /// The rows `loadFromRows` was given (JSON objects), which the
+        /// columns read are built from
+        JSONValue[] _rows;
+
+        /// Column data: column name → values by row
+        JSONValue[][string] _columns;
+
+        /// For child layers: groups of child refs by parent (by the local id
+        /// of the FK value)
+        LocalKeys!(AnyRef[]) _childRefsByParent;
 
         /// For child layers: the FK column and parent type the rows are grouped by
         string _parentFk, _parentType;
 
-        /// For child layers: the parent ref ids whose children this layer holds
+        /// For child layers: the parents whose children this layer holds
         /// completely (the rows of the parent layer it was selected against).
         /// A parent absent from this set is *unknown* to the layer, not childless.
-        bool[string] _coveredParents;
+        LocalKeys!bool _coveredParents;
     }
 
-    /// Initialize with refs (call before loadColumn)
+    /// The rows of the refs last looked up (see rowsOf): a copy of the refs
+    /// (whose ids are slices of the same strings), and their rows.
+    private AnyRef[] _lookedUp;
+    private size_t[] _lookedUpRows;
+
+    /// The rows of `refs` (see rowOf). Reads of several columns for the
+    /// same refs (e.g. of several fields of the same rows, which share their
+    /// refs) look them up once.
+    private const(size_t)[] rowsOf(AnyRef[] refs) {
+        if (refs.length == _lookedUp.length && refs.length) {
+            bool same = true;
+            foreach (i, r; refs)
+                if (r.id.ptr !is _lookedUp[i].id.ptr || r.id.length != _lookedUp[i].id.length) {
+                    same = false;
+                    break;
+                }
+            if (same)
+                return _lookedUpRows;
+        }
+        auto rows = new size_t[refs.length];
+        foreach (i, r; refs)
+            rows[i] = rowOf(r);
+        _lookedUp = refs.dup;
+        _lookedUpRows = rows;
+        return rows;
+    }
+
+    /// The row of `r`, or size_t.max if it is not one of the result's.
+    private size_t rowOf(AnyRef r) {
+        if (auto local = localIdOf(r.id, _typeName)) {
+            if (auto row = _rowOf.find(local))
+                return *row;
+            return size_t.max;
+        }
+        if (_rowOfOtherType.length)
+            if (auto row = r.id in _rowOfOtherType)
+                return *row;
+        return size_t.max;
+    }
+
+    /// Initialize with refs (call before loadColumn). Columns already
+    /// loaded keep the values of the refs kept.
     void initialize(string typeName, AnyRef[] refs) {
+        if (_rows.length)
+            foreach (column; _rows[0].object.byKey)
+                columnValues(column);
+        auto oldColumns = _columns;
+        auto oldRows = new size_t[refs.length];
+        foreach (i, r; refs)
+            oldRows[i] = rowOf(r);
+
         _typeName = typeName;
         _allRefs = refs;
+        _lookedUp = null;
+        _rows = null;
+        _rowOf = LocalKeys!size_t.init;
+        _rowOfOtherType = null;
+        foreach (i, r; refs) {
+            if (auto local = localIdOf(r.id, typeName))
+                _rowOf.require(r.id[$ - local.length .. $]) = i;
+            else
+                _rowOfOtherType[r.id] = i;
+        }
+        _columns = null;
+        foreach (column, values; oldColumns) {
+            auto remapped = new JSONValue[refs.length];
+            foreach (i, row; oldRows)
+                remapped[i] = row < values.length ? values[row] : JSONValue(null);
+            _columns[column] = remapped;
+        }
     }
 
     /// Load from row-oriented data (column-oriented storage built from rows)
     void loadFromRows(JSONValue[] rows, string typeName, string[] idColumns,
                                string parentFk = null, string parentType = null) {
-        import dunamis.core.types : encodeCompositeKey;
+        import dunamis.core.types : encodeCompositeKey, makeAnyRef;
 
         _typeName = typeName;
-        _allRefs = [];
+        _lookedUp = null;
+        _allRefs = new AnyRef[rows.length];
+        _rowOf = LocalKeys!size_t.init;
+        _rowOfOtherType = null;
+        _rows = rows;
+        _columns = null;
         _parentFk = parentFk;
         _parentType = parentType;
 
@@ -580,45 +737,53 @@ class QueryResult {
             }
         }
 
-        // First pass: collect all refs and build parent grouping
-        foreach (row; rows) {
-            // Build composite key from all ID columns
-            string idStr;
-            if (idColumns.length == 1 && row[idColumns[0]].type == JSONType.integer) {
-                // (The key of an integer is its decimal text, which needs no quoting)
-                idStr = jsonValToString(row[idColumns[0]]);
+        // Collect all refs and build parent grouping
+        bool grouped = parentFk !is null && parentType !is null;
+        foreach (i, row; rows) {
+            auto fields = row.object;
+            // (The key of an integer is its decimal text, which needs no quoting)
+            auto single = idColumns.length == 1 ? idColumns[0] in fields : null;
+            if (single !is null && single.type == JSONType.integer) {
+                auto n = single.integer;
+                _allRefs[i] = makeAnyRef(typeName, n);
+                _rowOf.require(n) = i;
             } else {
                 string[] keyParts;
                 foreach (col; idColumns) {
-                    keyParts ~= jsonValToString(row[col]);
+                    keyParts ~= jsonValToString(fields[col]);
                 }
-                idStr = encodeCompositeKey(keyParts);
+                auto key = encodeCompositeKey(keyParts);
+                _allRefs[i] = makeAnyRef(typeName, key);
+                _rowOf.require(key) = i;
             }
-            auto refId = typeName ~ ":" ~ idStr;
-            _allRefs ~= AnyRef(refId);
 
             // If this is a child layer, also index by parent
-            if (parentFk !is null && parentType !is null && parentFk in row) {
-                auto parentIdVal = row[parentFk];
-                if (parentIdVal.type != JSONType.null_) {
-                    auto parentIdStr = jsonValToString(parentIdVal);
-                    auto parentRefId = parentType ~ ":" ~ parentIdStr;
-                    _childRefsByParent[parentRefId] ~= AnyRef(refId);
+            if (grouped) {
+                if (auto parentIdVal = parentFk in fields) {
+                    if (parentIdVal.type == JSONType.integer)
+                        _childRefsByParent.require(parentIdVal.integer) ~= _allRefs[i];
+                    else if (parentIdVal.type != JSONType.null_)
+                        _childRefsByParent.require(jsonValToString(*parentIdVal)) ~= _allRefs[i];
                 }
             }
         }
+    }
 
-        // Second pass: extract columns
-        // Get all column names from first row
-        if (rows.length > 0) {
-            foreach (colName; rows[0].object.keys) {
-                JSONValue[string] colData;
-                foreach (i, row; rows) {
-                    colData[_allRefs[i].id] = row[colName];
-                }
-                _columns[colName] = colData;
-            }
+    /// The values of `column` by row (null if the result has no such column).
+    private JSONValue[] columnValues(string column) {
+        if (auto values = column in _columns)
+            return *values;
+        if (_rows.length == 0 || (column in _rows[0].object) is null)
+            return null;
+        auto values = new JSONValue[_rows.length];
+        foreach (i, row; _rows) {
+            if (auto value = column in row.object)
+                values[i] = *value;
+            else
+                values[i] = JSONValue(null);
         }
+        _columns[column] = values;
+        return values;
     }
 
     /// Record which parents this child layer holds the complete children of:
@@ -626,19 +791,26 @@ class QueryResult {
     /// (the values the child layer's FK was matched against).
     void recordCoveredParents(QueryResult parentLayer, string[] linkColumns) {
         import dunamis.core.types : encodeCompositeKey;
-        foreach (parentRef; parentLayer._allRefs) {
+        auto links = new JSONValue[][linkColumns.length];
+        foreach (i, col; linkColumns)
+            links[i] = parentLayer.columnValues(col);
+        foreach (row; 0 .. parentLayer._allRefs.length) {
+            // (The key of an integer is its decimal text)
+            if (links.length == 1 && row < links[0].length && links[0][row].type == JSONType.integer) {
+                _coveredParents.require(links[0][row].integer) = true;
+                continue;
+            }
             string[] parts;
-            foreach (col; linkColumns) {
-                auto colData = parentLayer._columns.get(col, null);
-                auto valPtr = colData is null ? null : parentRef.id in colData;
-                if (valPtr is null || valPtr.type == JSONType.null_) {
+            foreach (values; links) {
+                if (row >= values.length || values[row].type == JSONType.null_) {
                     parts = null;
                     break;
                 }
-                parts ~= valPtr.type == JSONType.string ? valPtr.str : valPtr.toString();
+                auto value = values[row];
+                parts ~= value.type == JSONType.string ? value.str : value.toString();
             }
             if (parts.length)
-                _coveredParents[_parentType ~ ":" ~ encodeCompositeKey(parts)] = true;
+                _coveredParents.require(encodeCompositeKey(parts)) = true;
         }
     }
 
@@ -649,38 +821,34 @@ class QueryResult {
     bool holdsChildrenOf(string childType, string fk, AnyRef[] parentRefs) {
         if (_parentFk.length == 0 || _typeName != childType || _parentFk != fk)
             return false;
-        foreach (p; parentRefs)
-            if (p.isValid && (p.id in _coveredParents) is null)
+        foreach (p; parentRefs) {
+            if (!p.isValid)
+                continue;
+            auto local = localIdOf(p.id, _parentType);
+            if (local is null || _coveredParents.find(local) is null)
                 return false;
+        }
         return true;
     }
 
     /// Initialize as child result with parent grouping
     void initializeAsChild(string typeName, AnyRef[] refs, AnyRef[] parentRefs,
                            string fkColumn, JSONValue[] fkValues) {
-        _typeName = typeName;
-        _allRefs = refs;
+        initialize(typeName, refs);
         _parentFk = fkColumn;
         _parentType = parentRefs.length > 0 ? parentRefs[0].typeName : "";
         foreach (p; parentRefs)
             if (p.isValid)
-                _coveredParents[p.id] = true;
+                if (auto local = localIdOf(p.id, _parentType))
+                    _coveredParents.require(p.id[$ - local.length .. $]) = true;
 
         // Build parent grouping from FK values
         foreach (i, r; refs) {
             auto fkVal = fkValues[i];
-            if (fkVal.type != JSONType.null_) {
-                string parentIdStr;
-                if (fkVal.type == JSONType.integer) {
-                    parentIdStr = fkVal.integer.to!string;
-                } else {
-                    parentIdStr = fkVal.str;
-                }
-                // Find parent type from first parent ref
-                string parentType = parentRefs.length > 0 ? parentRefs[0].typeName : "";
-                auto parentRefId = parentType ~ ":" ~ parentIdStr;
-                _childRefsByParent[parentRefId] ~= r;
-            }
+            if (fkVal.type == JSONType.integer)
+                _childRefsByParent.require(fkVal.integer) ~= r;
+            else if (fkVal.type != JSONType.null_)
+                _childRefsByParent.require(fkVal.str) ~= r;
         }
     }
 
@@ -688,9 +856,12 @@ class QueryResult {
     void loadColumn(string column, AnyRef[] refs, JSONValue[] values) {
         assert(refs.length == values.length,
             "loadColumn: refs and values length mismatch");
-        JSONValue[string] colData;
+        auto colData = new JSONValue[_allRefs.length];
+        colData[] = JSONValue(null);
         foreach (i, r; refs) {
-            colData[r.id] = values[i];
+            auto row = rowOf(r);
+            if (row < colData.length)
+                colData[row] = values[i];
         }
         _columns[column] = colData;
     }
@@ -702,22 +873,13 @@ class QueryResult {
 
     /// Get column values for given refs
     T[] getColumn(T)(string column, AnyRef[] refs) {
-        auto colData = _columns.get(column, null);
-        if (colData is null) {
-            T[] result;
-            result.length = refs.length;
+        auto result = new T[refs.length];
+        auto colData = columnValues(column);
+        if (colData is null)
             return result;
-        }
-
-        T[] result;
-        result.reserve(refs.length);
-        foreach (r; refs) {
-            if (auto valPtr = r.id in colData) {
-                result ~= extractValue!T(*valPtr);
-            } else {
-                result ~= T.init;
-            }
-        }
+        foreach (i, row; rowsOf(refs))
+            if (row < colData.length)
+                result[i] = extractValue!T(colData[row]);
         return result;
     }
 
@@ -732,49 +894,36 @@ class QueryResult {
         AnyRef[][] result;
         result.length = parentRefs.length;
         foreach (i, p; parentRefs) {
-            if (auto children = p.id in _childRefsByParent) {
+            auto local = localIdOf(p.id, _parentType);
+            if (local is null)
+                continue;
+            if (auto children = _childRefsByParent.find(local))
                 result[i] = *children;
-            } else {
-                result[i] = [];
-            }
         }
         return result;
     }
 
     /// Check if a column exists in this result
     bool hasColumn(string column) {
-        return (column in _columns) !is null;
+        return (column in _columns) !is null || (_rows.length && (column in _rows[0].object) !is null);
     }
 
     /// Get raw JSONValue for a column (for FK lookups)
     JSONValue[] getColumnRaw(string column, AnyRef[] refs) {
-        auto colData = _columns.get(column, null);
-        if (colData is null) {
-            JSONValue[] result;
-            result.length = refs.length;
-            foreach (ref r; result) r = JSONValue(null);
+        auto result = new JSONValue[refs.length];
+        result[] = JSONValue(null);
+        auto colData = columnValues(column);
+        if (colData is null)
             return result;
-        }
-
-        JSONValue[] result;
-        result.reserve(refs.length);
-        foreach (r; refs) {
-            if (auto valPtr = r.id in colData) {
-                result ~= *valPtr;
-            } else {
-                result ~= JSONValue(null);
-            }
-        }
+        foreach (i, row; rowsOf(refs))
+            if (row < colData.length)
+                result[i] = colData[row];
         return result;
     }
 
     /// Check if a ref exists in this result
     bool hasRef(AnyRef r) {
-        // Check if ref is in _allRefs
-        foreach (ref_; _allRefs) {
-            if (ref_.id == r.id) return true;
-        }
-        return false;
+        return rowOf(r) != size_t.max;
     }
 
     /// Check if every valid ref in `refs` exists in this result (and at least
@@ -785,13 +934,10 @@ class QueryResult {
     /// parents as NULL.
     bool containsAllRefs(AnyRef[] refs) {
         if (_allRefs.length == 0) return false;
-        bool[string] refSet;
-        foreach (r; _allRefs)
-            refSet[r.id] = true;
         bool any;
         foreach (r; refs) {
             if (!r.isValid) continue;
-            if ((r.id in refSet) is null) return false;
+            if (rowOf(r) == size_t.max) return false;
             any = true;
         }
         return any;
@@ -895,6 +1041,38 @@ unittest {
     assert(result.allRefs == refs);
     assert(result.hasRef(AnyRef("User:1")));
     assert(!result.hasRef(AnyRef("User:99")));
+}
+
+unittest {
+    // Rows of composite and of text keys, and of integer keys which are not
+    // keyed as integers, are found by their refs; refs of other types and
+    // of other rows are not
+    auto pairs = new QueryResult();
+    pairs.loadFromRows([parseJSON(`{"a": 1, "b": "x,y", "v": 10}`), parseJSON(`{"a": 2, "b": "", "v": 20}`)],
+        "Pair", ["a", "b"]);
+    assert(pairs.allRefs == [AnyRef(`Pair:1,"x,y"`), AnyRef(`Pair:2,""`)]);
+    assert(pairs.getColumn!int("v", [AnyRef(`Pair:2,""`), AnyRef(`Pair:1,"x,y"`), AnyRef("Pair:1")]) == [20, 10, 0]);
+
+    auto codes = new QueryResult();
+    codes.loadFromRows([parseJSON(`{"code": "007", "v": 1}`), parseJSON(`{"code": "7", "v": 2}`),
+        parseJSON(`{"code": "-0", "v": 3}`)], "Code", ["code"]);
+    assert(codes.getColumn!int("v", [AnyRef("Code:7"), AnyRef("Code:007"), AnyRef("Code:-0"), AnyRef("Other:7")]) ==
+        [2, 1, 3, 0]);
+
+    auto big = new QueryResult();
+    big.loadFromRows([parseJSON(`{"id": 9223372036854775807, "v": 1}`), parseJSON(`{"id": -5, "v": 2}`)],
+        "Big", ["id"], "parent_id", "Parent");
+    assert(big.allRefs == [AnyRef("Big:9223372036854775807"), AnyRef("Big:-5")]);
+    assert(big.getColumn!int("v", [AnyRef("Big:-5"), AnyRef("Big:9223372036854775807")]) == [2, 1]);
+    assert(!big.hasRef(AnyRef("Big:5")) && !big.hasColumn("w"));
+
+    // Re-initialized (e.g. reordered) refs keep their loaded values
+    auto mock = new QueryResult();
+    mock.initialize("User", [AnyRef("User:1"), AnyRef("User:2")]);
+    mock.loadColumn("name", [AnyRef("User:2"), AnyRef("User:1")], [JSONValue("b"), JSONValue("a")]);
+    mock.initialize("User", [AnyRef("User:2"), AnyRef("User:1")]);
+    assert(mock.getColumn!string("name", mock.allRefs) == ["b", "a"]);
+    assert(mock.getColumnRaw("name", [AnyRef("User:3")]) == [JSONValue(null)]);
 }
 
 unittest {
