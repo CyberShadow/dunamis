@@ -1,5 +1,7 @@
 module dunamis.sqlite.fetcher;
 
+import dunamis.relational.native : SqlDataSource;
+import dunamis.relational.sql_dialect : SqlDialect;
 import std.algorithm;
 import std.array;
 import std.conv;
@@ -574,7 +576,7 @@ class SQLiteSession : RelationalSession {
 /// Holds the database handle and creates per-request sessions.
 ///
 /// Parameterized by DBConfig for compile-time feature configuration.
-class SQLiteDB(DBConfig config = defaultDBConfig) : DataSource {
+class SQLiteDB(DBConfig config = defaultDBConfig) : DataSource, SqlDataSource {
     /// Configuration accessible at compile time
     enum configuration = config;
 
@@ -592,6 +594,11 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataSource {
     }
 
     /// Return the SqlOptimizer to enable SQL push-down
+    /// The dialect of the database's queries
+    @property SqlDialect sqlDialect() {
+        return sqliteDialect();
+    }
+
     override ExprOptimizer[] requestedOptimizers() {
         return [_sqlOptimizer];
     }

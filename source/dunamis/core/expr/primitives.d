@@ -214,6 +214,64 @@ auto entityCast(To, From)(Expr!From source) {
 }
 
 // ============================================================================
+// Value Cast Expression
+// ============================================================================
+
+/// Interface for conversions of values to values standing for them (e.g. a
+/// plugin's conversion of nullable objects to its wrapper of their type),
+/// which optimizers testing the input's values may see through (e.g. to the
+/// column they read). Unlike entity casts (EntityCastInfo), they are not
+/// links of chains of entity expressions.
+interface ValueCastInfo {
+    /// The values converted.
+    @property ExprBase valueCastInput();
+}
+
+/// Expression converting each value of its input with `convert` (see
+/// ValueCastInfo).
+final class ValueCastExpr(To, From) : Expr!To, ValueCastInfo {
+    private ExprBase _input;
+    private To function(From) _convert;
+
+    this(Expr!From input, To function(From) convert) {
+        _input = input;
+        _convert = convert;
+    }
+
+    override ExprBase[] dependencies() {
+        return [_input];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0)
+            _input = newDep;
+    }
+
+    override Expr!To optimize(OptimizeContext ctx) {
+        _input = (cast(Expr!From) _input).optimize(ctx);
+        return this;
+    }
+
+    override Promise!(To[]) eval(EvalContext ctx) {
+        auto convert = _convert;
+        return evalAs!From(_input, ctx).then((From[] values) {
+            auto result = new To[values.length];
+            foreach (i, ref value; values)
+                result[i] = convert(value);
+            return result;
+        });
+    }
+
+    @property ExprBase valueCastInput() { return _input; }
+}
+
+/// Convert each value of `input` with `convert`, to values standing for them
+/// (see ValueCastInfo).
+auto valueCast(To, From)(Expr!From input, To function(From) convert) {
+    return new ValueCastExpr!(To, From)(input, convert);
+}
+
+// ============================================================================
 // Field Access Expression (Eager Fields)
 // ============================================================================
 

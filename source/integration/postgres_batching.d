@@ -12,18 +12,23 @@ module integration.postgres_batching;
 import std.algorithm : sum;
 import std.conv : to;
 import std.format : format;
+import std.json : JSONValue;
 import std.typecons : Nullable;
 
 import ae.utils.promise.await : await;
 
 import dunamis.core.datasource : DataSource, SetupMode;
 import dunamis.core.eval : EvalContext;
-import dunamis.core.expr : Expr, evaluateNested, fieldAccess, map, some, use, useAsync;
+import dunamis.core.expr : Expr, ExprBase, evaluateNested, fieldAccess, map, some, use, useAsync;
 import dunamis.core.filtering : filterBy;
 import dunamis.core.sorting : SortDirection, sortBy, sortByField;
+import dunamis.graphql.schema : Schema;
 import dunamis.postgres : PostgresSession;
-import dunamis.relational.schema : Entity, PrimaryKey, Col, ForeignKeyCol, BelongsTo, HasMany, getAll,
+import dunamis.relational.schema : Entity, PrimaryKey, Col, ForeignKeyCol, BelongsTo, HasMany, Table, getAll,
     getByIds, entityById;
+import dunamis.relational.schema.attrs : DecodedBy;
+import dunamis.schema.filtering : FilteredBy, FilterPlugin;
+import dunamis.schema.plugin : ApplyPlugins;
 
 import integration.postgres_test : db, onEventLoop;
 import integration.test_framework : assertTrue;
@@ -68,6 +73,57 @@ struct BatchingItem {
     mixin BelongsTo!("child", "childId");
 }
 
+/// A value of the PostgreSQL range type `daterange`, as row_to_json renders
+/// it (its canonical text form, `[start,end)`; an empty endpoint unbounded),
+/// filtered by containment of a day: natively in PostgreSQL's queries.
+@FilteredBy!BatchingPeriodFilter
+@DecodedBy!decodeBatchingPeriod
+struct BatchingPeriod { Nullable!string start; Nullable!string end; }
+
+BatchingPeriod decodeBatchingPeriod(JSONValue value) {
+    import std.algorithm.searching : countUntil;
+    BatchingPeriod result;
+    auto text = value.str;
+    auto comma = text.countUntil(',');
+    if (comma >= 0 && text.length >= 2) {
+        auto start = text[1 .. cast(size_t) comma], end = text[cast(size_t) comma + 1 .. $ - 1];
+        if (start.length) result.start = start;
+        if (end.length) result.end = end;
+    }
+    return result;
+}
+
+bool batchingPeriodContains(Nullable!string start, Nullable!string end, string day) {
+    return (start.isNull || start.get <= day) && (end.isNull || day < end.get);
+}
+
+struct BatchingPeriodFilter {
+    Nullable!string containsElement;
+    Nullable!bool isNull;
+
+    Expr!bool condition(V)(Expr!V period, ExprBase lengthSource) const {
+        import dunamis.core.expr : constant;
+        import dunamis.postgres.predicates : rangeContainsElement;
+        if (containsElement.isNull)
+            return null;
+        auto day = constant(containsElement.get, lengthSource);
+        return rangeContainsElement(period, day, "date",
+            use(&batchingPeriodContains, V.start(period), V.end(period), day));
+    }
+}
+
+@Entity!(db, "batching_terms", "BatchingTerm")
+struct BatchingTerm {
+    @PrimaryKey int id;
+    mixin Col!("validity", Nullable!BatchingPeriod);
+}
+
+struct BatchingTermQuery {
+    mixin Table!(BatchingTerm, "terms");
+}
+
+alias BatchingTermSchema = ApplyPlugins!(Schema!BatchingTermQuery, FilterPlugin);
+
 alias Parent = BatchingParent;
 alias Child = BatchingChild;
 alias Item = BatchingItem;
@@ -77,7 +133,8 @@ alias Owner = BatchingOwner;
 // p (1-based) belongs to owner p % 2 + 1; child (p, j) has the id (p-1)*k+j,
 // is flagged for even j, has the amount id*10, and belongs to the parent's
 // owner except for j = 1; item (c, m) has the id (c-1)*k+m and is flagged for
-// odd m.
+// odd m. Term t (1 <= t <= n) is valid from 2020-01-01 for t days; term
+// n + 1 has no validity.
 private string[] dataStatements(int n, int k) {
     return [
         "CREATE TABLE batching_owners (id int PRIMARY KEY, name text NOT NULL)",
@@ -85,6 +142,7 @@ private string[] dataStatements(int n, int k) {
         "CREATE TABLE batching_children (id int PRIMARY KEY, flag boolean NOT NULL, amount int NOT NULL, " ~
             "parent_id int NOT NULL, owner_id int)",
         "CREATE TABLE batching_items (id int PRIMARY KEY, flag boolean NOT NULL, child_id int NOT NULL)",
+        "CREATE TABLE batching_terms (id int PRIMARY KEY, validity daterange)",
         "INSERT INTO batching_owners SELECT g, 'o' || g FROM generate_series(1, 2) g",
         format("INSERT INTO batching_parents SELECT g, 'p' || g, g %% 2 + 1 FROM generate_series(1, %d) g", n),
         format("INSERT INTO batching_children SELECT (p - 1) * %1$d + j, j %% 2 = 0, ((p - 1) * %1$d + j) * 10, p, " ~
@@ -92,6 +150,8 @@ private string[] dataStatements(int n, int k) {
             "FROM generate_series(1, %2$d) p, generate_series(1, %1$d) j", k, n),
         format("INSERT INTO batching_items SELECT (c - 1) * %1$d + m, m %% 2 = 1, c " ~
             "FROM generate_series(1, %2$d) c, generate_series(1, %1$d) m", k, n * k),
+        format("INSERT INTO batching_terms SELECT g, daterange('2020-01-01', DATE '2020-01-01' + g) " ~
+            "FROM generate_series(1, %1$d) g UNION ALL SELECT %1$d + 1, NULL", n),
     ];
 }
 
@@ -302,6 +362,38 @@ private void checkRootMembershipFilter(PostgresSession session, EvalContext ctx,
         "Root membership filter not in the WHERE clause: " ~ sent[0]);
 }
 
+/// A root collection filtered by a condition PostgreSQL tests natively (a
+/// range containment, see `dunamis.postgres.predicates`), declared by a
+/// value type's filter (`@FilteredBy`): one statement, in whose WHERE clause
+/// it is (as `@>`), rather than a read of the whole table filtered in D.
+private void checkRootNativePredicateFilter(PostgresSession session, EvalContext ctx, Data data) {
+    import std.algorithm.searching : canFind;
+    import dunamis.graphql.compiler : compileQuery;
+
+    string[] sent;
+    session.statementObserver = (const(char)[] sql) { sent ~= sql.idup; };
+    scope (exit) session.statementObserver = null;
+    auto result = evaluateNested(compileQuery!BatchingTermSchema(
+        `{ terms(filter: {validity: {containsElement: "2020-01-03"}}) { id validity { end } } }`), ctx).await;
+    int[] ids;
+    string[] ends;
+    foreach (term; result["terms"].array) {
+        ids ~= cast(int) term["id"].integer;
+        ends ~= term["validity"]["end"].str;
+    }
+    int[] expected;
+    string[] expectedEnds;
+    foreach (t; 3 .. data.n + 1) {
+        expected ~= t;
+        expectedEnds ~= format("2020-01-%02d", 1 + t);
+    }
+    assertTrue(ids == expected && ends == expectedEnds, "Root native predicate filter: " ~ result.toString());
+    assertTrue(sent.length == 1, "Root native predicate filter: " ~ sent.length.to!string ~ " statements: " ~
+        sent.to!string);
+    assertTrue(sent[0].canFind(`batching_terms.validity @> '2020-01-03'::date`),
+        "Root native predicate filter not in the WHERE clause: " ~ sent[0]);
+}
+
 /// A query of more layers than SQL functions take arguments for (see
 /// `dunamis.relational.sql.layerGroupSize`) reads all of them.
 private void checkManyLayers(PostgresSession session, Data data) {
@@ -423,7 +515,7 @@ void testStatementCountsOfComputedFields() {
         }
         void dropTables(PostgresSession session, EvalContext) {
             session.execute("DROP TABLE IF EXISTS batching_owners, batching_parents, batching_children, " ~
-                "batching_items").await;
+                "batching_items, batching_terms").await;
         }
 
         foreach (si, data; sizes) {
@@ -443,6 +535,7 @@ void testStatementCountsOfComputedFields() {
             inRequest((PostgresSession session, EvalContext) => checkManyLayers(session, data));
             inRequest((PostgresSession session, EvalContext ctx) => checkRootFilterWithoutColumns(session, ctx, data));
             inRequest((PostgresSession session, EvalContext ctx) => checkRootMembershipFilter(session, ctx, data));
+            inRequest((PostgresSession session, EvalContext ctx) => checkRootNativePredicateFilter(session, ctx, data));
         }
 
         string report;

@@ -1,5 +1,7 @@
 module dunamis.postgres.fetcher;
 
+import dunamis.relational.native : SqlDataSource;
+import dunamis.relational.sql_dialect : SqlDialect;
 import std.algorithm;
 import std.array;
 import std.conv;
@@ -909,7 +911,7 @@ class PostgresSession : RelationalSession {
 /// Each session acquires its own connection from the factory.
 ///
 /// Parameterized by DBConfig for compile-time feature configuration.
-class PostgresDB(DBConfig config = defaultDBConfig) : DataSource {
+class PostgresDB(DBConfig config = defaultDBConfig) : DataSource, SqlDataSource {
     /// Configuration accessible at compile time
     enum configuration = config;
 
@@ -937,6 +939,11 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataSource {
     }
 
     /// Return the SqlOptimizer to enable SQL push-down
+    /// The dialect of the database's queries
+    @property SqlDialect sqlDialect() {
+        return postgresDialect();
+    }
+
     override ExprOptimizer[] requestedOptimizers() {
         return [_sqlOptimizer];
     }

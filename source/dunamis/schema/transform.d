@@ -253,7 +253,7 @@ auto wrapEntityResult(alias TypeMap, R)(R result)
     if (isExpr!R)
 {
     import dunamis.core.expr : ExprResultType, map, use, Expr;
-    import dunamis.core.expr.primitives : EntityCastExpr;
+    import dunamis.core.expr.primitives : EntityCastExpr, valueCast;
     import dunamis.schema.entity_cast : pluginEntityCast;
 
     alias ResultT = ExprResultType!R;
@@ -300,7 +300,9 @@ auto wrapEntityResult(alias TypeMap, R)(R result)
         static if (is(MappedU == UObject)) {
             return result;
         } else {
-            return use(&nullableEntityCastValue!(MappedU, UObject), result);
+            // (A conversion of the values, which optimizers may see
+            // through to the column they are read from)
+            return valueCast!(Nullable!MappedU, Nullable!UObject)(result, &nullableEntityCastValue!(MappedU, UObject));
         }
     } else static if (isObjectType!ResultT) {
         alias MappedT = TypeMap!ResultT;

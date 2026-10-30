@@ -837,6 +837,27 @@ PostgreSQL range column, which arrives as text) is read with the decoder the
 type declares with `@DecodedBy!decode` (`dunamis.relational.schema`), a
 function from the column's JSON value to the type.
 
+**Native predicates:** a condition a database tests natively (e.g.
+PostgreSQL's range containment) can be pushed into the WHERE clauses of its
+queries while it is evaluated in memory elsewhere: an expression implementing
+`NativePredicateInfo` (`dunamis.relational.native`) names its operands
+(columns of the rows filtered, constants) and renders the condition for the
+dialects having a native form of it. Where a filter containing it is pushed
+into a query of such a dialect (a data source implementing `SqlDataSource`),
+it is rendered there; otherwise (other dialects, data sources without SQL such
+as MockDB, filters evaluated in memory) its in-memory form is evaluated.
+`dunamis.postgres.predicates` provides PostgreSQL's (`postgresCondition`,
+`rangeContainsElement`):
+
+```d
+Expr!bool condition(V)(Expr!V range, ExprBase lengthSource) const {
+    if (contains.isNull) return null;
+    auto day = constant(contains.get, lengthSource);
+    // `range @> 'day'::date` in PostgreSQL queries
+    return rangeContainsElement(range, day, "date", use(&rangeContains, V.start(range), V.end(range), day));
+}
+```
+
 **Unknown filter fields:** like all input objects, filters must only contain
 fields their type defines (in literals and in variables); anything else is a
 validation error, reported with its location before the query is executed:

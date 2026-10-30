@@ -15,6 +15,7 @@ import dunamis.core.expr;
 import dunamis.core.filtering : FilterByInfo;
 import dunamis.core.optimize : OptimizeContext, ExprOptimizer;
 import dunamis.relational.eval_context : RelationalSession, QueryResult;
+import dunamis.relational.native : NativePredicateInfo;
 import dunamis.relational.query_node;
 import dunamis.relational.schema;
 import dunamis.relational.project;
@@ -838,11 +839,15 @@ class ProjectComputedExpr(T) : Expr!T, ProjectComputedInfo {
 // ============================================================================
 
 /// Extract WHERE clause SQL from a FilterByInfo by pattern-matching its predicate.
-Nullable!DialectSql extractFilterWhereClause(FilterByInfo filterInfo, string table = null) {
+/// `dialect` is the dialect of the query (null if unknown, e.g. not a SQL
+/// data source's): native predicates (see `NativePredicateInfo`) are only
+/// expressed in a dialect which has a native form of them.
+Nullable!DialectSql extractFilterWhereClause(FilterByInfo filterInfo, string table = null,
+        SqlDialect dialect = null) {
     auto predicate = filterInfo.filterPredicate;
     auto filterItem = filterInfo.filterItem;
 
-    return extractWhereFromExpr(predicate, filterItem, table);
+    return extractWhereFromExpr(predicate, filterItem, table, dialect);
 }
 
 /// Extract WHERE SQL for those top-level `&&` conjuncts of a filter predicate
@@ -850,7 +855,8 @@ Nullable!DialectSql extractFilterWhereClause(FilterByInfo filterInfo, string tab
 /// by the predicate (but, unlike `extractFilterWhereClause`, not equivalent to
 /// it), so it can only narrow the rows that the whole predicate is then
 /// evaluated on.
-Nullable!DialectSql extractFilterConjunctsWhereClause(FilterByInfo filterInfo, string table = null) {
+Nullable!DialectSql extractFilterConjunctsWhereClause(FilterByInfo filterInfo, string table = null,
+        SqlDialect dialect = null) {
     auto filterItem = filterInfo.filterItem;
     DialectSql[] conjuncts;
     void collect(Object expr) {
@@ -861,7 +867,7 @@ Nullable!DialectSql extractFilterConjunctsWhereClause(FilterByInfo filterInfo, s
                 return;
             }
         }
-        auto sql = extractWhereFromExpr(expr, filterItem, table);
+        auto sql = extractWhereFromExpr(expr, filterItem, table, dialect);
         if (!sql.isNull)
             conjuncts ~= sql.get;
     }
@@ -879,16 +885,21 @@ Nullable!DialectSql extractFilterConjunctsWhereClause(FilterByInfo filterInfo, s
 /// related rows: a condition on a belongs-to relationship becomes a condition
 /// on the item's foreign key (`fk IN (SELECT pk FROM parent WHERE ...)`, also
 /// through chains of relationships), and `some` over a to-many relationship
-/// an `EXISTS` subquery over the child table. A predicate with any part that
+/// an `EXISTS` subquery over the child table. Native predicates (see
+/// `NativePredicateInfo`) on such operands are expressed in their native
+/// form if `dialect` (the query's) has one. A predicate with any part that
 /// cannot be expressed this way gives null.
-Nullable!DialectSql extractWhereFromExpr(Object expr, Object filterItem, string table = null) {
-    WhereContext context;
+Nullable!DialectSql extractWhereFromExpr(Object expr, Object filterItem, string table = null,
+        SqlDialect dialect = null) {
+    auto context = WhereContext(dialect);
     return context.extract(expr, filterItem, table);
 }
 
 /// The state of a WHERE clause extraction: the aliases of the subqueries it
 /// renders.
 private struct WhereContext {
+    /// The dialect of the query (null if unknown).
+    private SqlDialect dialect;
     private int aliases;
 
     /// A fresh table alias for a subquery.
@@ -965,10 +976,20 @@ private struct WhereContext {
 
     /// The column an operand reads, on the row it belongs to.
     static bool resolveColumn(Object expr, Object filterItem, out RowPath path, out string column) {
-        // A nullable column's values, unwrapped
-        while (auto unwrap = cast(UnwrapNullableInfo) expr) {
-            if (unwrap.inputExpr is expr) break;
-            expr = unwrap.inputExpr;
+        // A nullable column's values, unwrapped, or a column's values cast
+        // (e.g. a value type's, to a plugin's wrapper of the type)
+        while (true) {
+            if (auto unwrap = cast(UnwrapNullableInfo) expr) {
+                if (unwrap.inputExpr is expr) break;
+                expr = unwrap.inputExpr;
+            } else if (auto entityCast = cast(EntityCastInfo) expr) {
+                if (entityCast.inputExpr is expr) break;
+                expr = entityCast.inputExpr;
+            } else if (auto valueCast = cast(ValueCastInfo) expr) {
+                if (valueCast.valueCastInput is expr) break;
+                expr = valueCast.valueCastInput;
+            } else
+                break;
         }
         auto colAccess = cast(ColumnAccessInfo) expr;
         if (colAccess is null) return false;
@@ -1101,6 +1122,42 @@ private struct WhereContext {
                     return (SqlDialect d) => d.membershipOp(columnSql, valueType, values);
                 }));
             }
+        }
+
+        // Handle native predicates, in a dialect which has a native form of
+        // them, on columns of one row and constants
+        if (auto native = cast(NativePredicateInfo) expr) {
+            if (dialect is null || !native.hasNativeSql(dialect))
+                return Nullable!DialectSql.init;
+            auto operands = native.nativeOperands;
+            RowPath path;
+            bool hasPath;
+            auto columns = new string[operands.length];
+            auto literals = new string[operands.length];
+            foreach (i, operand; operands) {
+                auto literal = extractConstant(operand);
+                if (!literal.isNull) {
+                    literals[i] = literal.get;
+                    continue;
+                }
+                RowPath operandPath;
+                if (!resolveColumn(operand, filterItem, operandPath, columns[i]))
+                    return Nullable!DialectSql.init;
+                if (hasPath && operandPath.hops != path.hops)
+                    return Nullable!DialectSql.init;
+                path = operandPath;
+                hasPath = true;
+            }
+            if (!hasPath)
+                return Nullable!DialectSql.init;
+            auto queryDialect = dialect;
+            return Nullable!DialectSql(onRow(path, table, (string rowTable) {
+                auto operandSql = new string[operands.length];
+                foreach (i; 0 .. operands.length)
+                    operandSql[i] = columns[i].length ? qualified(rowTable, columns[i]) : literals[i];
+                auto sql = native.nativeSql(queryDialect, operandSql);
+                return (SqlDialect _) => sql;
+            }));
         }
 
         // Handle constant true/false

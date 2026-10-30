@@ -5,6 +5,7 @@ public {
     import dunamis.relational.demo;
     import dunamis.relational.eval_context;
     import dunamis.relational.mock;
+    import dunamis.relational.native;
     import dunamis.relational.optimize_context;
     import dunamis.relational.project;
     import dunamis.relational.query_node;
