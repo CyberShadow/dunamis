@@ -259,6 +259,14 @@ abstract class RelationalSession : DataSession {
         return resolve();
     }
 
+    /// The relation the session reads for the table (or logical relation
+    /// name) `table` of entities: by default, `table` itself. A session may
+    /// resolve names to other relations (e.g. PostgresSession's
+    /// setRelationResolver).
+    string relationSource(string table) {
+        return table;
+    }
+
     /// Record the PK columns of a table, for naive-path fetches of refs that
     /// did not come from a root fetch (e.g. children with a composite key).
     void notePkColumns(string table, string[] pkColumns) {

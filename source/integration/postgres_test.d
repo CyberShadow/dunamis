@@ -119,6 +119,8 @@ static this() {
         &testNestedEvaluationsOfDifferentTrees);
     registerTest("Composite-key entity of a mutation field", "postgres",
         &testCompositeKeyEntityOfMutation);
+    registerTest("Sessions resolving relation names", "postgres",
+        &testSessionRelations);
     registerTest("Sessions derived with other settings", "postgres",
         &testDerivedSessionSettings);
     registerTest("Conditional collections (onlyIf) of root collections", "postgres",
@@ -218,6 +220,121 @@ void testDerivedSessionSettings() {
         assertTrue(session.queryStrings(modeSql).await == ["request"], "The request's settings were not restored");
         assertTrue(derived.queryStrings(modeSql).await == ["scoped"], "The derived session failed after the error");
         assertTrue(userCount() == before + 1, "The request's work before the section was lost");
+    });
+}
+
+/// A session resolving the names of relations (PostgresSession.withRelations,
+/// in a scope of the request): the queries of the optimized path (root and
+/// child layers, joins, per-parent windows, and the subqueries of
+/// relationship filters) and of the naive path read the relations the names
+/// resolve to; the request's session reads the tables.
+void testSessionRelations() {
+    onEventLoop(() {
+        import std.algorithm.sorting : sort;
+        import std.json : JSONType, JSONValue;
+        import dunamis.core.datasource : DataSource;
+        import dunamis.core.eval : EvalContext;
+        import dunamis.core.expr : Expr, evaluateNested;
+        import dunamis.core.types : AnyRef, queryRoot;
+        import dunamis.graphql : compileQuery;
+        import integration.test_framework : assertTrue;
+
+        auto ctx = new EvalContext();
+        auto session = cast(PostgresSession) ctx.getSession(db);
+        // (Setup actions run in the session's transaction, after its setup)
+        session.setSetting("dunamis_test.mode", "request");
+        string[] setupSaw;
+        session.addSetupAction(() => session.queryStrings("SELECT current_setting('dunamis_test.mode')")
+            .then((string[] values) { setupSaw = values; }));
+        session.setup().await;
+        scope (exit) session.teardown(SetupMode.query, false).await;
+        assertTrue(setupSaw == ["request"], "The setup action did not run after the setup statements");
+
+        // The relations: the users named Alice, the posts with an even ID
+        session.execute("CREATE FUNCTION pg_temp.users_named(p_name text) RETURNS SETOF users " ~
+            "LANGUAGE sql STABLE AS $$ SELECT * FROM users WHERE first_name = p_name $$").await;
+        session.execute("CREATE FUNCTION pg_temp.even_posts() RETURNS SETOF posts " ~
+            "LANGUAGE sql STABLE AS $$ SELECT * FROM posts WHERE id % 2 = 0 $$").await;
+        size_t resolved;
+        auto scoped = session.withRelations((string name) {
+            resolved++;
+            return name == "users" ? "pg_temp.users_named('Alice')" : name == "posts" ? "pg_temp.even_posts()" : null;
+        });
+        assertTrue(scoped.relationSource("users") == "pg_temp.users_named('Alice')" &&
+            scoped.relationSource("tasks") == "tasks" && session.relationSource("users") == "users",
+            "Wrong relation sources");
+        auto scope_ = ctx.createScope([cast(DataSource) db: scoped]);
+
+        long[] ids(string sql) {
+            auto values = session.queryLongs(sql).await;
+            values.sort();
+            return values;
+        }
+        long[] idsIn(JSONValue v, string[] path) {
+            long[] result;
+            void walk(JSONValue v, string[] path) {
+                if (v.type == JSONType.array)
+                    foreach (item; v.array)
+                        walk(item, path);
+                else if (!path.length) {
+                    if (v.type == JSONType.integer)
+                        result ~= v.integer;
+                    else if (v.type == JSONType.string)
+                        result ~= v.str.to!long;
+                } else if (v.type == JSONType.object)
+                    walk(v[path[0]], path[1 .. $]);
+            }
+            walk(v, path);
+            result.sort();
+            return result;
+        }
+        enum alice = "SELECT id::bigint FROM users WHERE first_name = 'Alice'";
+        enum alicePosts = "SELECT p.id::bigint FROM posts p JOIN users u ON u.id = p.author_id " ~
+            "WHERE u.first_name = 'Alice' AND p.id % 2 = 0";
+        auto expectAlice = ids(alice), expectPosts = ids(alicePosts);
+        assertTrue(expectAlice.length && expectPosts.length, "Expected Alice's even posts");
+        auto expectTasks = ids("SELECT t.assignee_id::bigint FROM tasks t JOIN users u ON u.id = t.assignee_id " ~
+            "WHERE u.first_name = 'Alice'");
+        auto expectWithPosts = ids("SELECT DISTINCT p.author_id::bigint FROM (" ~ alicePosts.replace("p.id::bigint", "p.*") ~ ") p");
+
+        foreach (optimized; [true, false]) {
+            JSONValue run(string query) {
+                auto compiled = compileQuery!MySchema(query);
+                if (optimized)
+                    return evaluateNested(compiled, scope_).await;
+                auto s = scope_.createScope();
+                s.setValues!AnyRef(null, [queryRoot]);
+                return compiled.eval(s).await[0];
+            }
+            auto mode = optimized ? "optimized: " : "naive: ";
+            // Root rows, children, joined parents
+            auto users = run(`{ users { id posts { id } } }`);
+            assertTrue(idsIn(users, ["users", "id"]) == expectAlice, mode ~ "root rows: " ~ users.toString());
+            assertTrue(idsIn(users, ["users", "posts", "id"]) == expectPosts, mode ~ "children: " ~ users.toString());
+            // (The assignees which are not in the relation have no columns)
+            auto tasks = run(`{ tasks { assignee { firstName } } }`);
+            string[] names;
+            foreach (task; tasks["tasks"].array)
+                if (task["assignee"].type == JSONType.object && task["assignee"]["firstName"].type == JSONType.string && task["assignee"]["firstName"].str.length)
+                    names ~= task["assignee"]["firstName"].str;
+            assertTrue(names.length == expectTasks.length && names.all!(n => n == "Alice"),
+                mode ~ "joined: " ~ tasks.toString());
+            // Per-parent windows (each Alice's first even post)
+            auto firsts = run(`{ users { posts(first: 1) { id } } }`);
+            auto firstIds = idsIn(firsts, ["users", "posts", "id"]);
+            assertTrue(firstIds.length == expectWithPosts.length && firstIds.all!(id => expectPosts.canFind(id)),
+                mode ~ "windows: " ~ firsts.toString());
+            // Relationship filters (their subqueries)
+            auto withPosts = run(`{ users(filter: {posts: {some: {title: {notEqualTo: "-"}}}}) { id } }`);
+            assertTrue(idsIn(withPosts, ["users", "id"]) == expectWithPosts, mode ~ "some: " ~ withPosts.toString());
+            auto byAuthor = run(`{ posts(filter: {author: {firstName: {equalTo: "Alice"}}}) { id } }`);
+            assertTrue(idsIn(byAuthor, ["posts", "id"]) == expectPosts, mode ~ "belongs-to filter: " ~ byAuthor.toString());
+        }
+        assertTrue(resolved > 0, "The resolver was not called");
+
+        // The request's session reads the tables
+        auto all = evaluateNested(compileQuery!MySchema(`{ users { id } }`), ctx).await;
+        assertTrue(idsIn(all, ["users", "id"]) == ids("SELECT id::bigint FROM users"), "The request read the relations");
     });
 }
 

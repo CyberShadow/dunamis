@@ -40,6 +40,7 @@ class PostgresSession : RelationalSession {
     private string _cachedSQL;
     private QueryResult[QueryNode] _cachedResults;
     private string[] _setupStatements;
+    private Promise!void delegate()[] _setupActions;
     /// Numbers the session's transactions (incremented at each BEGIN), to
     /// tell whether an atomic section's savepoint still exists.
     private ulong _transaction;
@@ -51,12 +52,25 @@ class PostgresSession : RelationalSession {
     private PostgresSession _base;
     private string[string] _scopeSettings;
     private string _applySettings, _restoreSettings;
+    /// The relations the session's statements read for the names of
+    /// relations in them (see setRelationResolver), or null.
+    private string delegate(string name) _relationResolver;
 
     /// Add transaction-local initialization SQL for this request (for
     /// example SET LOCAL application context values).
     void addSetupStatement(string sql) {
         assert(_base is null, "addSetupStatement: a derived session has no setup of its own");
         _setupStatements ~= sql;
+    }
+
+    /// Add an action to run when the session is set up for the request, in
+    /// its transaction, after its setup statements (in the order they were
+    /// added): e.g. queries of the request's parameters which the request's
+    /// statements then depend on (see setRelationResolver). A failing action
+    /// fails the setup.
+    void addSetupAction(Promise!void delegate() action) {
+        assert(_base is null, "addSetupAction: a derived session has no setup of its own");
+        _setupActions ~= action;
     }
 
     /// Set the configuration parameter `name` (as `SET LOCAL`) for the
@@ -96,6 +110,7 @@ class PostgresSession : RelationalSession {
         auto base = _base is null ? this : _base;
         auto derived = new PostgresSession(_connFactory, _disconnectOnTeardown, _acquireConnection, _releaseConnection);
         derived._base = base;
+        derived._relationResolver = _relationResolver;
         derived._scopeSettings = _scopeSettings.dup;
         foreach (name, value; settings)
             derived._scopeSettings[settingName(name)] = value;
@@ -117,6 +132,62 @@ class PostgresSession : RelationalSession {
     /// request's session).
     @property const(string[string]) scopeSettings() const { return _scopeSettings; }
 
+    /// Resolve the names of relations in the session's statements with
+    /// `resolver`: a name it resolves (to a FROM item, e.g. a call of a
+    /// set-returning function with constant arguments; null: a name it does
+    /// not resolve) is read as that relation, in every statement the
+    /// session sends (the queries Dunamis generates, of the optimized and of
+    /// the naive path, as well as those of `execute`, `queryLongs` etc.):
+    /// the statement is sent with the name bound to the relation by a common
+    /// table expression, which PostgreSQL inlines where the name is
+    /// referenced (see `bindRelations`). E.g., an entity's table may be a
+    /// logical name, which the request resolves to the rows of a function
+    /// of the request's parameters. A resolved name must be an identifier
+    /// (it is also the alias of the relation in the statements) and should
+    /// not name a relation of the database. The resolver is called when a
+    /// statement is sent (so it may resolve a name differently over the
+    /// request). Sessions derived from this one (see withSettings,
+    /// withRelations) resolve names with it too, unless given their own.
+    void setRelationResolver(string delegate(string name) resolver) {
+        _relationResolver = resolver;
+    }
+
+    /// A session of the same request whose statements resolve the names of
+    /// relations with `resolver` (see setRelationResolver), for evaluating
+    /// expressions as of other relations in a scope of the request's context
+    /// (see `EvalContext.createScope`). Like a session derived with
+    /// `withSettings` (whose settings it keeps, if derived from one), it
+    /// issues its statements on this session's connection, in its
+    /// transaction, and has result caches of its own; unlike one, its
+    /// statements are sent as they are, without statements around them.
+    PostgresSession withRelations(string delegate(string name) resolver) {
+        auto base = _base is null ? this : _base;
+        auto derived = new PostgresSession(_connFactory, _disconnectOnTeardown, _acquireConnection, _releaseConnection);
+        derived._base = base;
+        derived._relationResolver = resolver;
+        derived._scopeSettings = _scopeSettings.dup;
+        derived._applySettings = _applySettings;
+        derived._restoreSettings = _restoreSettings;
+        return derived;
+    }
+
+    /// The relation the session reads for the relation `table` of its
+    /// statements: the resolver's (see setRelationResolver), or `table`.
+    override string relationSource(string table) {
+        if (_relationResolver !is null)
+            if (auto relation = _relationResolver(table))
+                return relation;
+        return table;
+    }
+
+    /// `sql`, with the names of relations bound (see setRelationResolver).
+    private const(char)[] bound(const(char)[] sql) {
+        import dunamis.postgres.sql : bindRelations;
+        if (_relationResolver is null)
+            return sql;
+        return bindRelations(sql, _relationResolver);
+    }
+
     private static string settingName(string name) {
         import std.ascii : isAlphaNum;
         if (!name.length)
@@ -134,8 +205,9 @@ class PostgresSession : RelationalSession {
     /// Called with the text of each statement the session sends (other than
     /// the BEGIN and COMMIT/ROLLBACK of its transaction, and the statements
     /// applying a derived session's settings), e.g. to count the database
-    /// round trips of an evaluation. Sessions derived from this one (see
-    /// withSettings) report their statements here too.
+    /// round trips of an evaluation: as it is sent (with its relations bound,
+    /// see setRelationResolver). Sessions derived from this one (see
+    /// withSettings, withRelations) report their statements here too.
     void delegate(const(char)[] sql) statementObserver;
 
     private void observe(const(char)[] sql) {
@@ -149,6 +221,7 @@ class PostgresSession : RelationalSession {
     /// the request's (see withSettings).
     private Promise!(PgSqlConnection.Row[]) run(const(char)[] sql) {
         auto conn = connection();
+        sql = bound(sql);
         observe(sql);
         if (_base is null || !_applySettings.length)
             return conn.query(sql).array();
@@ -158,6 +231,7 @@ class PostgresSession : RelationalSession {
     /// ditto, with the Extended Query protocol and parameters
     private Promise!(PgSqlConnection.Row[]) runExtended(Args...)(const(char)[] sql, Args args) {
         auto conn = connection();
+        sql = bound(sql);
         observe(sql);
         if (_base is null || !_applySettings.length)
             return conn.extendedQuery(sql, args).array();
@@ -203,7 +277,7 @@ class PostgresSession : RelationalSession {
             _transaction++;
             return connection().query("BEGIN").array();
         }).then((PgSqlConnection.Row[] _) {
-            return executeSetupStatement(0).then(() {
+            return executeSetupStatement(0).then(() => runSetupAction(0)).then(() {
                 _setupDepth = 1;
             });
         }).except((Exception e) {
@@ -250,6 +324,12 @@ class PostgresSession : RelationalSession {
         if (_conn is null)
             throw new Exception("PostgreSQL session used outside of a request (it has no connection)");
         return _conn;
+    }
+
+    private Promise!void runSetupAction(size_t index) {
+        if (index >= _setupActions.length)
+            return resolve();
+        return _setupActions[index]().then(() => runSetupAction(index + 1));
     }
 
     private Promise!void executeSetupStatement(size_t index) {
