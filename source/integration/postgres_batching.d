@@ -118,6 +118,34 @@ struct BatchingTerm {
     mixin Col!("validity", Nullable!BatchingPeriod);
 }
 
+/// The number of days of a period (0 if it is null or unbounded).
+int batchingPeriodDays(Nullable!BatchingPeriod period) {
+    import std.datetime.date : Date;
+    if (period.isNull || period.get.start.isNull || period.get.end.isNull)
+        return 0;
+    return cast(int) (Date.fromISOExtString(period.get.end.get) - Date.fromISOExtString(period.get.start.get)).total!"days";
+}
+
+/// The end of a period (null if it is null or unbounded above).
+Nullable!string batchingPeriodEnd(Nullable!BatchingPeriod period) {
+    return period.isNull ? Nullable!string.init : period.get.end;
+}
+
+/// The number of days of a term's validity (0 if it has none), computed
+/// natively in PostgreSQL's queries (see `dunamis.postgres.predicates`).
+Expr!int termDays(Expr!BatchingTerm t) {
+    import dunamis.postgres.predicates : postgresSql;
+    return postgresSql(use(&batchingPeriodDays, t.validity),
+        (const string[] sql) => "COALESCE(upper(" ~ sql[0] ~ ") - lower(" ~ sql[0] ~ "), 0)", t.validity);
+}
+
+/// The end of a term's validity (null if it has none), natively
+/// `upper(validity)::text`.
+Expr!(Nullable!string) termEnd(Expr!BatchingTerm t) {
+    import dunamis.postgres.predicates : rangeUpperBound;
+    return rangeUpperBound(t.validity, "text", use(&batchingPeriodEnd, t.validity));
+}
+
 struct BatchingTermQuery {
     mixin Table!(BatchingTerm, "terms");
 }
@@ -394,6 +422,57 @@ private void checkRootNativePredicateFilter(PostgresSession session, EvalContext
         "Root native predicate filter not in the WHERE clause: " ~ sent[0]);
 }
 
+/// Expressions PostgreSQL computes natively (see `NativeSqlInfo`), in each
+/// position the SQL optimizer puts expressions: one statement each, in
+/// whose SELECT, WHERE or ORDER BY clause they are, rather than in-memory
+/// evaluations.
+private void checkNativeSqlExpressions(PostgresSession session, EvalContext ctx, Data data) {
+    import std.algorithm.searching : canFind, findSplitAfter;
+    import std.algorithm.iteration : smap = map, sfilter = filter;
+    import std.range : iota, retro;
+    import std.array : array;
+
+    string[] sent;
+    session.statementObserver = (const(char)[] sql) { sent ~= sql.idup; };
+    scope (exit) session.statementObserver = null;
+    void expectOne(string what, string sql) {
+        assertTrue(sent.length == 1, what ~ ": " ~ sent.length.to!string ~ " statements: " ~ sent.to!string);
+        assertTrue(sent[0].canFind(sql), what ~ ": not in the query: " ~ sql ~ ": " ~ sent[0]);
+        sent = null;
+    }
+
+    // In the SELECT clause: a value (of a custom type), ...
+    auto ends = evaluateNested(map!((Expr!BatchingTerm t) => termEnd(t))(getAll!BatchingTerm()), ctx).await;
+    Nullable!string[] expectedEnds;
+    foreach (t; 1 .. data.n + 1)
+        expectedEnds ~= Nullable!string(format("2020-01-%02d", 1 + t));
+    expectedEnds ~= Nullable!string.init;
+    assertTrue(ends == expectedEnds, "Native SQL value: " ~ ends.to!string);
+    expectOne("Native SQL value", "upper(validity)::text AS computed_");
+
+    // ... and an operand of another operation computed in SQL
+    auto doubled = evaluateNested(map!((Expr!BatchingTerm t) => termDays(t) * 2)(getAll!BatchingTerm()), ctx).await;
+    assertTrue(doubled == iota(1, data.n + 1).smap!(t => 2 * t).array ~ 0, "Native SQL operand: " ~ doubled.to!string);
+    expectOne("Native SQL operand", "(COALESCE(upper(validity) - lower(validity), 0) * 2) AS computed_");
+
+    // In the WHERE clause: operands of comparisons (and of conjunctions)
+    auto ids = evaluateNested(map!((Expr!BatchingTerm t) => fieldAccess!"id"(t))(
+        filterBy!((Expr!BatchingTerm t) => termDays(t).gt(2).and(termDays(t).lt(6)))(getAll!BatchingTerm())), ctx).await;
+    assertTrue(ids == iota(3, 6).sfilter!(t => t <= data.n).array, "Native SQL in a filter: " ~ ids.to!string);
+    assertTrue(sent.length == 1 && sent[0].findSplitAfter("WHERE ")[1].canFind(
+        "(COALESCE(upper(batching_terms.validity) - lower(batching_terms.validity), 0) > 2)"),
+        "Native SQL not in the WHERE clause: " ~ sent.to!string);
+    sent = null;
+
+    // In the ORDER BY clause: a sort comparing it on the items
+    auto sorted = evaluateNested(map!((Expr!BatchingTerm t) => fieldAccess!"id"(t))(
+        sortBy!((Expr!BatchingTerm a, Expr!BatchingTerm b) => termDays(a).gt(termDays(b)))(getAll!BatchingTerm())),
+        ctx).await;
+    assertTrue(sorted == iota(1, data.n + 1).retro.array ~ (data.n + 1), "Native SQL sort key: " ~ sorted.to!string);
+    expectOne("Native SQL sort key",
+        "ORDER BY COALESCE(upper(batching_terms.validity) - lower(batching_terms.validity), 0) DESC");
+}
+
 /// A root collection filtered by its primary key (a plain field of the
 /// entity, see `PlainFieldInfo`): one statement, in whose WHERE clause the
 /// condition is, rather than a read of the whole table filtered in D.
@@ -573,6 +652,7 @@ void testStatementCountsOfComputedFields() {
             inRequest((PostgresSession session, EvalContext ctx) => checkRootMembershipFilter(session, ctx, data));
             inRequest((PostgresSession session, EvalContext ctx) => checkRootNativePredicateFilter(session, ctx, data));
             inRequest((PostgresSession session, EvalContext ctx) => checkRootPrimaryKeyFilter(session, ctx, data));
+            inRequest((PostgresSession session, EvalContext ctx) => checkNativeSqlExpressions(session, ctx, data));
         }
 
         string report;

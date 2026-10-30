@@ -221,6 +221,7 @@ The optimizer uses interface-based pattern matching to recognize and transform e
 - `BelongsToInfo` — Many-to-one relationships that become JOINs
 - `HasManyInfo` — One-to-many relationships that become child CTEs
 - `BinaryOpInfo` — Operations that can be pushed down to SQL
+- `NativeSqlInfo` — Expressions a SQL dialect computes natively (with an in-memory fallback), pushed into WHERE, SELECT, ORDER BY, or other pushed operations
 
 Different data sources register their own optimizers. The relational package contributes `RelationalOptimizer` and `SqlOptimizer`; future packages (e.g., REST APIs, in-memory stores) can add their own without modifying core.
 

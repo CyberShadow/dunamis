@@ -156,12 +156,15 @@ private string toCTE(QueryNode node, SqlDialect dialect,
         sql ~= format("\n      AND (%s)", where);
     }
 
-    // ORDER BY
+    // ORDER BY (a column, or a computed column, as its expression)
     if (node.orderBy_.length > 0) {
         string[] orderParts;
         foreach (spec; node.orderBy_) {
-            orderParts ~= format("%s.%s%s", node.table, spec.column,
-                spec.descending ? " DESC" : "");
+            string key = node.table ~ "." ~ spec.column;
+            foreach (computed; node.computedColumns)
+                if (computed.alias_ == spec.column)
+                    key = computed.sqlExpr;
+            orderParts ~= format("%s%s", key, spec.descending ? " DESC" : "");
         }
         sql ~= format("\n    ORDER BY %s", orderParts.join(", "));
     }

@@ -837,17 +837,24 @@ PostgreSQL range column, which arrives as text) is read with the decoder the
 type declares with `@DecodedBy!decode` (`dunamis.relational.schema`), a
 function from the column's JSON value to the type.
 
-**Native predicates:** a condition a database tests natively (e.g.
-PostgreSQL's range containment) can be pushed into the WHERE clauses of its
-queries while it is evaluated in memory elsewhere: an expression implementing
-`NativePredicateInfo` (`dunamis.relational.native`) names its operands
-(columns of the rows filtered, constants) and renders the condition for the
-dialects having a native form of it. Where a filter containing it is pushed
-into a query of such a dialect (a data source implementing `SqlDataSource`),
-it is rendered there; otherwise (other dialects, data sources without SQL such
-as MockDB, filters evaluated in memory) its in-memory form is evaluated.
-`dunamis.postgres.predicates` provides PostgreSQL's (`postgresCondition`,
-`rangeContainsElement`):
+**Native SQL expressions:** an expression a database computes natively
+(e.g. PostgreSQL's range containment, or a range's upper bound) can be put
+into its queries while it is evaluated in memory elsewhere: an expression
+implementing `NativeSqlInfo` (`dunamis.relational.native`), of any result
+type, names its operands (columns of the rows of a query, constants, or other
+expressions computed in SQL) and renders itself for the dialects having a
+native form of it. In a query of such a dialect (of a data source
+implementing `SqlDataSource`), the SQL optimizer puts it wherever it puts
+expressions: in the WHERE clause (a condition of a filter pushed into the
+query, or an operand of a comparison in one), in the SELECT clause (a value,
+read from a computed column), in the ORDER BY clause (a sort comparing it on
+the two items, e.g. the `orderBy` of a field computed by it), and as an
+operand of other expressions computed in SQL. Otherwise (other dialects, data
+sources without SQL such as MockDB, operands not computable in SQL), its
+in-memory form is evaluated, which must agree with the native form (also on
+NULL values and their order). `dunamis.postgres.predicates` provides
+PostgreSQL's (`postgresSql`, `postgresCondition`, `rangeContainsElement`,
+`rangeUpperBound`, `rangeLowerBound`):
 
 ```d
 Expr!bool condition(V)(Expr!V range, ExprBase lengthSource) const {
@@ -855,6 +862,13 @@ Expr!bool condition(V)(Expr!V range, ExprBase lengthSource) const {
     auto day = constant(contains.get, lengthSource);
     // `range @> 'day'::date` in PostgreSQL queries
     return rangeContainsElement(range, day, "date", use(&rangeContains, V.start(range), V.end(range), day));
+}
+
+// `upper(validity)::text` in PostgreSQL queries, e.g. in
+// `filterBy!(t => validityEnd(t).lt("2021-01-01"))(...)` (WHERE) or
+// `sortBy!((a, b) => validityEnd(a).lt(validityEnd(b)))(...)` (ORDER BY)
+Expr!(Nullable!string) validityEnd(Expr!Term t) {
+    return rangeUpperBound(t.validity, "text", use((Nullable!Period p) => p.isNull ? Nullable!string.init : p.get.end, t.validity));
 }
 ```
 

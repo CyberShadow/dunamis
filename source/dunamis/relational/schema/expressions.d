@@ -134,13 +134,16 @@ private Promise!(Entity[]) populatePlainFields(Entity)(RelationalSession session
 /// conjuncts narrow the query (under the same condition) and is then applied
 /// in memory. Filters may read the plain fields of the root's entity (e.g.
 /// its primary key) as well as its columns (see `RootExprInfo.plainFieldColumn`).
-private void pushDownRootCollection(QueryNode node, Object mapExpr, RootExprInfo rootExpr) {
+/// A sort by a native SQL expression (see `NativeSqlInfo`) orders by a
+/// computed column of the query.
+private void pushDownRootCollection(QueryNode node, Object mapExpr, RootExprInfo rootExpr,
+        RelationalOptimizeContext relCtx) {
     import dunamis.core.pagination : LimitInfo, OffsetInfo;
     import dunamis.core.sorting : SortByInfo;
     import dunamis.core.filtering : FilterByInfo;
     import dunamis.relational.native : sqlDialectOf;
     import dunamis.relational.sql_optimizer : extractFilterWhereClause,
-        extractFilterConjunctsWhereClause;
+        extractFilterConjunctsWhereClause, extractNativeSortKey;
 
     // The dialect of the node's query (for native predicates)
     auto dialect = sqlDialectOf(node.dataSource);
@@ -194,6 +197,15 @@ private void pushDownRootCollection(QueryNode node, Object mapExpr, RootExprInfo
             bool pushed;
             if (!windowBeneath && !sortBeneath) {
                 auto specs = extractSortBySpecs(sort);
+                if (specs.length == 0) {
+                    // A native SQL expression's order: by a computed column
+                    auto key = extractNativeSortKey(sort, node.table, dialect);
+                    if (!key.isNull) {
+                        auto alias_ = relCtx.newComputedColumnAlias();
+                        node.addComputedColumn(ComputedColumn(alias_, key.get.sql, key.get.type));
+                        specs = [OrderBySpec(alias_, key.get.direction)];
+                    }
+                }
                 if (specs.length > 0) {
                     foreach (spec; specs) node.addOrderBy(spec);
                     splice(sort.sortSource);
@@ -302,7 +314,7 @@ private QueryNode configuredNode(OptimizeContext ctx, Object mapExpr, string typ
     if (auto rootExpr = cast(RootExprInfo) underlyingColl) {
         // For root collections: unwrap pagination/sorting/filtering from the
         // expression tree and push to the QueryNode for SQL-level execution.
-        pushDownRootCollection(node, mapExpr, rootExpr);
+        pushDownRootCollection(node, mapExpr, rootExpr, relCtx);
         // The root's own order, beneath the sorts pushed (which are stable
         // in memory: it orders the rows they leave tied)
         foreach (column; rootExpr.orderColumns) {

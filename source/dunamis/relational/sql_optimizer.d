@@ -13,9 +13,10 @@ import dunamis.core.types;
 import dunamis.core.eval;
 import dunamis.core.expr;
 import dunamis.core.filtering : FilterByInfo;
+import dunamis.core.sorting : SortByInfo;
 import dunamis.core.optimize : OptimizeContext, ExprOptimizer;
 import dunamis.relational.eval_context : RelationalSession, QueryResult;
-import dunamis.relational.native : NativePredicateInfo;
+import dunamis.relational.native : NativeSqlInfo;
 import dunamis.relational.query_node;
 import dunamis.relational.schema;
 import dunamis.relational.project;
@@ -144,6 +145,14 @@ class SqlOptimizer : ExprOptimizer {
             // Check if this dependency is a some/every predicate that could be pushed down
             if (auto collPred = cast(CollectionPredicateInfo) dep) {
                 auto replacement = tryPushDownCollectionPredicate(dep, collPred, ctx);
+                if (replacement !is null && replacement !is dep) {
+                    parent.replaceDependency(i, replacement);
+                }
+            }
+
+            // Check if this dependency is a native SQL expression that could be pushed down
+            if (auto native = cast(NativeSqlInfo) dep) {
+                auto replacement = tryPushDownNative(dep, native, ctx);
                 if (replacement !is null && replacement !is dep) {
                     parent.replaceDependency(i, replacement);
                 }
@@ -347,6 +356,26 @@ class SqlOptimizer : ExprOptimizer {
 
         // Create and return projection for computed column
         return createProjectComputedExpr(queryNodeId, alias_, typeid(bool), input, prefetch);
+    }
+
+    /// Try to push down a native SQL expression (see `NativeSqlInfo`) to a
+    /// computed column, if the dialect has a native form of it and its
+    /// operands are SQL of one query node (columns, constants, or other
+    /// expressions computed in SQL).
+    protected ExprBase tryPushDownNative(ExprBase expr, NativeSqlInfo native, OptimizeContext ctx) {
+        if (!native.hasNativeSql(_dialect))
+            return null;
+        QueryNodeId queryNodeId = noQueryNodeId;
+        auto sqlExpr = tryGetSqlExpr(expr, queryNodeId);
+        if (sqlExpr.isNull || queryNodeId == noQueryNodeId)
+            return null;
+        auto input = extractInputFromExpr(expr);
+        auto prefetch = extractPrefetchFromExpr(expr);
+        if (input is null || prefetch is null)
+            return null;
+        assert(prefetch.node.id == queryNodeId, "Computed column operands from another QueryNode");
+        auto alias_ = addComputedColumn(prefetch.node, sqlExpr.get, expr.resultType, ctx);
+        return native.projectComputed(queryNodeId, alias_, input, prefetch);
     }
 
     /// Try to push down a collection predicate (some/every) to SQL EXISTS subquery.
@@ -553,6 +582,14 @@ class SqlOptimizer : ExprOptimizer {
             return extractInputFromExpr(isNullOp.operand);
         }
 
+        // Check for native SQL expressions and recurse into their operands
+        if (auto native = cast(NativeSqlInfo) expr) {
+            foreach (operand; native.nativeOperands)
+                if (auto result = extractInputFromExpr(operand))
+                    return result;
+            return null;
+        }
+
         // Check for projection expressions - they have input as first dependency
         if (cast(ProjectColumnInfo) expr !is null || cast(ProjectJoinedColumnInfo) expr !is null) {
             auto deps = expr.dependencies();
@@ -596,6 +633,14 @@ class SqlOptimizer : ExprOptimizer {
         // Check for isNull ops and recurse
         if (auto isNullOp = cast(IsNullInfo) expr) {
             return extractPrefetchFromExpr(isNullOp.operand);
+        }
+
+        // Check for native SQL expressions and recurse into their operands
+        if (auto native = cast(NativeSqlInfo) expr) {
+            foreach (operand; native.nativeOperands)
+                if (auto result = extractPrefetchFromExpr(operand))
+                    return result;
+            return null;
         }
 
         // Check for projection expressions - they have prefetch as second dependency
@@ -684,6 +729,22 @@ class SqlOptimizer : ExprOptimizer {
             auto operandSql = tryGetSqlExpr(isNullOp.operand, queryNodeId);
             if (!operandSql.isNull) {
                 return Nullable!string(_dialect.isNullOp(operandSql.get));
+            }
+        }
+
+        // Check if it's a native SQL expression (of a dialect having a
+        // native form of it) on operands which are SQL themselves
+        if (auto native = cast(NativeSqlInfo) expr) {
+            if (native.hasNativeSql(_dialect)) {
+                auto operands = native.nativeOperands;
+                auto operandSql = new string[operands.length];
+                foreach (i, operand; operands) {
+                    auto sql = tryGetSqlExpr(operand, queryNodeId);
+                    if (sql.isNull)
+                        return Nullable!string.init;
+                    operandSql[i] = sql.get;
+                }
+                return Nullable!string(native.nativeSql(_dialect, operandSql));
             }
         }
 
@@ -840,7 +901,7 @@ class ProjectComputedExpr(T) : Expr!T, ProjectComputedInfo {
 
 /// Extract WHERE clause SQL from a FilterByInfo by pattern-matching its predicate.
 /// `dialect` is the dialect of the query (null if unknown, e.g. not a SQL
-/// data source's): native predicates (see `NativePredicateInfo`) are only
+/// data source's): native SQL expressions (see `NativeSqlInfo`) are only
 /// expressed in a dialect which has a native form of them. `plainFieldColumn`
 /// (if not null) gives the columns of the plain fields of the filtered entity
 /// (see `PlainFieldInfo`), so that conditions on them can be expressed too.
@@ -887,9 +948,10 @@ Nullable!DialectSql extractFilterConjunctsWhereClause(FilterByInfo filterInfo, s
 /// related rows: a condition on a belongs-to relationship becomes a condition
 /// on the item's foreign key (`fk IN (SELECT pk FROM parent WHERE ...)`, also
 /// through chains of relationships), and `some` over a to-many relationship
-/// an `EXISTS` subquery over the child table. Native predicates (see
-/// `NativePredicateInfo`) on such operands are expressed in their native
-/// form if `dialect` (the query's) has one. Reads of the item's plain fields
+/// an `EXISTS` subquery over the child table. Native SQL expressions (see
+/// `NativeSqlInfo`) on such operands are expressed in their native form if
+/// `dialect` (the query's) has one: as conditions (of type `bool`), and as
+/// operands of comparisons. Reads of the item's plain fields
 /// (see `PlainFieldInfo`) are reads of their columns that `plainFieldColumn`
 /// gives (if not null). A predicate with any part that cannot be expressed
 /// this way gives null.
@@ -1017,6 +1079,68 @@ private struct WhereContext {
         return path.valid;
     }
 
+    /// The SQL of a value on the rows of `table`: a constant (on no row),
+    /// or a value of the row `path` leads to, as `render` renders it for
+    /// that row's table reference.
+    static struct RowValue {
+        bool valid;
+        bool constant;
+        bool native;     // Is it (or does it contain) a native SQL expression?
+        RowPath path;
+        string delegate(string rowTable) render;
+    }
+
+    /// The SQL of the value `expr`: a constant, a column of a row (see
+    /// `resolveColumn`), or a native SQL expression (see `NativeSqlInfo`)
+    /// having a native form in the dialect, on such values of one row.
+    RowValue rowValue(Object expr, Object filterItem) {
+        auto literal = extractConstant(expr);
+        if (!literal.isNull) {
+            auto sql = literal.get;
+            return RowValue(true, true, false, RowPath(true), (string) => sql);
+        }
+        RowPath path;
+        string column;
+        if (resolveColumn(expr, filterItem, path, column))
+            return RowValue(true, false, false, path, (string rowTable) => qualified(rowTable, column));
+        // A native expression's values, unwrapped or cast (as a column's)
+        while (true) {
+            if (auto unwrap = cast(UnwrapNullableInfo) expr) {
+                if (unwrap.inputExpr is expr) break;
+                expr = unwrap.inputExpr;
+            } else if (auto valueCast = cast(ValueCastInfo) expr) {
+                if (valueCast.valueCastInput is expr) break;
+                expr = valueCast.valueCastInput;
+            } else
+                break;
+        }
+        auto native = cast(NativeSqlInfo) expr;
+        if (native is null || dialect is null || !native.hasNativeSql(dialect))
+            return RowValue.init;
+        auto operands = native.nativeOperands;
+        auto values = new RowValue[operands.length];
+        auto result = RowValue(true, true, true, RowPath(true));
+        foreach (i, operand; operands) {
+            values[i] = rowValue(operand, filterItem);
+            if (!values[i].valid)
+                return RowValue.init;
+            if (values[i].constant)
+                continue;
+            if (!result.constant && values[i].path.hops != result.path.hops)
+                return RowValue.init;
+            result.constant = false;
+            result.path = values[i].path;
+        }
+        auto queryDialect = dialect;
+        result.render = (string rowTable) {
+            auto operandSql = new string[values.length];
+            foreach (i, value; values)
+                operandSql[i] = value.render(rowTable);
+            return native.nativeSql(queryDialect, operandSql);
+        };
+        return result;
+    }
+
     Nullable!DialectSql extract(Object expr, Object filterItem, string table) {
         // Handle binary operators: AND, OR, comparison operators
         if (auto binOp = cast(BinaryOpInfo) expr) {
@@ -1050,7 +1174,20 @@ private struct WhereContext {
                     value = leftConst.get;
                     isColumnOnLeft = false;
                 } else {
-                    return Nullable!DialectSql.init;
+                    // Comparisons of native SQL expressions (with constants,
+                    // columns or native expressions of the same row)
+                    auto left = rowValue(binOp.left, filterItem);
+                    auto right = rowValue(binOp.right, filterItem);
+                    if (!left.valid || !right.valid || !(left.native || right.native) ||
+                            (left.constant && right.constant) ||
+                            (!left.constant && !right.constant && left.path.hops != right.path.hops))
+                        return Nullable!DialectSql.init;
+                    auto valueOp = translateComparisonOp(op, true);
+                    return Nullable!DialectSql(onRow(left.constant ? right.path : left.path, table,
+                        (string rowTable) {
+                            auto sql = "(" ~ left.render(rowTable) ~ " " ~ valueOp ~ " " ~ right.render(rowTable) ~ ")";
+                            return (SqlDialect _) => sql;
+                        }));
                 }
 
                 string sqlOp = translateComparisonOp(op, isColumnOnLeft);
@@ -1143,38 +1280,17 @@ private struct WhereContext {
             }
         }
 
-        // Handle native predicates, in a dialect which has a native form of
-        // them, on columns of one row and constants
-        if (auto native = cast(NativePredicateInfo) expr) {
-            if (dialect is null || !native.hasNativeSql(dialect))
+        // Handle native conditions, in a dialect which has a native form of
+        // them, on values of one row (columns, constants, native expressions)
+        if (auto native = cast(NativeSqlInfo) expr) {
+            if ((cast(ExprBase) expr).resultType != typeid(bool))
                 return Nullable!DialectSql.init;
-            auto operands = native.nativeOperands;
-            RowPath path;
-            bool hasPath;
-            auto columns = new string[operands.length];
-            auto literals = new string[operands.length];
-            foreach (i, operand; operands) {
-                auto literal = extractConstant(operand);
-                if (!literal.isNull) {
-                    literals[i] = literal.get;
-                    continue;
-                }
-                RowPath operandPath;
-                if (!resolveColumn(operand, filterItem, operandPath, columns[i]))
-                    return Nullable!DialectSql.init;
-                if (hasPath && operandPath.hops != path.hops)
-                    return Nullable!DialectSql.init;
-                path = operandPath;
-                hasPath = true;
-            }
-            if (!hasPath)
+            auto value = rowValue(expr, filterItem);
+            if (!value.valid || value.constant)
                 return Nullable!DialectSql.init;
-            auto queryDialect = dialect;
-            return Nullable!DialectSql(onRow(path, table, (string rowTable) {
-                auto operandSql = new string[operands.length];
-                foreach (i; 0 .. operands.length)
-                    operandSql[i] = columns[i].length ? qualified(rowTable, columns[i]) : literals[i];
-                auto sql = native.nativeSql(queryDialect, operandSql);
+            auto render = value.render;
+            return Nullable!DialectSql(onRow(value.path, table, (string rowTable) {
+                auto sql = render(rowTable);
                 return (SqlDialect _) => sql;
             }));
         }
@@ -1207,6 +1323,42 @@ private struct WhereContext {
 
         return Nullable!DialectSql.init;
     }
+}
+
+/// The ORDER BY key of a sort (see `SortByInfo`) whose predicate compares a
+/// native SQL expression (see `NativeSqlInfo`) of the two items compared,
+/// `<` (ascending) or `>` (descending), with `dialect` (that of the query
+/// of the rows sorted, a table reference to which is `table`) having a
+/// native form of it: the expression's SQL, its result type, and the
+/// direction; or null if the sort is not such a one.
+Nullable!NativeSortKey extractNativeSortKey(SortByInfo sort, string table, SqlDialect dialect) {
+    import dunamis.core.sorting : SortDirection;
+
+    if (dialect is null)
+        return Nullable!NativeSortKey.init;
+    auto binOp = cast(BinaryOpInfo) sort.sortPredicate;
+    if (binOp is null || (binOp.operator != "<" && binOp.operator != ">"))
+        return Nullable!NativeSortKey.init;
+    auto left = WhereContext(dialect, 0, sort.sortLeftItem).rowValue(binOp.left, sort.sortLeftItem);
+    auto right = WhereContext(dialect, 0, sort.sortRightItem).rowValue(binOp.right, sort.sortRightItem);
+    // (Both the same expression of the item itself)
+    if (!left.valid || !right.valid || !left.native || left.constant || right.constant ||
+            left.path.hops.length || right.path.hops.length)
+        return Nullable!NativeSortKey.init;
+    auto sql = left.render(table);
+    if (sql != right.render(table))
+        return Nullable!NativeSortKey.init;
+    return Nullable!NativeSortKey(NativeSortKey(sql, binOp.left.resultType,
+        binOp.operator == "<" ? SortDirection.ASC : SortDirection.DESC));
+}
+
+/// ditto
+struct NativeSortKey {
+    import dunamis.core.sorting : SortDirection;
+
+    string sql;
+    TypeInfo type;
+    SortDirection direction;
 }
 
 private Nullable!DialectSql dialectAgnostic(string sql) {
