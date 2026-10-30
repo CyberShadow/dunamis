@@ -786,6 +786,7 @@ private auto deduplicate(Entity)(Entity[] elements, size_t[] localIndices, size_
 /// between equal elements. (The inputs of other bound values, such as an
 /// object's, lead to the placeholders they derive from.)
 private bool bodyReadsOnlyOwnItems(Object map) {
+    import dunamis.core.elements : subexpressions;
     import dunamis.core.filtering : FilterByInfo, FilterItemInfo;
     import dunamis.core.sorting : SortByInfo, SortItemInfo;
 
@@ -799,8 +800,10 @@ private bool bodyReadsOnlyOwnItems(Object map) {
         nodes ~= e;
         if (cast(MapExprInfo) e || cast(CollectionPredicateInfo) e || cast(FilterByInfo) e || cast(SortByInfo) e)
             binders[cast(Object) e] = true;
-        foreach (dependency; e.dependencies())
-            collect(dependency);
+        // (Also the predicates of filters and sorts, which are not their
+        // dependencies)
+        foreach (part; subexpressions(e))
+            collect(part);
     }
     collect((cast(MapExprInfo) map).bodyExpr);
     foreach (e; nodes) {
@@ -1691,6 +1694,24 @@ unittest {
     auto inner = map!((Expr!TestEntity item) => some!((Expr!TestEntity c) => use((TestEntity e) => e.id == "x", c))(
         use((TestEntity e) => [e], item)))(collection);
     assert(bodyReadsOnlyOwnItems(inner));
+
+    // Also through the predicate of a filter or a sort in the body (which
+    // is not among the filter's or sort's dependencies)
+    import dunamis.core.filtering : filterBy;
+    import dunamis.core.sorting : sortBy;
+    auto children(Expr!TestEntity item) {
+        return use((TestEntity e) => [e, TestEntity("z")], item);
+    }
+    auto filtering = map!((Expr!TestEntity child) => filterBy!((Expr!TestEntity c) =>
+        use((TestEntity c, TestEntity p) => c.id == p.id, c, outerItem))(children(child)))(collection);
+    assert(!bodyReadsOnlyOwnItems(filtering));
+    auto sorting = map!((Expr!TestEntity child) => sortBy!((Expr!TestEntity a, Expr!TestEntity b) =>
+        use((TestEntity a, TestEntity b, TestEntity p) => (a.id == p.id) > (b.id == p.id), a, b, outerItem))(
+        children(child)))(collection);
+    assert(!bodyReadsOnlyOwnItems(sorting));
+    auto ownFilter = map!((Expr!TestEntity child) => filterBy!((Expr!TestEntity c) =>
+        use((TestEntity c, TestEntity p) => c.id == p.id, c, child))(children(child)))(collection);
+    assert(bodyReadsOnlyOwnItems(ownFilter));
 }
 
 unittest {

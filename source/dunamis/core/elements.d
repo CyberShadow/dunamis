@@ -47,6 +47,33 @@ void registerElementOwner(OptimizeContext ctx, Object map, ExprBase collection) 
     }
 }
 
+/// The parts of `expr` which it evaluates in a scope of its own: a map's
+/// body, the predicate of a filter, a sort or a collection predicate.
+ExprBase[] scopedParts(ExprBase expr) {
+    if (auto m = cast(MapExprInfo) expr) return [m.bodyExpr];
+    if (auto f = cast(FilterByInfo) expr) return [f.filterPredicate];
+    if (auto s = cast(SortByInfo) expr) return [s.sortPredicate];
+    if (auto p = cast(CollectionPredicateInfo) expr) return [p.predicate];
+    return null;
+}
+
+/// The subexpressions of `expr`: its dependencies, and the parts it
+/// evaluates in a scope of its own (see `scopedParts`), which are not all
+/// among them (a filter's or a sort's predicate is not). Analyses of what a
+/// tree reads (its placeholders, data sources, ...) must walk these.
+ExprBase[] subexpressions(ExprBase expr) {
+    auto result = expr.dependencies().dup;
+    foreach (part; scopedParts(expr)) {
+        bool listed;
+        foreach (dep; result)
+            if (dep is part)
+                listed = true;
+        if (!listed && part !is null)
+            result ~= part;
+    }
+    return result;
+}
+
 /// Whether the predicate `predicate` of a filter or sort, over the
 /// placeholders `items` (its item, or its two compared items), must be
 /// evaluated for one item (or pair) at a time, rather than for a batch of
@@ -74,15 +101,6 @@ bool evaluatesPerItem(ExprBase predicate, Object[] items...) {
             if (x is o)
                 return true;
         return false;
-    }
-
-    // The parts of `expr` evaluated in a scope of their own.
-    static ExprBase[] scopedParts(ExprBase expr) {
-        if (auto m = cast(MapExprInfo) expr) return [m.bodyExpr];
-        if (auto f = cast(FilterByInfo) expr) return [f.filterPredicate];
-        if (auto s = cast(SortByInfo) expr) return [s.sortPredicate];
-        if (auto p = cast(CollectionPredicateInfo) expr) return [p.predicate];
-        return null;
     }
 
     bool visit(ExprBase expr) {

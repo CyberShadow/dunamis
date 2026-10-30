@@ -6,6 +6,7 @@ import ae.utils.promise.await : awaitSync;
 // (Errors thrown during evaluation fail it: see dunamis.core.errors)
 import dunamis.core.errors : EvaluationError;
 import dunamis.core.datasource : ChangeEvent, DataSource, DataSession, SetupMode;
+import dunamis.core.elements : subexpressions;
 import dunamis.core.eval;
 import dunamis.core.expr;
 import dunamis.core.optimize;
@@ -115,9 +116,10 @@ class Executor {
                 }
             }
 
-            // Recurse into dependencies
-            foreach (dep; expr.dependencies()) {
-                walk(dep);
+            // Recurse into subexpressions (also the predicates of filters
+            // and sorts, which are not their dependencies)
+            foreach (part; subexpressions(expr)) {
+                walk(part);
             }
         }
 
@@ -145,8 +147,8 @@ class Executor {
                 }
             }
 
-            foreach (dep; expr.dependencies()) {
-                walk(dep);
+            foreach (part; subexpressions(expr)) {
+                walk(part);
             }
         }
 
@@ -625,4 +627,49 @@ unittest {
 
     assert(received.length == 1);
     assert(received[0].str == "handled");
+}
+
+unittest {
+    // The data sources and optimizers of expressions within the predicates
+    // of filters and sorts (which are not their dependencies) are the
+    // tree's too: their sessions are set up for the request
+    import dunamis.core.datasource : DataSource, DataSession, SetupMode;
+    import dunamis.core.filtering : filterBy;
+    import dunamis.core.sorting : sortBy;
+
+    static class CountingSession : DataSession {
+        bool setUp;
+        override Promise!void setup(SetupMode mode = SetupMode.query) {
+            setUp = true;
+            return resolve();
+        }
+    }
+    static class CountingSource : DataSource {
+        override DataSession createSession() { return new CountingSession(); }
+    }
+    // An expression reading a data source (whose session must be set up)
+    static class ReadsSource : Expr!bool {
+        ExprBase _input;
+        DataSource _source;
+        this(ExprBase input, DataSource source) { _input = input; _source = source; }
+        override ExprBase[] dependencies() { return [_input]; }
+        override void replaceDependency(size_t index, ExprBase newDep) { _input = newDep; }
+        override DataSource[] dataSources() { return [_source]; }
+        override Promise!(bool[]) eval(EvalContext ctx) {
+            auto session = cast(CountingSession) ctx.getSession(_source);
+            assert(session.setUp, "The session of a data source read in a predicate was not set up");
+            return _input.evalResultLength(ctx).then((size_t n) => new bool[n]);
+        }
+    }
+
+    auto collection = new MockCollectionExpr!TestEntity([TestEntity("1"), TestEntity("2")]);
+    auto source = new CountingSource();
+    auto filtered = filterBy!((Expr!TestEntity e) => cast(Expr!bool) new ReadsSource(e, source))(collection);
+    assert(Executor.dataSourcesOf(filtered) == [source]);
+    assert(awaitSync(new Executor().execute(filtered)) == []);
+
+    auto source2 = new CountingSource();
+    auto sorted = sortBy!((Expr!TestEntity a, Expr!TestEntity b) => cast(Expr!bool) new ReadsSource(a, source2))(
+        collection);
+    assert(Executor.dataSourcesOf(sorted) == [source2]);
 }
