@@ -43,7 +43,9 @@ private T extractJsonValue(T)(JSONValue val) {
     } else static if (isCustomScalar!T) {
         return T(extractJsonValue!(T.DType)(val));
     } else static if (is(T == enum)) {
-        return val.type == JSONType.string ? enumFromDbString!T(val.str) : T.init;
+        if (val.type != JSONType.string)
+            throw new Exception("Not an enum label of " ~ T.stringof ~ ": " ~ val.toString());
+        return enumFromDbString!T(val.str);
     } else static if (is(T == string)) {
         if (val.type == JSONType.integer) return val.integer.to!string;
         if (val.type == JSONType.float_) return val.floating.to!string;
@@ -173,8 +175,8 @@ enum defaultDBConfig = DBConfig();
 // ============================================================================
 
 /// Convert a database string to a D enum value: the member stored under
-/// that label (see `dunamis.core.types.StoredAs`).
-/// Returns T.init for empty strings or unknown values (graceful degradation).
+/// that label (see `dunamis.core.types.StoredAs`); an unknown label is an
+/// error (see `enumFromStoredLabel`).
 T enumFromDbString(T)(string s) if (is(T == enum)) {
     import dunamis.core.types : enumFromStoredLabel;
     return enumFromStoredLabel!T(s);

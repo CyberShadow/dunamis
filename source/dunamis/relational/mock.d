@@ -455,7 +455,7 @@ class MockDBImpl : RelationalSession {
             if (val.type == JSONType.string) {
                 return enumFromDbString!T(val.str);
             }
-            return T.init;
+            throw new Exception("MockDB: not an enum label: " ~ val.toString());
         } else {
             static assert(false, "Unsupported type: " ~ T.stringof);
         }

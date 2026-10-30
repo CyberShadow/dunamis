@@ -77,14 +77,15 @@ string storedLabel(E)(E value) if (is(E == enum)) {
     return value.to!string;  // Not a member (e.g. a combination of flags)
 }
 
-/// The member of the enum E stored under `label` (see storedLabel), or
-/// E.init for an empty or unknown label.
+/// The member of the enum E stored under `label` (see storedLabel). A
+/// label which is not one of E's (e.g. a stored value the enum no longer
+/// has) is an error: the value cannot be represented.
 E enumFromStoredLabel(E)(string label) if (is(E == enum)) {
     static foreach (name; __traits(allMembers, E)) {
         if (label == storedLabelOf!(E, name))
             return __traits(getMember, E, name);
     }
-    return E.init;
+    throw new Exception("The stored label '" ~ label ~ "' is not one of the enum " ~ E.stringof);
 }
 
 private template storedLabelOf(E, string name) {
@@ -103,9 +104,11 @@ unittest {
     assert(storedLabel(Status.done) == "done");
     assert(enumFromStoredLabel!Status("in_progress") == Status.inProgress);
     assert(enumFromStoredLabel!Status("done") == Status.done);
-    // Labels are matched exactly
-    assert(enumFromStoredLabel!Status("inProgress") == Status.unknown);
-    assert(enumFromStoredLabel!Status("DONE") == Status.unknown);
+    // Labels are matched exactly; others are errors
+    import std.exception : assertThrown;
+    assertThrown(enumFromStoredLabel!Status("inProgress"));
+    assertThrown(enumFromStoredLabel!Status("DONE"));
+    assertThrown(enumFromStoredLabel!Status(""));
 }
 
 // ============================================================================
