@@ -344,6 +344,28 @@ unittest {
     assert(ctx.getSession(fixtureDb) is session && ctx.allSessions == [session]);
 }
 
+// An expression evaluated in a request, then in a scope of it with a session
+// of its own, is evaluated again there, on the scope's session (the
+// request's memoized evaluation read the request's)
+unittest {
+    import dunamis.core.datasource : DataSource;
+    import dunamis.core.expr : evalAs, singleton;
+    import dunamis.core.types : AnyRef, queryRoot;
+    import dunamis.relational.demo : MockDB;
+
+    seed();
+    auto other = new MockDB!();
+    other.setTableData("users", `[{"id": 7, "name": "Zed"}]`);
+    auto count = new Executor().optimize(rootFixture.userCount(Query().singleton()));
+    auto ctx = new EvalContext();
+    ctx.setValues!AnyRef(null, [queryRoot]);
+    assert(awaitSync(evalAs!int(count, ctx)) == [3]);
+    auto scope_ = ctx.createScope([cast(DataSource) fixtureDb: other.createSession()]);
+    assert(awaitSync(evalAs!int(count, scope_)) == [1]);
+    assert(awaitSync(evalAs!int(count, scope_.createScope())) == [1]);
+    assert(awaitSync(evalAs!int(count, ctx.createScope())) == [3]);
+}
+
 // Asynchronous batch functions (useAsync): run once per batch, with nested
 // evaluations; a failing function fails the field; per-item errors
 // (GqlResult) at the items' paths

@@ -35,6 +35,11 @@ struct SealedArray {
     bool empty() const {
         return _data.length == 0;
     }
+
+    /// Whether this holds the same values (of the same type) as `other`.
+    bool sameAs(const SealedArray other) const {
+        return _type == other._type && (_data is other._data || _data == other._data);
+    }
 }
 
 // ============================================================================
@@ -80,9 +85,21 @@ struct GraphQLError {
 /// request-scoped (sessions, request contexts, string maps, errors) with the
 /// context it was created from, except for the data sessions it was given
 /// to use instead of the request's.
+///
+/// Memoized evaluations are keyed by expression only, so a scope may reuse
+/// those of the context it is a scope of only while what they depend on is
+/// the same in both: a scope with data sessions of its own, or binding a key
+/// to other values than the context it is a scope of sees, has a memo of its
+/// own (see `getCachedEval`).
 class EvalContext {
     /// The context this one is a scope of (null for a request's context).
     private EvalContext _parent;
+
+    /// Whether the memoized evaluations of the contexts this is a scope of
+    /// are not visible from this one (nor from its scopes): this scope
+    /// evaluates expressions differently from them, on sessions of its own
+    /// or with other bindings (see `setValues`).
+    private bool _ownMemo;
 
     /// The request's context (the outermost one this is a scope of).
     @property EvalContext request() { return root; }
@@ -99,8 +116,11 @@ class EvalContext {
     /// bindings of its own (for example a filter predicate for one item).
     /// Values bound and evaluations memoized in the scope stay in the scope;
     /// those of this context are visible from it, unless the scope overrides
-    /// them. This context is not modified, so other evaluations in flight in
-    /// it are not affected.
+    /// them: once the scope binds a key this context binds (to other
+    /// values), the evaluations memoized in this context, which may depend on
+    /// the values it binds, are no longer visible from the scope. This
+    /// context is not modified, so other evaluations in flight in it are not
+    /// affected.
     EvalContext createScope() {
         auto scope_ = new EvalContext();
         scope_._parent = this;
@@ -116,10 +136,13 @@ class EvalContext {
     /// settings, while sibling evaluations in the request see the request's.
     ///
     /// The overriding sessions belong to the scope: the executor does not
-    /// set them up or tear them down (`allSessions` is the request's).
+    /// set them up or tear them down (`allSessions` is the request's). The
+    /// evaluations memoized in this context (on its sessions) are not
+    /// visible from the scope.
     EvalContext createScope(DataSession[DataSource] overrides) {
         auto scope_ = createScope();
         scope_._overrides = overrides.dup;
+        scope_._ownMemo = overrides.length > 0;
         return scope_;
     }
 
@@ -186,8 +209,26 @@ class EvalContext {
     private SealedArray[void*] _exprCache;
 
     /// Set values for an expression (generic storage for any T[]).
+    ///
+    /// In a scope, binding a key which the contexts it is a scope of bind to
+    /// other values gives the scope a memo of its own (see `createScope`):
+    /// bind the scope's values before evaluating anything in it.
     void setValues(T)(Object key, T[] vals) {
-        _valueMap[cast(void*) key] = SealedArray(vals);
+        auto values = SealedArray(vals);
+        if (_parent !is null && !_ownMemo)
+            if (auto bound = _parent.findBinding(cast(void*) key))
+                if (!bound.sameAs(values))
+                    _ownMemo = true;
+        _valueMap[cast(void*) key] = values;
+    }
+
+    /// The values bound to `key` in this context or in the nearest context
+    /// it is a scope of which binds it (of any type), or null.
+    private SealedArray* findBinding(void* key) {
+        for (auto ctx = this; ctx !is null; ctx = ctx._parent)
+            if (auto p = key in ctx._valueMap)
+                return p;
+        return null;
     }
 
     /// Get values for an expression.
@@ -216,13 +257,17 @@ class EvalContext {
     /// Get cached Promise for an expression, or null if types don't match.
     /// Uses runtime type checking via SealedArray — asserts on type mismatch
     /// rather than silently returning null.
+    ///
+    /// In a scope, the evaluations memoized in the contexts it is a scope of
+    /// are visible too, unless the scope has a memo of its own (see
+    /// `createScope`).
     import ae.utils.promise : Promise;
     Promise!(T[]) getCachedEval(T)(Object expr) {
         if (auto p = cast(void*) expr in _exprCache) {
             if (p.hasType!(Promise!(T[])))
                 return p.get!(Promise!(T[]))()[0];
         }
-        if (_parent !is null)
+        if (_parent !is null && !_ownMemo)
             return _parent.getCachedEval!T(expr);
         return null;
     }
@@ -418,7 +463,9 @@ unittest {
     assert(scope_.getValues!int(key) == [10]);
     assert(scope_.getValues!int(other) == [2]);
     assert(ctx.getValues!int(key) == [1]);
-    assert(scope_.getCachedEval!int(other) is ctx.getCachedEval!int(other));
+    // (The scope overrides a binding: the context's memo is not its own)
+    assert(scope_.getCachedEval!int(other) is null);
+    assert(ctx.createScope().getCachedEval!int(other) is ctx.getCachedEval!int(other));
     scope_.setCachedEval!int(key, resolve([10]));
     assert(ctx.getCachedEval!int(key) is null);
     assert(scope_.getRequestContext!AuthCtx.userId == "user-1");
@@ -453,4 +500,35 @@ unittest {
     // Other data sources: the request's sessions (created in the request)
     auto otherSession = scope_.getSession(other);
     assert(ctx.getSession(other) is otherSession);
+}
+
+unittest {
+    // A scope binding a key its context binds, to other values, does not
+    // reuse the evaluations memoized in the context (which may depend on
+    // them), nor do its scopes; one binding it to the same values does
+    import ae.utils.promise : Promise, resolve;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core.expr : Expr, ExprBase, evalAs, use;
+
+    static class BoundInts : Expr!int {
+        override ExprBase[] dependencies() { return []; }
+        override void replaceDependency(size_t, ExprBase) {}
+        override Promise!(int[]) eval(EvalContext ctx) { return resolve(ctx.getValues!int(this)); }
+    }
+    auto bound = new BoundInts();
+    auto tenfold = use((int x) => x * 10, bound);
+    auto ctx = new EvalContext();
+    ctx.setValues!int(bound, [1, 2]);
+    assert(awaitSync(evalAs!int(tenfold, ctx)) == [10, 20]);
+
+    auto same = ctx.createScope();
+    same.setValues!int(bound, [1, 2]);
+    assert(same.getCachedEval!int(tenfold) is ctx.getCachedEval!int(tenfold));
+
+    auto other = ctx.createScope();
+    other.setValues!int(bound, [3]);
+    assert(other.getCachedEval!int(tenfold) is null);
+    assert(awaitSync(evalAs!int(tenfold, other)) == [30]);
+    assert(awaitSync(evalAs!int(tenfold, other.createScope())) == [30]);
+    assert(awaitSync(evalAs!int(tenfold, ctx)) == [10, 20]);
 }
