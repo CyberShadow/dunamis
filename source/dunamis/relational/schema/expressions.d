@@ -132,8 +132,9 @@ private Promise!(Entity[]) populatePlainFields(Entity)(RelationalSession session
 /// - an offset or limit, only if everything beneath it was pushed.
 /// A filter that cannot be pushed as a whole still lets its SQL-expressible
 /// conjuncts narrow the query (under the same condition) and is then applied
-/// in memory.
-private void pushDownRootCollection(QueryNode node, Object mapExpr) {
+/// in memory. Filters may read the plain fields of the root's entity (e.g.
+/// its primary key) as well as its columns (see `RootExprInfo.plainFieldColumn`).
+private void pushDownRootCollection(QueryNode node, Object mapExpr, RootExprInfo rootExpr) {
     import dunamis.core.pagination : LimitInfo, OffsetInfo;
     import dunamis.core.sorting : SortByInfo;
     import dunamis.core.filtering : FilterByInfo;
@@ -177,13 +178,14 @@ private void pushDownRootCollection(QueryNode node, Object mapExpr) {
 
         if (auto filter = cast(FilterByInfo) link) {
             if (!windowBeneath) {
-                auto where = extractFilterWhereClause(filter, node.table, dialect);
+                auto where = extractFilterWhereClause(filter, node.table, dialect, &rootExpr.plainFieldColumn);
                 if (!where.isNull) {
                     node.addWhereClause(where.get);
                     splice(filter.filterSource);
                     continue;
                 }
-                auto narrowing = extractFilterConjunctsWhereClause(filter, node.table, dialect);
+                auto narrowing = extractFilterConjunctsWhereClause(filter, node.table, dialect,
+                    &rootExpr.plainFieldColumn);
                 if (!narrowing.isNull)
                     node.addWhereClause(narrowing.get);
             }
@@ -300,7 +302,7 @@ private QueryNode configuredNode(OptimizeContext ctx, Object mapExpr, string typ
     if (auto rootExpr = cast(RootExprInfo) underlyingColl) {
         // For root collections: unwrap pagination/sorting/filtering from the
         // expression tree and push to the QueryNode for SQL-level execution.
-        pushDownRootCollection(node, mapExpr);
+        pushDownRootCollection(node, mapExpr, rootExpr);
         // The root's own order, beneath the sorts pushed (which are stable
         // in memory: it orders the rows they leave tied)
         foreach (column; rootExpr.orderColumns) {
@@ -562,6 +564,7 @@ class GetByIdsExpr(Entity) : Expr!(Entity[]), RootExprInfo {
     // RootExprInfo implementation
     FilterType filterType() { return FilterType.byIds; }
     string[] orderColumns() { return []; }
+    string plainFieldColumn(string fieldName) { return plainFieldColumnOf!Entity(fieldName); }
     AnyRef[] filterRefs() { return _entities.map!(e => entityToRef(e)).array; }
     string entityTypeName() { return EntityID!Entity.typeName; }
     string entityTable() { return EntityID!Entity.table; }
@@ -733,6 +736,7 @@ class GetAllExpr(Entity, string[] orderBy = null) : Expr!(Entity[]), RootExprInf
     // RootExprInfo implementation
     FilterType filterType() { return FilterType.all; }
     string[] orderColumns() { return orderBy.dup; }
+    string plainFieldColumn(string fieldName) { return plainFieldColumnOf!Entity(fieldName); }
     AnyRef[] filterRefs() { return []; }
     string entityTypeName() { return EntityID!Entity.typeName; }
     string entityTable() { return EntityID!Entity.table; }

@@ -94,6 +94,10 @@ interface RootExprInfo {
     /// the order of the refs). Sorts applied to the collection take
     /// precedence: these columns order the rows they leave tied.
     string[] orderColumns();
+
+    /// The column storing the entity's plain field `fieldName` (e.g. its
+    /// primary key), or null if it has no such field (see PlainFieldInfo).
+    string plainFieldColumn(string fieldName);
 }
 
 /// Source ID for an entity - uses table name as unique identifier.

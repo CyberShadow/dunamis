@@ -51,13 +51,15 @@ template NormalizeFieldsCode(SourceType, alias TypeMap) {
         return result;
     }();
 
-    /// Generate code for a normalized plain field (read from _normalizedSource).
+    /// Generate code for a normalized plain field (read from _normalizedSource,
+    /// marked as the read of the field `member`, see PlainFieldInfo).
     private static string _plainFieldCode(string member) {
         return
             "@(__traits(getAttributes, __traits(getMember, SourceType, \"" ~ member ~ "\"))) " ~
             "static auto " ~ member ~ "(" ~ _Expr ~ "!(typeof(this)) _self) { " ~
             "return " ~ _wrap ~ "!(TypeMap)(" ~
-            _use ~ "(function(typeof(this) _n) { return _n._normalizedSource." ~ member ~
+            "dunamis.core.expr.plainField!\"" ~ member ~ "\"" ~
+            "(function(typeof(this) _n) { return _n._normalizedSource." ~ member ~
             "; }, _self)); }\n";
     }
 

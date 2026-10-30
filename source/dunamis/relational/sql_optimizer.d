@@ -841,13 +841,15 @@ class ProjectComputedExpr(T) : Expr!T, ProjectComputedInfo {
 /// Extract WHERE clause SQL from a FilterByInfo by pattern-matching its predicate.
 /// `dialect` is the dialect of the query (null if unknown, e.g. not a SQL
 /// data source's): native predicates (see `NativePredicateInfo`) are only
-/// expressed in a dialect which has a native form of them.
+/// expressed in a dialect which has a native form of them. `plainFieldColumn`
+/// (if not null) gives the columns of the plain fields of the filtered entity
+/// (see `PlainFieldInfo`), so that conditions on them can be expressed too.
 Nullable!DialectSql extractFilterWhereClause(FilterByInfo filterInfo, string table = null,
-        SqlDialect dialect = null) {
+        SqlDialect dialect = null, string delegate(string) plainFieldColumn = null) {
     auto predicate = filterInfo.filterPredicate;
     auto filterItem = filterInfo.filterItem;
 
-    return extractWhereFromExpr(predicate, filterItem, table, dialect);
+    return extractWhereFromExpr(predicate, filterItem, table, dialect, plainFieldColumn);
 }
 
 /// Extract WHERE SQL for those top-level `&&` conjuncts of a filter predicate
@@ -856,7 +858,7 @@ Nullable!DialectSql extractFilterWhereClause(FilterByInfo filterInfo, string tab
 /// it), so it can only narrow the rows that the whole predicate is then
 /// evaluated on.
 Nullable!DialectSql extractFilterConjunctsWhereClause(FilterByInfo filterInfo, string table = null,
-        SqlDialect dialect = null) {
+        SqlDialect dialect = null, string delegate(string) plainFieldColumn = null) {
     auto filterItem = filterInfo.filterItem;
     DialectSql[] conjuncts;
     void collect(Object expr) {
@@ -867,7 +869,7 @@ Nullable!DialectSql extractFilterConjunctsWhereClause(FilterByInfo filterInfo, s
                 return;
             }
         }
-        auto sql = extractWhereFromExpr(expr, filterItem, table, dialect);
+        auto sql = extractWhereFromExpr(expr, filterItem, table, dialect, plainFieldColumn);
         if (!sql.isNull)
             conjuncts ~= sql.get;
     }
@@ -887,11 +889,13 @@ Nullable!DialectSql extractFilterConjunctsWhereClause(FilterByInfo filterInfo, s
 /// through chains of relationships), and `some` over a to-many relationship
 /// an `EXISTS` subquery over the child table. Native predicates (see
 /// `NativePredicateInfo`) on such operands are expressed in their native
-/// form if `dialect` (the query's) has one. A predicate with any part that
-/// cannot be expressed this way gives null.
+/// form if `dialect` (the query's) has one. Reads of the item's plain fields
+/// (see `PlainFieldInfo`) are reads of their columns that `plainFieldColumn`
+/// gives (if not null). A predicate with any part that cannot be expressed
+/// this way gives null.
 Nullable!DialectSql extractWhereFromExpr(Object expr, Object filterItem, string table = null,
-        SqlDialect dialect = null) {
-    auto context = WhereContext(dialect);
+        SqlDialect dialect = null, string delegate(string) plainFieldColumn = null) {
+    auto context = WhereContext(dialect, 0, filterItem, plainFieldColumn);
     return context.extract(expr, filterItem, table);
 }
 
@@ -901,6 +905,11 @@ private struct WhereContext {
     /// The dialect of the query (null if unknown).
     private SqlDialect dialect;
     private int aliases;
+
+    /// The item of the filter extracted (not of the filters of collections
+    /// within it), and the columns of its plain fields (null if unknown).
+    private Object rootItem;
+    private string delegate(string) rootPlainFieldColumn;
 
     /// A fresh table alias for a subquery.
     string newAlias() {
@@ -975,7 +984,7 @@ private struct WhereContext {
     }
 
     /// The column an operand reads, on the row it belongs to.
-    static bool resolveColumn(Object expr, Object filterItem, out RowPath path, out string column) {
+    bool resolveColumn(Object expr, Object filterItem, out RowPath path, out string column) {
         // A nullable column's values, unwrapped, or a column's values cast
         // (e.g. a value type's, to a plugin's wrapper of the type)
         while (true) {
@@ -990,6 +999,16 @@ private struct WhereContext {
                 expr = valueCast.valueCastInput;
             } else
                 break;
+        }
+        // A plain field of the filter's own item, stored in a column
+        if (auto plain = cast(PlainFieldInfo) expr) {
+            if (filterItem !is rootItem || rootPlainFieldColumn is null)
+                return false;
+            path = resolveRow(plain.plainFieldOwner, filterItem);
+            if (!path.valid || path.hops.length)
+                return false;
+            column = rootPlainFieldColumn(plain.plainFieldName);
+            return column !is null;
         }
         auto colAccess = cast(ColumnAccessInfo) expr;
         if (colAccess is null) return false;

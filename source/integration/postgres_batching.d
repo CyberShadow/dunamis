@@ -394,6 +394,42 @@ private void checkRootNativePredicateFilter(PostgresSession session, EvalContext
         "Root native predicate filter not in the WHERE clause: " ~ sent[0]);
 }
 
+/// A root collection filtered by its primary key (a plain field of the
+/// entity, see `PlainFieldInfo`): one statement, in whose WHERE clause the
+/// condition is, rather than a read of the whole table filtered in D.
+private void checkRootPrimaryKeyFilter(PostgresSession session, EvalContext ctx, Data data) {
+    import std.algorithm.searching : canFind, findSplitAfter;
+    import std.json : JSONType;
+    import std.typecons : tuple;
+    import dunamis.graphql.compiler : compileQuery;
+
+    // (Term n + 1 has no validity)
+    foreach (q; [
+        tuple(`{ terms(filter: {id: {equalTo: 2}}) { validity { end } } }`, (int t) => t == 2),
+        tuple(`{ terms(filter: {id: {in: [4, 1, 99]}}) { id validity { end } } }`, (int t) => t == 1 || t == 4),
+        tuple(`{ terms(filter: {not: {id: {lessThan: 2}}}) { validity { end } } }`, (int t) => t >= 2),
+    ]) {
+        auto query = q[0];
+        string[] sent;
+        session.statementObserver = (const(char)[] sql) { sent ~= sql.idup; };
+        scope (exit) session.statementObserver = null;
+        auto result = evaluateNested(compileQuery!BatchingTermSchema(query), ctx).await;
+        string[] ends, expectedEnds;
+        assertTrue(result.type == JSONType.object && "terms" in result.object,
+            "Root primary key filter: " ~ query ~ ": " ~ result.toString());
+        foreach (term; result["terms"].array)
+            ends ~= term["validity"].type == JSONType.null_ ? "-" : term["validity"]["end"].str;
+        foreach (t; 1 .. data.n + 2)
+            if (q[1](t))
+                expectedEnds ~= t > data.n ? "-" : format("2020-01-%02d", 1 + t);
+        assertTrue(ends == expectedEnds, "Root primary key filter: " ~ query ~ ": " ~ result.toString());
+        assertTrue(sent.length == 1, "Root primary key filter: " ~ query ~ ": " ~ sent.length.to!string ~
+            " statements: " ~ sent.to!string);
+        assertTrue(sent[0].findSplitAfter("WHERE ")[1].canFind("batching_terms.id"),
+            "Root primary key filter not in the WHERE clause: " ~ query ~ ": " ~ sent[0]);
+    }
+}
+
 /// A query of more layers than SQL functions take arguments for (see
 /// `dunamis.relational.sql.layerGroupSize`) reads all of them.
 private void checkManyLayers(PostgresSession session, Data data) {
@@ -536,6 +572,7 @@ void testStatementCountsOfComputedFields() {
             inRequest((PostgresSession session, EvalContext ctx) => checkRootFilterWithoutColumns(session, ctx, data));
             inRequest((PostgresSession session, EvalContext ctx) => checkRootMembershipFilter(session, ctx, data));
             inRequest((PostgresSession session, EvalContext ctx) => checkRootNativePredicateFilter(session, ctx, data));
+            inRequest((PostgresSession session, EvalContext ctx) => checkRootPrimaryKeyFilter(session, ctx, data));
         }
 
         string report;

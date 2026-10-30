@@ -117,6 +117,41 @@ auto use(Fn, Exprs...)(Fn fn, Exprs exprs)
     return new UseExpr!(Fn, Exprs)(exprs, fn);
 }
 
+/// Interface for the reads of a plain field (a field stored in the entity
+/// struct itself, e.g. its primary key) of entities, for optimizers to
+/// recognize: a data source storing the field (e.g. as a column) can read it
+/// itself, e.g. to push down a filter on it.
+interface PlainFieldInfo {
+    /// The name of the field (of the entity type the owner's elements wrap).
+    string plainFieldName();
+
+    /// The entities whose field is read (type-erased Expr!Entity).
+    ExprBase plainFieldOwner();
+}
+
+/// The plain field `name` of each element of `owner`, which `fn` reads (see
+/// `plainField`).
+class PlainFieldExpr(Fn, E) : UseExpr!(Fn, E), PlainFieldInfo {
+    private string _name;
+
+    this(E owner, Fn fn, string name) {
+        super(owner, fn);
+        _name = name;
+    }
+
+    string plainFieldName() { return _name; }
+
+    ExprBase plainFieldOwner() { return dependencies()[0]; }
+}
+
+/// `use(fn, owner)`, where `fn` reads the plain field `name` of an entity:
+/// marked as such (see PlainFieldInfo).
+auto plainField(string name, Fn, E)(Fn fn, E owner)
+    if (isExpr!E)
+{
+    return new PlainFieldExpr!(Fn, E)(owner, fn, name);
+}
+
 // ============================================================================
 // TryUse Combinator (per-element error catching)
 // ============================================================================
