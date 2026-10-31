@@ -98,6 +98,18 @@ private string toSQL(QueryNode[] nodes, SqlDialect dialect,
     return result;
 }
 
+/// The relations (see `QueryNode.relations`) the query of `nodes` (see
+/// toSQL) reads, each once.
+string[] relationsOf(QueryNode[] nodes) {
+    string[] result;
+    foreach (node; nodes)
+        if (node.sameRowsAs is null)
+            foreach (relation; node.relations)
+                if (!result.canFind(relation))
+                    result ~= relation;
+    return result;
+}
+
 /// Generate CTE for a single QueryNode.
 private string toCTE(QueryNode node, SqlDialect dialect) {
     return toCTE(node, dialect, node.rootFilter);

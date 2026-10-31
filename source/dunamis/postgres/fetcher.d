@@ -22,7 +22,7 @@ import dunamis.relational.keys : keyOf, keyOfTexts, keyValues, singleKeyValue;
 import dunamis.relational.query_node;
 import dunamis.relational.sql_optimizer;
 import dunamis.postgres.dialect : postgresDialect;
-import dunamis.relational.sql : toSQL;
+import dunamis.relational.sql : relationsOf, toSQL;
 import dunamis.core.json_text : parseJsonText;
 
 // ============================================================================
@@ -133,22 +133,25 @@ class PostgresSession : RelationalSession {
     /// request's session).
     @property const(string[string]) scopeSettings() const { return _scopeSettings; }
 
-    /// Resolve the names of relations in the session's statements with
+    /// Resolve the names of relations (the tables of entities) with
     /// `resolver`: a name it resolves (to a FROM item, e.g. a call of a
     /// set-returning function with constant arguments; null: a name it does
-    /// not resolve) is read as that relation, in every statement the
-    /// session sends (the queries Dunamis generates, of the optimized and of
-    /// the naive path, as well as those of `execute`, `queryLongs` etc.):
-    /// the statement is sent with the name bound to the relation by a common
-    /// table expression, which PostgreSQL inlines where the name is
-    /// referenced (see `bindRelations`). E.g., an entity's table may be a
-    /// logical name, which the request resolves to the rows of a function
-    /// of the request's parameters. A resolved name must be an identifier
-    /// (it is also the alias of the relation in the statements) and should
-    /// not name a relation of the database. The resolver is called when a
-    /// statement is sent (so it may resolve a name differently over the
-    /// request). Sessions derived from this one (see withSettings,
-    /// withRelations) resolve names with it too, unless given their own.
+    /// not resolve) is read as that relation by the queries Dunamis
+    /// generates (of the optimized and of the naive path), which know the
+    /// relations they read (see `QueryNode.relations`): such a query is sent
+    /// with the name bound to the relation by a common table expression,
+    /// which PostgreSQL inlines where the name is referenced (see
+    /// `bindRelations`). E.g., an entity's table may be a logical name,
+    /// which the request resolves to the rows of a function of the
+    /// request's parameters. A resolved name must be an identifier (it is
+    /// also the alias of the relation in the statements) and should not name
+    /// a relation of the database. The statements of `execute`, `queryLongs`
+    /// etc. are sent as they are: they read the relation of a name as
+    /// `relationSource` gives it. Mutations write the tables themselves. The
+    /// resolver is called when a statement is sent (so it may resolve a
+    /// name differently over the request). Sessions derived from this one
+    /// (see withSettings, withRelations) resolve names with it too, unless
+    /// given their own.
     void setRelationResolver(string delegate(string name) resolver) {
         _relationResolver = resolver;
     }
@@ -172,8 +175,9 @@ class PostgresSession : RelationalSession {
         return derived;
     }
 
-    /// The relation the session reads for the relation `table` of its
-    /// statements: the resolver's (see setRelationResolver), or `table`.
+    /// The relation the session reads for the relation `table` (e.g. the
+    /// table of an entity): the resolver's (see setRelationResolver), or
+    /// `table`.
     override string relationSource(string table) {
         if (_relationResolver !is null)
             if (auto relation = _relationResolver(table))
@@ -181,12 +185,13 @@ class PostgresSession : RelationalSession {
         return table;
     }
 
-    /// `sql`, with the names of relations bound (see setRelationResolver).
-    private const(char)[] bound(const(char)[] sql) {
+    /// `sql`, a query reading the relations `relations`, with their names
+    /// bound (see setRelationResolver).
+    private const(char)[] bound(const(char)[] sql, const(string)[] relations) {
         import dunamis.postgres.sql : bindRelations;
-        if (_relationResolver is null)
+        if (_relationResolver is null || !relations.length)
             return sql;
-        return bindRelations(sql, _relationResolver);
+        return bindRelations(sql, relations, _relationResolver);
     }
 
     private static string settingName(string name) {
@@ -206,8 +211,8 @@ class PostgresSession : RelationalSession {
     /// Called with the text of each statement the session sends (other than
     /// the BEGIN and COMMIT/ROLLBACK of its transaction, and the statements
     /// applying a derived session's settings), e.g. to count the database
-    /// round trips of an evaluation: as it is sent (with its relations bound,
-    /// see setRelationResolver). Sessions derived from this one (see
+    /// round trips of an evaluation: as it is sent (with the relations of a
+    /// query bound, see setRelationResolver). Sessions derived from this one (see
     /// withSettings, withRelations) report their statements here too.
     void delegate(const(char)[] sql) statementObserver;
 
@@ -217,12 +222,13 @@ class PostgresSession : RelationalSession {
             observer(sql);
     }
 
-    /// Send the statement `sql`, and collect its rows. A derived session
-    /// sends it between the statements applying its settings and restoring
-    /// the request's (see withSettings).
-    private Promise!(PgSqlConnection.Row[]) run(const(char)[] sql) {
+    /// Send the statement `sql` (which reads the relations `relations`, see
+    /// setRelationResolver), and collect its rows. A derived session sends
+    /// it between the statements applying its settings and restoring the
+    /// request's (see withSettings).
+    private Promise!(PgSqlConnection.Row[]) run(const(char)[] sql, const(string)[] relations = null) {
         auto conn = connection();
-        sql = bound(sql);
+        sql = bound(sql, relations);
         observe(sql);
         if (_base is null || !_applySettings.length)
             return conn.query(sql).array();
@@ -230,9 +236,10 @@ class PostgresSession : RelationalSession {
     }
 
     /// ditto, with the Extended Query protocol and parameters
-    private Promise!(PgSqlConnection.Row[]) runExtended(Args...)(const(char)[] sql, Args args) {
+    private Promise!(PgSqlConnection.Row[]) runExtended(Args...)(const(char)[] sql, const(string)[] relations,
+            Args args) {
         auto conn = connection();
-        sql = bound(sql);
+        sql = bound(sql, relations);
         observe(sql);
         if (_base is null || !_applySettings.length)
             return conn.extendedQuery(sql, args).array();
@@ -486,13 +493,14 @@ class PostgresSession : RelationalSession {
             idValues = root.refs.map!(r => singleKeyValue(r.localId)).array;
         }
 
+        auto relations = relationsOf(allNodes);
         if (idValues.length > 0) {
             // PostgreSQL array as string: {1,2,3}
-            return runExtended(sql, arrayLiteral(idValues))
+            return runExtended(sql, relations, arrayLiteral(idValues))
                 .then((PgSqlConnection.Row[] rows) => parseQueryResult(rows, allNodes));
         }
 
-        return runExtended(sql)
+        return runExtended(sql, relations)
             .then((PgSqlConnection.Row[] rows) => parseQueryResult(rows, allNodes));
     }
 
@@ -592,7 +600,7 @@ class PostgresSession : RelationalSession {
         auto pkCount = pkColumns.length;
         auto sql = buildFetchColumnSQL(table, column, validIds);
 
-        return run(sql).then((PgSqlConnection.Row[] rows) {
+        return run(sql, [table]).then((PgSqlConnection.Row[] rows) {
             // Build lookup map
             string[string] values;
             foreach (row; rows) {
@@ -622,7 +630,7 @@ class PostgresSession : RelationalSession {
         auto pkCount = pkColumns.length;
         auto sql = buildFetchColumnSQL(table, column, validIds);
 
-        return run(sql).then((PgSqlConnection.Row[] rows) {
+        return run(sql, [table]).then((PgSqlConnection.Row[] rows) {
             // Build lookup map
             long[string] values;
             foreach (row; rows) {
@@ -641,7 +649,7 @@ class PostgresSession : RelationalSession {
             sql ~= " ORDER BY " ~ orderBy.join(", ");
 
         auto numPkCols = pkColumns.length;
-        return run(sql).then((PgSqlConnection.Row[] rows) {
+        return run(sql, [table]).then((PgSqlConnection.Row[] rows) {
             return rows.map!(r => buildKeyFromRow(r, numPkCols)).array;
         });
     }
@@ -673,7 +681,7 @@ class PostgresSession : RelationalSession {
         if (orderBy.length)
             sql ~= " ORDER BY " ~ orderBy.join(", ");
 
-        return run(sql).then((PgSqlConnection.Row[] rows) {
+        return run(sql, [childTable]).then((PgSqlConnection.Row[] rows) {
             // Group children by parent
             AnyRef[][string] childrenByParent;
             foreach (row; rows) {
@@ -708,7 +716,7 @@ class PostgresSession : RelationalSession {
         auto pkCount = pkColumns.length;
         auto sql = buildFetchColumnSQL(childTable, fk, validIds);
 
-        return run(sql).then((PgSqlConnection.Row[] rows) {
+        return run(sql, [childTable]).then((PgSqlConnection.Row[] rows) {
             import std.typecons : Nullable;
             // Build lookup map
             // (The parents' refs; a NULL FK, none)
@@ -760,7 +768,7 @@ class PostgresSession : RelationalSession {
         auto pkCount = pkColumns.length;
         auto sql = buildFetchColumnSQL(table, asJson ? "to_json(" ~ column ~ ")::text" : column, validIds);
 
-        return run(sql).then((PgSqlConnection.Row[] rows) {
+        return run(sql, [table]).then((PgSqlConnection.Row[] rows) {
             // Build lookup map
             JSONValue[string] values;
             foreach (row; rows) {

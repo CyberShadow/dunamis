@@ -145,7 +145,7 @@ class SqlOptimizer : ExprOptimizer {
             : computedProjection(node.id, alias_, expr.resultType, translator.nodeRefs, prefetch, expr);
         if (projection is null)
             return null;
-        node.addComputedColumn(ComputedColumn(alias_, sql, expr.resultType));
+        node.addComputedColumn(ComputedColumn(alias_, sql, expr.resultType, translator.relations));
         return projection;
     }
 
@@ -187,6 +187,8 @@ struct FilterWhereClause {
     /// conjuncts of the predicate which can be expressed in SQL), so it can
     /// only narrow the rows that the whole predicate is then evaluated on.
     bool complete;
+    /// The relations its subqueries read (see `SqlTranslator.relations`).
+    string[] relations;
 }
 
 /// Extract WHERE clause SQL from a FilterByInfo by pattern-matching its
@@ -216,7 +218,9 @@ FilterWhereClause extractFilterWhereClause(FilterByInfo filterInfo, string table
         auto sql = translator.condition(expr, filterItem, table);
         return FilterWhereClause(sql, !sql.isNull);
     }
-    return extract(filterInfo.filterPredicate);
+    auto clause = extract(filterInfo.filterPredicate);
+    clause.relations = translator.relations;
+    return clause;
 }
 
 /// Recursively extract WHERE SQL from an expression tree: the condition the
@@ -269,6 +273,11 @@ final class SqlTranslator {
     /// The dialect of the query (null if unknown).
     private SqlDialect dialect;
     private int aliases;
+
+    /// The relations (tables of entities) the subqueries of the SQL
+    /// rendered read, besides the rows' own table (see
+    /// `QueryNode.relations`).
+    string[] relations;
 
     /// The item of the filter extracted (not of the filters of collections
     /// within it), and the columns of its plain fields (null if unknown).
@@ -440,6 +449,7 @@ final class SqlTranslator {
         auto fk = qualified(table, hop.fk);
         auto subquery = "SELECT " ~ alias_ ~ "." ~ hop.parentPk ~ " FROM " ~ hop.parentTable ~ " " ~ alias_ ~
             " WHERE ";
+        relations ~= hop.parentTable;
         return (SqlDialect d) => "(" ~ fk ~ " IN (" ~ subquery ~ inner(d) ~ "))";
     }
 
@@ -726,6 +736,7 @@ final class SqlTranslator {
                 return Nullable!DialectSql.init;
             auto pred = predicate.get;
             auto childTable = hasMany.childTable;
+            relations ~= childTable;
             auto fk = hasMany.fkColumn;
             auto parentPk = hasMany.parentPkColumns[0];
             return Nullable!DialectSql(onRow(path, table, (string rowTable) {

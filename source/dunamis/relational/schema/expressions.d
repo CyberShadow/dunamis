@@ -171,7 +171,7 @@ private void pushDownRootCollection(QueryNode node, Object mapExpr, RootExprInfo
             if (!windowBeneath && dialect !is null) {
                 auto where = extractFilterWhereClause(filter, node.table, dialect, &rootExpr.plainFieldColumn);
                 if (!where.sql.isNull)
-                    node.addWhereClause(where.sql.get);
+                    node.addWhereClause(where.sql.get, where.relations);
                 if (where.complete) {
                     splice(filter.filterSource);
                     continue;

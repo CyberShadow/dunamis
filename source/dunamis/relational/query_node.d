@@ -52,6 +52,7 @@ struct ComputedColumn {
     string alias_;     // SQL alias (e.g., "computed_0")
     string sqlExpr;    // SQL expression (e.g., "first_name || ' ' || last_name")
     TypeInfo type;     // Result type for creating typed projection
+    string[] relations; // The relations its subqueries read (see QueryNode.relations)
 }
 
 /// The rows a root QueryNode selects in one evaluation.
@@ -149,6 +150,10 @@ class QueryNode {
     /// Multiple clauses are combined with AND.
     /// WHERE predicates (ANDed), rendered for the target dialect.
     DialectSql[] whereClauses_;
+
+    /// The relations the subqueries of the WHERE predicates read (see
+    /// `relations`).
+    string[] whereRelations;
 
     /// Computed columns (SQL expressions pushed down by SqlOptimizer).
     /// Part of the optimized plan, so that rendering SQL needs no optimizer
@@ -279,9 +284,32 @@ class QueryNode {
         computedColumns ~= column;
     }
 
-    /// Add a WHERE predicate (ANDed with existing ones)
-    void addWhereClause(DialectSql clause) {
+    /// Add a WHERE predicate (ANDed with existing ones), whose subqueries
+    /// read `relations` (see `relations`)
+    void addWhereClause(DialectSql clause, string[] relations = null) {
         whereClauses_ ~= clause;
+        whereRelations ~= relations;
+    }
+
+    /// The relations (tables of entities, by their names in the SQL, as the
+    /// session resolves them, see `RelationalSession.relationSource`) the
+    /// node's SQL layer reads: its table, the tables it joins, and those its
+    /// conditions and computed columns read (each once, in that order).
+    string[] relations() {
+        string[] result;
+        void add(string relation) {
+            if (!result.canFind(relation))
+                result ~= relation;
+        }
+        add(table);
+        foreach (join; joins)
+            add(join.targetTable);
+        foreach (relation; whereRelations)
+            add(relation);
+        foreach (computed; computedColumns)
+            foreach (relation; computed.relations)
+                add(relation);
+        return result;
     }
 
     /// ditto
