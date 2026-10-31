@@ -492,12 +492,13 @@ private void checkNativeSqlExpressions(PostgresSession session, EvalContext ctx,
         expectedEnds ~= Nullable!string(format("2020-01-%02d", 1 + t));
     expectedEnds ~= Nullable!string.init;
     assertTrue(ends == expectedEnds, "Native SQL value: " ~ ends.to!string);
-    expectOne("Native SQL value", "upper(validity)::text AS computed_");
+    expectOne("Native SQL value", "upper(batching_terms.validity)::text AS computed_");
 
     // ... and an operand of another operation computed in SQL
     auto doubled = evaluateNested(map!((Expr!BatchingTerm t) => termDays(t) * 2)(getAll!BatchingTerm()), ctx).await;
     assertTrue(doubled == iota(1, data.n + 1).smap!(t => 2 * t).array ~ 0, "Native SQL operand: " ~ doubled.to!string);
-    expectOne("Native SQL operand", "(COALESCE(upper(validity) - lower(validity), 0) * 2) AS computed_");
+    expectOne("Native SQL operand",
+        "(COALESCE(upper(batching_terms.validity) - lower(batching_terms.validity), 0) * 2) AS computed_");
 
     // In the WHERE clause: operands of comparisons (and of conjunctions)
     auto ids = evaluateNested(map!((Expr!BatchingTerm t) => fieldAccess!"id"(t))(

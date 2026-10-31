@@ -702,7 +702,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name::text AS first_name, users.last_name::text AS last_name, ((first_name || ' ') || last_name) AS computed_0
+    SELECT users.id, users.first_name::text AS first_name, users.last_name::text AS last_name, ((users.first_name || ' ') || users.last_name) AS computed_0
     FROM users
     WHERE 1=1
   ),
@@ -762,7 +762,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name::text AS first_name, users.last_name::text AS last_name, ((first_name || ' ') || last_name) AS computed_0
+    SELECT users.id, users.first_name::text AS first_name, users.last_name::text AS last_name, ((users.first_name || ' ') || users.last_name) AS computed_0
     FROM users
     WHERE 1=1
   ),
@@ -819,7 +819,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name::text AS first_name, (('Hello ' || first_name) || '!') AS computed_0
+    SELECT users.id, users.first_name::text AS first_name, (('Hello ' || users.first_name) || '!') AS computed_0
     FROM users
     WHERE 1=1
   )
@@ -868,7 +868,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name::text AS first_name, users.last_name::text AS last_name, ((first_name || ' ') || last_name) AS computed_0
+    SELECT users.id, users.first_name::text AS first_name, users.last_name::text AS last_name, ((users.first_name || ' ') || users.last_name) AS computed_0
     FROM users
     WHERE users.id = ANY($1)
   )
@@ -904,9 +904,9 @@ unittest {
 
     auto sqlA = toSQL(nodesA, testDialect());
     auto sqlB = toSQL(nodesB, testDialect());
-    assert(sqlA.canFind("((first_name || ' ') || last_name) AS computed_0"), sqlA);
+    assert(sqlA.canFind("((users.first_name || ' ') || users.last_name) AS computed_0"), sqlA);
     assert(!sqlA.canFind("', '"), sqlA);
-    assert(sqlB.canFind("((last_name || ', ') || first_name) AS computed_0"), sqlB);
+    assert(sqlB.canFind("((users.last_name || ', ') || users.first_name) AS computed_0"), sqlB);
 }
 
 // Test computed field with arguments
@@ -932,7 +932,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name::text AS first_name, (('Hello ' || first_name) || '!') AS computed_0
+    SELECT users.id, users.first_name::text AS first_name, (('Hello ' || users.first_name) || '!') AS computed_0
     FROM users
     WHERE users.id = ANY($1)
   )
@@ -1432,7 +1432,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name::text AS first_name, EXISTS (SELECT 1 FROM posts WHERE posts.author_id = users.id AND (posts.title <> '')) AS computed_0
+    SELECT users.id, users.first_name::text AS first_name, EXISTS (SELECT 1 FROM posts _f1 WHERE _f1.author_id = users.id AND _f1.title <> '') AS computed_0
     FROM users
     WHERE users.id = ANY($1)
   )
@@ -1447,6 +1447,31 @@ EOF";
         writeln("\n=== Test: some() with title predicate ===");
         db.printSQL();
     }
+}
+
+// A condition is the same SQL in a field (a computed column) and in a filter
+// (a WHERE clause): one translator renders both
+unittest {
+    import dunamis.core.filtering : FilterByInfo;
+    import dunamis.relational.sql_optimizer : extractFilterWhereClause;
+
+    auto mock = new MockDB!()();
+    mock.setTableData("users", `[{"id": 1, "first_name": "Alice"}, {"id": 2, "first_name": "Bob"}]`);
+    mock.setTableData("posts", `[{"id": 1, "author_id": 1, "title": "Hello", "body": ""},
+        {"id": 2, "author_id": 2, "title": "", "body": ""}]`);
+    db = new DebugSqlDB!()(mock, testDialect());
+
+    enum condition = "EXISTS (SELECT 1 FROM posts _f1 WHERE _f1.author_id = users.id AND _f1.title <> '')";
+    auto field = map!((Expr!User u) => jsonObject("name", u.firstName,
+        "hasTitledPost", some!((Expr!Post p) => p.title.ne(""))(u.posts)))(getByIds!User([1, 2]));
+    auto result = awaitSync(new Executor().execute(field));
+    assert(result.length == 2 && result[0]["hasTitledPost"].boolean && !result[1]["hasTitledPost"].boolean,
+        result.to!string);
+    assert(db.getSQL().canFind(condition ~ " AS computed_0"), db.getSQL());
+
+    auto filtered = filterBy!((Expr!User u) => some!((Expr!Post p) => p.title.ne(""))(u.posts))(getAll!User());
+    auto where = extractFilterWhereClause(cast(FilterByInfo) filtered, "users", testDialect());
+    assert(where.complete && where.sql.get()(testDialect()) == condition, where.sql.get()(testDialect()));
 }
 
 // Test every() - all items must match
@@ -1493,7 +1518,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name::text AS first_name, EXISTS (SELECT 1 FROM posts WHERE posts.author_id = users.id AND (NOT (posts.title <> ''))) AS computed_0
+    SELECT users.id, users.first_name::text AS first_name, NOT EXISTS (SELECT 1 FROM posts _f1 WHERE _f1.author_id = users.id AND NOT _f1.title <> '') AS computed_0
     FROM users
     WHERE users.id = ANY($1)
   )
@@ -1768,7 +1793,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name::text AS first_name, (('Hello ' || first_name) || '!') AS computed_0
+    SELECT users.id, users.first_name::text AS first_name, (('Hello ' || users.first_name) || '!') AS computed_0
     FROM users
     WHERE users.id = ANY($1)
   )

@@ -143,7 +143,7 @@ private void pushDownRootCollection(QueryNode node, Object mapExpr, RootExprInfo
     import dunamis.core.sorting : SortByInfo;
     import dunamis.core.filtering : FilterByInfo;
     import dunamis.relational.native : sqlDialectOf;
-    import dunamis.relational.sql_optimizer : extractFilterWhereClause, extractNativeSortKey;
+    import dunamis.relational.sql_optimizer : extractFilterWhereClause, extractSortKey;
 
     // The dialect of the node's query (for native predicates)
     auto dialect = sqlDialectOf(node.dataSource);
@@ -181,18 +181,16 @@ private void pushDownRootCollection(QueryNode node, Object mapExpr, RootExprInfo
         } else if (auto sort = cast(SortByInfo) link) {
             bool pushed;
             if (!windowBeneath && !sortBeneath) {
-                auto specs = extractSortBySpecs(sort);
-                if (specs.length == 0) {
-                    // A native SQL expression's order: by a computed column
-                    auto key = extractNativeSortKey(sort, node.table, dialect);
-                    if (!key.isNull) {
-                        auto alias_ = relCtx.newComputedColumnAlias();
-                        node.addComputedColumn(ComputedColumn(alias_, key.get.sql, key.get.type));
-                        specs = [OrderBySpec(alias_, key.get.direction)];
+                auto key = extractSortKey(sort, node.table, dialect);
+                if (!key.isNull) {
+                    // By a column, or by a computed column (of a native
+                    // SQL expression)
+                    auto column = key.get.column;
+                    if (column is null) {
+                        column = relCtx.newComputedColumnAlias();
+                        node.addComputedColumn(ComputedColumn(column, key.get.sql, key.get.type));
                     }
-                }
-                if (specs.length > 0) {
-                    foreach (spec; specs) node.addOrderBy(spec);
+                    node.addOrderBy(OrderBySpec(column, key.get.direction));
                     splice(sort.sortSource);
                     pushed = true;
                 }

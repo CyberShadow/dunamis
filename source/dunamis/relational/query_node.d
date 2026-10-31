@@ -236,19 +236,10 @@ class QueryNode {
         return alias_;
     }
 
-    /// Add a column to fetch from a joined table.
+    /// Add a column to fetch from a joined table (one of `joins`, whose
+    /// columns include its key's, see addJoin).
     void addJoinedColumn(JoinAlias joinAlias, string column) {
-        if (joinAlias !in joinedColumns) {
-            // Fallback: look up PK columns from JoinInfo if available
-            string[] seed = ["id"];
-            foreach (j; joins) {
-                if (j.alias_ == joinAlias) {
-                    seed = j.targetPkColumns.dup;
-                    break;
-                }
-            }
-            joinedColumns[joinAlias] = seed;
-        }
+        assert(joinAlias in joinedColumns, "Column " ~ column ~ " of an unknown JOIN " ~ joinAlias.value);
         if (!joinedColumns[joinAlias].canFind(column)) {
             joinedColumns[joinAlias] ~= column;
         }

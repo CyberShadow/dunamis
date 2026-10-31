@@ -66,6 +66,10 @@ Object findMapExprFromChain(ExprBase expr, ref JoinHop[] joinPath, out ExprBase 
             continue;
         }
         if (auto belongs = cast(BelongsToInfo) expr) {
+            // (A JOIN by the foreign key column, of a single-column key; the
+            // parents of a composite key are read on the naive path)
+            if (belongs.parentPkColumns.length != 1)
+                break;
             // Track the input that produces base entity refs for the query node.
             // Always update (not just first hop) so that for multi-hop chains
             // (e.g., c.post.author.firstName) we get the innermost input (Comment refs),
@@ -114,84 +118,3 @@ struct JoinHop {
     string fk;                // e.g., "author_id"
     string[] targetPkColumns; // e.g., ["id"] — SQL column names of target's PK
 }
-
-// ============================================================================
-// Sorting Pattern Matching
-// ============================================================================
-
-/// Extract ORDER BY specs from a SortByInfo by pattern-matching its predicate.
-OrderBySpec[] extractSortBySpecs(SortByInfo sortByInfo) {
-    import dunamis.core.expr : BinaryOpInfo;
-    import dunamis.core.sorting : SortItemInfo, SortDirection, OrderBySpec;
-
-    auto predicate = sortByInfo.sortPredicate;
-    auto leftItem = sortByInfo.sortLeftItem;
-    auto rightItem = sortByInfo.sortRightItem;
-
-    // Try to match: BinaryOp(<, ColumnAccess(left, col), ColumnAccess(right, col))
-    //           or: BinaryOp(>, ColumnAccess(left, col), ColumnAccess(right, col))
-    auto binOp = cast(BinaryOpInfo) predicate;
-    if (binOp is null) return [];
-
-    string op = binOp.operator;
-    if (op != "<" && op != ">") return [];
-
-    // Get left and right operands
-    auto leftOp = binOp.left;
-    auto rightOp = binOp.right;
-
-    // Try to extract column info from each operand
-    auto leftColInfo = extractSortColumnInfo(leftOp, leftItem, rightItem);
-    auto rightColInfo = extractSortColumnInfo(rightOp, leftItem, rightItem);
-
-    if (leftColInfo.column.length == 0 || rightColInfo.column.length == 0) return [];
-
-    // Both must access the same column
-    if (leftColInfo.column != rightColInfo.column) return [];
-
-    // Verify left operand is on left item and right operand is on right item
-    if (!leftColInfo.isLeftItem || rightColInfo.isLeftItem) return [];
-
-    // Determine direction: < means ASC, > means DESC
-    auto direction = (op == "<") ? SortDirection.ASC : SortDirection.DESC;
-
-    return [OrderBySpec(leftColInfo.column, direction)];
-}
-
-/// Info about a column extracted from a sort predicate operand
-private struct SortColumnInfo {
-    string column;        // Column name, empty if not a column access
-    bool isLeftItem;      // true if this accesses the left (a) sort item
-}
-
-/// Try to extract column info from a sort predicate operand.
-private SortColumnInfo extractSortColumnInfo(Object expr, Object leftItem, Object rightItem) {
-    import dunamis.core.sorting : SortItemInfo;
-    import dunamis.core.expr : EntityCastInfo;
-
-    // Check if this is a column access expression
-    auto colAccess = cast(ColumnAccessInfo) expr;
-    if (colAccess is null) return SortColumnInfo.init;
-
-    // Get the input expression, walking through EntityCast wrappers
-    // (plugin forwarded fields insert EntityCast between the sort item and column access)
-    Object inputExpr = colAccess.inputExpr();
-    while (inputExpr !is null) {
-        if (inputExpr is leftItem) {
-            return SortColumnInfo(colAccess.column, true);
-        } else if (inputExpr is rightItem) {
-            return SortColumnInfo(colAccess.column, false);
-        }
-        // Walk through EntityCast
-        if (auto castInfo = cast(EntityCastInfo) inputExpr) {
-            inputExpr = castInfo.inputExpr();
-        } else {
-            break;
-        }
-    }
-
-    return SortColumnInfo.init;
-}
-
-// Import these interfaces from their modules for use in pattern matching
-private import dunamis.core.sorting : SortByInfo, OrderBySpec, SortDirection;

@@ -124,10 +124,11 @@ private string toCTE(QueryNode node, SqlDialect dialect,
     // JOINs for belongsTo relationships
     foreach (joinInfo; node.joins) {
         auto sourceRef = !joinInfo.sourceAlias.isNull ? joinInfo.sourceAlias.get.value : node.table;
-        auto targetPk = joinInfo.targetPkColumns.length > 0 ? joinInfo.targetPkColumns[0] : "id";
+        // (A foreign key column refers to a single-column key)
+        assert(joinInfo.targetPkColumns.length == 1, "A JOIN of " ~ joinInfo.targetTable ~ " by a composite key");
         sql ~= format("\n    LEFT JOIN %s %s ON %s.%s = %s.%s",
             joinInfo.targetTable, joinInfo.alias_.value,
-            sourceRef, joinInfo.fk, joinInfo.alias_.value, targetPk);
+            sourceRef, joinInfo.fk, joinInfo.alias_.value, joinInfo.targetPkColumns[0]);
     }
 
     // WHERE clause
