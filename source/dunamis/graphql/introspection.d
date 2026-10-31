@@ -990,10 +990,12 @@ package {
 // ============================================================================
 
 unittest {
-    import dunamis.graphql.operations : parseOperationFields;
+    import graphql.lexer : Lexer;
+    import graphql.parser : Parser;
+    import dunamis.graphql.compiler.values : findOperation;
 
-    auto selection = parseOperationFields(
-        "query { root { cells { value } } }")[0].selection;
+    auto operation = findOperation(Parser(Lexer("query { root { cells { value } } }")).parseDocument());
+    auto selection = iterateSelections(operation.ss)[0].field.ss;
     auto data = JSONValue([
         "cells": JSONValue([
             JSONValue([JSONValue(["value": JSONValue(1), "ignored": JSONValue(2)])]),
