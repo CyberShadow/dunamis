@@ -845,11 +845,11 @@ unittest {
         (Expr!User user) => user.fullName
     )(getByIds!User([1, 2]));
 
-    // Phase 1: Standard optimization (creates QueryNodes and ProjectColumnExprs)
+    // Phase 1: Standard optimization (creates QueryNodes and ProjectionExprs)
     auto optCtx = new OptimizeContext();
     auto optimized = query.optimize(optCtx);
 
-    // Phase 2: SQL push-down (replaces BinaryOpExprs with ProjectComputedExprs)
+    // Phase 2: SQL push-down (replaces BinaryOpExprs with ProjectionExprs of computed columns)
     auto sqlOpt = new SqlOptimizer(testDialect());
     sqlOpt.optimize(optimized, optCtx);
 

@@ -19,6 +19,7 @@ import std.typecons : Nullable;
 import ae.utils.promise;
 
 import dunamis.core;
+import dunamis.core.transparency : Transparent, seeThrough, wrappersOf;
 import dunamis.relational.eval_context;
 import dunamis.relational.optimize_context;
 import dunamis.relational.project;
@@ -148,24 +149,10 @@ private void pushDownRootCollection(QueryNode node, Object mapExpr, RootExprInfo
     auto dialect = sqlDialectOf(node.dataSource);
 
     // links[0] is mapExpr's collection, links[$-1] wraps the root expression.
-    Object[] links;
-    for (Object link = (cast(MapExprInfo) mapExpr).collection; ; ) {
-        Object next;
-        if (auto l = cast(LimitInfo) link) next = l.limitSource;
-        else if (auto o = cast(OffsetInfo) link) next = o.offsetSource;
-        else if (auto s = cast(SortByInfo) link) next = s.sortSource;
-        else if (auto f = cast(FilterByInfo) link) next = f.filterSource;
-        else if (auto m = cast(MapExprInfo) link) {
-            if (preservesElements(m)) next = m.collection;
-        }
-        else if (auto c = cast(EntityCastInfo) link) next = c.inputExpr;
-        // (All or none of its source's rows, so it commutes with all of them)
-        else if (auto g = cast(OnlyIfInfo) link) next = g.onlyIfSource;
-        if (next is null || next is link)
-            break;
-        links ~= link;
-        link = next;
-    }
+    // (A conditional collection is all or none of its source's rows, so it
+    // commutes with all of them.)
+    Object root;
+    auto links = wrappersOf((cast(MapExprInfo) mapExpr).collection, Transparent.rows, root);
 
     bool allPushed = true;    // Is everything beneath the current link pushed?
     bool windowBeneath;       // Is a limit/offset (pushed or not) beneath it?
@@ -253,10 +240,6 @@ private bool isConfigured(QueryNode node) {
 /// on the naive path.
 private QueryNode configuredNode(OptimizeContext ctx, Object mapExpr, string typeName, string table,
         string[] pkColumns, DataSource db) {
-    import dunamis.core.pagination : LimitInfo, OffsetInfo;
-    import dunamis.core.sorting : SortByInfo;
-    import dunamis.core.filtering : FilterByInfo;
-
     auto relCtx = ctx.getSourceContext!RelationalOptimizeContext();
     auto node = relCtx.getOrCreateNode(mapExpr, typeName, table, pkColumns);
 
@@ -271,43 +254,11 @@ private QueryNode configuredNode(OptimizeContext ctx, Object mapExpr, string typ
         return node;
     Object coll = mapInfo.collection;
 
-    // Peek through the entire collection chain (read-only) to determine
-    // if this is a root or child collection, BEFORE modifying the tree.
-    Object underlyingColl;
-    {
-        Object peek = coll;
-        while (true) {
-            if (auto l = cast(LimitInfo) peek) { peek = l.limitSource; continue; }
-            if (auto o = cast(OffsetInfo) peek) { peek = o.offsetSource; continue; }
-            if (auto s = cast(SortByInfo) peek) { peek = s.sortSource; continue; }
-            if (auto f = cast(FilterByInfo) peek) { peek = f.filterSource; continue; }
-            // Only maps that preserve the rows: the elements
-            // of any other map are not the root's rows.
-            if (auto m = cast(MapExprInfo) peek) {
-                if (!preservesElements(m)) break;
-                auto inner = m.collection;
-                if (inner is peek) break;
-                peek = inner;
-                continue;
-            }
-            // Conditional collections: all or none of the rows
-            if (auto onlyIfInfo = cast(OnlyIfInfo) peek) {
-                auto inner = onlyIfInfo.onlyIfSource;
-                if (inner is null || inner is peek) break;
-                peek = inner;
-                continue;
-            }
-            // Walk through transparent wrappers (e.g., OverrideExpr)
-            if (auto castInfo = cast(EntityCastInfo) peek) {
-                auto inner = castInfo.inputExpr;
-                if (inner is null || inner is peek) break;
-                peek = inner;
-                continue;
-            }
-            break;
-        }
-        underlyingColl = peek;
-    }
+    // The root or relationship whose rows the map's elements are (seen
+    // read-only, BEFORE modifying the tree): beneath the wrappers keeping
+    // (some of) their source's rows. (The elements of a map other than an
+    // element-preserving one are not the root's rows.)
+    Object underlyingColl = seeThrough(coll, Transparent.rows);
 
     if (auto rootExpr = cast(RootExprInfo) underlyingColl) {
         // For root collections: unwrap pagination/sorting/filtering from the
@@ -445,7 +396,7 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
             static if (isStringBacked!T)
                 node.markStringColumn(_column);
             auto refInput = relCtx.refsOf!Entity(_input);
-            return new ProjectColumnExpr!T(node.id, _column, refInput, prefetch);
+            return new ProjectionExpr!T(node.id, ProjectedColumn.column(_column), refInput, prefetch);
         }
 
         // Access through belongsTo chain - add JOINs
@@ -468,7 +419,8 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
             node.markJoinedStringColumn(lastAlias.get, _column);
 
         // Return projection that reads from the final joined table
-        return new ProjectJoinedColumnExpr!T(node.id, lastAlias.get, _column, baseInputAsAnyRef, prefetch);
+        return new ProjectionExpr!T(node.id, ProjectedColumn.joined(lastAlias.get, _column), baseInputAsAnyRef,
+            prefetch);
     }
 
     override Promise!(T[]) eval(EvalContext ctx) {

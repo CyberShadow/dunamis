@@ -134,17 +134,39 @@ class PrefetchExpr : Expr!(AnyRef[]) {
 // Interfaces for Optimizer Pattern Matching
 // ============================================================================
 
-/// Interface for ProjectColumnExpr pattern matching by external optimizers
-interface ProjectColumnInfo {
-    @property QueryNodeId queryNodeId();
-    @property string column();
+/// What a projection (`ProjectionExpr`) reads of the rows of its query
+/// node: a column of the node's table, a column of a table the node joins
+/// (a belongs-to parent's), or a computed column (an expression the SQL
+/// optimizer put into the node's SELECT clause).
+struct ProjectedColumn {
+    enum Kind { column, joined, computed }
+
+    Kind kind;
+    /// The column's name: of the table's column, or the computed column's
+    /// alias
+    string name;
+    /// The JOIN of the joined table (`joined`)
+    JoinAlias join;
+
+    static ProjectedColumn column(string name) { return ProjectedColumn(Kind.column, name); }
+    static ProjectedColumn joined(JoinAlias join, string name) { return ProjectedColumn(Kind.joined, name, join); }
+    static ProjectedColumn computed(string alias_) { return ProjectedColumn(Kind.computed, alias_); }
+
+    /// The column of the node's query results holding the values (see
+    /// `QueryResult`): the column's name, prefixed by the JOIN's alias for
+    /// a joined one (as the query selects it, see `buildSelectColumns`).
+    @property string resultColumn() const {
+        return kind == Kind.joined ? join.value ~ "__" ~ name : name;
+    }
 }
 
-/// Interface for ProjectJoinedColumnExpr pattern matching by external optimizers
-interface ProjectJoinedColumnInfo {
+/// Interface of projections (`ProjectionExpr`), for optimizers' pattern
+/// matching: the node and the column read. A projection's dependencies are
+/// the refs of the rows read (an `Expr!AnyRef`) and the node's
+/// `PrefetchExpr`.
+interface ProjectionInfo {
     @property QueryNodeId queryNodeId();
-    @property JoinAlias joinAlias();
-    @property string column();
+    @property ProjectedColumn projected();
 }
 
 // ============================================================================
@@ -183,25 +205,39 @@ class EntityToAnyRefExpr(Entity) : Expr!AnyRef {
 // Projection Expressions
 // ============================================================================
 
-/// Reads a column from pre-fetched QueryResults.
-/// Created by optimizer when transforming ColumnAccessExpr.
-class ProjectColumnExpr(T) : Expr!T, ProjectColumnInfo {
+/// Reads the values of a column (see `ProjectedColumn`) of the rows of a
+/// query node from its prefetched results: the projection of a column
+/// access (`ColumnAccessExpr`, of a column of the node's table or of a table
+/// it joins), or of an expression computed in SQL (by the SQL optimizer).
+///
+/// The values of a computed column are evaluated in memory, as the
+/// expression `inMemory` (an `Expr!T`, which it replaced), on a session which
+/// does not compute columns (see `RelationalSession.computesColumns`).
+class ProjectionExpr(T) : Expr!T, ProjectionInfo {
     private {
         QueryNodeId _queryNodeId;
-        string _column;
-        ExprBase _input;     // The input chain (for deriving refs) - Expr!AnyRef via EntityToAnyRefExpr
+        ProjectedColumn _projected;
+        ExprBase _input;     // The refs of the rows (Expr!AnyRef, e.g. EntityToAnyRefExpr)
         ExprBase _prefetch;  // PrefetchExpr - ensures data is loaded
+        ExprBase _inMemory;  // (Computed columns) the expression computed
     }
 
-    /// Accepts ExprBase to work with both typed Expr!Entity and untyped Expr!AnyRef
-    this(QueryNodeId queryNodeId, string column, ExprBase input, PrefetchExpr prefetch) {
-        assert(column.length > 0, "ProjectColumnExpr column must not be empty");
-        assert(input !is null, "ProjectColumnExpr input must not be null");
-        assert(prefetch !is null, "ProjectColumnExpr prefetch must not be null");
+    this(QueryNodeId queryNodeId, ProjectedColumn projected, ExprBase input, PrefetchExpr prefetch,
+            ExprBase inMemory = null) {
+        assert(projected.name.length > 0, "ProjectionExpr: no column");
+        assert(projected.kind != ProjectedColumn.Kind.joined || projected.join.value.length > 0,
+            "ProjectionExpr: no join alias");
+        assert(input !is null, "ProjectionExpr: no input");
+        assert(prefetch !is null, "ProjectionExpr: no prefetch");
+        assert((projected.kind == ProjectedColumn.Kind.computed) == (inMemory !is null),
+            "ProjectionExpr: an in-memory form is given for (and only for) a computed column");
+        assert(inMemory is null || cast(Expr!T) inMemory !is null,
+            "ProjectionExpr: the in-memory form must be an Expr!" ~ T.stringof);
         _queryNodeId = queryNodeId;
-        _column = column;
+        _projected = projected;
         _input = input;
         _prefetch = prefetch;
+        _inMemory = inMemory;
     }
 
     override ExprBase[] dependencies() {
@@ -217,77 +253,30 @@ class ProjectColumnExpr(T) : Expr!T, ProjectColumnInfo {
 
     override Promise!(T[]) eval(EvalContext ctx) {
         auto queryNodeId = _queryNodeId;
-        auto column = _column;
+        auto column = _projected.resultColumn;
+        auto computed = _projected.kind == ProjectedColumn.Kind.computed;
         auto input = _input;
         auto prefetch = cast(PrefetchExpr) _prefetch;
+        auto inMemory = _inMemory;
 
         // Ensure data is prefetched, then evaluate input refs, then read
         return evalAs!(AnyRef[])(_prefetch, ctx).then((_) {
             return evalAs!AnyRef(input, ctx);
         }).then((AnyRef[] refs) {
             auto session = cast(RelationalSession) ctx.getSession(prefetch.node.dataSource);
-            return session.getColumnValues!T(queryNodeId, column, refs);
+            if (computed) {
+                if (!session.computesColumns)
+                    return evalAs!T(inMemory, ctx);
+                auto queryResult = session.getQueryResult(queryNodeId);
+                assert(queryResult !is null && queryResult.hasColumn(column),
+                    "Computed column " ~ column ~ " was not fetched");
+            }
+            return resolve(session.getColumnValues!T(queryNodeId, column, refs));
         });
     }
 
     @property QueryNodeId queryNodeId() { return _queryNodeId; }
-    @property string column() { return _column; }
-}
-
-/// Reads a column from a JOINed table in pre-fetched QueryResults.
-/// Created by optimizer for belongsTo chain access.
-class ProjectJoinedColumnExpr(T) : Expr!T, ProjectJoinedColumnInfo {
-    private {
-        QueryNodeId _queryNodeId;
-        JoinAlias _joinAlias;
-        string _column;
-        ExprBase _input;     // The input chain (for deriving refs)
-        ExprBase _prefetch;  // PrefetchExpr - ensures data is loaded
-    }
-
-    /// Accepts ExprBase to work with both typed Expr!Entity and untyped Expr!AnyRef
-    this(QueryNodeId queryNodeId, JoinAlias joinAlias, string column, ExprBase input, PrefetchExpr prefetch) {
-        assert(joinAlias.value.length > 0, "ProjectJoinedColumnExpr joinAlias must not be empty");
-        assert(column.length > 0, "ProjectJoinedColumnExpr column must not be empty");
-        assert(input !is null, "ProjectJoinedColumnExpr input must not be null");
-        assert(prefetch !is null, "ProjectJoinedColumnExpr prefetch must not be null");
-        _queryNodeId = queryNodeId;
-        _joinAlias = joinAlias;
-        _column = column;
-        _input = input;
-        _prefetch = prefetch;
-    }
-
-    override ExprBase[] dependencies() {
-        return [_input, _prefetch];
-    }
-
-    override void replaceDependency(size_t index, ExprBase newDep) {
-        if (index == 0)
-            _input = newDep;
-        else if (index == 1)
-            _prefetch = newDep;
-    }
-
-    override Promise!(T[]) eval(EvalContext ctx) {
-        auto queryNodeId = _queryNodeId;
-        auto joinAlias = _joinAlias;
-        auto column = _column;
-        auto input = _input;
-        auto prefetch = cast(PrefetchExpr) _prefetch;
-
-        // Ensure data is prefetched, then evaluate input refs, then read
-        return evalAs!(AnyRef[])(_prefetch, ctx).then((_) {
-            return evalAs!AnyRef(input, ctx);
-        }).then((AnyRef[] refs) {
-            auto session = cast(RelationalSession) ctx.getSession(prefetch.node.dataSource);
-            return session.getJoinedColumnValues!T(queryNodeId, joinAlias, column, refs);
-        });
-    }
-
-    @property QueryNodeId queryNodeId() { return _queryNodeId; }
-    @property JoinAlias joinAlias() { return _joinAlias; }
-    @property string column() { return _column; }
+    @property ProjectedColumn projected() { return _projected; }
 }
 
 /// Projects parent ref for each child (belongsTo).
@@ -436,7 +425,7 @@ unittest {
 
     _testDb = new MockDB!();
 
-    // Test ProjectColumnExpr
+    // Test ProjectionExpr
     auto ctx = new EvalContext();
     auto session = cast(RelationalSession) ctx.getSession(_testDb);
 
@@ -460,7 +449,7 @@ unittest {
     auto refInput = new EntityToAnyRefExpr!TestUser(item);
 
     // Create projection with input and prefetch
-    auto proj = new ProjectColumnExpr!string(QueryNodeId(0), "first_name", refInput, prefetch);
+    auto proj = new ProjectionExpr!string(QueryNodeId(0), ProjectedColumn.column("first_name"), refInput, prefetch);
 
     // Evaluate
     auto names = awaitSync(proj.eval(ctx));

@@ -205,7 +205,7 @@ abstract class RelationalSession : DataSession {
     protected string[][string] _pkColumnsByTable;
 
     /// Pre-fetched query results, keyed by QueryNode ID.
-    /// Stored by PrefetchExpr after query execution, read by ProjectColumnExpr.
+    /// Stored by PrefetchExpr after query execution, read by ProjectionExpr.
     private QueryResult[QueryNodeId] _queryResults;
 
     /// The queries of QueryNodes' own rows sent (see pendingQueryResult).
@@ -320,13 +320,6 @@ abstract class RelationalSession : DataSession {
         return result.getColumn!T(column, refs);
     }
 
-    /// Get column values from a JOINed table
-    T[] getJoinedColumnValues(T)(QueryNodeId queryNodeId, JoinAlias joinAlias, string column, AnyRef[] refs) {
-        auto result = _queryResults.get(queryNodeId, null);
-        assert(result !is null, "No query result for query node " ~ queryNodeId.value.to!string);
-        return result.getJoinedColumn!T(joinAlias, column, refs);
-    }
-
     /// Fetch all IDs for a table as strings, wrapped in AnyRef, ordered by
     /// the `orderBy` columns (unordered if empty)
     Promise!(AnyRef[]) fetchAllIdsAsRefs(string table, string typeName, string[] pkColumns,
@@ -367,7 +360,7 @@ abstract class RelationalSession : DataSession {
     /// Whether the session's queries compute the computed columns of query
     /// nodes (SQL expressions, see `QueryNode.computedColumns`). Those of a
     /// session which does not (an in-memory one, such as MockDB's) are
-    /// evaluated in memory instead (see `ProjectComputedExpr`).
+    /// evaluated in memory instead (see `ProjectionExpr`).
     bool computesColumns() {
         return true;
     }
@@ -885,12 +878,6 @@ class QueryResult {
             if (row < colData.length)
                 result[i] = extractValue!T(colData[row]);
         return result;
-    }
-
-    /// Get column from JOINed data (aliased columns like "j0__first_name")
-    T[] getJoinedColumn(T)(JoinAlias joinAlias, string column, AnyRef[] refs) {
-        auto fullColumn = joinAlias.value ~ "__" ~ column;
-        return getColumn!T(fullColumn, refs);
     }
 
     /// Get child refs for parent refs (used by HasMany projection)

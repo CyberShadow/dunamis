@@ -46,8 +46,8 @@ interface NativeSqlInfo {
 
     /// An expression of the expression's result type reading its values
     /// from the computed column `alias_` of the query node `queryNodeId`
-    /// (a `dunamis.relational.sql_optimizer.ProjectComputedExpr` of the
-    /// arguments given), which the SQL optimizer replaces the expression
+    /// (a `dunamis.relational.project.ProjectionExpr` of the arguments
+    /// given, with the expression as its in-memory form), which the SQL optimizer replaces the expression
     /// with where it puts it into the node's SELECT clause.
     ExprBase projectComputed(QueryNodeId queryNodeId, string alias_, ExprBase input, ExprBase prefetch);
 }

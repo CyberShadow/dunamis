@@ -49,15 +49,9 @@ class RelationalOptimizeContext {
     /// of the same rows (e.g. of several fields of a map's elements) share
     /// it, and so evaluate the refs once rather than once per column.
     ExprBase refsOf(Entity)(ExprBase input) {
+        import dunamis.core.transparency : Transparent, seeThrough;
         import dunamis.relational.project : EntityToAnyRefExpr;
-        ExprBase base = input;
-        while (auto entityCast = cast(EntityCastInfo) base) {
-            auto inner = entityCast.inputExpr;
-            if (inner is null || inner is base)
-                break;
-            base = inner;
-        }
-        auto key = cast(void*) base;
+        auto key = cast(void*) seeThrough(input, Transparent.entityCasts);
         if (auto byType = key in _refExprs)
             if (auto refs = typeid(Entity) in *byType)
                 return *refs;

@@ -26,8 +26,9 @@ import dunamis.relational.schema.interfaces;
 /// `OptimizeContext.elementOwner`): for them, that map is returned.
 Object findMapExprFromChain(ExprBase expr, ref JoinHop[] joinPath, out ExprBase baseInput, out ExprBase baseInputAsAnyRef,
         OptimizeContext ctx = null) {
-    import dunamis.core.expr : EveryItemOfExprInfo, UnwrapNullableInfo, EntityCastInfo;
+    import dunamis.core.expr : EveryItemOfExprInfo;
     import dunamis.core.filtering : FilterItemInfo;
+    import dunamis.core.transparency : Transparent, wrapped;
     import dunamis.core.sorting : SortItemInfo;
 
     // Track the first expression before any belongsTo chain starts
@@ -89,14 +90,10 @@ Object findMapExprFromChain(ExprBase expr, ref JoinHop[] joinPath, out ExprBase 
             expr = hasMany.inputExpr;
             continue;
         }
-        // Unwrap nullable expressions - continue through to the nullable input
-        if (auto unwrap = cast(UnwrapNullableInfo) expr) {
-            expr = unwrap.inputExpr;
-            continue;
-        }
-        // Walk through entity cast expressions (plugin forwarding inserts these)
-        if (auto castInfo = cast(EntityCastInfo) expr) {
-            expr = castInfo.inputExpr;
+        // Through unwrapped nullables and entity casts (plugin forwarding
+        // inserts these)
+        if (auto inner = cast(ExprBase) wrapped(expr, Transparent.entity)) {
+            expr = inner;
             continue;
         }
         // Unknown expression type

@@ -73,9 +73,9 @@ final class PostgresSqlExpr(T) : Expr!T, NativeSqlInfo {
     }
 
     ExprBase projectComputed(QueryNodeId queryNodeId, string alias_, ExprBase input, ExprBase prefetch) {
-        import dunamis.relational.project : PrefetchExpr;
-        import dunamis.relational.sql_optimizer : ProjectComputedExpr;
-        return new ProjectComputedExpr!T(queryNodeId, alias_, input, cast(PrefetchExpr) prefetch, _inMemory);
+        import dunamis.relational.project : PrefetchExpr, ProjectedColumn, ProjectionExpr;
+        return new ProjectionExpr!T(queryNodeId, ProjectedColumn.computed(alias_), input, cast(PrefetchExpr) prefetch,
+            _inMemory);
     }
 }
 

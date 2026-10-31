@@ -14,6 +14,7 @@ import dunamis.core.eval;
 import dunamis.core.expr;
 import dunamis.core.filtering : FilterByInfo;
 import dunamis.core.sorting : SortByInfo;
+import dunamis.core.transparency : Transparent, seeThrough, wrapped;
 import dunamis.core.optimize : OptimizeContext, ExprOptimizer;
 import dunamis.relational.eval_context : RelationalSession, QueryResult;
 import dunamis.relational.native : NativeSqlInfo;
@@ -59,7 +60,7 @@ string constantToSqlLiteral(ConstantInfo info) {
 /// Usage:
 ///   1. First run the standard optimizer to create QueryNodes and ProjectionExprs
 ///   2. Then run SqlOptimizer to find BinaryOpExprs over projections
-///   3. SqlOptimizer replaces them with ProjectComputedExprs
+///   3. SqlOptimizer replaces them with ProjectionExprs of computed columns
 ///   4. Computed columns are added to their QueryNode for SQL generation
 ///
 /// The optimizer holds no per-request state: everything it produces is part
@@ -247,7 +248,7 @@ class SqlOptimizer : ExprOptimizer {
         auto alias_ = addComputedColumn(prefetch.node, sqlExpr, expr.resultType, ctx);
 
         // Create and return projection for computed column
-        return createProjectComputedExpr(queryNodeId, alias_, expr.resultType, input, prefetch, expr);
+        return createComputedProjection(queryNodeId, alias_, expr.resultType, input, prefetch, expr);
     }
 
     /// Try to push down a unary operation to SQL
@@ -279,7 +280,7 @@ class SqlOptimizer : ExprOptimizer {
         auto alias_ = addComputedColumn(prefetch.node, sqlExpr, expr.resultType, ctx);
 
         // Create and return projection for computed column
-        return createProjectComputedExpr(queryNodeId, alias_, expr.resultType, input, prefetch, expr);
+        return createComputedProjection(queryNodeId, alias_, expr.resultType, input, prefetch, expr);
     }
 
     /// Try to push down a ternary operation to SQL
@@ -325,7 +326,7 @@ class SqlOptimizer : ExprOptimizer {
         auto alias_ = addComputedColumn(prefetch.node, sqlExpr, expr.resultType, ctx);
 
         // Create and return projection for computed column
-        return createProjectComputedExpr(queryNodeId, alias_, expr.resultType, input, prefetch, expr);
+        return createComputedProjection(queryNodeId, alias_, expr.resultType, input, prefetch, expr);
     }
 
     /// Try to push down an isNull check to SQL
@@ -357,7 +358,7 @@ class SqlOptimizer : ExprOptimizer {
         auto alias_ = addComputedColumn(prefetch.node, sqlExpr, typeid(bool), ctx);
 
         // Create and return projection for computed column
-        return createProjectComputedExpr(queryNodeId, alias_, typeid(bool), input, prefetch, expr);
+        return createComputedProjection(queryNodeId, alias_, typeid(bool), input, prefetch, expr);
     }
 
     /// Try to push down a native SQL expression (see `NativeSqlInfo`) to a
@@ -453,7 +454,7 @@ class SqlOptimizer : ExprOptimizer {
         auto alias_ = addComputedColumn(parentNode, sqlExpr, typeid(bool), ctx);
 
         // Create and return projection for computed column
-        return createProjectComputedExpr(parentNode.id, alias_, typeid(bool), input, prefetch, expr);
+        return createComputedProjection(parentNode.id, alias_, typeid(bool), input, prefetch, expr);
     }
 
     /// Try to convert a predicate expression to SQL for use in EXISTS subquery.
@@ -568,8 +569,9 @@ class SqlOptimizer : ExprOptimizer {
             return null;
         }
 
-        // Check for projection expressions - they have input as first dependency
-        if (cast(ProjectColumnInfo) expr !is null || cast(ProjectJoinedColumnInfo) expr !is null) {
+        // Check for projection expressions (of columns) - they have input as first dependency
+        if (auto projection = cast(ProjectionInfo) expr)
+        if (projection.projected.kind != ProjectedColumn.Kind.computed) {
             auto deps = expr.dependencies();
             if (deps.length > 0) {
                 return deps[0];  // Input expression that produces entity refs
@@ -621,8 +623,9 @@ class SqlOptimizer : ExprOptimizer {
             return null;
         }
 
-        // Check for projection expressions - they have prefetch as second dependency
-        if (cast(ProjectColumnInfo) expr !is null || cast(ProjectJoinedColumnInfo) expr !is null) {
+        // Check for projection expressions (of columns) - they have prefetch as second dependency
+        if (auto projection = cast(ProjectionInfo) expr)
+        if (projection.projected.kind != ProjectedColumn.Kind.computed) {
             auto deps = expr.dependencies();
             if (deps.length > 1) {
                 if (auto prefetch = cast(PrefetchExpr) deps[1]) {
@@ -637,37 +640,19 @@ class SqlOptimizer : ExprOptimizer {
     /// Try to get SQL expression for an operand.
     /// Also tracks the queryNodeId to ensure all parts come from the same node.
     private Nullable!string tryGetSqlExpr(ExprBase expr, ref QueryNodeId queryNodeId) {
-        // Check if it's a column projection
-        if (auto projCol = cast(ProjectColumnInfo) expr) {
+        // Check if it's a projection (of a column, a joined column, or a
+        // computed column, e.g. an EXISTS subquery)
+        if (auto projection = cast(ProjectionInfo) expr) {
             if (queryNodeId == noQueryNodeId) {
-                queryNodeId = projCol.queryNodeId;
-            } else if (queryNodeId != projCol.queryNodeId) {
+                queryNodeId = projection.queryNodeId;
+            } else if (queryNodeId != projection.queryNodeId) {
                 // Different query nodes - can't combine
                 return Nullable!string.init;
             }
-            // Get the table name from QueryNode
-            // For now, just use the column name directly (assumes single table)
-            return Nullable!string(projCol.column);
-        }
-
-        // Check if it's a joined column projection
-        if (auto projJoin = cast(ProjectJoinedColumnInfo) expr) {
-            if (queryNodeId == noQueryNodeId) {
-                queryNodeId = projJoin.queryNodeId;
-            } else if (queryNodeId != projJoin.queryNodeId) {
-                return Nullable!string.init;
-            }
-            return Nullable!string(projJoin.joinAlias.value ~ "." ~ projJoin.column);
-        }
-
-        // Check if it's a computed column projection (e.g., EXISTS subquery)
-        if (auto projComputed = cast(ProjectComputedInfo) expr) {
-            if (queryNodeId == noQueryNodeId) {
-                queryNodeId = projComputed.queryNodeId;
-            } else if (queryNodeId != projComputed.queryNodeId) {
-                return Nullable!string.init;
-            }
-            return Nullable!string(projComputed.columnAlias);
+            auto projected = projection.projected;
+            // (For now, the column name directly (assumes single table))
+            return Nullable!string(projected.kind == ProjectedColumn.Kind.joined
+                ? projected.join.value ~ "." ~ projected.name : projected.name);
         }
 
         // Check if it's a constant
@@ -729,30 +714,30 @@ class SqlOptimizer : ExprOptimizer {
         return Nullable!string.init;
     }
 
-    /// Create a ProjectComputedExpr for the given result type, replacing
+    /// Create a ProjectionExpr of a computed column for the given result type, replacing
     /// the expression `original`.
     /// Since we need to create a typed expression but only have TypeInfo at runtime,
     /// we use a factory approach with common types.
-    private ExprBase createProjectComputedExpr(QueryNodeId queryNodeId, string alias_, TypeInfo type, ExprBase input,
+    private ExprBase createComputedProjection(QueryNodeId queryNodeId, string alias_, TypeInfo type, ExprBase input,
             PrefetchExpr prefetch, ExprBase original) {
         // Handle common types
         if (type == typeid(string)) {
-            return new ProjectComputedExpr!string(queryNodeId, alias_, input, prefetch, original);
+            return new ProjectionExpr!string(queryNodeId, ProjectedColumn.computed(alias_), input, prefetch, original);
         }
         if (type == typeid(int)) {
-            return new ProjectComputedExpr!int(queryNodeId, alias_, input, prefetch, original);
+            return new ProjectionExpr!int(queryNodeId, ProjectedColumn.computed(alias_), input, prefetch, original);
         }
         if (type == typeid(long)) {
-            return new ProjectComputedExpr!long(queryNodeId, alias_, input, prefetch, original);
+            return new ProjectionExpr!long(queryNodeId, ProjectedColumn.computed(alias_), input, prefetch, original);
         }
         if (type == typeid(float)) {
-            return new ProjectComputedExpr!float(queryNodeId, alias_, input, prefetch, original);
+            return new ProjectionExpr!float(queryNodeId, ProjectedColumn.computed(alias_), input, prefetch, original);
         }
         if (type == typeid(double)) {
-            return new ProjectComputedExpr!double(queryNodeId, alias_, input, prefetch, original);
+            return new ProjectionExpr!double(queryNodeId, ProjectedColumn.computed(alias_), input, prefetch, original);
         }
         if (type == typeid(bool)) {
-            return new ProjectComputedExpr!bool(queryNodeId, alias_, input, prefetch, original);
+            return new ProjectionExpr!bool(queryNodeId, ProjectedColumn.computed(alias_), input, prefetch, original);
         }
 
         // Unsupported type - return null (caller should keep original expression)
@@ -760,78 +745,6 @@ class SqlOptimizer : ExprOptimizer {
     }
 
 }
-
-// ============================================================================
-// Computed Column Projection Expression
-// ============================================================================
-
-/// Interface for ProjectComputedExpr pattern matching by external optimizers
-interface ProjectComputedInfo {
-    @property QueryNodeId queryNodeId();
-    @property string columnAlias();
-}
-
-/// Projection expression that reads a computed column from QueryResult.
-/// Created by SqlOptimizer when pushing down expressions to SQL.
-class ProjectComputedExpr(T) : Expr!T, ProjectComputedInfo {
-    private QueryNodeId _queryNodeId;
-    private string _alias;
-    private ExprBase _input;     // The input chain (for deriving refs)
-    private ExprBase _prefetch;  // PrefetchExpr - ensures data is loaded
-    private ExprBase _inMemory;  // The expression computed, as evaluated in memory
-
-    /// Accepts ExprBase to work with both typed Expr!Entity and untyped Expr!AnyRef.
-    /// `inMemory` is the expression (an Expr!T) the computed column is the
-    /// value of: it is evaluated in memory on a session which does not
-    /// compute columns (see `RelationalSession.computesColumns`).
-    this(QueryNodeId queryNodeId, string alias_, ExprBase input, PrefetchExpr prefetch, ExprBase inMemory) {
-        assert(inMemory !is null && cast(Expr!T) inMemory !is null,
-            "ProjectComputedExpr: the in-memory form must be an Expr!" ~ T.stringof);
-        _queryNodeId = queryNodeId;
-        _alias = alias_;
-        _input = input;
-        _prefetch = prefetch;
-        _inMemory = inMemory;
-    }
-
-    override ExprBase[] dependencies() {
-        return [_input, _prefetch];
-    }
-
-    override void replaceDependency(size_t index, ExprBase newDep) {
-        if (index == 0)
-            _input = newDep;
-        else if (index == 1)
-            _prefetch = newDep;
-    }
-
-    override Promise!(T[]) eval(EvalContext ctx) {
-        auto queryNodeId = _queryNodeId;
-        auto alias_ = _alias;
-        auto input = _input;
-        auto prefetch = cast(PrefetchExpr) _prefetch;
-        auto inMemory = _inMemory;
-
-        // Ensure data is prefetched, then evaluate input refs, then read
-        return evalAs!(AnyRef[])(_prefetch, ctx).then((_) {
-            return evalAs!AnyRef(input, ctx);
-        }).then((AnyRef[] refs) {
-            auto session = cast(RelationalSession) ctx.getSession(prefetch.node.dataSource);
-            auto queryResult = session.getQueryResult(queryNodeId);
-
-            if (session.computesColumns) {
-                assert(queryResult !is null && queryResult.hasColumn(alias_),
-                    "Computed column " ~ alias_ ~ " was not fetched");
-                return resolve(session.getColumnValues!T(queryNodeId, alias_, refs));
-            }
-            return evalAs!T(inMemory, ctx);
-        });
-    }
-
-    @property QueryNodeId queryNodeId() { return _queryNodeId; }
-    @property string columnAlias() { return _alias; }
-}
-
 
 // ============================================================================
 // Filter WHERE Clause Generation
@@ -938,15 +851,7 @@ private struct WhereContext {
                 return RowPath.init;
             if (entity is filterItem)
                 return RowPath(true);
-            if (auto entityCast = cast(EntityCastInfo) entity) {
-                auto inner = entityCast.inputExpr;
-                if (inner is entity) return RowPath.init;
-                entity = inner;
-                continue;
-            }
-            if (auto unwrap = cast(UnwrapNullableInfo) entity) {
-                auto inner = unwrap.inputExpr;
-                if (inner is entity) return RowPath.init;
+            if (auto inner = wrapped(entity, Transparent.entity)) {
                 entity = inner;
                 continue;
             }
@@ -986,19 +891,7 @@ private struct WhereContext {
     bool resolveColumn(Object expr, Object filterItem, out RowPath path, out string column) {
         // A nullable column's values, unwrapped, or a column's values cast
         // (e.g. a value type's, to a plugin's wrapper of the type)
-        while (true) {
-            if (auto unwrap = cast(UnwrapNullableInfo) expr) {
-                if (unwrap.inputExpr is expr) break;
-                expr = unwrap.inputExpr;
-            } else if (auto entityCast = cast(EntityCastInfo) expr) {
-                if (entityCast.inputExpr is expr) break;
-                expr = entityCast.inputExpr;
-            } else if (auto valueCast = cast(ValueCastInfo) expr) {
-                if (valueCast.valueCastInput is expr) break;
-                expr = valueCast.valueCastInput;
-            } else
-                break;
-        }
+        expr = seeThrough(expr, Transparent.value);
         // A plain field of the filter's own item, stored in a column
         if (auto plain = cast(PlainFieldInfo) expr) {
             if (filterItem !is rootItem || rootPlainFieldColumn is null)
@@ -1041,16 +934,7 @@ private struct WhereContext {
         if (resolveColumn(expr, filterItem, path, column))
             return RowValue(true, false, false, path, (string rowTable) => qualified(rowTable, column));
         // A native expression's values, unwrapped or cast (as a column's)
-        while (true) {
-            if (auto unwrap = cast(UnwrapNullableInfo) expr) {
-                if (unwrap.inputExpr is expr) break;
-                expr = unwrap.inputExpr;
-            } else if (auto valueCast = cast(ValueCastInfo) expr) {
-                if (valueCast.valueCastInput is expr) break;
-                expr = valueCast.valueCastInput;
-            } else
-                break;
-        }
+        expr = seeThrough(expr, Transparent.value);
         auto native = cast(NativeSqlInfo) expr;
         if (native is null || dialect is null || !native.hasNativeSql(dialect))
             return RowValue.init;
@@ -1169,18 +1053,7 @@ private struct WhereContext {
         // Handle `some` over a to-many relationship
         if (auto collPred = cast(CollectionPredicateInfo) expr) {
             // The collection, seen through element-wise entity casts
-            Object collection = collPred.collection;
-            while (true) {
-                if (auto entityCast = cast(EntityCastInfo) collection) {
-                    if (entityCast.inputExpr is collection) break;
-                    collection = entityCast.inputExpr;
-                } else if (auto map = cast(MapExprInfo) collection) {
-                    if (map.collection is collection || !preservesElements(map)) break;
-                    collection = map.collection;
-                } else
-                    break;
-            }
-            auto hasMany = cast(HasManyInfo) collection;
+            auto hasMany = cast(HasManyInfo) seeThrough(collPred.collection, Transparent.elements);
             if (hasMany is null || hasMany.parentPkColumns.length != 1)
                 return Nullable!DialectSql.init;
             auto path = resolveRow(hasMany.inputExpr, filterItem);
@@ -1401,7 +1274,7 @@ unittest {
 
 unittest {
     // Test computed column detection
-    // Create a mock expression tree: ProjectColumn + " " + ProjectColumn
+    // Create a mock expression tree: projection + " " + projection
 
     // Minimal entity for testing
     static struct TestUser {
@@ -1417,8 +1290,8 @@ unittest {
     auto item = new EveryItemOfExpr!TestUser();
 
     // First, set up mock projections with input and prefetch
-    auto proj1 = new ProjectColumnExpr!string(QueryNodeId(0), "first_name", item, prefetch);
-    auto proj2 = new ProjectColumnExpr!string(QueryNodeId(0), "last_name", item, prefetch);
+    auto proj1 = new ProjectionExpr!string(QueryNodeId(0), ProjectedColumn.column("first_name"), item, prefetch);
+    auto proj2 = new ProjectionExpr!string(QueryNodeId(0), ProjectedColumn.column("last_name"), item, prefetch);
 
     // Create binary op: proj1 ~ " " ~ proj2
     auto space = constant(" ", proj1);  // Derive length from proj1
@@ -1480,7 +1353,7 @@ unittest {
 }
 
 unittest {
-    // Test ProjectComputedExpr
+    // Test ProjectionExpr of a computed column
     static struct TestUser {
         import dunamis.relational.schema.attrs : PrimaryKey;
         @PrimaryKey string id;
@@ -1489,9 +1362,9 @@ unittest {
     auto node = new QueryNode(QueryNodeId(0), "User", "users", ["id"]);
     auto prefetch = new PrefetchExpr(node);
     auto item = new EveryItemOfExpr!TestUser();
-    auto proj = new ProjectComputedExpr!string(QueryNodeId(0), "computed_0", item, prefetch,
+    auto proj = new ProjectionExpr!string(QueryNodeId(0), ProjectedColumn.computed("computed_0"), item, prefetch,
         constant("computed", item));
     assert(proj.queryNodeId == QueryNodeId(0));
-    assert(proj.columnAlias == "computed_0");
+    assert(proj.projected.resultColumn == "computed_0");
     assert(proj.dependencies().length == 2);  // input and prefetch
 }
