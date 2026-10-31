@@ -326,9 +326,8 @@ class ProjectBelongsToExpr : Expr!AnyRef {
             return evalAs!AnyRef(input, ctx);
         }).then((AnyRef[] refs) {
             auto session = cast(RelationalSession) ctx.getSession(prefetch.node.dataSource);
-            // Read FK as string to support non-numeric IDs
-            auto fkValues = session.getColumnValues!string(queryNodeId, fkColumn, refs);
-            return fkValues.map!(fk => fk.length == 0 ? AnyRef.init : makeAnyRef(parentTypeName, fk)).array;
+            // (The parents' keys, as their refs encode them)
+            return session.getColumnRefs(queryNodeId, fkColumn, parentTypeName, refs);
         });
     }
 

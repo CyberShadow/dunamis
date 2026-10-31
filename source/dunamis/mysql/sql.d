@@ -103,18 +103,18 @@ string generateSelectByPkSQL(string table, string[] pkColumns, string[] inputCol
 
 /// Generate a WHERE clause for PK column(s) matching a set of IDs.
 private string generatePkWhereClause(string[] pkColumns, string[] ids) {
-    import dunamis.core.types : decodeCompositeKey;
+    import dunamis.relational.keys : keyValues, singleKeyValue;
     auto dialect = mysqlDialect();
 
     if (pkColumns.length == 1) {
         // Single PK: col IN ('id1','id2')
-        auto quotedIds = ids.map!(id => dialect.escapeSqlString(id)).join(",");
+        auto quotedIds = ids.map!(id => dialect.escapeSqlString(singleKeyValue(id))).join(",");
         return format("%s IN (%s)", pkColumns[0], quotedIds);
     } else {
         // Composite PK: (col1 = 'v1' AND col2 = 'v2') OR ...
         string[] conditions;
         foreach (id; ids) {
-            auto parts = decodeCompositeKey(id);
+            auto parts = keyValues(id);
             string[] eqs;
             foreach (i, col; pkColumns) {
                 eqs ~= format("%s = %s", col, dialect.escapeSqlString(i < parts.length ? parts[i] : ""));

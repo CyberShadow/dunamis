@@ -320,6 +320,15 @@ abstract class RelationalSession : DataSession {
         return result.getColumn!T(column, refs);
     }
 
+    /// The refs of the rows of the type `typeName` whose keys are the values
+    /// of `column` (a foreign key) of the rows `refs` from pre-fetched
+    /// results (invalid refs for null values).
+    AnyRef[] getColumnRefs(QueryNodeId queryNodeId, string column, string typeName, AnyRef[] refs) {
+        auto result = _queryResults.get(queryNodeId, null);
+        assert(result !is null, "No query result for query node " ~ queryNodeId.value.to!string);
+        return result.getColumnRefs(column, typeName, refs);
+    }
+
     /// Fetch all IDs for a table as strings, wrapped in AnyRef, ordered by
     /// the `orderBy` columns (unordered if empty)
     Promise!(AnyRef[]) fetchAllIdsAsRefs(string table, string typeName, string[] pkColumns,
@@ -711,7 +720,8 @@ class QueryResult {
     /// Load from row-oriented data (column-oriented storage built from rows)
     void loadFromRows(JSONValue[] rows, string typeName, string[] idColumns,
                                string parentFk = null, string parentType = null) {
-        import dunamis.core.types : encodeCompositeKey, makeAnyRef;
+        import dunamis.core.types : makeAnyRef;
+        import dunamis.relational.keys : keyOf;
 
         _typeName = typeName;
         _lookedUp = null;
@@ -722,17 +732,6 @@ class QueryResult {
         _columns = null;
         _parentFk = parentFk;
         _parentType = parentType;
-
-        // Helper to extract ID value as string from JSON
-        static string jsonValToString(JSONValue val) {
-            if (val.type == JSONType.integer) {
-                return val.integer.to!string;
-            } else if (val.type == JSONType.string) {
-                return val.str;
-            } else {
-                return "";
-            }
-        }
 
         // Collect all refs and build parent grouping
         bool grouped = parentFk !is null && parentType !is null;
@@ -745,11 +744,10 @@ class QueryResult {
                 _allRefs[i] = makeAnyRef(typeName, n);
                 _rowOf.require(n) = i;
             } else {
-                string[] keyParts;
-                foreach (col; idColumns) {
-                    keyParts ~= jsonValToString(fields[col]);
-                }
-                auto key = encodeCompositeKey(keyParts);
+                auto keyValues = new JSONValue[idColumns.length];
+                foreach (k, col; idColumns)
+                    keyValues[k] = fields[col];
+                auto key = keyOf(keyValues);
                 _allRefs[i] = makeAnyRef(typeName, key);
                 _rowOf.require(key) = i;
             }
@@ -760,7 +758,7 @@ class QueryResult {
                     if (parentIdVal.type == JSONType.integer)
                         _childRefsByParent.require(parentIdVal.integer) ~= _allRefs[i];
                     else if (parentIdVal.type != JSONType.null_)
-                        _childRefsByParent.require(jsonValToString(*parentIdVal)) ~= _allRefs[i];
+                        _childRefsByParent.require(keyOf([*parentIdVal])) ~= _allRefs[i];
                 }
             }
         }
@@ -787,7 +785,7 @@ class QueryResult {
     /// every row of `parentLayer`, identified by its `linkColumns` values
     /// (the values the child layer's FK was matched against).
     void recordCoveredParents(QueryResult parentLayer, string[] linkColumns) {
-        import dunamis.core.types : encodeCompositeKey;
+        import dunamis.relational.keys : keyOf;
         auto links = new JSONValue[][linkColumns.length];
         foreach (i, col; linkColumns)
             links[i] = parentLayer.columnValues(col);
@@ -797,17 +795,16 @@ class QueryResult {
                 _coveredParents.require(links[0][row].integer) = true;
                 continue;
             }
-            string[] parts;
+            JSONValue[] parts;
             foreach (values; links) {
                 if (row >= values.length || values[row].type == JSONType.null_) {
                     parts = null;
                     break;
                 }
-                auto value = values[row];
-                parts ~= value.type == JSONType.string ? value.str : value.toString();
+                parts ~= values[row];
             }
             if (parts.length)
-                _coveredParents.require(encodeCompositeKey(parts)) = true;
+                _coveredParents.require(keyOf(parts)) = true;
         }
     }
 
@@ -840,12 +837,13 @@ class QueryResult {
                     _coveredParents.require(p.id[$ - local.length .. $]) = true;
 
         // Build parent grouping from FK values
+        import dunamis.relational.keys : keyOf;
         foreach (i, r; refs) {
             auto fkVal = fkValues[i];
             if (fkVal.type == JSONType.integer)
                 _childRefsByParent.require(fkVal.integer) ~= r;
             else if (fkVal.type != JSONType.null_)
-                _childRefsByParent.require(fkVal.str) ~= r;
+                _childRefsByParent.require(keyOf([fkVal])) ~= r;
         }
     }
 
@@ -909,6 +907,20 @@ class QueryResult {
         foreach (i, row; rowsOf(refs))
             if (row < colData.length)
                 result[i] = colData[row];
+        return result;
+    }
+
+    /// The refs of the rows of the type `typeName` whose keys are the values
+    /// of the column `column` (a foreign key) of the rows `refs` (invalid
+    /// refs for null values, and rows not in the result).
+    AnyRef[] getColumnRefs(string column, string typeName, AnyRef[] refs) {
+        import dunamis.relational.keys : keyOf;
+        auto result = new AnyRef[refs.length];
+        foreach (i, value; getColumnRaw(column, refs))
+            if (value.type == JSONType.integer)
+                result[i] = makeAnyRef(typeName, value.integer);
+            else if (value.type != JSONType.null_)
+                result[i] = makeAnyRef(typeName, keyOf([value]));
         return result;
     }
 

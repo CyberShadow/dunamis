@@ -12,6 +12,7 @@ import ae.sys.sqlite3 : SQLite;
 import ae.utils.promise : Promise, resolve;
 
 import dunamis.core.types : AnyRef, makeAnyRef;
+import dunamis.relational.keys : keyOf, keyOfTexts, keyValues, singleKeyValue;
 import dunamis.core.optimize : ExprOptimizer;
 import dunamis.core.expr : ExprBase;
 import dunamis.core.datasource : DataSource, DataSession, SetupMode;
@@ -81,7 +82,7 @@ class SQLiteSession : RelationalSession {
         // Substitute IDs if needed
         if (root.filter == FilterType.byId || root.filter == FilterType.byIds) {
             auto idValues = root.refs.map!(r => r.localId).array;
-            sql = sql.replace("{{IDS}}", idValues.map!(id => sqliteDialect().escapeSqlString(id)).join(","));
+            sql = sql.replace("{{IDS}}", idValues.map!(id => sqliteDialect().escapeSqlString(singleKeyValue(id))).join(","));
         } else {
             // No filter - remove the placeholder
             sql = sql.replace("{{IDS}}", "");
@@ -134,11 +135,10 @@ class SQLiteSession : RelationalSession {
     /// For single PK: SELECT pk, column FROM table WHERE pk IN (...)
     /// For composite PK: SELECT pk1, pk2, ..., column FROM table WHERE (pk1=v1 AND pk2=v2) OR ...
     private string buildFetchColumnSQL(string table, string column, string[] validIds) {
-        import dunamis.core.types : decodeCompositeKey;
         auto pkColumns = getPkColumnsForTable(table);
 
         if (pkColumns.length == 1) {
-            auto idList = validIds.map!(id => sqliteDialect().escapeSqlString(id)).join(",");
+            auto idList = validIds.map!(id => sqliteDialect().escapeSqlString(singleKeyValue(id))).join(",");
             return format("SELECT %s, %s FROM %s WHERE %s IN (%s)",
                 pkColumns[0], column, table, pkColumns[0], idList);
         } else {
@@ -146,7 +146,7 @@ class SQLiteSession : RelationalSession {
             auto dialect = sqliteDialect();
             string[] conditions;
             foreach (id; validIds) {
-                auto parts = decodeCompositeKey(id);
+                auto parts = keyValues(id);
                 string[] eqs;
                 foreach (i, col; pkColumns) {
                     eqs ~= format("%s = %s", col, dialect.escapeSqlString(i < parts.length ? parts[i] : ""));
@@ -160,16 +160,10 @@ class SQLiteSession : RelationalSession {
 
     /// Build composite key from result cells (PK columns come first in result)
     private string buildKeyFromCells(Cells)(Cells cells, size_t pkCount) {
-        import dunamis.core.types : encodeCompositeKey;
-        if (pkCount == 1) {
-            return cells[0] !is null ? cells[0].idup : "";
-        } else {
-            string[] parts;
-            foreach (i; 0 .. pkCount) {
-                parts ~= cells[i] !is null ? cells[i].idup : "";
-            }
-            return encodeCompositeKey(parts);
-        }
+        auto parts = new string[pkCount];
+        foreach (i; 0 .. pkCount)
+            parts[i] = cells[i] !is null ? cells[i].idup : "";
+        return keyOfTexts(parts);
     }
 
     override Promise!(string[]) fetchColumnString(string table, string column, AnyRef[] refs) {
@@ -251,25 +245,14 @@ class SQLiteSession : RelationalSession {
     }
 
     override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns, string[] orderBy = null) {
-        import dunamis.core.types : encodeCompositeKey;
-
         auto sql = format("SELECT %s FROM %s", pkColumns.join(", "), table);
         if (orderBy.length)
             sql ~= " ORDER BY " ~ orderBy.join(", ");
         string[] result;
 
         foreach (cells, columns; _db.query(sql)) {
-            if (cells.length >= 1 && cells[0] !is null) {
-                if (pkColumns.length == 1) {
-                    result ~= cells[0].idup;
-                } else {
-                    string[] parts;
-                    foreach (i; 0 .. pkColumns.length) {
-                        parts ~= cells[i] !is null ? cells[i].idup : "";
-                    }
-                    result ~= encodeCompositeKey(parts);
-                }
-            }
+            if (cells.length >= 1 && cells[0] !is null)
+                result ~= buildKeyFromCells(cells, pkColumns.length);
         }
 
         return resolve(result);
@@ -299,7 +282,7 @@ class SQLiteSession : RelationalSession {
 
         if (validIds.length > 0) {
             auto childPkColumns = getPkColumnsForTable(childTable);
-            auto idList = validIds.map!(id => sqliteDialect().escapeSqlString(id)).join(",");
+            auto idList = validIds.map!(id => sqliteDialect().escapeSqlString(singleKeyValue(id))).join(",");
             auto sql = format("SELECT %s, %s FROM %s WHERE %s IN (%s)",
                 childPkColumns.join(", "), fk, childTable, fk, idList);
             if (orderBy.length)
@@ -312,7 +295,7 @@ class SQLiteSession : RelationalSession {
                     auto childId = buildKeyFromCells(cells, pkCount);
                     auto parentId = cells[pkCount] !is null ? cells[pkCount].idup : "";
                     if (parentId.length > 0) {
-                        childrenByParentId[parentId] ~= makeAnyRef(childType, childId);
+                        childrenByParentId[keyOfTexts([parentId])] ~= makeAnyRef(childType, childId);
                     }
                 }
             }
@@ -351,7 +334,7 @@ class SQLiteSession : RelationalSession {
                 refs.reserve(fkValues.length);
                 foreach (fkVal; fkValues) {
                     if (fkVal.type != JSONType.null_) {
-                        refs ~= makeAnyRef(parentType, jsonToIdString(fkVal));
+                        refs ~= makeAnyRef(parentType, keyOf([fkVal]));
                     } else {
                         refs ~= AnyRef.init;
                     }
@@ -395,7 +378,7 @@ class SQLiteSession : RelationalSession {
                 result ~= AnyRef.init;  // Invalid child ref -> null parent
             } else if (auto fkPtr = childRef.localId in fkByChildId) {
                 if ((*fkPtr).length > 0) {
-                    result ~= makeAnyRef(parentType, *fkPtr);
+                    result ~= makeAnyRef(parentType, keyOfTexts([*fkPtr]));
                 } else {
                     result ~= AnyRef.init;
                 }
@@ -404,17 +387,6 @@ class SQLiteSession : RelationalSession {
             }
         }
         return resolve(result);
-    }
-
-    /// Convert JSON value to ID string (handles integers and strings)
-    private static string jsonToIdString(JSONValue val) {
-        if (val.type == JSONType.integer) {
-            return val.integer.to!string;
-        } else if (val.type == JSONType.string) {
-            return val.str;
-        } else {
-            return "";
-        }
     }
 
 

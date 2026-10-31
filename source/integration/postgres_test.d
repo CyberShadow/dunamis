@@ -127,6 +127,9 @@ static this() {
         &testOnlyIfRootCollection);
     registerTest("Naive-path fetches by string keys", "postgres",
         &testNaiveFetchesByStringKeys);
+    import integration.postgres_keys : testKeysNeedingQuotes;
+    registerTest("Keys needing quotes: rows, parents and children", "postgres",
+        &testKeysNeedingQuotes);
     import integration.postgres_batching : testStatementCountsOfComputedFields;
     registerTest("Statement counts of computed fields do not depend on the data", "postgres",
         &testStatementCountsOfComputedFields);

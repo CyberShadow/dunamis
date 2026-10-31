@@ -12,6 +12,7 @@ import ae.net.db.mysql;
 import ae.utils.promise;
 
 import dunamis.core.types : AnyRef, makeAnyRef;
+import dunamis.relational.keys : keyOf, keyOfTexts, keyValues, singleKeyValue;
 import dunamis.core.optimize : ExprOptimizer;
 import dunamis.core.expr : ExprBase;
 import dunamis.core.datasource : DataSource, DataSession, SetupMode;
@@ -87,7 +88,7 @@ class MySQLSession : RelationalSession {
         // Substitute IDs if needed
         if (root.filter == FilterType.byId || root.filter == FilterType.byIds) {
             auto idValues = root.refs.map!(r => r.localId).array;
-            sql = sql.replace("{{IDS}}", idValues.map!(id => mysqlDialect().escapeSqlString(id)).join(","));
+            sql = sql.replace("{{IDS}}", idValues.map!(id => mysqlDialect().escapeSqlString(singleKeyValue(id))).join(","));
         } else {
             // No filter - remove the placeholder
             sql = sql.replace("{{IDS}}", "");
@@ -139,18 +140,17 @@ class MySQLSession : RelationalSession {
     /// Generate SQL to fetch a column value, keyed by PK columns.
     private string buildFetchColumnSQL(string table, string column, string[] validIds) {
         import std.format : format;
-        import dunamis.core.types : decodeCompositeKey;
         auto pkColumns = getPkColumnsForTable(table);
 
         if (pkColumns.length == 1) {
             return format("SELECT %s, %s FROM %s WHERE %s IN (%s)",
                 pkColumns[0], column, table, pkColumns[0],
-                validIds.map!(id => mysqlDialect().escapeSqlString(id)).join(","));
+                validIds.map!(id => mysqlDialect().escapeSqlString(singleKeyValue(id))).join(","));
         } else {
             auto dialect = mysqlDialect();
             string[] conditions;
             foreach (id; validIds) {
-                auto parts = decodeCompositeKey(id);
+                auto parts = keyValues(id);
                 string[] eqs;
                 foreach (i, col; pkColumns) {
                     eqs ~= format("%s = %s", col, dialect.escapeSqlString(i < parts.length ? parts[i] : ""));
@@ -162,18 +162,13 @@ class MySQLSession : RelationalSession {
         }
     }
 
-    /// Build composite key from a row result (PK columns come first).
-    private string buildKeyFromRow(MySqlConnection.Row row, size_t pkCount) {
-        import dunamis.core.types : encodeCompositeKey;
-        if (pkCount == 1) {
-            return row.column!string(0);
-        } else {
-            string[] parts;
-            foreach (i; 0 .. pkCount) {
-                parts ~= row.column!string(cast(int) i);
-            }
-            return encodeCompositeKey(parts);
-        }
+    /// The key of a row of a result (its key columns come first, see
+    /// `dunamis.relational.keys`).
+    private static string buildKeyFromRow(MySqlConnection.Row row, size_t pkCount) {
+        auto parts = new string[pkCount];
+        foreach (i; 0 .. pkCount)
+            parts[i] = row.column!string(cast(int) i);
+        return keyOfTexts(parts);
     }
 
     override Promise!(string[]) fetchColumnString(string table, string column, AnyRef[] refs) {
@@ -247,24 +242,13 @@ class MySQLSession : RelationalSession {
     }
 
     override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns, string[] orderBy = null) {
-        import dunamis.core.types : encodeCompositeKey;
-
         auto sql = "SELECT " ~ pkColumns.join(", ") ~ " FROM " ~ table;
         if (orderBy.length)
             sql ~= " ORDER BY " ~ orderBy.join(", ");
 
         auto numPkCols = pkColumns.length;
         return _conn.query(sql).array().then((MySqlConnection.Row[] rows) {
-            return rows.map!((r) {
-                if (numPkCols == 1) {
-                    return r.column!string(0);
-                }
-                string[] parts;
-                foreach (i; 0 .. numPkCols) {
-                    parts ~= r.column!string(cast(int) i);
-                }
-                return encodeCompositeKey(parts);
-            }).array;
+            return rows.map!(r => buildKeyFromRow(r, numPkCols)).array;
         });
     }
 
@@ -296,7 +280,7 @@ class MySQLSession : RelationalSession {
         auto childPkColumns = getPkColumnsForTable(childTable);
         auto childPkCount = childPkColumns.length;
         auto sql = "SELECT " ~ childPkColumns.join(", ") ~ ", " ~ fk ~ " FROM " ~ childTable ~
-                   " WHERE " ~ fk ~ " IN (" ~ validIds.map!(id => mysqlDialect().escapeSqlString(id)).join(",") ~ ")";
+                   " WHERE " ~ fk ~ " IN (" ~ validIds.map!(id => mysqlDialect().escapeSqlString(singleKeyValue(id))).join(",") ~ ")";
         if (orderBy.length)
             sql ~= " ORDER BY " ~ orderBy.join(", ");
 
@@ -305,7 +289,7 @@ class MySQLSession : RelationalSession {
             AnyRef[][string] childrenByParent;
             foreach (row; rows) {
                 auto childId = buildKeyFromRow(row, childPkCount);
-                auto parentId = row.column!string(cast(int) childPkCount);
+                auto parentId = keyOfTexts([row.column!string(cast(int) childPkCount)]);
                 childrenByParent[parentId] ~= makeAnyRef(childType, childId);
             }
             // Return in parent ref order (invalid refs get empty array)
@@ -327,7 +311,7 @@ class MySQLSession : RelationalSession {
                 refs.reserve(fkValues.length);
                 foreach (fkVal; fkValues) {
                     if (fkVal.type != JSONType.null_) {
-                        refs ~= makeAnyRef(parentType, jsonToIdString(fkVal));
+                        refs ~= makeAnyRef(parentType, keyOf([fkVal]));
                     } else {
                         refs ~= AnyRef.init;
                     }
@@ -373,7 +357,7 @@ class MySQLSession : RelationalSession {
                 } else {
                     auto fkVal = fkValues.get(r.localId, "");
                     if (fkVal.length > 0) {
-                        result ~= makeAnyRef(parentType, fkVal);
+                        result ~= makeAnyRef(parentType, keyOfTexts([fkVal]));
                     } else {
                         result ~= AnyRef.init;
                     }
@@ -381,17 +365,6 @@ class MySQLSession : RelationalSession {
             }
             return result;
         });
-    }
-
-    /// Convert JSON value to ID string (handles integers and strings)
-    private static string jsonToIdString(JSONValue val) {
-        if (val.type == JSONType.integer) {
-            return val.integer.to!string;
-        } else if (val.type == JSONType.string) {
-            return val.str;
-        } else {
-            return "";
-        }
     }
 
     override Promise!(JSONValue[]) fetchColumnJson(string table, string column, AnyRef[] refs) {

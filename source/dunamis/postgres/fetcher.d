@@ -18,6 +18,7 @@ import dunamis.core.optimize : ExprOptimizer;
 import dunamis.core.expr : ExprBase;
 import dunamis.core.datasource : DataSource, DataSession, SetupMode;
 import dunamis.relational.eval_context;
+import dunamis.relational.keys : keyOf, keyOfTexts, keyValues, singleKeyValue;
 import dunamis.relational.query_node;
 import dunamis.relational.sql_optimizer;
 import dunamis.postgres.dialect : postgresDialect;
@@ -483,7 +484,7 @@ class PostgresSession : RelationalSession {
         // We need to pass the IDs as a PostgreSQL array
         string[] idValues;
         if (root.filter == FilterType.byId || root.filter == FilterType.byIds) {
-            idValues = root.refs.map!(r => r.localId).array;
+            idValues = root.refs.map!(r => singleKeyValue(r.localId)).array;
         }
 
         if (idValues.length > 0) {
@@ -529,11 +530,11 @@ class PostgresSession : RelationalSession {
         return ids;
     }
 
-    /// The keys `ids` as a list of SQL string literals (which compare with
-    /// columns of any key type).
+    /// The values of the single-column keys `ids` as a list of SQL string
+    /// literals (which compare with columns of any key type).
     private static string sqlLiterals(string[] ids) {
         auto dialect = postgresDialect();
-        return ids.map!(id => dialect.escapeSqlString(id)).join(",");
+        return ids.map!(id => dialect.escapeSqlString(singleKeyValue(id))).join(",");
     }
 
     /// The keys `ids` as a PostgreSQL array literal (of quoted elements).
@@ -545,7 +546,6 @@ class PostgresSession : RelationalSession {
     /// Generate SQL to fetch a column value, keyed by PK columns.
     private string buildFetchColumnSQL(string table, string column, string[] validIds) {
         import std.format : format;
-        import dunamis.core.types : decodeCompositeKey;
         auto pkColumns = getPkColumnsForTable(table);
 
         if (pkColumns.length == 1) {
@@ -555,7 +555,7 @@ class PostgresSession : RelationalSession {
             auto dialect = postgresDialect();
             string[] conditions;
             foreach (id; validIds) {
-                auto parts = decodeCompositeKey(id);
+                auto parts = keyValues(id);
                 string[] eqs;
                 foreach (i, col; pkColumns) {
                     eqs ~= format("%s = %s", col, dialect.escapeSqlString(i < parts.length ? parts[i] : ""));
@@ -567,18 +567,13 @@ class PostgresSession : RelationalSession {
         }
     }
 
-    /// Build composite key from a row result (PK columns come first).
-    private string buildKeyFromRow(PgSqlConnection.Row row, size_t pkCount) {
-        import dunamis.core.types : encodeCompositeKey;
-        if (pkCount == 1) {
-            return row.column!string(0);
-        } else {
-            string[] parts;
-            foreach (i; 0 .. pkCount) {
-                parts ~= row.column!string(cast(int) i);
-            }
-            return encodeCompositeKey(parts);
-        }
+    /// The key of a row of a result (its key columns come first, see
+    /// `dunamis.relational.keys`).
+    private static string buildKeyFromRow(PgSqlConnection.Row row, size_t pkCount) {
+        auto parts = new string[pkCount];
+        foreach (i; 0 .. pkCount)
+            parts[i] = row.column!string(cast(int) i);
+        return keyOfTexts(parts);
     }
 
     override Promise!(string[]) fetchColumnString(string table, string column, AnyRef[] refs) {
@@ -642,24 +637,13 @@ class PostgresSession : RelationalSession {
     }
 
     override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns, string[] orderBy = null) {
-        import dunamis.core.types : encodeCompositeKey;
-
         auto sql = "SELECT " ~ pkColumns.join(", ") ~ " FROM " ~ table;
         if (orderBy.length)
             sql ~= " ORDER BY " ~ orderBy.join(", ");
 
         auto numPkCols = pkColumns.length;
         return run(sql).then((PgSqlConnection.Row[] rows) {
-            return rows.map!((r) {
-                if (numPkCols == 1) {
-                    return r.column!string(0);
-                }
-                string[] parts;
-                foreach (i; 0 .. numPkCols) {
-                    parts ~= r.column!string(cast(int) i);
-                }
-                return encodeCompositeKey(parts);
-            }).array;
+            return rows.map!(r => buildKeyFromRow(r, numPkCols)).array;
         });
     }
 
@@ -695,7 +679,7 @@ class PostgresSession : RelationalSession {
             AnyRef[][string] childrenByParent;
             foreach (row; rows) {
                 auto childId = buildKeyFromRow(row, childPkCount);
-                auto parentId = row.column!string(cast(int) childPkCount);
+                auto parentId = keyOfTexts([row.column!string(cast(int) childPkCount)]);
                 childrenByParent[parentId] ~= makeAnyRef(childType, childId);
             }
             // Return in parent ref order (invalid refs get empty array)
@@ -717,7 +701,7 @@ class PostgresSession : RelationalSession {
                 refs.reserve(fkValues.length);
                 foreach (fkVal; fkValues) {
                     if (fkVal.type != JSONType.null_) {
-                        refs ~= makeAnyRef(parentType, jsonToIdString(fkVal));
+                        refs ~= makeAnyRef(parentType, keyOf([fkVal]));
                     } else {
                         refs ~= AnyRef.init;
                     }
@@ -742,41 +726,20 @@ class PostgresSession : RelationalSession {
         return run(sql).then((PgSqlConnection.Row[] rows) {
             import std.typecons : Nullable;
             // Build lookup map
-            string[string] fkValues;
+            // (The parents' refs; a NULL FK, none)
+            AnyRef[string] parents;
             foreach (row; rows) {
                 auto key = buildKeyFromRow(row, pkCount);
-                // FK column may be NULL
                 auto fkVal = row.column!(Nullable!string)(cast(int) pkCount);
-                fkValues[key] = fkVal.isNull ? "" : fkVal.get;
+                parents[key] = fkVal.isNull ? AnyRef.init : makeAnyRef(parentType, keyOfTexts([fkVal.get]));
             }
             // Return in ref order (invalid refs get AnyRef.init)
             AnyRef[] result;
             result.reserve(childRefs.length);
-            foreach (r; childRefs) {
-                if (!r.isValid || r.localId.length == 0) {
-                    result ~= AnyRef.init;
-                } else {
-                    auto fkVal = fkValues.get(r.localId, "");
-                    if (fkVal.length > 0) {
-                        result ~= makeAnyRef(parentType, fkVal);
-                    } else {
-                        result ~= AnyRef.init;
-                    }
-                }
-            }
+            foreach (r; childRefs)
+                result ~= r.isValid && r.localId.length > 0 ? parents.get(r.localId, AnyRef.init) : AnyRef.init;
             return result;
         });
-    }
-
-    /// Convert JSON value to ID string (handles integers and strings)
-    private static string jsonToIdString(JSONValue val) {
-        if (val.type == JSONType.integer) {
-            return val.integer.to!string;
-        } else if (val.type == JSONType.string) {
-            return val.str;
-        } else {
-            return "";
-        }
     }
 
     override Promise!(JSONValue[]) fetchColumnJson(string table, string column, AnyRef[] refs) {

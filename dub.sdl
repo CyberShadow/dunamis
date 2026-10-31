@@ -37,7 +37,7 @@ configuration "postgres-integration" {
     targetType "executable"
     mainSourceFile "source/integration/postgres_test.d"
     sourceFiles "source/integration/test_framework.d" "source/integration/tests.d" "source/integration/schema.d" "source/integration/test_runner.d"
-    sourceFiles "source/integration/postgres_batching.d"
+    sourceFiles "source/integration/postgres_batching.d" "source/integration/postgres_keys.d"
     debugVersions "ASOCKETS_DEBUG_IDLE"
 }
 
