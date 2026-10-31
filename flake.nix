@@ -120,8 +120,15 @@
               # Create test database
               createdb -h "$TMPDIR" -U postgres "$PGDATABASE"
 
-              # Run tests (schema setup, seeding, and tests all happen in D)
-              ${postgresTestBin}/bin/postgres_test
+              # Run tests (schema setup, seeding, and tests all happen in D).
+              # A promise whose rejection nobody handled is reported (by ae's
+              # leak check, in debug builds) when the program ends: an error.
+              ${postgresTestBin}/bin/postgres_test 2>&1 | tee "$TMPDIR/output"
+              test "''${PIPESTATUS[0]}" -eq 0
+              if grep -q '^Leaked rejected' "$TMPDIR/output"; then
+                echo 'Rejected promises were leaked (see above)' >&2
+                exit 1
+              fi
 
               # Cleanup (use immediate mode for faster shutdown in CI)
               pg_ctl -D "$PGDATA" stop -m immediate -t 5

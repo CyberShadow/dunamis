@@ -242,11 +242,20 @@ class PostgresSession : RelationalSession {
     private Promise!(PgSqlConnection.Row[]) bracketed(PgSqlConnection conn, PgSqlConnection.Result statement) {
         // (A statement is sent when its rows are requested: here, the three
         // one after the other.)
-        auto applied = conn.query(_applySettings).array();
-        auto rows = statement.array();
-        auto restored = conn.query(_restoreSettings).array();
-        return applied.then((PgSqlConnection.Row[] _) => rows)
-            .then((PgSqlConnection.Row[] result) => restored.then((PgSqlConnection.Row[] _) => result));
+        // The result is the statement's rows, or the first error (in that
+        // order). Each one's outcome is awaited, so that none's error goes
+        // unhandled when an earlier one fails (e.g. once one has failed, the
+        // others fail too, the transaction being aborted).
+        alias Rows = PgSqlConnection.Row[];
+        auto applied = conn.query(_applySettings).array().toResult();
+        auto rows = statement.array().toResult();
+        auto restored = conn.query(_restoreSettings).array().toResult();
+        return applied.then((Result!Rows a) => rows.then((Result!Rows r) => restored.then((Result!Rows s) {
+            a.unwrap();
+            auto result = r.unwrap();
+            s.unwrap();
+            return result;
+        })));
     }
 
     /// Create with a connection factory. The factory is called in setup().
