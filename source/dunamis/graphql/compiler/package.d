@@ -2476,6 +2476,54 @@ unittest {
     assert(users[0]["fullName"].str == "Alice Smith");
 }
 
+// The objects of a response have their keys in the order of their selection
+// sets' fields (also through fragments, aliases and repeated fields), and
+// introspection's too (they are ordered JSON objects)
+unittest {
+    import std.json;
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core;
+    import dunamis.relational.schema;
+    import dunamis.relational.demo;
+
+    static MockDB!() db;
+
+    @DemoEntity!(db, "users")
+    static struct User {
+        mixin DemoId;
+        mixin Col!("firstName", string);
+        mixin Col!("lastName", string);
+    }
+
+    static struct Query {
+        mixin Table!(User, "users");
+    }
+
+    db = new MockDB!();
+    db.setTableData("users", `[{"id": 1, "first_name": "Alice", "last_name": "Smith"}]`);
+
+    auto query = compileTestQuery!Query(`
+        query {
+            users {
+                zLast: lastName
+                ...Names
+                ... on User { id }
+                zLast: lastName
+            }
+            __type(name: "User") { name kind }
+        }
+        fragment Names on User {
+            firstName
+            aFirst: firstName
+        }
+    `);
+
+    auto result = awaitSync(new Executor().execute(query));
+    assert(result.toString() ==
+        `{"users":[{"zLast":"Smith","firstName":"Alice","aFirst":"Alice","id":1}],` ~
+        `"__type":{"name":"User","kind":"OBJECT"}}`, result.toString());
+}
+
 // Circular fragment detection (throws)
 unittest {
     import dunamis.core;

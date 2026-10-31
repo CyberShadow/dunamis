@@ -173,7 +173,7 @@ unittest {
     assert(alice["maybeSpan"]["from"].integer == 1);
     assert(alice["maybeSpans"].array.length == 2, result.toString());
     assert(alice["maybeSpans"][1]["from"].integer == 3 && alice["maybeSpans"][1]["last"].integer == 4, result.toString());
-    assert("to" !in alice["maybeSpans"][0].object, result.toString());
+    assert("to" !in alice["maybeSpans"][0], result.toString());
     assert(alice["window"]["label"].str == "Alice" && alice["window"]["span"]["to"].integer == 5, result.toString());
     assert(alice["windows"][0]["label"].str == "a" && alice["windows"][0]["span"]["from"].integer == 1, result.toString());
     assert(alice["visiblePosts"].array.length == 1, result.toString());

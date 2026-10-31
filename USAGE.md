@@ -1368,6 +1368,8 @@ Field-level errors produce partial results instead of failing the entire request
 
 Errors are collected on `EvalContext` during evaluation. The server includes both `data` and `errors` in the response when errors are present (HTTP status 200, per the GraphQL spec). Errors from query compilation or data source failures still produce full error responses with no data.
 
+**Key order:** the objects of a response have their keys in the order of their selection sets' fields (as the GraphQL spec requires; also through fragments). The object expressions build them as ordered `std.json` objects (`JSONValue.emptyOrderedObject`), which keep the order of their keys, so a server writes the response's `data` with `data.toString()`. (Objects that are not ordered, e.g. the JSON values of D structs, `toString` writes with their keys sorted.) Code reading them by key (`object["field"]`) gets the same values as from unordered objects, but each lookup in an ordered object builds an associative array of its keys, and their `object` property (by reference) throws (use `objectNoRef`); code reading many objects by key should convert them once (`JSONValue(object.objectNoRef)`).
+
 **Key properties:**
 
 - **Field-level granularity** — each field in a selection set is independently error-caught; one field's failure doesn't affect siblings

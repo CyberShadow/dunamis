@@ -539,7 +539,7 @@ private void checkRootPrimaryKeyFilter(PostgresSession session, EvalContext ctx,
         scope (exit) session.statementObserver = null;
         auto result = evaluateNested(compileQuery!BatchingTermSchema(query), ctx).await;
         string[] ends, expectedEnds;
-        assertTrue(result.type == JSONType.object && "terms" in result.object,
+        assertTrue(result.type == JSONType.object && "terms" in result,
             "Root primary key filter: " ~ query ~ ": " ~ result.toString());
         foreach (term; result["terms"].array)
             ends ~= term["validity"].type == JSONType.null_ ? "-" : term["validity"]["end"].str;

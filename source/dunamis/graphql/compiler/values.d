@@ -9,6 +9,7 @@ import std.traits;
 import std.typecons : Nullable;
 
 import graphql.ast;
+import graphql.tokenmodule : Token;
 
 import dunamis.core.types : isCustomScalar;
 import dunamis.graphql.schema : isInputType, isInternalMember;
@@ -123,6 +124,94 @@ auto iterateSelections(SelectionSet ss) @safe {
 
     collect(ss.sel);
     return result;
+}
+
+/// How `foreachSelectedField` expands the spreads of named fragments.
+struct FragmentSpreads {
+    /// Whether the spread of an unknown fragment, or of a fragment within
+    /// itself, is an error (when compiling); else it is skipped.
+    bool strict;
+
+    /// The fragments expanded so far in the walks of a whole document, if
+    /// each fragment is to be expanded once only (when validating: the
+    /// walks of nested selection sets share it); if null, fragments are
+    /// expanded wherever they are spread (but not within themselves).
+    bool[string]* once;
+}
+
+/// Visit the fields the selection set `ss` selects, in document order: its
+/// fields, and, recursively, those of the fragments it spreads (defined in
+/// `fragments`) and of its inline fragments, if `expands` accepts the
+/// fragment's type condition (whose value is null if it has none) and
+/// selection set (it may also handle them itself, and return false); if
+/// `expands` is null, every fragment is expanded.
+///
+/// With `variables` (not null), fields and fragments which @skip/@include
+/// exclude are not visited (as executing the selection set does); without,
+/// all of them are (as validating it does). `fragmentDirectives`, if not
+/// null, is called with the directives of every fragment spread and inline
+/// fragment met.
+///
+/// The one walk over selections and fragments: compiling, validating and
+/// introspecting queries visit selection sets through it.
+void foreachSelectedField(SelectionSet ss, FragmentMap fragments, const(JSONValue)* variables,
+    scope bool delegate(Token typeCondition, SelectionSet selection) expands,
+    scope void delegate(Field field) visit,
+    FragmentSpreads spreads = FragmentSpreads.init,
+    scope void delegate(Directives directives) fragmentDirectives = null)
+{
+    bool[string] expanding;  // (the named fragments being expanded)
+
+    bool included(Directives dirs) {
+        return variables is null || shouldIncludeField(dirs, *variables);
+    }
+
+    void walk(SelectionSet selection) {
+        foreach (sel; iterateSelections(selection)) {
+            if (sel.ruleSelection == SelectionEnum.Field) {
+                auto field = sel.field;
+                if (field is null || !included(field.dirs)) continue;
+                visit(field);
+            } else if (sel.ruleSelection == SelectionEnum.Spread) {
+                auto spread = sel.frag;
+                if (spread is null) continue;
+                if (fragmentDirectives !is null) fragmentDirectives(spread.dirs);
+                if (!included(spread.dirs)) continue;
+                auto name = spread.name.value;
+                if (name is null) continue;
+                if (spreads.once !is null) {
+                    if (name in *spreads.once) continue;
+                } else if (name in expanding) {
+                    if (spreads.strict)
+                        throw new CompilerException("Circular fragment reference: " ~ name);
+                    continue;
+                }
+                auto definition = name in fragments;
+                if (definition is null) {
+                    if (spreads.strict)
+                        throw new CompilerException("Unknown fragment: " ~ name);
+                    continue;
+                }
+                if (expands !is null && !expands((*definition).tc, (*definition).ss))
+                    continue;
+                if (spreads.once !is null)
+                    (*spreads.once)[name] = true;
+                expanding[name] = true;
+                walk((*definition).ss);
+                expanding.remove(name);
+            } else if (sel.ruleSelection == SelectionEnum.IFrag) {
+                auto ifrag = sel.ifrag;
+                if (ifrag is null) continue;
+                if (fragmentDirectives !is null) fragmentDirectives(ifrag.dirs);
+                if (!included(ifrag.dirs)) continue;
+                if (expands !is null && !expands(ifrag.tc, ifrag.ss))
+                    continue;
+                walk(ifrag.ss);
+            }
+        }
+    }
+
+    walk(ss);
 }
 
 /// Iterate over arguments in an Arguments node

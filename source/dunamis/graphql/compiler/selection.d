@@ -6,6 +6,7 @@ import std.traits;
 import std.typecons : Nullable;
 
 import graphql.ast;
+import graphql.tokenmodule : Token;
 
 import dunamis.core.expr : ExprBase, ExprResultType, Expr, isExpr, singleton,
     DynamicJsonObjectExpr, SequentialJsonObjectExpr, MapExpr,
@@ -18,96 +19,126 @@ import dunamis.graphql.introspection;
 import dunamis.graphql.schema;
 import dunamis.graphql.compiler.values;
 import dunamis.graphql.compiler.fields;
+import dunamis.graphql.compiler.shape;
 
 // ============================================================================
-// Root Subscription Compilation
+// Root Selection Sets
 // ============================================================================
 
 package(dunamis.graphql):
 
-/// Whether list items of type T are leaves (scalars, or lists of them),
-/// which are serialized as they are, without a selection set.
-private template isScalarElement(T) {
-    static if (is(T == Nullable!U, U))
-        enum isScalarElement = isScalarElement!U;
-    else static if (is(T == E[], E) && !isSomeString!T && !isCustomScalar!T)
-        enum isScalarElement = isScalarElement!E;
-    else
-        enum isScalarElement = isCustomScalar!T || !is(T == struct) || isGqlResult!T;
-}
+/// The fields of the root selection set `ss` of an operation on the root
+/// type Root, compiled (see compileRootField), with their output names and
+/// nullability (see fieldNullability). `operation` names the operation for
+/// errors ("query", "mutation", "subscription").
+private auto compileRootFields(Root, alias SchemaType)(SelectionSet ss, JSONValue variables,
+    FragmentMap fragments, string operation)
+{
+    static struct RootFields {
+        string[] names;
+        ExprBase[] exprs;
+        FieldNullability nullability;
+    }
 
-/// Whether items of type T are plain objects (non-null structs with a
-/// selection set), compiled by compileMapExpr.
-private template isObjectElement(T) {
-    enum isObjectElement = is(T == struct) && !is(T == Nullable!U, U) && !isScalarElement!T;
-}
+    if (iterateSelections(ss).length == 0)
+        throw new CompilerException(operation == "query" ? "Empty selection set" :
+            "Empty " ~ operation ~ " selection set");
 
-/// Whether a null item in a list of T makes the list null (null bubbling):
-/// T is non-null, and an object or a list which can itself become null.
-private template bubblesNullItems(T) {
-    static if (is(T == Nullable!U, U))
-        enum bubblesNullItems = false;
-    else static if (is(T == E[], E) && !isSomeString!T && !isCustomScalar!T)
-        enum bubblesNullItems = bubblesNullItems!E;
-    else
-        enum bubblesNullItems = is(T == struct) && !isCustomScalar!T && !isGqlResult!T;
+    RootFields result;
+    string[] schemaFieldNames;
+    processSelections!(getGraphQLTypeName!Root)(ss, variables, fragments, result.names, result.exprs,
+        (field) {
+            schemaFieldNames ~= getFieldName(field);
+            return compileRootField!(Root, SchemaType)(field, variables, fragments);
+        }
+    );
+    assert(schemaFieldNames.length == result.names.length);
+    result.nullability = fieldNullability!Root(schemaFieldNames);
+    return result;
 }
 
 /// Compile the root selection set for subscriptions.
 /// GraphQL spec requires exactly one root field for subscriptions.
 DynamicJsonObjectExpr compileRootSubscriptionSet(Subscription, alias SchemaType = Subscription)(SelectionSet ss, JSONValue variables, FragmentMap fragments) {
-    auto selections = iterateSelections(ss);
-
-    if (selections.length == 0) {
-        throw new CompilerException("Empty subscription selection set");
-    }
-
-    string[] fieldNames;
-    ExprBase[] fieldExprs;
-
-    processSelections!(getGraphQLTypeName!Subscription)(
-        selections, variables, fragments, fieldNames, fieldExprs,
-        (field) => compileRootField!(Subscription, SchemaType)(field, variables, fragments)
-    );
+    auto fields = compileRootFields!(Subscription, SchemaType)(ss, variables, fragments, "subscription");
 
     // GraphQL spec: subscriptions must have exactly one root field
-    if (fieldNames.length != 1) {
-        throw new CompilerException("Subscription operations must have exactly one root field, got " ~ fieldNames.length.to!string);
+    if (fields.names.length != 1) {
+        throw new CompilerException("Subscription operations must have exactly one root field, got " ~ fields.names.length.to!string);
     }
 
-    return new DynamicJsonObjectExpr(fieldNames, fieldExprs);
+    return new DynamicJsonObjectExpr(fields.names, fields.exprs);
 }
 
-// ============================================================================
-// Root Mutation Compilation
-// ============================================================================
-
-/// Compile the root selection set for mutations (sequential execution)
+/// Compile the root selection set for mutations (sequential execution).
+/// Null bubbling as for queries: a null in a non-null root field makes the
+/// whole result null.
 SequentialJsonObjectExpr compileRootMutationSet(Mutation, alias SchemaType = Mutation)(SelectionSet ss, JSONValue variables, FragmentMap fragments) {
-    auto selections = iterateSelections(ss);
+    auto fields = compileRootFields!(Mutation, SchemaType)(ss, variables, fragments, "mutation");
+    return new SequentialJsonObjectExpr(fields.names, fields.exprs, [],
+        fields.nullability.nonNull, fields.nullability.nonNullItems);
+}
 
-    if (selections.length == 0) {
-        throw new CompilerException("Empty mutation selection set");
+/// Compile the root selection set of a query (fields from the Query type).
+/// Null bubbling: a null in a non-null root field makes the whole result
+/// (the response's `data`) null.
+DynamicJsonObjectExpr compileRootSelectionSet(Query, alias IntrospectionSource = Query)(SelectionSet ss, JSONValue variables, FragmentMap fragments) {
+    auto fields = compileRootFields!(Query, IntrospectionSource)(ss, variables, fragments, "query");
+    return buildDynamicJsonObject(fields.names, fields.exprs, [],
+        fields.nullability.nonNull, fields.nullability.nonNullItems);
+}
+
+/// The selection set `ss` of the introspection JSON `data` (see
+/// applySelectionSet), applied when evaluated (for the root's batch of one):
+/// the objects of each request's response are its own.
+private final class IntrospectionSelectionExpr : Expr!JSONValue {
+    import ae.utils.promise : Promise, resolve;
+    import dunamis.core.eval : EvalContext;
+
+    private JSONValue _data;
+    private SelectionSet _ss;
+    private JSONValue _variables;
+    private FragmentMap _fragments;
+
+    this(JSONValue data, SelectionSet ss, JSONValue variables, FragmentMap fragments) {
+        _data = data;
+        _ss = ss;
+        _variables = variables;
+        _fragments = fragments;
     }
 
-    string[] fieldNames;
-    ExprBase[] fieldExprs;
-    string[] schemaFieldNames;
+    override ExprBase[] dependencies() { return []; }
+    override void replaceDependency(size_t, ExprBase) {}
 
-    processSelections!(getGraphQLTypeName!Mutation)(
-        selections, variables, fragments, fieldNames, fieldExprs,
-        (field) {
-            schemaFieldNames ~= getFieldName(field);
-            return compileRootField!(Mutation, SchemaType)(field, variables, fragments);
-        }
-    );
-    assert(schemaFieldNames.length == fieldNames.length);
+    override Promise!(JSONValue[]) eval(EvalContext ctx) {
+        return resolve([applySelectionSet(_data, _ss, _variables, _fragments)]);
+    }
+}
 
-    // Null bubbling as for queries: a null in a non-null root field makes the
-    // whole result null.
-    return new SequentialJsonObjectExpr(fieldNames, fieldExprs, [],
-        resolveNonNullFlags!Mutation(schemaFieldNames),
-        resolveNonNullItemFlags!Mutation(schemaFieldNames));
+/// The introspection JSON of the schema (or Query type) S (see
+/// buildIntrospectionJson), built once per thread: the values introspection
+/// meta-fields select from (which they do not modify).
+private JSONValue introspectionJsonOf(alias S)() {
+    static JSONValue cached;
+    static bool built;
+    if (!built) {
+        cached = buildIntrospectionJson!S();
+        built = true;
+    }
+    return cached;
+}
+
+/// The introspection JSON of each type of S, by name (see
+/// buildTypeLookup), built once per thread.
+private JSONValue[string] typeLookupOf(alias S)() {
+    static JSONValue[string] cached;
+    static bool built;
+    if (!built) {
+        foreach (typeJson; introspectionJsonOf!S()["types"].array)
+            cached[typeJson["name"].str] = typeJson;
+        built = true;
+    }
+    return cached;
 }
 
 /// Compile a single field of a root type (Query, Mutation or Subscription).
@@ -118,17 +149,14 @@ ExprBase compileRootField(Parent, alias IntrospectionSource = Parent)(Field fiel
     auto fieldName = getFieldName(field);
 
     // Introspection meta-fields
-    if (fieldName == "__schema") {
-        auto schemaJson = buildIntrospectionJson!IntrospectionSource();
-        auto result = applySelectionSet(schemaJson, field.ss, variables, fragments);
-        return wrapAsJsonExpr(singleton(result));
-    }
+    if (fieldName == "__schema")
+        return new IntrospectionSelectionExpr(introspectionJsonOf!IntrospectionSource(), field.ss, variables,
+            fragments);
     if (fieldName == "__type") {
         auto typeName = extractTypeNameArg(field.args, variables);
-        auto lookup = buildTypeLookup!IntrospectionSource();
-        if (auto typeJson = typeName in lookup) {
-            return wrapAsJsonExpr(singleton(applySelectionSet(*typeJson, field.ss, variables, fragments)));
-        }
+        auto lookup = typeLookupOf!IntrospectionSource();
+        if (auto typeJson = typeName in lookup)
+            return new IntrospectionSelectionExpr(*typeJson, field.ss, variables, fragments);
         return wrapAsJsonExpr(singleton(JSONValue(null)));
     }
 
@@ -218,88 +246,23 @@ bool typeConditionApplies(string condition, string typeName, const string[] abst
     return false;
 }
 
-/// Process a list of selections, handling Field, FragmentSpread, and InlineFragment.
-/// The processField delegate is called for each Field selection. Fragments
-/// apply whose type condition is the type `typeName` or one of the abstract
-/// types `abstractNames` it is a member of.
+/// Compile the fields selection set `ss` selects (see foreachSelectedField):
+/// processField compiles each, whose output name and compiled expression
+/// are appended to fieldNames and fieldExprs. Fragments apply whose type
+/// condition is the type `typeName` or one of the abstract types
+/// `abstractNames` it is a member of.
 void processSelections(string typeName, string[] abstractNames = null)(
-    Selection[] selections, JSONValue variables, FragmentMap fragments,
+    SelectionSet ss, JSONValue variables, FragmentMap fragments,
     ref string[] fieldNames, ref ExprBase[] fieldExprs,
-    ExprBase delegate(Field) processField,
-    bool[string] expanding = null
+    ExprBase delegate(Field) processField
 ) {
-    foreach (sel; selections) {
-        if (sel.ruleSelection == SelectionEnum.Field) {
-            auto field = sel.field;
-            if (!shouldIncludeField(field.dirs, variables)) continue;
+    foreachSelectedField(ss, fragments, &variables,
+        (Token typeCondition, SelectionSet _) => typeConditionApplies(typeCondition.value, typeName, abstractNames),
+        (Field field) {
             fieldNames ~= getOutputName(field);
             fieldExprs ~= processField(field);
-        } else if (sel.ruleSelection == SelectionEnum.Spread) {
-            auto spread = sel.frag;
-            if (!shouldIncludeField(spread.dirs, variables)) continue;
-            auto fragName = spread.name.value;
-            if (expanding !is null && fragName in expanding)
-                throw new CompilerException("Circular fragment reference: " ~ fragName);
-            auto fragDefPtr = fragName in fragments;
-            if (fragDefPtr is null)
-                throw new CompilerException("Unknown fragment: " ~ fragName);
-            auto fragDef = *fragDefPtr;
-            // Check type condition
-            if (!typeConditionApplies(fragDef.tc.value, typeName, abstractNames))
-                continue;
-            if (expanding is null)
-                expanding = [fragName: true];
-            else
-                expanding[fragName] = true;
-            processSelections!(typeName, abstractNames)(
-                iterateSelections(fragDef.ss), variables, fragments,
-                fieldNames, fieldExprs, processField, expanding
-            );
-            expanding.remove(fragName);
-        } else if (sel.ruleSelection == SelectionEnum.IFrag) {
-            auto ifrag = sel.ifrag;
-            if (!shouldIncludeField(ifrag.dirs, variables)) continue;
-            // Check type condition
-            if (!typeConditionApplies(ifrag.tc.value, typeName, abstractNames))
-                continue;
-            processSelections!(typeName, abstractNames)(
-                iterateSelections(ifrag.ss), variables, fragments,
-                fieldNames, fieldExprs, processField, expanding
-            );
-        }
-    }
-}
-
-// ============================================================================
-// Root Selection Set Compilation
-// ============================================================================
-
-/// Compile the root selection set (fields from Query type)
-DynamicJsonObjectExpr compileRootSelectionSet(Query, alias IntrospectionSource = Query)(SelectionSet ss, JSONValue variables, FragmentMap fragments) {
-    auto selections = iterateSelections(ss);
-
-    if (selections.length == 0) {
-        throw new CompilerException("Empty selection set");
-    }
-
-    string[] fieldNames;
-    ExprBase[] fieldExprs;
-    string[] schemaFieldNames;
-
-    processSelections!(getGraphQLTypeName!Query)(
-        selections, variables, fragments, fieldNames, fieldExprs,
-        (field) {
-            schemaFieldNames ~= getFieldName(field);
-            return compileRootField!(Query, IntrospectionSource)(field, variables, fragments);
-        }
-    );
-    assert(schemaFieldNames.length == fieldNames.length);
-
-    // Null bubbling: a null in a non-null root field makes the whole result
-    // (the response's `data`) null.
-    return buildDynamicJsonObject(fieldNames, fieldExprs, [],
-        resolveNonNullFlags!Query(schemaFieldNames),
-        resolveNonNullItemFlags!Query(schemaFieldNames));
+        },
+        FragmentSpreads(true));
 }
 
 // ============================================================================
@@ -322,7 +285,7 @@ MapExpr!(Entity, DynamicJsonObjectExpr) compileMapExpr(Entity, alias SchemaSourc
 /// Note: Explicit return type breaks circular template instantiation.
 Expr!(JSONValue[]) compileListItems(E, alias SchemaSource = void, Coll)(Coll collection, SelectionSet ss,
     JSONValue variables, FragmentMap fragments, JSONValue[] pathPrefix = []) {
-    static if (isObjectElement!E) {
+    static if (shapeOf!E == Shape.object) {
         return compileMapExpr!(E, SchemaSource)(collection, ss, variables, fragments, pathPrefix);
     } else {
         return map!(
@@ -364,19 +327,18 @@ private JSONValue strictListJson(JSONValue[] items) {
 /// Works with any struct type that has field methods.
 /// SchemaSource enables abstract type resolution for nested fields.
 DynamicJsonObjectExpr compileSelectionSetBody(T, alias SchemaSource = void)(Expr!T ref_, SelectionSet ss, JSONValue variables, FragmentMap fragments, JSONValue[] pathPrefix = []) {
-    auto selections = iterateSelections(ss);
-    if (selections.length == 0) {
+    if (iterateSelections(ss).length == 0) {
         throw new CompilerException("Empty selection set for " ~ T.stringof);
     }
 
     // Build field name/value pairs for jsonObject
-    return compileFieldsToJsonObject!(T, SchemaSource)(ref_, selections, variables, fragments, pathPrefix);
+    return compileFieldsToJsonObject!(T, SchemaSource)(ref_, ss, variables, fragments, pathPrefix);
 }
 
 /// Compile selected fields into a jsonObject call.
 /// Works with any struct type that has field methods.
 /// SchemaSource enables abstract type resolution for nested fields.
-DynamicJsonObjectExpr compileFieldsToJsonObject(T, alias SchemaSource = void)(Expr!T ref_, Selection[] selections, JSONValue variables, FragmentMap fragments, JSONValue[] pathPrefix = []) {
+DynamicJsonObjectExpr compileFieldsToJsonObject(T, alias SchemaSource = void)(Expr!T ref_, SelectionSet ss, JSONValue variables, FragmentMap fragments, JSONValue[] pathPrefix = []) {
     // Collect field expressions
     ExprBase[] fieldExprs;
     string[] fieldNames;
@@ -385,7 +347,7 @@ DynamicJsonObjectExpr compileFieldsToJsonObject(T, alias SchemaSource = void)(Ex
     string[] schemaFieldNames;
 
     processSelections!(getGraphQLTypeName!T, abstractTypeNamesIn!(T, SchemaSource))(
-        selections, variables, fragments, fieldNames, fieldExprs,
+        ss, variables, fragments, fieldNames, fieldExprs,
         (field) {
             schemaFieldNames ~= getFieldName(field);
             return compileFieldAccess!(T, SchemaSource)(ref_, field, variables, fragments, pathPrefix);
@@ -395,22 +357,36 @@ DynamicJsonObjectExpr compileFieldsToJsonObject(T, alias SchemaSource = void)(Ex
 
     // Determine non-null flags for null bubbling. Nullability is a property
     // of the schema field, so look it up by field name, not by alias.
-    bool[] nonNullFlags = resolveNonNullFlags!T(schemaFieldNames);
-    bool[] nonNullItemFlags = resolveNonNullItemFlags!T(schemaFieldNames);
+    auto nullability = fieldNullability!T(schemaFieldNames);
 
     // Build a dynamic JSON object using runtime construction, one per
     // object in ref_'s batch
-    return buildDynamicJsonObject(fieldNames, fieldExprs, pathPrefix, nonNullFlags, nonNullItemFlags, ref_);
+    return buildDynamicJsonObject(fieldNames, fieldExprs, pathPrefix, nullability.nonNull,
+        nullability.nonNullItems, ref_);
 }
 
-/// Determine which fields are non-nullable based on compile-time D type info.
-/// Uses the D return type directly (avoiding graphqlTypeName which may fail for
-/// internal types like ForeignKey).
-bool[] resolveNonNullFlags(T)(string[] fieldNames) {
-    bool[] flags = new bool[fieldNames.length];
+/// The nullability of fields of a type, for null bubbling (one flag per
+/// field, see fieldNullability).
+struct FieldNullability {
+    /// The field has a non-null type: a null in it makes its object null.
+    bool[] nonNull;
+    /// The field is a list of non-null objects ([T!], or lists of them): a
+    /// null item (e.g. from null bubbling) makes the list null.
+    bool[] nonNullItems;
+}
+
+/// The nullability of the fields of T named (in GraphQL) `fieldNames`,
+/// from their D result types (see isNonNullType, isNonNullItemListType;
+/// avoiding graphqlTypeName, which may fail for internal types like
+/// ForeignKey). Nullability is a property of the schema field: look it up by
+/// field name, not by alias.
+FieldNullability fieldNullability(T)(string[] fieldNames) {
+    FieldNullability result;
+    result.nonNull = new bool[fieldNames.length];
+    result.nonNullItems = new bool[fieldNames.length];
     foreach (i, name; fieldNames) {
         if (name == "__typename") {
-            flags[i] = true; // __typename is always String!
+            result.nonNull[i] = true; // __typename is always String!
             continue;
         }
         static foreach (member; getSchemaFields!T) {{
@@ -418,63 +394,13 @@ bool[] resolveNonNullFlags(T)(string[] fieldNames) {
             static if (!hasGqlHidden!memberSym) {
                 enum gqlName = getGqlName!(memberSym, member);
                 if (name == gqlName) {
-                    flags[i] = isNonNullResultType!(fieldResultType!(T, member));
+                    result.nonNull[i] = isNonNullType!(fieldResultType!(T, member));
+                    result.nonNullItems[i] = isNonNullItemListType!(fieldResultType!(T, member));
                 }
             }
         }}
     }
-    return flags;
-}
-
-/// Determine which fields are lists of non-null objects ([T!]), so that a
-/// null item (e.g. from null bubbling) can be propagated to the list.
-bool[] resolveNonNullItemFlags(T)(string[] fieldNames) {
-    bool[] flags = new bool[fieldNames.length];
-    foreach (i, name; fieldNames) {
-        static foreach (member; getSchemaFields!T) {{
-            alias memberSym = __traits(getMember, T, member);
-            static if (!hasGqlHidden!memberSym) {
-                enum gqlName = getGqlName!(memberSym, member);
-                if (name == gqlName) {
-                    flags[i] = isNonNullObjectListType!(fieldResultType!(T, member));
-                }
-            }
-        }}
-    }
-    return flags;
-}
-
-/// Check if a D type maps to a GraphQL list whose non-null items can become
-/// null through null bubbling: objects, or lists of them (see
-/// bubblesNullItems). Scalar items cannot, and array-valued scalars must not
-/// be inspected.
-private template isNonNullObjectListType(T) {
-    import std.traits : isSomeString;
-    import std.typecons : Nullable;
-    static if (isGqlResult!T) {
-        enum isNonNullObjectListType = isNonNullObjectListType!(typeof(T.init.value));
-    } else static if (is(T == Nullable!U, U)) {
-        enum isNonNullObjectListType = isNonNullObjectListType!U;
-    } else static if (is(T == E[], E) && !isSomeString!T && !isCustomScalar!T) {
-        enum isNonNullObjectListType = bubblesNullItems!E;
-    } else {
-        enum isNonNullObjectListType = false;
-    }
-}
-
-/// Check if a D type maps to a non-nullable GraphQL type.
-/// Nullable!T and pointer types are nullable; GqlResult!T uses inner type's nullability.
-private template isNonNullResultType(T) {
-    import std.typecons : Nullable;
-    static if (is(T == Nullable!U, U)) {
-        enum isNonNullResultType = false;
-    } else static if (is(T == U*, U)) {
-        enum isNonNullResultType = false;
-    } else static if (isGqlResult!T) {
-        enum isNonNullResultType = isNonNullResultType!(typeof(T.init.value));
-    } else {
-        enum isNonNullResultType = true;
-    }
+    return result;
 }
 
 /// Build a JSON object from runtime field names and expressions
@@ -504,7 +430,7 @@ ExprBase compileFieldResult(ResultExpr, alias SchemaSource = void)(ResultExpr re
             }
             return compileAbstractArrayResult!(E, SchemaSource)(resultExpr, ss, variables, fragments, pathPrefix);
         }
-        else static if (isScalarElement!E) {
+        else static if (isLeafElement!E) {
             // Array of scalars (custom or primitive) or GqlResult elements - wrap to JSON
             return wrapAsJsonExpr(resultExpr);
         } else {
@@ -525,7 +451,7 @@ ExprBase compileFieldResult(ResultExpr, alias SchemaSource = void)(ResultExpr re
     }
     // Nullable lists of objects - like nullable objects, with the selection
     // set compiled for each element of the unwrapped list
-    else static if (is(ResultType == Nullable!(E[]), E) && !isScalarElement!E && !isAbstractType!E) {
+    else static if (is(ResultType == Nullable!(E[]), E) && !isLeafElement!E && !isAbstractType!E) {
         if (ss is null) {
             throw new CompilerException(
                 "Field returning [" ~ E.stringof ~ "] requires a selection set");

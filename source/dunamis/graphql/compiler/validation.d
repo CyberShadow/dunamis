@@ -17,20 +17,11 @@ import dunamis.core.discovery : isObjectType, extractObjectFromType, getSchemaFi
 import dunamis.graphql.schema;
 import dunamis.graphql.compiler.values;
 import dunamis.graphql.compiler.selection : abstractTypeNamesIn, typeConditionApplies;
+import dunamis.graphql.compiler.shape : isLeafElement;
 
 // ============================================================================
 // Types
 // ============================================================================
-
-private template isScalarElement(T) {
-    import std.traits : isSomeString;
-    static if (is(T == Nullable!U, U))
-        enum isScalarElement = isScalarElement!U;
-    else static if (is(T == E[], E) && !isSomeString!T && !isCustomScalar!T)
-        enum isScalarElement = isScalarElement!E;
-    else
-        enum isScalarElement = isCustomScalar!T || !is(T == struct) || isGqlResult!T;
-}
 
 /// A validation error with source location information.
 struct ValidationError {
@@ -276,33 +267,16 @@ private void collectVariableReferences(
 ) {
     if (ss is null) return;
 
-    foreach (sel; iterateSelections(ss)) {
-        if (sel.ruleSelection == SelectionEnum.Field) {
-            auto field = sel.field;
-            if (field is null) continue;
+    // (Each fragment once; all of them, whatever their type condition)
+    foreachSelectedField(ss, fragments, null, null,
+        (Field field) {
             collectVariableRefsFromArgs(field.args, usedVars);
             collectVariableRefsFromDirectives(field.dirs, usedVars);
             // Recurse into nested selection set
             collectVariableReferences(field.ss, fragments, usedVars, visited);
-        } else if (sel.ruleSelection == SelectionEnum.Spread) {
-            auto spread = sel.frag;
-            if (spread is null) continue;
-            collectVariableRefsFromDirectives(spread.dirs, usedVars);
-            auto fragName = spread.name.value;
-            if (fragName !is null && fragName !in visited) {
-                auto fragDefPtr = fragName in fragments;
-                if (fragDefPtr !is null) {
-                    visited[fragName] = true;
-                    collectVariableReferences((*fragDefPtr).ss, fragments, usedVars, visited);
-                }
-            }
-        } else if (sel.ruleSelection == SelectionEnum.IFrag) {
-            auto ifrag = sel.ifrag;
-            if (ifrag is null) continue;
-            collectVariableRefsFromDirectives(ifrag.dirs, usedVars);
-            collectVariableReferences(ifrag.ss, fragments, usedVars, visited);
-        }
-    }
+        },
+        FragmentSpreads(false, &visited),
+        (Directives dirs) => collectVariableRefsFromDirectives(dirs, usedVars));
 }
 
 /// Collect variable references from arguments.
@@ -410,35 +384,13 @@ private ValidationError[] validateRootSelectionSet(Query, alias SchemaSource)(
     SelectionSet ss, FragmentMap fragments, bool[string] visited, JSONValue variables
 ) {
     ValidationError[] errors;
-    auto selections = iterateSelections(ss);
-
-    foreach (sel; selections) {
-        if (sel.ruleSelection == SelectionEnum.Field) {
-            auto field = sel.field;
-            if (field is null) continue;
+    foreachSelectedField(ss, fragments, null,
+        (Token typeCondition, SelectionSet _) =>
+            typeCondition.value is null || typeCondition.value == getGraphQLTypeName!Query,
+        (Field field) {
             errors ~= validateRootField!(Query, SchemaSource)(field, fragments, visited, variables);
-        } else if (sel.ruleSelection == SelectionEnum.Spread) {
-            auto spread = sel.frag;
-            if (spread is null) continue;
-            auto fragName = spread.name.value;
-            if (fragName is null || fragName in visited) continue;
-            auto fragDefPtr = fragName in fragments;
-            if (fragDefPtr !is null) {
-                auto fragDef = *fragDefPtr;
-                if (fragDef.tc.value is null || fragDef.tc.value == getGraphQLTypeName!Query) {
-                    visited[fragName] = true;
-                    errors ~= validateRootSelectionSet!(Query, SchemaSource)(fragDef.ss, fragments, visited, variables);
-                }
-            }
-        } else if (sel.ruleSelection == SelectionEnum.IFrag) {
-            auto ifrag = sel.ifrag;
-            if (ifrag is null) continue;
-            if (ifrag.tc.value is null || ifrag.tc.value == getGraphQLTypeName!Query) {
-                errors ~= validateRootSelectionSet!(Query, SchemaSource)(ifrag.ss, fragments, visited, variables);
-            }
-        }
-    }
-
+        },
+        FragmentSpreads(false, &visited));
     return errors;
 }
 
@@ -460,35 +412,13 @@ private ValidationError[] validateRootField(Parent, alias SchemaSource)(Field fi
 private ValidationError[] validateSelectionSet(T, alias SchemaSource)(SelectionSet ss, FragmentMap fragments, bool[string] visited, JSONValue variables) {
     ValidationError[] errors;
     if (ss is null) return errors;
-    auto selections = iterateSelections(ss);
-
-    foreach (sel; selections) {
-        if (sel.ruleSelection == SelectionEnum.Field) {
-            auto field = sel.field;
-            if (field is null) continue;
+    foreachSelectedField(ss, fragments, null,
+        (Token typeCondition, SelectionSet _) =>
+            typeConditionApplies(typeCondition.value, getGraphQLTypeName!T, abstractTypeNamesIn!(T, SchemaSource)),
+        (Field field) {
             errors ~= validateFieldAccess!(T, SchemaSource)(field, fragments, visited, variables);
-        } else if (sel.ruleSelection == SelectionEnum.Spread) {
-            auto spread = sel.frag;
-            if (spread is null) continue;
-            auto fragName = spread.name.value;
-            if (fragName is null || fragName in visited) continue;
-            auto fragDefPtr = fragName in fragments;
-            if (fragDefPtr !is null) {
-                auto fragDef = *fragDefPtr;
-                if (typeConditionApplies(fragDef.tc.value, getGraphQLTypeName!T, abstractTypeNamesIn!(T, SchemaSource))) {
-                    visited[fragName] = true;
-                    errors ~= validateSelectionSet!(T, SchemaSource)(fragDef.ss, fragments, visited, variables);
-                }
-            }
-        } else if (sel.ruleSelection == SelectionEnum.IFrag) {
-            auto ifrag = sel.ifrag;
-            if (ifrag is null) continue;
-            if (typeConditionApplies(ifrag.tc.value, getGraphQLTypeName!T, abstractTypeNamesIn!(T, SchemaSource))) {
-                errors ~= validateSelectionSet!(T, SchemaSource)(ifrag.ss, fragments, visited, variables);
-            }
-        }
-    }
-
+        },
+        FragmentSpreads(false, &visited));
     return errors;
 }
 
@@ -665,7 +595,7 @@ private ValidationError[] validateFieldResultType(ResultType, alias SchemaSource
             }
             return validateAbstractSelectionSet!(E, SchemaSource)(field.ss, fragments, visited, variables);
         }
-        else static if (isScalarElement!E) {
+        else static if (isLeafElement!E) {
             // Array of scalars — no selection set allowed
             if (field.ss !is null) {
                 return [fieldError(
@@ -732,15 +662,25 @@ private ValidationError[] validateAbstractSelectionSet(AbstractT, alias SchemaSo
     enum abstractName = getGraphQLTypeName!AbstractT;
     enum bool isInterface = getSchemaFields!AbstractT.length > 0;
 
-    foreach (sel; iterateSelections(ss)) {
-        if (sel.ruleSelection == SelectionEnum.Field) {
-            auto field = sel.field;
-            if (field is null) continue;
+    // A fragment without a type condition selects from the abstract type
+    // itself (as bare fields do: only an interface's); one with a type
+    // condition is validated against that member type, as a selection set
+    // of its own (not marking a named fragment validated).
+    bool expands(Token typeCondition, SelectionSet selection) {
+        if (typeCondition.value is null)
+            return isInterface;
+        errors ~= validateTypeCondition!(AbstractT, SchemaSource, Members)(
+            typeCondition.value, typeCondition.line, typeCondition.column, selection, fragments, visited, variables);
+        return false;
+    }
+
+    foreachSelectedField(ss, fragments, null, &expands,
+        (Field field) {
             auto fieldName = getFieldName(field);
-            if (fieldName is null) continue;
+            if (fieldName is null) return;
 
             // __typename is always valid on abstract types
-            if (fieldName == "__typename") continue;
+            if (fieldName == "__typename") return;
 
             // For interfaces, bare fields must exist on the interface type
             static if (isInterface) {
@@ -753,44 +693,8 @@ private ValidationError[] validateAbstractSelectionSet(AbstractT, alias SchemaSo
                     field
                 );
             }
-        } else if (sel.ruleSelection == SelectionEnum.Spread) {
-            auto spread = sel.frag;
-            if (spread is null) continue;
-            auto fragName = spread.name.value;
-            if (fragName is null || fragName in visited) continue;
-            auto fragDefPtr = fragName in fragments;
-            if (fragDefPtr is null) continue;
-            auto fragDef = *fragDefPtr;
-
-            // Fragment without type condition on abstract type — same as bare fields
-            if (fragDef.tc.value is null) {
-                static if (isInterface) {
-                    visited[fragName] = true;
-                    errors ~= validateAbstractSelectionSet!(AbstractT, SchemaSource)(fragDef.ss, fragments, visited, variables);
-                }
-                continue;
-            }
-
-            // Validate type condition against member types
-            errors ~= validateTypeCondition!(AbstractT, SchemaSource, Members)(
-                fragDef.tc.value, fragDef.tc.line, fragDef.tc.column, fragDef.ss, fragments, visited, variables);
-        } else if (sel.ruleSelection == SelectionEnum.IFrag) {
-            auto ifrag = sel.ifrag;
-            if (ifrag is null) continue;
-
-            // Inline fragment without type condition — same as bare fields
-            if (ifrag.tc.value is null) {
-                static if (isInterface) {
-                    errors ~= validateAbstractSelectionSet!(AbstractT, SchemaSource)(ifrag.ss, fragments, visited, variables);
-                }
-                continue;
-            }
-
-            // Validate type condition against member types
-            errors ~= validateTypeCondition!(AbstractT, SchemaSource, Members)(
-                ifrag.tc.value, ifrag.tc.line, ifrag.tc.column, ifrag.ss, fragments, visited, variables);
-        }
-    }
+        },
+        FragmentSpreads(false, &visited));
 
     return errors;
 }

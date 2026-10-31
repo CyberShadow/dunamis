@@ -494,7 +494,8 @@ JSONValue[string] buildTypeLookup(alias SchemaOrQuery)() {
 // ----------------------------------------------------------------------------
 
 /// Apply a GraphQL selection set to an introspection JSON value,
-/// extracting only the requested fields.
+/// extracting only the requested fields. The objects selected are ordered
+/// JSON objects, their keys in the order of their fields.
 JSONValue applySelectionSet(JSONValue data, SelectionSet ss, JSONValue variables, FragmentMap fragments = null) {
     import graphql.ast : SelectionEnum;
 
@@ -510,10 +511,9 @@ JSONValue applySelectionSet(JSONValue data, SelectionSet ss, JSONValue variables
         return JSONValue(items);
     }
 
-    auto selections = iterateSelections(ss);
-    if (selections.length == 0) return data;
+    if (iterateSelections(ss).length == 0) return data;
 
-    JSONValue result = JSONValue.emptyObject;
+    JSONValue result = JSONValue.emptyOrderedObject;
 
     void processField(Field field) {
         auto fieldName = getFieldName(field);
@@ -553,36 +553,9 @@ JSONValue applySelectionSet(JSONValue data, SelectionSet ss, JSONValue variables
         }
     }
 
-    void processSelections(Selection[] sels, bool[string] expanding = null) {
-        foreach (sel; sels) {
-            if (sel.ruleSelection == SelectionEnum.Field) {
-                auto field = sel.field;
-                if (!shouldIncludeField(field.dirs, variables)) continue;
-                processField(field);
-            } else if (sel.ruleSelection == SelectionEnum.Spread) {
-                auto spread = sel.frag;
-                if (!shouldIncludeField(spread.dirs, variables)) continue;
-                if (fragments is null) continue;
-                auto fragName = spread.name.value;
-                if (expanding !is null && fragName in expanding) continue;
-                auto fragDefPtr = fragName in fragments;
-                if (fragDefPtr is null) continue;
-                auto fragDef = *fragDefPtr;
-                if (expanding is null)
-                    expanding = [fragName: true];
-                else
-                    expanding[fragName] = true;
-                processSelections(iterateSelections(fragDef.ss), expanding);
-                expanding.remove(fragName);
-            } else if (sel.ruleSelection == SelectionEnum.IFrag) {
-                auto ifrag = sel.ifrag;
-                if (!shouldIncludeField(ifrag.dirs, variables)) continue;
-                processSelections(iterateSelections(ifrag.ss), expanding);
-            }
-        }
-    }
-
-    processSelections(selections);
+    // (Every fragment applies; unknown fragments and fragments spread within
+    // themselves are skipped)
+    foreachSelectedField(ss, fragments, &variables, null, &processField);
 
     return result;
 }
@@ -1009,7 +982,7 @@ import graphql.ast : Selection, SelectionSet, Selections, SelectionEnum,
 package {
     // Forward declarations - these come from compiler.d with package visibility
     import dunamis.graphql.compiler : iterateSelections, getFieldName, getOutputName,
-        findArgumentValue, extractBool, shouldIncludeField, FragmentMap;
+        findArgumentValue, extractBool, foreachSelectedField, FragmentMap;
 }
 
 // ============================================================================

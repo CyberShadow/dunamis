@@ -150,11 +150,13 @@ class JsonObjectExpr(Args...) : Expr!JSONValue
             auto count = results[0].length;
             JSONValue[] jsonResults = new JSONValue[count];
 
+            auto keys = ObjectKeys(names[]);
             foreach (idx; 0 .. count) {
-                jsonResults[idx] = JSONValue.emptyObject;
+                auto members = keys.newMembers();
                 static foreach (i; 0 .. Args.length / 2) {
-                    jsonResults[idx][names[i]] = toJsonValue(results[i][idx]);
+                    members[keys.positions[i]].value = toJsonValue(results[i][idx]);
                 }
+                jsonResults[idx] = orderedObject(members);
             }
             return jsonResults;
         });
@@ -178,6 +180,7 @@ auto jsonObject(Args...)(Args args)
 /// the field is set to null and the error is recorded on the EvalContext.
 class DynamicJsonObjectExpr : Expr!JSONValue {
     private string[] _names;
+    private ObjectKeys _keys;
     private ExprBase[] _exprs;
     private JSONValue[] _pathPrefix;
     private bool[] _nonNullFields;
@@ -196,6 +199,7 @@ class DynamicJsonObjectExpr : Expr!JSONValue {
         bool[] nonNullItemFields = [], ExprBase lengthSource = null) {
         assert(names.length == exprs.length, "Names and exprs must have same length");
         _names = names;
+        _keys = ObjectKeys(names);
         _exprs = exprs;
         _pathPrefix = pathPrefix;
         _nonNullFields = nonNullFields;
@@ -240,6 +244,7 @@ class DynamicJsonObjectExpr : Expr!JSONValue {
         }
 
         auto names = _names;
+        auto keys = _keys;
         auto pathPrefix = _pathPrefix;
         auto nonNullFields = _nonNullFields;
         auto nonNullItemFields = _nonNullItemFields;
@@ -265,7 +270,7 @@ class DynamicJsonObjectExpr : Expr!JSONValue {
 
             JSONValue[] jsonResults = new JSONValue[count];
             foreach (idx; 0 .. count) {
-                jsonResults[idx] = JSONValue.emptyObject;
+                auto members = keys.newMembers();
                 bool hasNonNullViolation = false;
                 foreach (i, name; names) {
                     if (results[i].error is null) {
@@ -279,12 +284,12 @@ class DynamicJsonObjectExpr : Expr!JSONValue {
                                     val = JSONValue(null);
                                     break;
                                 }
-                        jsonResults[idx][name] = val;
+                        members[keys.positions[i]].value = val;
                         // Check non-null violation: field is non-null but value is null
                         if (i < nonNullFields.length && nonNullFields[i] && val.isNull)
                             hasNonNullViolation = true;
                     } else {
-                        jsonResults[idx][name] = JSONValue(null);
+                        members[keys.positions[i]].value = JSONValue(null);
                         // Record error once per field (at first entity)
                         if (results[i].error !is null && idx == 0) {
                             JSONValue[] errorPath = pathPrefix.dup;
@@ -297,8 +302,7 @@ class DynamicJsonObjectExpr : Expr!JSONValue {
                     }
                 }
                 // Null bubbling: if any non-null field is null, the entire object becomes null
-                if (hasNonNullViolation)
-                    jsonResults[idx] = JSONValue(null);
+                jsonResults[idx] = hasNonNullViolation ? JSONValue(null) : orderedObject(members);
             }
             return jsonResults;
         });
@@ -358,14 +362,15 @@ class SequentialJsonObjectExpr : Expr!JSONValue {
     override Promise!(JSONValue[]) eval(EvalContext ctx) {
         // Evaluate fields sequentially using recursive helper
         // (avoids D's closure variable capture issues with foreach loops)
-        auto result = JSONValue.emptyObject;
+        // (An ordered object: its keys in the order of the fields, a
+        // repeated one at its first occurrence)
+        auto result = JSONValue.emptyOrderedObject;
         return evalFieldsSequentially(ctx, 0, result);
     }
 
     private Promise!(JSONValue[]) evalFieldsSequentially(EvalContext ctx, size_t idx, JSONValue result) {
-        if (idx >= _exprs.length) {
+        if (idx >= _exprs.length)
             return resolve([result]);
-        }
 
         auto fieldName = _names[idx];
         auto fieldExpr = _exprs[idx];
@@ -430,6 +435,41 @@ class SequentialJsonObjectExpr : Expr!JSONValue {
             return endAtomic(0, !failed).then(() => next(value));
         });
     }
+}
+
+/// The keys of the JSON objects of the fields `names` (built as ordered
+/// objects, whose keys keep their order: that of the fields, as GraphQL
+/// responses have them): the names without repetitions (the first of each),
+/// and the position of each field's among them (a repeated field's value
+/// replacing the previous one's).
+private struct ObjectKeys {
+    string[] keys;
+    size_t[] positions;  // (by field)
+
+    this(string[] names) {
+        size_t[string] positionOf;
+        foreach (name; names) {
+            auto position = positionOf.require(name, keys.length);
+            if (position == keys.length)
+                keys ~= name;
+            positions ~= position;
+        }
+    }
+
+    /// The members of a new object (their values to be set).
+    JSONValue.OrderedObjectMember[] newMembers() const {
+        auto members = new JSONValue.OrderedObjectMember[keys.length];
+        foreach (i, key; keys)
+            members[i].key = key;
+        return members;
+    }
+}
+
+/// The ordered JSON object of the members `members`.
+private JSONValue orderedObject(JSONValue.OrderedObjectMember[] members) {
+    JSONValue object = JSONValue.emptyOrderedObject;
+    object.orderedObject = members;
+    return object;
 }
 
 /// Evaluate an expression and convert its result to JSONValue[].

@@ -178,7 +178,7 @@ fieldResultType!(T, "firstName")  // → string
 
 All code that needs to iterate over a type's fields uses this protocol:
 
-- **GraphQL compiler** (`selection.d`) — `compileFieldAccess`, `compileRootField`, `resolveNonNullFlags`
+- **GraphQL compiler** (`selection.d`) — `compileFieldAccess`, `compileRootField`, `fieldNullability`
 - **Query validator** (`validation.d`) — `validateFieldAccess`, `validateRootField`
 - **SDL generator** (`fields.d`) — `getFields!T`
 - **Introspection** (`introspection.d`) — `getRuntimeFields!T`
