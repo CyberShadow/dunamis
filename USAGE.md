@@ -1374,7 +1374,19 @@ Errors are collected on `EvalContext` during evaluation. The server includes bot
 - **Path tracking** — error paths trace through nested selections (e.g., `["users", "posts", "title"]`)
 - **Transparent** — no changes needed to entity definitions or computed fields; error catching is automatic
 - **Sequential mutations** — mutation fields also catch errors independently and continue to the next field; a null in a non-null mutation field makes the whole result null (null bubbling, as for query fields), and the fields after it are not evaluated
-- **Bugs fail too** — a D `Error` (a failed assertion, a range violation, ...) thrown during evaluation is logged to stderr and fails what it was evaluating like an `Exception` would, as an `EvaluationError` ("Internal error: ..."), rather than leaving the evaluation pending forever (`dunamis.core.errors` sets `ae.utils.promise.errorRejection` for the process)
+- **Bugs can fail too** — a D `Error` (a failed assertion, a range violation, ...) thrown during evaluation is not an `Exception`: by default it escapes the promises of the evaluation to the event loop, leaving the evaluation pending forever. A program can opt in to having it logged to stderr and fail what it was evaluating like an `Exception` would, as an `EvaluationError` ("Internal error: ..."), by setting ae's process-wide `errorRejection` to `dunamis.core.errors.evaluationFailure` (see below)
+
+Whether an `Error` fails the evaluation it was thrown by is a policy of the whole process (it applies to all of ae's promises), so the library does not choose it; a program chooses it, typically at the start of its `main`:
+
+```d
+import ae.utils.promise : errorRejection;
+import dunamis.core.errors : evaluationFailure;
+
+void main() {
+    errorRejection = function Exception(Error error) nothrow => evaluationFailure(error);
+    // ... start the server
+}
+```
 
 The selection set of a nullable object is evaluated for the whole batch, with placeholders (`T.init`) for the null objects, whose results are then discarded. A required `BelongsTo` of a placeholder yields a placeholder parent; a missing parent of any other row is an error of the field.
 
