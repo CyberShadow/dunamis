@@ -445,8 +445,8 @@ class ColumnAccessExpr(T, Entity) : Expr!T, ColumnAccessInfo {
             // The objects a mutation returned (mutations store their results
             // here), if they are all of them; others are read from the
             // database (which also holds the mutation's writes).
-            if (session !is null && session.mutationResultHolds(EntityID!Entity.typeName, entityRefs)) {
-                return resolve(session.getMutationColumnValues!T(EntityID!Entity.typeName, column, entityRefs));
+            if (session !is null && session.mutationResultHolds(entityRefs)) {
+                return resolve(session.getMutationColumnValues!T(column, entityRefs));
             }
 
             // Otherwise, fetch from database (async). (The refs need not

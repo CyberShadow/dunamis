@@ -204,16 +204,22 @@ abstract class RelationalSession : DataSession {
     /// Used by naive-path fetchColumn* methods to generate correct WHERE clauses.
     protected string[][string] _pkColumnsByTable;
 
-    /// Pre-fetched query results, keyed by QueryNode ID.
-    /// Stored by PrefetchExpr after query execution, read by ProjectionExpr.
-    private QueryResult[QueryNodeId] _queryResults;
+    /// The session's results of query nodes, by node: the query of the
+    /// node's own rows sent (see pendingQueryResult), and the rows of the
+    /// node stored (by PrefetchExpr, and by the query of a tree of nodes, of
+    /// each of its layers, see storeLayers), which projections read; the
+    /// naive path's fetches find child layers and foreign keys among them.
+    private NodeResult[QueryNodeId] _results;
 
-    /// The queries of QueryNodes' own rows sent (see pendingQueryResult).
-    private Promise!QueryResult[QueryNodeId] _pendingQueryResults;
+    /// ditto
+    private static struct NodeResult {
+        Promise!QueryResult pending;
+        QueryResult rows;
+    }
 
-    /// Mutation results, keyed by entity type name.
-    /// Stored by InsertExpr/UpdateExpr, read by ColumnAccessExpr.
-    private QueryResult[string] _mutationResults;
+    /// The results of the mutations of the session (see storeMutationResult),
+    /// by the refs of the objects they hold.
+    private QueryResult[string] _mutationResultOf;
 
     /// Pending change events queued during mutations, fired post-commit.
     private ChangeEvent[] _pendingEvents;
@@ -242,9 +248,8 @@ abstract class RelationalSession : DataSession {
     /// Subclasses that override setup() should call super.setup().
     override Promise!void setup(SetupMode mode = SetupMode.query) {
         _pendingEvents = [];
-        _queryResults.clear();
-        _pendingQueryResults.clear();
-        _mutationResults.clear();
+        _results.clear();
+        _mutationResultOf.clear();
         return resolve();
     }
 
@@ -284,10 +289,19 @@ abstract class RelationalSession : DataSession {
     // Query Result Storage (for optimized path)
     // =========================================================================
 
-    /// Store results from a QueryNode execution
+    /// Store the rows of a query node (see `_results`).
     void storeQueryResult(QueryNodeId queryNodeId, QueryResult result) {
         assert(result !is null, "Cannot store null QueryResult");
-        _queryResults[queryNodeId] = result;
+        _results.require(queryNodeId).rows = result;
+    }
+
+    /// Store the layers of the query of a tree of query nodes (`layers`,
+    /// see `loadLayerResults`): the rows of each of `nodes`. Returns the
+    /// rows of the root node.
+    protected QueryResult storeLayers(JSONValue layers, QueryNode[] nodes) {
+        return loadLayerResults(layers, nodes, (QueryNode node, QueryResult result) {
+            storeQueryResult(node.id, result);
+        });
     }
 
     /// The result of the query of the rows of the query node `queryNodeId`
@@ -295,27 +309,53 @@ abstract class RelationalSession : DataSession {
     /// pending), or null: evaluations of the node's PrefetchExpr in different
     /// scopes of a request share it.
     Promise!QueryResult pendingQueryResult(QueryNodeId queryNodeId) {
-        return _pendingQueryResults.get(queryNodeId, null);
+        if (auto result = queryNodeId in _results)
+            return result.pending;
+        return null;
     }
 
     /// Record the query of the rows of a query node (see pendingQueryResult).
     void setPendingQueryResult(QueryNodeId queryNodeId, Promise!QueryResult result) {
-        _pendingQueryResults[queryNodeId] = result;
+        _results.require(queryNodeId).pending = result;
     }
 
     /// Check if we have results for a query node
     bool hasQueryResult(QueryNodeId queryNodeId) {
-        return (queryNodeId in _queryResults) !is null;
+        return getQueryResult(queryNodeId) !is null;
     }
 
-    /// Get query result by node ID
+    /// The rows of a query node stored, or null.
     QueryResult getQueryResult(QueryNodeId queryNodeId) {
-        return _queryResults.get(queryNodeId, null);
+        if (auto result = queryNodeId in _results)
+            return result.rows;
+        return null;
+    }
+
+    /// The stored rows of query nodes (see `_results`).
+    protected auto storedResults() {
+        return _results.byValue.map!(result => result.rows).filter!(rows => rows !is null);
+    }
+
+    /// A stored child layer which holds the children of `parentRefs` by the
+    /// foreign key `fk` of the child type `childType` (see `findChildLayer`),
+    /// or null.
+    protected QueryResult storedChildLayer(string childType, string fk, AnyRef[] parentRefs) {
+        return findChildLayer(storedResults, childType, fk, parentRefs);
+    }
+
+    /// The parents (of the type `parentType`) of `childRefs` by their foreign
+    /// key `fk`, from stored rows holding all of them (see
+    /// `QueryResult.containsAllRefs`), or null if none do.
+    protected AnyRef[] storedParents(string fk, string parentType, AnyRef[] childRefs) {
+        foreach (result; storedResults)
+            if (result.hasColumn(fk) && result.containsAllRefs(childRefs))
+                return result.getColumnRefs(fk, parentType, childRefs);
+        return null;
     }
 
     /// Get column values from pre-fetched results
     T[] getColumnValues(T)(QueryNodeId queryNodeId, string column, AnyRef[] refs) {
-        auto result = _queryResults.get(queryNodeId, null);
+        auto result = getQueryResult(queryNodeId);
         assert(result !is null, "No query result for query node " ~ queryNodeId.value.to!string);
         return result.getColumn!T(column, refs);
     }
@@ -324,7 +364,7 @@ abstract class RelationalSession : DataSession {
     /// of `column` (a foreign key) of the rows `refs` from pre-fetched
     /// results (invalid refs for null values).
     AnyRef[] getColumnRefs(QueryNodeId queryNodeId, string column, string typeName, AnyRef[] refs) {
-        auto result = _queryResults.get(queryNodeId, null);
+        auto result = getQueryResult(queryNodeId);
         assert(result !is null, "No query result for query node " ~ queryNodeId.value.to!string);
         return result.getColumnRefs(column, typeName, refs);
     }
@@ -344,26 +384,52 @@ abstract class RelationalSession : DataSession {
     // Mutation Result Storage
     // =========================================================================
 
-    /// Store mutation result for later field access.
+    /// Store mutation result for later field access: the rows of the objects
+    /// it holds (as a later mutation's of an object, its later rows).
     /// Called by InsertExpr/UpdateExpr after executing the mutation.
-    void storeMutationResult(string typeName, QueryResult result) {
-        assert(typeName.length > 0, "Mutation typeName must not be empty");
+    void storeMutationResult(QueryResult result) {
         assert(result !is null, "Cannot store null mutation QueryResult");
-        _mutationResults[typeName] = result;
+        foreach (r; result.allRefs)
+            _mutationResultOf[r.id] = result;
     }
 
-    /// Get column values from mutation results.
+    /// Get column values from mutation results (of `refs`, which they hold:
+    /// see mutationResultHolds).
     /// Used by ColumnAccessExpr when evaluating fields on mutation results.
-    T[] getMutationColumnValues(T)(string typeName, string column, AnyRef[] refs) {
-        auto result = _mutationResults.get(typeName, null);
-        assert(result !is null, "No mutation result for " ~ typeName);
-        return result.getColumn!T(column, refs);
+    T[] getMutationColumnValues(T)(string column, AnyRef[] refs) {
+        auto values = new T[refs.length];
+        auto done = new bool[refs.length];
+        foreach (i, r; refs) {
+            auto result = done[i] ? null : _mutationResultOf.get(r.id, null);
+            if (result is null)
+                continue;
+            // (The refs of one result at once)
+            size_t[] indices;
+            AnyRef[] ofResult;
+            foreach (j; i .. refs.length)
+                if (!done[j] && _mutationResultOf.get(refs[j].id, null) is result) {
+                    indices ~= j;
+                    ofResult ~= refs[j];
+                    done[j] = true;
+                }
+            foreach (k, value; result.getColumn!T(column, ofResult))
+                values[indices[k]] = value;
+        }
+        return values;
     }
 
-    /// Whether the last mutation result of a type holds all of `refs`
-    bool mutationResultHolds(string typeName, AnyRef[] refs) {
-        auto result = _mutationResults.get(typeName, null);
-        return result !is null && result.containsAllRefs(refs);
+    /// Whether the session's mutations returned the objects `refs` (their
+    /// valid refs, of which there is at least one).
+    bool mutationResultHolds(AnyRef[] refs) {
+        bool any;
+        foreach (r; refs) {
+            if (!r.isValid)
+                continue;
+            if ((r.id in _mutationResultOf) is null)
+                return false;
+            any = true;
+        }
+        return any;
     }
 
     /// Whether the session's queries compute the computed columns of query
@@ -952,12 +1018,12 @@ class QueryResult {
 }
 
 /// Load the layers of one batched CTE execution (`{"layer0": [rows], ...}`)
-/// into per-node QueryResults, storing each in `cache`. Child layers record
+/// into per-node QueryResults, giving each to `store`. Child layers record
 /// which parents they hold the complete children of, so a later hasMany
 /// lookup can tell a childless parent from one the layer never covered.
 /// Returns the root node's result (or an empty result if absent).
 QueryResult loadLayerResults(JSONValue layers, QueryNode[] nodes,
-        ref QueryResult[QueryNode] cache) {
+        scope void delegate(QueryNode, QueryResult) store) {
     import dunamis.relational.sql : layerGroupKey;
     import std.algorithm.searching : startsWith;
 
@@ -995,30 +1061,29 @@ QueryResult loadLayerResults(JSONValue layers, QueryNode[] nodes,
                 node.parentFk, node.parentTypeName);
         }
         loaded[node] = result;
-        cache[node] = result;
     }
     // Nodes merged into another hold its layer's rows (see QueryNode.mergeFrom)
     foreach (node; nodes)
         if (node.sameRowsAs !is null)
-            if (auto layer = node.layerNode in loaded) {
+            if (auto layer = node.layerNode in loaded)
                 loaded[node] = *layer;
-                cache[node] = *layer;
-            }
     foreach (node, result; loaded)
         if (!node.isRoot && node.sameRowsAs is null)
             if (auto parentResult = node.parent in loaded)
                 result.recordCoveredParents(*parentResult, node.parentLinkColumns);
+    foreach (node; nodes)
+        if (auto result = node in loaded)
+            store(node, *result);
     return rootResult !is null ? rootResult : new QueryResult();
 }
 
-/// Find a cached child layer that faithfully answers the hasMany relationship
-/// `childType`.`fk` for every parent in `parentRefs`, or null if none does
-/// (the caller must then fetch the children itself). A layer of the same
-/// child type is not enough: it may be grouped by another FK, be a root layer,
-/// or have been selected for a different set of parents.
-QueryResult findChildLayer(QueryResult[QueryNode] cache, string childType,
-        string fk, AnyRef[] parentRefs) {
-    foreach (result; cache.byValue)
+/// Find a layer among `results` (QueryResults) that faithfully answers the
+/// hasMany relationship `childType`.`fk` for every parent in `parentRefs`,
+/// or null if none does (the caller must then fetch the children itself). A
+/// layer of the same child type is not enough: it may be grouped by another
+/// FK, be a root layer, or have been selected for a different set of parents.
+QueryResult findChildLayer(R)(R results, string childType, string fk, AnyRef[] parentRefs) {
+    foreach (result; results)
         if (result.holdsChildrenOf(childType, fk, parentRefs))
             return result;
     return null;
@@ -1108,26 +1173,26 @@ unittest {
     auto root = loadLayerResults(parseJSON(`{
         "layer0": [{"id": 1, "post_id": 1, "j0__id": 1}, {"id": 2, "post_id": 2, "j0__id": 2}],
         "layer1": [{"id": 1, "post_id": 1}, {"id": 2, "post_id": 2}, {"id": 3, "post_id": 2}]
-    }`), [rootNode, childNode], cache);
+    }`), [rootNode, childNode], (QueryNode node, QueryResult result) { cache[node] = result; });
     assert(root is cache[rootNode]);
 
     auto posts = [AnyRef("Post:1"), AnyRef("Post:2")];
-    auto layer = findChildLayer(cache, "Comment", "post_id", posts);
+    auto layer = findChildLayer(cache.byValue, "Comment", "post_id", posts);
     assert(layer is cache[childNode]);
     assert(layer.getChildRefs(posts) ==
         [[AnyRef("Comment:1")], [AnyRef("Comment:2"), AnyRef("Comment:3")]]);
 
     // A parent the child layer was not selected for is unknown, not childless
-    assert(findChildLayer(cache, "Comment", "post_id", [AnyRef("Post:3")]) is null);
+    assert(findChildLayer(cache.byValue, "Comment", "post_id", [AnyRef("Post:3")]) is null);
     // Same child type, different relationship
-    assert(findChildLayer(cache, "Comment", "author_id", posts) is null);
+    assert(findChildLayer(cache.byValue, "Comment", "author_id", posts) is null);
     // Different child type
-    assert(findChildLayer(cache, "Post", "post_id", posts) is null);
+    assert(findChildLayer(cache.byValue, "Post", "post_id", posts) is null);
 
     // A root layer never answers hasMany lookups, even when its type matches
     QueryResult[QueryNode] rootOnly;
     rootOnly[rootNode] = cache[rootNode];
-    assert(findChildLayer(rootOnly, "Comment", "post_id", posts) is null);
+    assert(findChildLayer(rootOnly.byValue, "Comment", "post_id", posts) is null);
 
     // fetchBelongsTo may only read FKs from a result holding all its refs
     assert(root.containsAllRefs([AnyRef("Comment:1"), AnyRef("Comment:2")]));

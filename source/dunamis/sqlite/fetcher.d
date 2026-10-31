@@ -33,7 +33,6 @@ import dunamis.sqlite.sql;
 class SQLiteSession : RelationalSession {
     private SQLite _db;
     private string _cachedSQL;
-    private QueryResult[QueryNode] _cachedResults;
 
     this(SQLite db) {
         _db = db;
@@ -67,8 +66,8 @@ class SQLiteSession : RelationalSession {
             RootSelection root) {
         // For child nodes, check if we already have cached results from root CTE execution
         if (!node.isRoot) {
-            if (node in _cachedResults) {
-                return resolve(_cachedResults[node]);
+            if (auto result = getQueryResult(node.id)) {
+                return resolve(result);
             }
             return resolve(new QueryResult());
         }
@@ -123,7 +122,7 @@ class SQLiteSession : RelationalSession {
 
         // Parse each layer and cache results (root results too, so that
         // fetchBelongsTo can find FK columns)
-        return loadLayerResults(jsonData, nodes, _cachedResults);
+        return storeLayers(jsonData, nodes);
     }
 
     // =========================================================================
@@ -261,7 +260,7 @@ class SQLiteSession : RelationalSession {
     override Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs,
             string[] orderBy = null) {
         // Use a CTE child layer if one holds exactly these children
-        if (auto result = findChildLayer(_cachedResults, childType, fk, parentRefs)) {
+        if (auto result = storedChildLayer(childType, fk, parentRefs)) {
             return resolve(result.getChildRefs(parentRefs));
         }
 
@@ -326,22 +325,8 @@ class SQLiteSession : RelationalSession {
         // fk is already the SQL column name (from @SqlColumn UDA via getSqlColumn)
         // Try to get FK values from cached query results first
         // The FK column is included in the main query, so we can avoid an extra query
-        foreach (result; _cachedResults.byValue) {
-            if (result.hasColumn(fk) && result.containsAllRefs(childRefs)) {
-                // Found the FK column in a result that actually contains our refs
-                auto fkValues = result.getColumnRaw(fk, childRefs);
-                AnyRef[] refs;
-                refs.reserve(fkValues.length);
-                foreach (fkVal; fkValues) {
-                    if (fkVal.type != JSONType.null_) {
-                        refs ~= makeAnyRef(parentType, keyOf([fkVal]));
-                    } else {
-                        refs ~= AnyRef.init;
-                    }
-                }
-                return resolve(refs);
-            }
-        }
+        if (auto parents = storedParents(fk, parentType, childRefs))
+            return resolve(parents);
 
         // Naive path fallback: query the database directly
         // Filter to valid refs only

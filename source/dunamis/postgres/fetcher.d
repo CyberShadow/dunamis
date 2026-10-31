@@ -40,7 +40,6 @@ class PostgresSession : RelationalSession {
     private bool _disconnectOnTeardown;
     private size_t _setupDepth;
     private string _cachedSQL;
-    private QueryResult[QueryNode] _cachedResults;
     private string[] _setupStatements;
     private Promise!void delegate()[] _setupActions;
     /// Numbers the session's transactions (incremented at each BEGIN), to
@@ -452,8 +451,8 @@ class PostgresSession : RelationalSession {
             RootSelection root) {
         // For child nodes, check if we already have cached results from root CTE execution
         if (!node.isRoot) {
-            if (node in _cachedResults) {
-                return resolve(_cachedResults[node]);
+            if (auto result = getQueryResult(node.id)) {
+                return resolve(result);
             }
             // Child nodes should be fetched as part of root CTE execution
             // If we get here without cached results, something is wrong
@@ -509,7 +508,7 @@ class PostgresSession : RelationalSession {
         auto jsonStr = rows[0].column!string(0);
         // Parse each layer and cache results (root results too, so that
         // fetchBelongsTo can find FK columns)
-        return loadLayerResults(parseJsonText(jsonStr), nodes, _cachedResults);
+        return storeLayers(parseJsonText(jsonStr), nodes);
     }
 
     // =========================================================================
@@ -650,7 +649,7 @@ class PostgresSession : RelationalSession {
     override Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs,
             string[] orderBy = null) {
         // Use a CTE child layer if one holds exactly these children
-        if (auto result = findChildLayer(_cachedResults, childType, fk, parentRefs)) {
+        if (auto result = storedChildLayer(childType, fk, parentRefs)) {
             return resolve(result.getChildRefs(parentRefs));
         }
 
@@ -693,22 +692,8 @@ class PostgresSession : RelationalSession {
         }
 
         // Try to get FK values from cached query results first
-        foreach (result; _cachedResults.byValue) {
-            if (result.hasColumn(fk) && result.containsAllRefs(childRefs)) {
-                // Found the FK column in a result that actually contains our refs
-                auto fkValues = result.getColumnRaw(fk, childRefs);
-                AnyRef[] refs;
-                refs.reserve(fkValues.length);
-                foreach (fkVal; fkValues) {
-                    if (fkVal.type != JSONType.null_) {
-                        refs ~= makeAnyRef(parentType, keyOf([fkVal]));
-                    } else {
-                        refs ~= AnyRef.init;
-                    }
-                }
-                return resolve(refs);
-            }
-        }
+        if (auto parents = storedParents(fk, parentType, childRefs))
+            return resolve(parents);
 
         // The valid refs' ids, once each
         string[] validIds = distinctValidIds(childRefs);

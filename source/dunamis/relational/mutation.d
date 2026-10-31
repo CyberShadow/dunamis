@@ -120,7 +120,7 @@ class InsertExpr(Entity) : Expr!Entity {
         auto promise = session.executeInsert(_table, _typeName, _input, _pkColumns, _isAutoIncrement)
             .then((QueryResult result) {
                 // Store result for field access
-                session.storeMutationResult(_typeName, result);
+                session.storeMutationResult(result);
 
                 // Record change event for subscription notifications
                 auto refs = result.allRefs();

@@ -33,7 +33,6 @@ class MySQLSession : RelationalSession {
     private MySqlConnection _conn;
     private Promise!MySqlConnection delegate() _connFactory;
     private string _cachedSQL;
-    private QueryResult[QueryNode] _cachedResults;
 
     /// Create with a connection factory. The factory is called in setup().
     this(Promise!MySqlConnection delegate() connFactory) {
@@ -71,8 +70,8 @@ class MySQLSession : RelationalSession {
             RootSelection root) {
         // For child nodes, check if we already have cached results from root CTE execution
         if (!node.isRoot) {
-            if (node in _cachedResults) {
-                return resolve(_cachedResults[node]);
+            if (auto result = getQueryResult(node.id)) {
+                return resolve(result);
             }
             // Child nodes should be fetched as part of root CTE execution
             // If we get here without cached results, something is wrong
@@ -129,7 +128,7 @@ class MySQLSession : RelationalSession {
 
         // Parse each layer and cache results (root results too, so that
         // fetchBelongsTo can find FK columns)
-        return loadLayerResults(jsonData, nodes, _cachedResults);
+        return storeLayers(jsonData, nodes);
     }
 
     // =========================================================================
@@ -255,7 +254,7 @@ class MySQLSession : RelationalSession {
     override Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs,
             string[] orderBy = null) {
         // Use a CTE child layer if one holds exactly these children
-        if (auto result = findChildLayer(_cachedResults, childType, fk, parentRefs)) {
+        if (auto result = storedChildLayer(childType, fk, parentRefs)) {
             return resolve(result.getChildRefs(parentRefs));
         }
 
@@ -303,22 +302,8 @@ class MySQLSession : RelationalSession {
         }
 
         // Try to get FK values from cached query results first
-        foreach (result; _cachedResults.byValue) {
-            if (result.hasColumn(fk) && result.containsAllRefs(childRefs)) {
-                // Found the FK column in a result that actually contains our refs
-                auto fkValues = result.getColumnRaw(fk, childRefs);
-                AnyRef[] refs;
-                refs.reserve(fkValues.length);
-                foreach (fkVal; fkValues) {
-                    if (fkVal.type != JSONType.null_) {
-                        refs ~= makeAnyRef(parentType, keyOf([fkVal]));
-                    } else {
-                        refs ~= AnyRef.init;
-                    }
-                }
-                return resolve(refs);
-            }
-        }
+        if (auto parents = storedParents(fk, parentType, childRefs))
+            return resolve(parents);
 
         // Filter to valid child refs only
         string[] validIds;
