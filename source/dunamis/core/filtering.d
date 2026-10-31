@@ -15,6 +15,7 @@ import ae.utils.promise;
 import ae.utils.promise.await : async;
 
 import dunamis.core.expr : CollectionEntityType, Expr, ExprBase, evalAs;
+import dunamis.core.elements : analyzeBinders, BinderInfo, evalBound, Flattened, PlaceholderInfo, ScopeAnalysis;
 import dunamis.core.eval;
 import dunamis.core.optimize;
 import dunamis.core.types : AnyRef;
@@ -24,8 +25,8 @@ import dunamis.core.types : AnyRef;
 // ============================================================================
 
 /// Interface for filter placeholder items (for detecting item in predicate).
-interface FilterItemInfo {
-    /// Get parent FilterByExpr
+interface FilterItemInfo : PlaceholderInfo {
+    /// Get parent FilterByExpr (its binder)
     @property Object parentFilter();
 }
 
@@ -56,6 +57,7 @@ class FilterItemExpr(Entity) : Expr!Entity, FilterItemInfo {
     Object _parentFilter;
 
     @property Object parentFilter() { return _parentFilter; }
+    @property Object binder() { return _parentFilter; }
 
     override ExprBase[] dependencies() {
         return [];  // Leaf node (placeholder)
@@ -96,21 +98,27 @@ class FilterItemExpr(Entity) : Expr!Entity, FilterItemInfo {
 /// auto filtered = filterBy!((e) => e.firstName.eq("Alice"))(users);
 /// auto filtered = filterBy!((e) => e.age.gte(18).and(e.age.lt(65)))(users);
 /// ---
-class FilterByExpr(Entity) : Expr!(Entity[]), FilterByInfo {
+class FilterByExpr(Entity) : Expr!(Entity[]), FilterByInfo, BinderInfo {
     private ExprBase _source;
     FilterItemExpr!Entity _item;
     private ExprBase _predicate;  // Expr!bool
-    /// Whether the predicate must be evaluated for one item at a time (see
-    /// `evaluatesPerItem`).
-    private bool _perItem;
+    /// What the predicate reads (whether it must be evaluated for one item
+    /// at a time, see `ScopeAnalysis`).
+    private ScopeAnalysis _analysis;
 
     this(Expr!(Entity[]) source, FilterItemExpr!Entity item, Expr!bool pred) {
-        import dunamis.core.elements : evaluatesPerItem;
         _source = source;
         _item = item;
         _predicate = pred;
-        _perItem = evaluatesPerItem(pred, item);
+        item._parentFilter = this;
+        analyzeBinders(this);
     }
+
+    // BinderInfo implementation
+    ExprBase[] scopedParts() { return [_predicate]; }
+    Object[] placeholders() { return [_item]; }
+    @property ScopeAnalysis scopeAnalysis() { return _analysis; }
+    void setScopeAnalysis(ScopeAnalysis analysis) { _analysis = analysis; }
 
     // FilterByInfo implementation
     ExprBase filterSource() { return _source; }
@@ -132,8 +140,6 @@ class FilterByExpr(Entity) : Expr!(Entity[]), FilterByInfo {
     }
 
     override Expr!(Entity[]) optimize(OptimizeContext ctx) {
-        import dunamis.core.elements : evaluatesPerItem;
-
         // Optimize the predicate, for its in-memory evaluation (data sources
         // may read the values it needs with those of the rows filtered, see
         // OptimizeContext.elementOwner). First, as a map optimizes its body
@@ -141,7 +147,6 @@ class FilterByExpr(Entity) : Expr!(Entity[]), FilterByInfo {
         // a query of their own (into which the filter is then pushed), which
         // the source's root reads its rows from.
         _predicate = (cast(Expr!bool) _predicate).optimize(ctx);
-        _perItem = evaluatesPerItem(_predicate, _item);
         // Optimize source - pattern matching for SQL push-down happens
         // in the relational layer (schema.d), not here in core
         _source = source.optimize(ctx);
@@ -150,51 +155,39 @@ class FilterByExpr(Entity) : Expr!(Entity[]), FilterByInfo {
 
     /// In-memory filtering: the predicate is evaluated once, for all the
     /// items of all the groups (like a map's body), in a scope of its own
-    /// binding the items (its evaluations depend on them, and must not be
-    /// memoized in — or wipe the memo of — the shared context). A predicate
-    /// referring to the item from within a nested scope (e.g. a nested
-    /// filter's predicate comparing with it), or to the placeholder of an
-    /// enclosing construct, is evaluated for each item (see
-    /// `evaluatesPerItem`).
+    /// binding the items (see `evalBound`). A predicate referring to the item
+    /// from within a nested scope (e.g. a nested filter's predicate comparing
+    /// with it), or to the placeholder of an enclosing construct, is
+    /// evaluated for each item (see `ScopeAnalysis.perElement`).
     override Promise!(Entity[][]) eval(EvalContext ctx) {
         auto predicate = _predicate;
         auto self = this;
-        auto perItem = _perItem;
+        auto perItem = _analysis.perElement;
 
         return evalAs!(Entity[])(_source, ctx).then((Entity[][] groups) {
-            Entity[] items;
-            foreach (group; groups)
-                items ~= group;
+            auto batch = Flattened!Entity(groups);
+            auto items = batch.elements;
             if (items.length == 0)
                 return resolve(groups);
 
             Promise!(bool[]) results;
             if (perItem)
                 results = evalPerItem(predicate, ctx, self, items);
-            else {
-                auto itemsCtx = ctx.createScope();
-                itemsCtx.setValues!Entity(self, items);
-                results = evalAs!bool(predicate, itemsCtx);
-            }
+            else
+                results = evalBound!bool(predicate, ctx, [binding(self, items)], items.length,
+                    construct, "predicate", "items");
             return results.then((bool[] keep) {
-                import std.conv : to;
-                if (keep.length != items.length)
-                    throw new Exception("Batch size mismatch in filter of " ~ Entity.stringof ~
-                        ": its predicate produced " ~ keep.length.to!string ~ " results for " ~
-                        items.length.to!string ~ " items (use broadcast() to replicate a single value " ~
-                        "across a batch)");
                 auto result = new Entity[][](groups.length);
-                size_t offset;
-                foreach (gi, group; groups) {
-                    foreach (j, item; group)
-                        if (keep[offset + j])
-                            result[gi] ~= item;
-                    offset += group.length;
-                }
+                foreach (gi, group; batch.regroup(keep))
+                    foreach (j, k; group)
+                        if (k)
+                            result[gi] ~= groups[gi][j];
                 return result;
             });
         });
     }
+
+    private enum construct = "filter of " ~ Entity.stringof;
 
     /// The predicate's value for each item, evaluated for one at a time.
     private static Promise!(bool[]) evalPerItem(ExprBase predicate, EvalContext ctx, Object self, Entity[] items) {
@@ -202,12 +195,9 @@ class FilterByExpr(Entity) : Expr!(Entity[]), FilterByInfo {
         return async({
             bool[] results;
             results.reserve(items.length);
-            foreach (item; items) {
-                auto itemCtx = ctx.createScope();
-                itemCtx.setValues!Entity(self, [item]);
-                bool[] r = evalAs!bool(predicate, itemCtx).await;
-                results ~= r.length > 0 && r[0];
-            }
+            foreach (item; items)
+                results ~= evalBound!bool(predicate, ctx, [binding(self, [item])], 1,
+                    construct, "predicate", "item").await[0];
             return results;
         });
     }
@@ -249,13 +239,8 @@ auto filterBy(alias pred, Coll)(Coll collection)
     static assert(is(typeof(predicate) : Expr!bool),
         "Filter predicate must return Expr!bool, got " ~ typeof(predicate).stringof);
 
-    // Create FilterByExpr
-    auto filterExpr = new FilterByExpr!Entity(collection, item, predicate);
-
-    // Link placeholder back to parent
-    item._parentFilter = filterExpr;
-
-    return filterExpr;
+    // Create FilterByExpr (which links the placeholder to itself)
+    return new FilterByExpr!Entity(collection, item, predicate);
 }
 
 // ============================================================================

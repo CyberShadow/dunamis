@@ -13,6 +13,7 @@ import dunamis.core.eval;
 import dunamis.core.optimize;
 import dunamis.core.expr.base;
 import dunamis.core.join : joinAll;
+import dunamis.core.elements : evalBound;
 
 // ============================================================================
 // jsonObject Combinator (JSON construction)
@@ -770,16 +771,14 @@ class NullableObjectExpr(T) : Expr!JSONValue {
                 return resolve(result);
             }
 
-            // Set unwrapper values for ALL entities (using T.init for nulls)
-            // The inner expression (ProjectJoinedColumnExpr) doesn't actually use
-            // the unwrapper values - it uses the parent refs from baseInput.
-            // But we set values in case any expression needs them.
-            unwrapper.bind(ctx, unwrapNullables(nullableVals));
-
-            // Evaluate inner expression for ALL entities
-            // The optimized ProjectJoinedColumnExpr uses parent refs (e.g., Task refs)
-            // and returns values for all of them (null/empty for null FK rows)
-            return evalAs!JSONValue(innerExpr, ctx).then((JSONValue[] innerResults) {
+            // Evaluate the inner expression for ALL entities, in a scope
+            // binding the unwrapper's values (T.init for nulls). (The
+            // optimized ProjectJoinedColumnExpr doesn't actually use them -
+            // it uses the parent refs from baseInput, e.g. Task refs, and
+            // returns values for all of them, null/empty for null FK rows.)
+            return evalBound!JSONValue(innerExpr, ctx, [unwrapper.binding(unwrapNullables(nullableVals))],
+                nullableVals.length, "nullable object of " ~ T.stringof, "selection set", "objects"
+            ).then((JSONValue[] innerResults) {
                 // Mask results: return JSON null where FK is null
                 JSONValue[] result = new JSONValue[nullableVals.length];
                 foreach (i, nval; nullableVals) {
@@ -799,8 +798,8 @@ class NullableObjectExpr(T) : Expr!JSONValue {
 /// sub-expression compiled against this placeholder (e.g. the object whose
 /// selection set is being evaluated).
 ///
-/// The binding is per evaluation: it is stored in the EvalContext, keyed by
-/// this node, so that the expression tree itself stays immutable after
+/// The binding is per evaluation: it is bound in a scope of the EvalContext
+/// (see `evalBound`), keyed by this node, so that the expression tree itself stays immutable after
 /// optimization and can be evaluated by several requests concurrently.
 /// If nothing has bound values in the current context (e.g. the placeholder
 /// was used outside of its binding expression), the input is evaluated.
@@ -814,9 +813,10 @@ abstract class BoundValueExpr(T) : Expr!T, UnwrapNullableInfo {
         _input = input;
     }
 
-    /// Bind the values this placeholder evaluates to in `ctx`.
-    final void bind(EvalContext ctx, T[] values) {
-        ctx.setValues!T(this, values);
+    /// The binding of the values this placeholder evaluates to (for the
+    /// scope its binding expression evaluates the sub-expression in).
+    final Binding binding(T[] values) {
+        return .binding(this, values);
     }
 
     override ExprBase[] dependencies() {
@@ -920,10 +920,9 @@ class ObjectExpr(T) : Expr!JSONValue {
     override Promise!(JSONValue[]) eval(EvalContext ctx) {
         auto innerExpr = _innerExpr;
         auto bound = _bound;
-        return evalAs!T(_input, ctx).then((T[] values) {
-            bound.bind(ctx, values);
-            return evalAs!JSONValue(innerExpr, ctx);
-        });
+        return evalAs!T(_input, ctx).then((T[] values) =>
+            evalBound!JSONValue(innerExpr, ctx, [bound.binding(values)], values.length,
+                "object of " ~ T.stringof, "selection set", "objects"));
     }
 
     private static bool dependsOn(ExprBase expr, ExprBase target) {

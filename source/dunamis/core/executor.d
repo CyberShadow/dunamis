@@ -4,7 +4,7 @@ import ae.utils.promise;
 import ae.utils.promise.await : awaitSync;
 
 import dunamis.core.datasource : ChangeEvent, DataSource, DataSession, SetupMode;
-import dunamis.core.elements : subexpressions;
+import dunamis.core.elements : analyzeBinders, subexpressions;
 import dunamis.core.eval;
 import dunamis.core.expr;
 import dunamis.core.optimize;
@@ -49,8 +49,7 @@ class Executor {
 
         if (sources.length == 0) {
             // No data sources — evaluate directly (no setup/teardown needed)
-            evalCtx.setValues!AnyRef(null, [queryRoot]);
-            return toEval.eval(evalCtx).then((T[] results) => results[0]);
+            return toEval.eval(evalCtx.createScope(rootBinding)).then((T[] results) => results[0]);
         }
 
         // Create per-request sessions for each data source
@@ -64,8 +63,7 @@ class Executor {
             setupChain = setupChain.then(() => s.setup());
 
         return setupChain.then(() {
-            evalCtx.setValues!AnyRef(null, [queryRoot]);
-            return toEval.eval(evalCtx);
+            return toEval.eval(evalCtx.createScope(rootBinding));
         }).then((T[] results) {
             // Teardown with success
             auto p = resolve();
@@ -82,7 +80,8 @@ class Executor {
     }
 
     /// Optimize an expression tree (standard optimization, then the
-    /// optimizers its data sources request), without evaluating it.
+    /// optimizers its data sources request, then the analysis of its binders,
+    /// see `analyzeBinders`), without evaluating it.
     ///
     /// The optimized tree is not modified by evaluation, so it may be
     /// evaluated any number of times, also concurrently, with
@@ -95,6 +94,7 @@ class Executor {
         foreach (optimizer; collectOptimizers(optimized)) {
             optimizer.optimize(optimized, optCtx);
         }
+        analyzeBinders(optimized);
         return optimized;
     }
 
@@ -180,12 +180,7 @@ class SubscriptionExecutor(T) {
 
     this(Executor executor, Expr!JSONValue expr) {
         // Optimize once
-        auto optCtx = new OptimizeContext();
-        _optimized = cast(Expr!JSONValue) expr.optimize(optCtx);
-
-        foreach (optimizer; executor.collectOptimizers(_optimized)) {
-            optimizer.optimize(_optimized, optCtx);
-        }
+        _optimized = executor.optimize(expr);
 
         // Find the EventSourceExpr in the tree
         _eventSource = findEventSource(_optimized);
@@ -210,10 +205,9 @@ class SubscriptionExecutor(T) {
         import std.json : JSONValue;
 
         _eventSource.deliver(evalCtx, value);
-        evalCtx.setValues!AnyRef(null, [queryRoot]);
 
         if (_sources.length == 0) {
-            return _optimized.eval(evalCtx)
+            return _optimized.eval(evalCtx.createScope(rootBinding))
                 .then((JSONValue[] results) => results[0]);
         }
 
@@ -227,7 +221,7 @@ class SubscriptionExecutor(T) {
             setupChain = setupChain.then(() => s.setup(SetupMode.respond));
 
         return setupChain.then(() {
-            return _optimized.eval(evalCtx);
+            return _optimized.eval(evalCtx.createScope(rootBinding));
         }).then((JSONValue[] results) {
             auto p = resolve();
             foreach (s; sessions)

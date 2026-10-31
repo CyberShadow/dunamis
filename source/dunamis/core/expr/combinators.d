@@ -15,6 +15,7 @@ import dunamis.core.eval;
 import dunamis.core.optimize;
 import dunamis.core.expr.base;
 import dunamis.core.join : joinAll;
+import dunamis.core.elements : analyzeBinders, BinderInfo, evalBound, Flattened, PlaceholderInfo, ScopeAnalysis;
 
 // ============================================================================
 // Use Combinator (computed fields)
@@ -505,8 +506,9 @@ class SubscriptionResultExpr : ForwardingExpr!(_JSONValue) {
 
 /// Interface to identify any EveryItemOfExpr regardless of Entity type.
 /// Used by optimizers to find the MapExpr boundary.
-interface EveryItemOfExprInfo {
-    /// Get the parent MapExpr (as Object)
+interface EveryItemOfExprInfo : PlaceholderInfo {
+    /// Get the parent MapExpr (as Object): its binder (a map, or a
+    /// collection predicate)
     @property Object parentMap();
 }
 
@@ -517,10 +519,12 @@ interface EveryItemOfExprInfo {
 ///
 /// Typed with the Entity being iterated. Returns Entity with PK populated.
 class EveryItemOfExpr(T) : Expr!T, EveryItemOfExprInfo {
-    /// Back-reference to owning MapExpr (set at construction)
+    /// Back-reference to the owning MapExpr or SomeExpr (set by its
+    /// constructor)
     Object _parentMap;  // Use Object to avoid template instantiation issues
 
     @property Object parentMap() { return _parentMap; }
+    @property Object binder() { return _parentMap; }
 
     override ExprBase[] dependencies() {
         return [];  // Leaf node (back-reference to parent is not a dependency)
@@ -559,14 +563,9 @@ interface MapExprInfo {
 /// collection's rows and their order, so optimizers may see through it; any
 /// other map yields different values, which are not its collection's rows.
 bool preservesElements(MapExprInfo map) {
-    import dunamis.core.expr.primitives : EntityCastInfo;
+    import dunamis.core.transparency : seeThrough, Transparent;
 
-    Object item = map.bodyExpr;
-    while (auto entityCast = cast(EntityCastInfo) item) {
-        if (entityCast.inputExpr is item) return false;
-        item = entityCast.inputExpr;
-    }
-    auto every = cast(EveryItemOfExprInfo) item;
+    auto every = cast(EveryItemOfExprInfo) seeThrough(map.bodyExpr, Transparent.entityCasts);
     return every !is null && every.parentMap is cast(Object) map;
 }
 
@@ -575,7 +574,7 @@ bool preservesElements(MapExprInfo map) {
 ///
 /// Entity is the type of items in the collection (e.g., User, Post).
 /// Body is the expression type produced by the mapping function.
-class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
+class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo, BinderInfo
     if (is(Body : Expr!U, U))
 {
     alias R = Body.ResultType;
@@ -586,6 +585,7 @@ class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
     private Object _indexKey;            // key for local element index storage
     private Object _groupIndexKey;       // key for group (parent) index storage
     private Object _dedupKey;            // key for the deduplication of a batch (MapDedup)
+    private ScopeAnalysis _analysis;     // of the body (see analyzeBinders)
 
     this(Expr!(Entity[]) collection, EveryItemOfExpr!Entity item, Body body_) {
         _collection = collection;
@@ -594,7 +594,15 @@ class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
         _indexKey = new Object();
         _groupIndexKey = new Object();
         _dedupKey = new Object();
+        item._parentMap = this;
+        analyzeBinders(this);
     }
+
+    // BinderInfo implementation
+    ExprBase[] scopedParts() { return [_body]; }
+    Object[] placeholders() { return [_item]; }
+    @property ScopeAnalysis scopeAnalysis() { return _analysis; }
+    void setScopeAnalysis(ScopeAnalysis analysis) { _analysis = analysis; }
 
     /// Key used to look up element indices from EvalContext.
     /// Each element gets its local index within its parent's collection.
@@ -633,110 +641,67 @@ class MapExpr(Entity, Body) : Expr!(Body.ResultType[]), MapExprInfo
         return this;
     }
 
-    /// Batched eval: evaluates all items at once.
-    /// Works correctly for both naive and optimized paths.
+    /// Batched eval: evaluates the body once, for the elements of all the
+    /// collections at once (see `evalBound`). Works correctly for both
+    /// naive and optimized paths.
     ///
     /// A batch with repeated elements (e.g. the same parent reached from
     /// many children) evaluates the body once per distinct element, if the
-    /// body is a function of its element only (see `bodyReadsOnlyOwnItems`):
-    /// the repeated elements share the results of the first. Per-element
-    /// errors are still reported at each element's path (see MapDedup).
+    /// body is a function of its element only (see `ScopeAnalysis`): the
+    /// repeated elements share the results of the first. Per-element errors
+    /// are still reported at each element's path (see MapDedup).
     override Promise!(R[][]) eval(EvalContext ctx) {
         // Capture for use in closures
         auto bodyExpr = _body;
-        auto self = this;  // Key for refs map
+        auto self = this;  // Key of the elements (see EveryItemOfExpr)
         auto indexKey = _indexKey;
         auto groupIndexKey = _groupIndexKey;
         auto dedupKey = _dedupKey;
+        auto analysis = _analysis;
+        enum construct = "map over " ~ Entity.stringof;
 
-        // 1. Evaluate collection for each parent ref
         return evalAs!(Entity[])(_collection, ctx).then((Entity[][] collectionResults) {
-            // 2. Flatten for batch evaluation
-            Entity[] flatEntities;
-            size_t[] lengths;
-            size_t[] localIndices;
-            size_t[] groupIndices;
-            foreach (groupIdx, group; collectionResults) {
-                lengths ~= group.length;
-                foreach (j, e; group) {
-                    flatEntities ~= e;
-                    localIndices ~= j;
-                    groupIndices ~= groupIdx;
-                }
-            }
-
-            if (flatEntities.length == 0) {
-                // No items to process - return empty array for each parent
-                return resolve(std.algorithm.map!(_ => cast(R[])[])(iota(collectionResults.length)).array);
-            }
+            auto batch = Flattened!Entity(collectionResults);
+            auto n = batch.elements.length;
+            if (n == 0)
+                return resolve(new R[][](collectionResults.length));
+            auto localIndices = batch.localIndices;
+            auto groupIndices = batch.groupIndices;
 
             static if (isDeduplicable!Entity) {
-                if (flatEntities.length > 1) {
-                    auto dedup = deduplicate(flatEntities, localIndices, groupIndices);
-                    if (dedup.distinct.length < flatEntities.length && bodyReadsOnlyOwnItems(self)) {
+                if (n > 1 && analysis.readsOwnElementsOnly) {
+                    auto dedup = deduplicate(batch.elements, localIndices, groupIndices);
+                    if (dedup.distinct.length < n) {
                         size_t[] distinctLocal, distinctGroup;
                         foreach (positions; dedup.info.occurrences) {
                             distinctLocal ~= localIndices[positions[0]];
                             distinctGroup ~= groupIndices[positions[0]];
                         }
-                        ctx.setValues!Entity(self, dedup.distinct);
-                        ctx.setValues!size_t(indexKey, distinctLocal);
-                        ctx.setValues!size_t(groupIndexKey, distinctGroup);
-                        ctx.setValues!MapDedup(dedupKey, [dedup.info]);
-                        return evalAs!R(bodyExpr, ctx).then((R[] distinctResults) {
-                            if (distinctResults.length != dedup.distinct.length)
-                                throw new Exception("Batch size mismatch in map over " ~ Entity.stringof ~
-                                    ": its body produced " ~ distinctResults.length.to!string ~
-                                    " results for " ~ dedup.distinct.length.to!string ~ " elements (use " ~
-                                    "broadcast() to replicate a single value across a batch)");
-                            R[] flatResults = new R[flatEntities.length];
+                        return evalBound!R(bodyExpr, ctx, [
+                            binding(self, dedup.distinct),
+                            binding(indexKey, distinctLocal),
+                            binding(groupIndexKey, distinctGroup),
+                            binding(dedupKey, [dedup.info]),
+                        ], dedup.distinct.length, construct, "body", "elements").then((R[] distinctResults) {
+                            R[] flatResults = new R[n];
                             foreach (d, positions; dedup.info.occurrences)
                                 foreach (position; positions)
                                     flatResults[position] = distinctResults[d];
-                            R[][] result;
-                            size_t offset = 0;
-                            foreach (len; lengths) {
-                                result ~= flatResults[offset .. offset + len];
-                                offset += len;
-                            }
-                            return result;
+                            return batch.regroup(flatResults);
                         });
                     }
                 }
             }
 
-            // (Not deduplicated: unlike that of another evaluation of the map,
-            // e.g. in the context this one is a scope of)
-            if (ctx.getValues!MapDedup(dedupKey).length)
-                ctx.setValues!MapDedup(dedupKey, []);
-
-            // 3. Store values for EveryItemOfExpr to retrieve
-            ctx.setValues!Entity(self, flatEntities);
-
-            // 4. Store indices for error path tracking (separate keys)
-            ctx.setValues!size_t(indexKey, localIndices);
-            ctx.setValues!size_t(groupIndexKey, groupIndices);
-
-            // 5. Evaluate body with ALL refs at once
-            return evalAs!R(bodyExpr, ctx).then((R[] flatResults) {
-                // The body yields one result per element. One result for a
-                // whole batch is not replicated: an expression producing a
-                // single value (e.g. reaching a root collection) must be
-                // aligned to the batch with broadcast().
-                if (flatResults.length != flatEntities.length)
-                    throw new Exception("Batch size mismatch in map over " ~ Entity.stringof ~
-                        ": its body produced " ~ flatResults.length.to!string ~ " results for " ~
-                        flatEntities.length.to!string ~ " elements (use broadcast() to replicate " ~
-                        "a single value across a batch)");
-                // 6. Regroup to match input structure
-                R[][] result;
-                size_t offset = 0;
-                foreach (len; lengths) {
-                    result ~= flatResults[offset .. offset + len];
-                    offset += len;
-                }
-                return result;
-            });
+            // The elements for EveryItemOfExpr, their indices for error paths,
+            // and no deduplication (unlike that of another evaluation of the
+            // map, e.g. in the context this one is a scope of)
+            return evalBound!R(bodyExpr, ctx, [
+                binding(self, batch.elements),
+                binding(indexKey, localIndices),
+                binding(groupIndexKey, groupIndices),
+                binding(dedupKey, cast(MapDedup[]) null),
+            ], n, construct, "body", "elements").then((R[] flatResults) => batch.regroup(flatResults));
         });
     }
 
@@ -778,50 +743,6 @@ private auto deduplicate(Entity)(Entity[] elements, size_t[] localIndices, size_
     return result;
 }
 
-/// Whether the body of the map `map` is a function of its element only,
-/// so that equal elements yield equal results: the placeholders in the body
-/// (of the items of maps, collection predicates, filters and sorts) are all
-/// bound by the map itself or by expressions within the body, not by an
-/// enclosing expression (e.g. an outer map's item), whose values differ
-/// between equal elements. (The inputs of other bound values, such as an
-/// object's, lead to the placeholders they derive from.)
-private bool bodyReadsOnlyOwnItems(Object map) {
-    import dunamis.core.elements : subexpressions;
-    import dunamis.core.filtering : FilterByInfo, FilterItemInfo;
-    import dunamis.core.sorting : SortByInfo, SortItemInfo;
-
-    bool[Object] binders, visited;
-    binders[map] = true;
-    ExprBase[] nodes;
-    void collect(ExprBase e) {
-        if (e is null || cast(Object) e in visited)
-            return;
-        visited[cast(Object) e] = true;
-        nodes ~= e;
-        if (cast(MapExprInfo) e || cast(CollectionPredicateInfo) e || cast(FilterByInfo) e || cast(SortByInfo) e)
-            binders[cast(Object) e] = true;
-        // (Also the predicates of filters and sorts, which are not their
-        // dependencies)
-        foreach (part; subexpressions(e))
-            collect(part);
-    }
-    collect((cast(MapExprInfo) map).bodyExpr);
-    foreach (e; nodes) {
-        Object binder;
-        if (auto item = cast(EveryItemOfExprInfo) e)
-            binder = item.parentMap;
-        else if (auto item = cast(FilterItemInfo) e)
-            binder = item.parentFilter;
-        else if (auto item = cast(SortItemInfo) e)
-            binder = item.parentSort;
-        else
-            continue;
-        if (binder !in binders)
-            return false;
-    }
-    return true;
-}
-
 /// Extract the Entity type from an Expr!(Entity[]) type
 template CollectionEntityType(Coll) {
     static if (is(Coll : Expr!(E[]), E)) {
@@ -843,13 +764,11 @@ auto map(alias fn, Coll)(Coll collection)
     // 2. Build body expression using placeholder as input
     auto body_ = fn(item);
 
-    // 3. Create MapExpr with both (Entity type flows through)
+    // 3. Create MapExpr with both (Entity type flows through; it links the
+    // placeholder to itself)
     auto mapExpr = new MapExpr!(Entity, typeof(body_))(collection, item, body_);
 
-    // 4. Link placeholder back to MapExpr
-    item._parentMap = mapExpr;
-
-    // 5. Auto-link index sources for error path tracking
+    // 4. Auto-link index sources for error path tracking
     linkIndexSources(body_, IndexLevel(mapExpr.indexKey, mapExpr.groupIndexKey, mapExpr.dedupKey));
 
     return mapExpr;
@@ -898,7 +817,7 @@ interface CollectionPredicateInfo {
 /// Example:
 ///   some!((Expr!Post p) => p.isPublished)(user.posts)
 ///   // Returns true if user has at least one published post
-class SomeExpr(Entity, Body) : Expr!bool, CollectionPredicateInfo
+class SomeExpr(Entity, Body) : Expr!bool, CollectionPredicateInfo, BinderInfo
     if (is(Body : Expr!bool))
 {
     private ExprBase _collection;           // Expr!(Entity[])
@@ -909,7 +828,18 @@ class SomeExpr(Entity, Body) : Expr!bool, CollectionPredicateInfo
         _collection = collection;
         _item = item;
         _predicate = predicate;
+        item._parentMap = this;
+        analyzeBinders(this);
     }
+
+    private ScopeAnalysis _analysis;  // (of the predicate: see analyzeBinders)
+
+    // BinderInfo implementation (the predicate is evaluated for a batch of
+    // all the elements in any case)
+    ExprBase[] scopedParts() { return [_predicate]; }
+    Object[] placeholders() { return [_item]; }
+    @property ScopeAnalysis scopeAnalysis() { return _analysis; }
+    void setScopeAnalysis(ScopeAnalysis analysis) { _analysis = analysis; }
 
     override ExprBase[] dependencies() {
         return [_collection, _predicate];
@@ -929,73 +859,27 @@ class SomeExpr(Entity, Body) : Expr!bool, CollectionPredicateInfo
         return this;
     }
 
+    /// The predicate is evaluated once, for the elements of all the
+    /// collections (see `evalBound`); a collection is true if any of its
+    /// elements is (none: false).
     override Promise!(bool[]) eval(EvalContext ctx) {
-        debug(filter) {
-            import std.stdio : writefln, stdout;
-            writefln("  >>SomeExpr.eval CALLED<<");
-            stdout.flush();
-        }
+        auto predicate = _predicate;
+        auto self = this;  // Key of the elements (see EveryItemOfExpr)
 
-        auto predicate = cast(Expr!bool) _predicate;
-        auto self = this;  // Key for refs map (EveryItemOfExpr._parentMap points to this)
-
-        // Evaluate collection for each parent ref
         return evalAs!(Entity[])(_collection, ctx).then((Entity[][] collectionResults) {
-            // Flatten all items for batch evaluation
-            size_t[] groupLengths;
-            size_t totalItems = 0;
-            foreach (group; collectionResults) {
-                groupLengths ~= group.length;
-                totalItems += group.length;
-            }
-
-            // Handle empty case
-            if (totalItems == 0) {
-                bool[] results;
-                results.length = collectionResults.length;
-                results[] = false;  // some() on empty = false
-                return resolve(results);
-            }
-
-            // Store all items in unified value storage
-            Entity[] flatVals;
-            flatVals.reserve(totalItems);
-            foreach (group; collectionResults) {
-                foreach (v; group) {
-                    flatVals ~= v;
-                }
-            }
-            debug(filter) {
-                import std.stdio : writefln;
-                writefln("  SomeExpr.eval: %d groups, %d total items", collectionResults.length, flatVals.length);
-            }
-            ctx.setValues!Entity(self, flatVals);
-
-            // Evaluate predicate for all items in batch
-            return evalAs!bool(predicate, ctx).then((bool[] predicateResults) {
-                debug(filter) {
-                    import std.stdio : writefln;
-                    writefln("    predicate results=%s", predicateResults);
-                }
-
-                // Reduce flat results back to per-group booleans
-                bool[] results;
-                results.length = groupLengths.length;
-
-                size_t offset = 0;
-                foreach (i, len; groupLengths) {
-                    bool anyTrue = false;
-                    foreach (j; 0 .. len) {
-                        if (predicateResults[offset + j]) {
-                            anyTrue = true;
+            auto batch = Flattened!Entity(collectionResults);
+            if (batch.elements.length == 0)
+                return resolve(new bool[collectionResults.length]);
+            return evalBound!bool(predicate, ctx, [binding(self, batch.elements)], batch.elements.length,
+                "some over " ~ Entity.stringof, "predicate", "elements").then((bool[] results) {
+                bool[] anyTrue = new bool[collectionResults.length];
+                foreach (i, group; batch.regroup(results))
+                    foreach (r; group)
+                        if (r) {
+                            anyTrue[i] = true;
                             break;
                         }
-                    }
-                    results[i] = anyTrue;
-                    offset += len;
-                }
-
-                return results;
+                return anyTrue;
             });
         });
     }
@@ -1025,11 +909,8 @@ auto some(alias pred, Coll)(Coll collection)
     static assert(is(typeof(predicate) : Expr!bool),
         "some() predicate must return Expr!bool, got " ~ typeof(predicate).stringof);
 
-    // Create SomeExpr and link
-    auto expr = new SomeExpr!(Entity, typeof(predicate))(collection, item, predicate);
-    item._parentMap = expr;  // Reuse _parentMap for predicate item lookup
-
-    return expr;
+    // Create SomeExpr (which links the placeholder to itself)
+    return new SomeExpr!(Entity, typeof(predicate))(collection, item, predicate);
 }
 
 /// Test if ALL items in collection satisfy the predicate.
@@ -1688,12 +1569,12 @@ unittest {
     outerItem._parentMap = new Object();
     auto reading = map!((Expr!TestEntity child) =>
         use((TestEntity c, TestEntity p) => c.id ~ p.id, child, outerItem))(collection);
-    assert(!bodyReadsOnlyOwnItems(reading));
-    assert(bodyReadsOnlyOwnItems(query));
+    assert(!reading.scopeAnalysis.readsOwnElementsOnly);
+    assert(query.scopeAnalysis.readsOwnElementsOnly);
     // (Items of maps, predicates, filters within the body are its own)
     auto inner = map!((Expr!TestEntity item) => some!((Expr!TestEntity c) => use((TestEntity e) => e.id == "x", c))(
         use((TestEntity e) => [e], item)))(collection);
-    assert(bodyReadsOnlyOwnItems(inner));
+    assert(inner.scopeAnalysis.readsOwnElementsOnly);
 
     // Also through the predicate of a filter or a sort in the body (which
     // is not among the filter's or sort's dependencies)
@@ -1704,14 +1585,14 @@ unittest {
     }
     auto filtering = map!((Expr!TestEntity child) => filterBy!((Expr!TestEntity c) =>
         use((TestEntity c, TestEntity p) => c.id == p.id, c, outerItem))(children(child)))(collection);
-    assert(!bodyReadsOnlyOwnItems(filtering));
+    assert(!filtering.scopeAnalysis.readsOwnElementsOnly);
     auto sorting = map!((Expr!TestEntity child) => sortBy!((Expr!TestEntity a, Expr!TestEntity b) =>
         use((TestEntity a, TestEntity b, TestEntity p) => (a.id == p.id) > (b.id == p.id), a, b, outerItem))(
         children(child)))(collection);
-    assert(!bodyReadsOnlyOwnItems(sorting));
+    assert(!sorting.scopeAnalysis.readsOwnElementsOnly);
     auto ownFilter = map!((Expr!TestEntity child) => filterBy!((Expr!TestEntity c) =>
         use((TestEntity c, TestEntity p) => c.id == p.id, c, child))(children(child)))(collection);
-    assert(bodyReadsOnlyOwnItems(ownFilter));
+    assert(ownFilter.scopeAnalysis.readsOwnElementsOnly);
 }
 
 unittest {

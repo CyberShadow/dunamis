@@ -43,6 +43,38 @@ struct SealedArray {
 }
 
 // ============================================================================
+// Bindings
+// ============================================================================
+
+/// Values bound to a key (e.g. a map's elements, bound to the map for its
+/// item placeholder), for a scope to bind (see `EvalContext.createScope`).
+struct Binding {
+    private Object _key;
+    private SealedArray _values;
+}
+
+/// The binding of `values` to `key`.
+Binding binding(T)(Object key, T[] values) {
+    return Binding(key, SealedArray(values));
+}
+
+/// The key of the root binding: the batch a tree's root is evaluated for,
+/// of one element, the query root (see `rootBinding`).
+private final class RootBindingKey {}
+
+/// ditto
+private immutable RootBindingKey rootBindingKey = new immutable RootBindingKey();
+
+/// The root binding, which a context binds before a tree is evaluated in it
+/// as a root expression (by an executor, see `dunamis.core.executor`): the
+/// batch of one element, the query root (`queryRoot`), the tree is
+/// evaluated for.
+Binding rootBinding() {
+    // (Only the key's identity is used)
+    return binding!AnyRef(cast(Object) rootBindingKey, [queryRoot]);
+}
+
+// ============================================================================
 // GraphQL Error Type
 // ============================================================================
 
@@ -121,9 +153,16 @@ class EvalContext {
     /// the values it binds, are no longer visible from the scope. This
     /// context is not modified, so other evaluations in flight in it are not
     /// affected.
-    EvalContext createScope() {
+    ///
+    /// The scope binds `bindings` (see `setValues`), before anything is
+    /// evaluated in it: expressions binding values for a part of themselves
+    /// (a map's elements for its body, ...) evaluate that part in such a
+    /// scope, so that what is memoized in the scope is of these values.
+    EvalContext createScope(Binding[] bindings...) {
         auto scope_ = new EvalContext();
         scope_._parent = this;
+        foreach (b; bindings)
+            scope_.bind(cast(void*) b._key, b._values);
         return scope_;
     }
 
@@ -212,14 +251,23 @@ class EvalContext {
     ///
     /// In a scope, binding a key which the contexts it is a scope of bind to
     /// other values gives the scope a memo of its own (see `createScope`):
-    /// bind the scope's values before evaluating anything in it.
+    /// bind the scope's values before evaluating anything in it. Expressions
+    /// binding values for parts of themselves do so by evaluating them in a
+    /// scope created with the bindings (see `createScope(Binding[]...)`);
+    /// this is for values delivered to a context before a tree is evaluated
+    /// in it (e.g. a subscription's event), the member values a union
+    /// publishes for its subsets (see `UnionExpr`), and tests.
     void setValues(T)(Object key, T[] vals) {
-        auto values = SealedArray(vals);
+        bind(cast(void*) key, SealedArray(vals));
+    }
+
+    /// ditto
+    private void bind(void* key, SealedArray values) {
         if (_parent !is null && !_ownMemo)
-            if (auto bound = _parent.findBinding(cast(void*) key))
+            if (auto bound = _parent.findBinding(key))
                 if (!bound.sameAs(values))
                     _ownMemo = true;
-        _valueMap[cast(void*) key] = values;
+        _valueMap[key] = values;
     }
 
     /// The values bound to `key` in this context or in the nearest context

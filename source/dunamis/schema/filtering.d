@@ -631,7 +631,6 @@ Expr!bool buildFilterPredicateFromStruct(Entity)(Expr!Entity item, const ref Ent
                 if (negate)
                     childPred = childPred.not();
                 auto someExpr = new SomeExpr!(ChildEntity, Expr!bool)(collectionExpr, childItem, childPred);
-                childItem._parentMap = someExpr;
                 return someExpr;
             }
 
@@ -665,7 +664,6 @@ Expr!bool buildFilterPredicateFromStruct(Entity)(Expr!Entity item, const ref Ent
                     if (negate)
                         elemPred = elemPred.not();
                     auto someExpr = new SomeExpr!(ElemType, Expr!bool)(collectionExpr, elemItem, elemPred);
-                    elemItem._parentMap = someExpr;
                     return someExpr;
                 }
 
@@ -1037,9 +1035,7 @@ mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) 
                 predicate = constant(true, item);
         } else
             auto predicate = buildFilterPredicateFromStruct!_ElementType(item, filter.get);
-        auto filterExpr = new FilterByExpr!_ElementType(base, item, predicate);
-        item._parentFilter = filterExpr;
-        return filterExpr;
+        return new FilterByExpr!_ElementType(base, item, predicate);
     }
 
     @(__traits(getAttributes, __traits(getMember, SourceQuery, fieldName)))

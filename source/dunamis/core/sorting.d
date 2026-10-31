@@ -10,6 +10,7 @@ module dunamis.core.sorting;
 import ae.utils.promise;
 import ae.utils.promise.await : async;
 
+import dunamis.core.elements : analyzeBinders, BinderInfo, evalBound, PlaceholderInfo, ScopeAnalysis;
 import dunamis.core.expr;
 import dunamis.core.eval;
 import dunamis.core.optimize;
@@ -39,7 +40,7 @@ struct OrderBySpec {
 // ============================================================================
 
 /// Interface for sort placeholder items (for detecting a vs b in predicate)
-interface SortItemInfo {
+interface SortItemInfo : PlaceholderInfo {
     /// Is this the "left" (a) item in comparison?
     @property bool isLeftItem();
     /// Get parent SortByExpr
@@ -82,6 +83,7 @@ class SortItemExpr(Entity) : Expr!Entity, SortItemInfo {
 
     @property bool isLeftItem() { return _isLeftItem; }
     @property Object parentSort() { return _parentSort; }
+    @property Object binder() { return _parentSort; }
 
     override ExprBase[] dependencies() {
         return [];  // Leaf node (placeholder)
@@ -121,25 +123,32 @@ class SortItemExpr(Entity) : Expr!Entity, SortItemInfo {
 /// ---
 /// auto sorted = sortBy!((a, b) => a.firstName < b.firstName)(users);
 /// ---
-class SortByExpr(Entity, Pred) : Expr!(Entity[]), SortByInfo
+class SortByExpr(Entity, Pred) : Expr!(Entity[]), SortByInfo, BinderInfo
     if (is(Pred : Expr!bool) || is(Pred : Expr!int))
 {
     private ExprBase _source;
     SortItemExpr!Entity _itemA;  // Left item (a)
     SortItemExpr!Entity _itemB;  // Right item (b)
     private ExprBase _predicate;
-    /// Whether comparisons must be evaluated one at a time (see
-    /// `evaluatesPerItem`).
-    private bool _perItem;
+    /// What the predicate reads (whether comparisons must be evaluated one
+    /// at a time, see `ScopeAnalysis`).
+    private ScopeAnalysis _analysis;
 
     this(Expr!(Entity[]) source, SortItemExpr!Entity a, SortItemExpr!Entity b, Pred pred) {
-        import dunamis.core.elements : evaluatesPerItem;
         _source = source;
         _itemA = a;
         _itemB = b;
         _predicate = pred;
-        _perItem = evaluatesPerItem(pred, a, b);
+        a._parentSort = this;
+        b._parentSort = this;
+        analyzeBinders(this);
     }
+
+    // BinderInfo implementation
+    ExprBase[] scopedParts() { return [_predicate]; }
+    Object[] placeholders() { return [_itemA, _itemB]; }
+    @property ScopeAnalysis scopeAnalysis() { return _analysis; }
+    void setScopeAnalysis(ScopeAnalysis analysis) { _analysis = analysis; }
 
     // SortByInfo implementation
     ExprBase sortSource() { return _source; }
@@ -162,12 +171,9 @@ class SortByExpr(Entity, Pred) : Expr!(Entity[]), SortByInfo
     }
 
     override Expr!(Entity[]) optimize(OptimizeContext ctx) {
-        import dunamis.core.elements : evaluatesPerItem;
-
         // Optimize the predicate (first: see FilterByExpr.optimize), for its
         // in-memory evaluation
         _predicate = (cast(Pred) _predicate).optimize(ctx);
-        _perItem = evaluatesPerItem(_predicate, _itemA, _itemB);
         // Optimize source - pattern matching for SQL push-down happens
         // in the relational layer (schema.d), not here in core
         _source = source.optimize(ctx);
@@ -181,7 +187,7 @@ class SortByExpr(Entity, Pred) : Expr!(Entity[]), SortByInfo
     /// of each group are evaluated at once, as one batch of the predicate
     /// (in a scope binding the items, see FilterByExpr.eval), unless there
     /// are more than `maxBatchedComparisons` of them, or the predicate must
-    /// be evaluated one pair at a time (see `evaluatesPerItem`): then the
+    /// be evaluated one pair at a time (see `ScopeAnalysis.perElement`): then the
     /// comparisons the sort needs are evaluated one at a time.
     override Promise!(Entity[][]) eval(EvalContext ctx) {
         auto self = this;
@@ -191,11 +197,13 @@ class SortByExpr(Entity, Pred) : Expr!(Entity[]), SortByInfo
                 pairs += group.length > 1 ? group.length * (group.length - 1) : 0;
             if (pairs == 0)
                 return resolve(groups);
-            if (_perItem || pairs > maxBatchedComparisons)
+            if (self._analysis.perElement || pairs > maxBatchedComparisons)
                 return self.sortComparingEach(ctx, groups);
             return self.sortComparingAll(ctx, groups, pairs);
         });
     }
+
+    private enum construct = "sort of " ~ Entity.stringof;
 
     /// Whether a comparison result means "less than".
     private static bool isLess(R)(R r) {
@@ -221,15 +229,8 @@ class SortByExpr(Entity, Pred) : Expr!(Entity[]), SortByInfo
                             lefts ~= a;
                             rights ~= b;
                         }
-        auto pairCtx = ctx.createScope();
-        pairCtx.setValues!Entity(_itemA, lefts);
-        pairCtx.setValues!Entity(_itemB, rights);
-        return evalAs!PredResult(_predicate, pairCtx).then((PredResult[] results) {
-            if (results.length != pairs)
-                throw new Exception("Batch size mismatch in sort of " ~ Entity.stringof ~
-                    ": its predicate produced " ~ results.length.to!string ~ " results for " ~
-                    pairs.to!string ~ " comparisons (use broadcast() to replicate a single value " ~
-                    "across a batch)");
+        return evalBound!PredResult(_predicate, ctx, [binding(_itemA, lefts), binding(_itemB, rights)], pairs,
+            construct, "predicate", "comparisons").then((PredResult[] results) {
             auto sorted = new Entity[][](groups.length);
             size_t offset;
             foreach (gi, group; groups) {
@@ -268,12 +269,11 @@ class SortByExpr(Entity, Pred) : Expr!(Entity[]), SortByInfo
                 auto items = group;
                 bool less(size_t i, size_t j) {
                     if (i == j) return false;
-                    // Evaluated in a scope of its own (see FilterByExpr)
-                    auto pairCtx = ctx.createScope();
-                    pairCtx.setValues!Entity(itemA, [items[i]]);
-                    pairCtx.setValues!Entity(itemB, [items[j]]);
-                    PredResult[] results = evalAs!PredResult(predicate, pairCtx).await;
-                    return results.length > 0 && isLess(results[0]);
+                    // Evaluated in a scope of its own (see evalBound)
+                    PredResult[] results = evalBound!PredResult(predicate, ctx,
+                        [binding(itemA, [items[i]]), binding(itemB, [items[j]])], 1,
+                        construct, "predicate", "comparison").await;
+                    return isLess(results[0]);
                 }
                 auto order = new size_t[items.length];
                 foreach (i; 0 .. items.length)
@@ -322,14 +322,8 @@ auto sortBy(alias pred, Coll)(Coll collection)
     // Build predicate expression using placeholders
     auto predicate = pred(itemA, itemB);
 
-    // Create SortByExpr
-    auto sortExpr = new SortByExpr!(Entity, typeof(predicate))(collection, itemA, itemB, predicate);
-
-    // Link placeholders back to parent
-    itemA._parentSort = sortExpr;
-    itemB._parentSort = sortExpr;
-
-    return sortExpr;
+    // Create SortByExpr (which links the placeholders to itself)
+    return new SortByExpr!(Entity, typeof(predicate))(collection, itemA, itemB, predicate);
 }
 
 /// Extract the Entity type from an Expr!(Entity[]) type

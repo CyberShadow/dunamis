@@ -138,16 +138,12 @@ auto effect(Fn)(Fn fn, ExprBase lengthSource = null) {
 /// these: e.g. as of other database settings.
 Promise!T evaluateNested(T)(Expr!T expr, EvalContext ctx) {
     import dunamis.core.executor : Executor;
-    import dunamis.core.types : AnyRef, queryRoot;
-
     auto optimized = new Executor().optimize(expr);
     foreach (ds; Executor.dataSourcesOf(optimized))
         if (!ctx.hasSession(ds))
             throw new Exception("evaluateNested: an expression's data source has no session in the request " ~
                 "(name it in the sources of the procedure)");
-    auto scope_ = ctx.createScope();
-    scope_.setValues!AnyRef(null, [queryRoot]);
-    return optimized.eval(scope_).then((T[] values) {
+    return optimized.eval(ctx.createScope(rootBinding)).then((T[] values) {
         if (values.length != 1)
             throw new Exception("evaluateNested: a root expression evaluated to a batch");
         return values[0];
