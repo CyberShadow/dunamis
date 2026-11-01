@@ -108,6 +108,11 @@ class MySQLDialect : SqlDialect {
     override string emptyJsonArray() { return "JSON_ARRAY()"; }
 
     override string castToText(string sql) { return "CAST(" ~ sql ~ " AS CHAR)"; }
+    override string orderByTerm(string sql, bool descending) {
+        // (Ordered by itself, NULL would be the least value)
+        auto direction = descending ? " DESC" : "";
+        return "(" ~ sql ~ " IS NULL)" ~ direction ~ ", " ~ sql ~ direction;
+    }
 
     override string aggregateLayerJson(int layerId, string orderByClause) {
         if (orderByClause.length > 0) {

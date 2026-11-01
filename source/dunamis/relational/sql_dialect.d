@@ -119,6 +119,14 @@ interface SqlDialect {
     ///   SQLite: "CAST(expr AS TEXT)"
     ///   MySQL: "CAST(expr AS CHAR)"
     string castToText(string sql);
+
+    /// A term of an ORDER BY clause ordering by the SQL expression `sql`,
+    /// in descending order if `descending`, with NULL last in ascending
+    /// order and first in descending order, as PostgreSQL orders it (and
+    /// as `dunamis.core.sorting.compareValues` does).
+    ///   PostgreSQL: "expr", "expr DESC"
+    ///   SQLite/MySQL: "(expr IS NULL), expr", "(expr IS NULL) DESC, expr DESC"
+    string orderByTerm(string sql, bool descending);
 }
 
 /// SQL text whose rendering depends on the target dialect. Used for

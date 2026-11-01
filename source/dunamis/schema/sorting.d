@@ -1,14 +1,21 @@
 /// Sorting plugin for GraphQL schemas.
 ///
-/// The SortingPlugin automatically adds `orderBy` sorting arguments
-/// to all array-returning fields in the Query type.
+/// The SortingPlugin adds `orderBy` sorting arguments to the list fields of
+/// the schema's types. It has two parts:
+/// - the mechanism: sorting a list by fields of its elements (`SortField`s,
+///   see `sortByFields`), which data sources do in their queries (e.g. SQL
+///   ORDER BY) where they can, in memory otherwise;
+/// - the argument surface: what the `orderBy` argument of a list field is,
+///   and the fields its values sort by (see `SortingPluginWith`). The
+///   default one (`SortingPlugin`) takes `{field, direction}` objects;
+///   applications can compose other ones (e.g. `EnumSortSurface`).
 ///
 /// Example:
 /// ---
 /// alias BaseSchema = Schema!Query;
 /// alias SortedSchema = SortingPlugin!BaseSchema;
 ///
-/// // users: [User!]! becomes users(orderBy: [UserOrderBy!]): [User!]!
+/// // users: [User!]! becomes users(orderBy: [_OrderByStruct_Query_users!]): [User!]!
 /// ---
 module dunamis.schema.sorting;
 
@@ -16,7 +23,7 @@ import std.traits : ReturnType, Parameters, ParameterDefaults, ParameterIdentifi
 import std.typecons : Nullable;
 
 import dunamis.core.expr : Expr, ExprResultType;
-import dunamis.core.sorting : SortDirection;
+public import dunamis.core.sorting : SortDirection, SortField;
 import dunamis.schema.plugin;
 
 // ============================================================================
@@ -24,21 +31,22 @@ import dunamis.schema.plugin;
 // ============================================================================
 
 /// Plugin that adds orderBy sorting arguments to all array-returning fields,
-/// including nested HasMany relationships.
+/// including nested HasMany relationships, with the default argument
+/// surface (`DefaultSortSurface`): see `SortingPluginWith`.
 ///
-/// For each entity type E, generates:
-/// - enum EOrderByField { id, field1, field2, ... } - all sortable column fields
-/// - struct EOrderBy { EOrderByField field; SortDirection direction = SortDirection.ASC; }
+/// For each list field, generates:
+/// - enum _OrderByFieldEnum_<Type>_<field> { id, field1, field2, ... } - the sortable fields of its elements
+/// - struct _OrderByStruct_<Type>_<field> { <that enum> field; SortDirection direction = SortDirection.ASC; }
 ///
 /// Transforms root Query fields:
 ///   users: [User!]!
 /// Into:
-///   users(orderBy: [UserOrderBy!]): [User!]!
+///   users(orderBy: [_OrderByStruct_Query_users!]): [User!]!
 ///
 /// And nested entity fields:
 ///   User.posts: [Post!]!
 /// Into:
-///   User.posts(orderBy: [PostOrderBy!]): [Post!]!
+///   User.posts(orderBy: [_OrderByStruct_User_posts!]): [Post!]!
 ///
 /// Example:
 /// ---
@@ -53,40 +61,174 @@ import dunamis.schema.plugin;
 /// // Query with sorting:
 /// // { users(orderBy: [{field: lastName, direction: DESC}]) { posts(orderBy: [{field: title}]) { title } } }
 /// ---
-template SortingPlugin(alias S) if (isSchema!S) {
-    import std.meta : AliasSeq, staticMap;
-    import dunamis.core.discovery : getSchemaObjectTypes, SchemaRootTypes;
-    import dunamis.schema.transform : isTypeInList;
+alias SortingPlugin = SortingPluginWith!DefaultSortSurface;
 
-    // The schema's object types: its root types, and those reachable from them
-    alias _AllEntityTypes = getSchemaObjectTypes!S;
-    alias _AllTypes = AliasSeq!(SchemaRootTypes!S, _AllEntityTypes);
+/// Plugin that adds an `orderBy` argument to the list fields (of objects)
+/// for which the argument surface `Surface` declares one, sorting the
+/// elements by the fields the argument names (see `sortByFields`).
+///
+/// The surface is the template `Surface!(Scope, fieldName, Element)`, for
+/// the list field `fieldName` of the type `Scope` (as the plugin's source
+/// schema has them) whose elements are of type `Element` (likewise). It has:
+/// - `Argument`: the type of the argument (if the field gets one), and
+/// - `static SortField[] sortFields(Argument)`: the fields an argument value
+///   sorts by, the first the primary key of the order (none: the field's
+///   own order).
+///
+/// Dunamis's surfaces: `DefaultSortSurface` (`{field, direction}` objects),
+/// `EnumSortSurface` (members of an enum, see `SortsBy`). An application can
+/// compose its own (e.g. choosing one by the element type).
+template SortingPluginWith(alias Surface) {
+    template SortingPluginWith(alias S) if (isSchema!S) {
+        import std.meta : AliasSeq, staticMap;
+        import dunamis.core.discovery : getSchemaObjectTypes, SchemaRootTypes;
+        import dunamis.schema.transform : isTypeInList;
 
-    // Generate sorted versions of each entity type.
-    template SortedEntity(Entity) {
-        @(RemapTypeAttributes!(EntityTypeMap, __traits(getAttributes, Entity)))
-        @OriginalName(__traits(identifier, Entity))
-        struct SortedEntity {
-            mixin WrapFields!(Entity, EntityTypeMap, SortedArrayField);
+        // The schema's object types: its root types, and those reachable from them
+        alias _AllEntityTypes = getSchemaObjectTypes!S;
+        alias _AllTypes = AliasSeq!(SchemaRootTypes!S, _AllEntityTypes);
+
+        // The list fields of the wrappers, sorted with the plugin's surface
+        mixin template _SortedField(SourceQuery, string fieldName, alias TypeMap) {
+            mixin SortedArrayField!(Surface, SourceQuery, fieldName, TypeMap);
+        }
+
+        // Generate sorted versions of each entity type.
+        template SortedEntity(Entity) {
+            @(RemapTypeAttributes!(EntityTypeMap, __traits(getAttributes, Entity)))
+            @OriginalName(__traits(identifier, Entity))
+            struct SortedEntity {
+                mixin WrapFields!(Entity, EntityTypeMap, _SortedField);
+            }
+        }
+
+        // Map all entity types to their sorted versions
+        alias AllEntityTypes = staticMap!(SortedEntity, _AllEntityTypes);
+
+        /// Entity type map: maps the schema's object types (the root types
+        /// included) to their sorted versions.
+        template EntityTypeMap(T) {
+            static if (isTypeInList!(T, _AllTypes)) {
+                alias EntityTypeMap = SortedEntity!T;
+            } else {
+                alias EntityTypeMap = T;
+            }
+        }
+
+        alias Query = EntityTypeMap!(S.Query);
+        alias Mutation = EntityTypeMap!(S.Mutation);
+        alias Subscription = EntityTypeMap!(S.Subscription);
+    }
+}
+
+// ============================================================================
+// Sorting by fields (the mechanism)
+// ============================================================================
+
+/// Sort the elements of `source` by the fields `fields` (sortable fields of
+/// the elements, see `getSortableFields`), the first the primary key of the
+/// order: see `dunamis.core.sorting.sortByFieldsAmong`.
+auto sortByFields(S)(S source, const(SortField)[] fields) {
+    import dunamis.core.sorting : sortByFieldsAmong;
+    alias _E = Expr;
+    static assert(is(S : _E!(E[]), E), "Expected Expr!(E[]), got " ~ S.stringof);
+    static if (is(S : _E!(E[]), E))
+        return sortByFieldsAmong!(getSortableFields!E)(source, fields);
+}
+
+// ============================================================================
+// Argument surfaces
+// ============================================================================
+
+/// The default orderBy argument surface (see `SortingPluginWith`): a list of
+/// `{field, direction}` objects, of a type of the list field's own, whose
+/// `field` is a member of an enum of the elements' sortable fields
+/// (`_OrderByStruct_<Type>_<field>` and `_OrderByFieldEnum_<Type>_<field>`,
+/// `<Type>` being the name of the type of the field). A list whose elements
+/// have no sortable fields gets no argument.
+template DefaultSortSurface(Scope, string fieldName, Element) {
+    private enum string[] _fields = getSortableFields!Element;
+    static if (_fields.length) {
+        private enum string _scopeName = getOriginalTypeName!Scope;
+        private enum string _enumName = "_OrderByFieldEnum_" ~ _scopeName ~ "_" ~ fieldName;
+        private enum string _structName = "_OrderByStruct_" ~ _scopeName ~ "_" ~ fieldName;
+
+        mixin("enum " ~ _enumName ~ " { " ~ () {
+            string members;
+            foreach (f; _fields)
+                members ~= f ~ ", ";
+            return members;
+        }() ~ "}");
+        mixin("struct " ~ _structName ~ " { " ~ _enumName ~ " field; SortDirection direction = SortDirection.ASC; }");
+
+        /// The type of the argument
+        mixin("alias Argument = " ~ _structName ~ "[];");
+
+        /// The fields an argument sorts by
+        static SortField[] sortFields(const Argument argument) {
+            SortField[] result;
+            foreach (ref item; argument)
+                result ~= SortField(_fields[item.field], item.direction);
+            return result;
         }
     }
+}
 
-    // Map all entity types to their sorted versions
-    alias AllEntityTypes = staticMap!(SortedEntity, _AllEntityTypes);
+/// UDA on a member of an enum whose values are orderBy arguments (see
+/// `EnumSortSurface`): the field the member sorts by, and the direction.
+/// A member without one sorts by no field (e.g. a `NATURAL` member, which
+/// keeps the list's own order).
+struct SortsBy {
+    string field;
+    SortDirection direction = SortDirection.ASC;
+}
 
-    /// Entity type map: maps the schema's object types (the root types
-    /// included) to their sorted versions.
-    template EntityTypeMap(T) {
-        static if (isTypeInList!(T, _AllTypes)) {
-            alias EntityTypeMap = SortedEntity!T;
-        } else {
-            alias EntityTypeMap = T;
+/// The orderBy argument surface (see `SortingPluginWith`) whose argument is
+/// a list of members of the enum `E`, which sort by the fields their
+/// `@SortsBy` attributes name (see `sortFieldsOf`).
+template EnumSortSurface(E) if (is(E == enum)) {
+    /// The type of the argument
+    alias Argument = E[];
+
+    /// The fields an argument sorts by
+    static SortField[] sortFields(const Argument argument) {
+        return sortFieldsOf(argument);
+    }
+}
+
+/// The fields values of the enum `E` sort by, by their `@SortsBy`
+/// attributes (see `EnumSortSurface`).
+SortField[] sortFieldsOf(E)(const(E)[] values) if (is(E == enum)) {
+    SortField[] result;
+    foreach (value; values) {
+        sw: final switch (value) {
+            static foreach (name; __traits(allMembers, E)) {
+                case __traits(getMember, E, name):
+                    static foreach (attr; __traits(getAttributes, __traits(getMember, E, name)))
+                        static if (is(typeof(attr) == SortsBy))
+                            result ~= SortField(attr.field, attr.direction);
+                    break sw;
+            }
         }
     }
+    return result;
+}
 
-    alias Query = EntityTypeMap!(S.Query);
-    alias Mutation = EntityTypeMap!(S.Mutation);
-    alias Subscription = EntityTypeMap!(S.Subscription);
+/// The fields which the `@SortsBy` attributes of the members of the enum `E`
+/// name, but which are not sortable fields of the type `Element` (see
+/// `getSortableFields`): for checking at compile time that an
+/// `EnumSortSurface` sorts objects of that type.
+template unsortableSortsByFields(E, Element) if (is(E == enum)) {
+    enum string[] unsortableSortsByFields = () {
+        import std.algorithm.searching : canFind;
+        string[] result;
+        static foreach (name; __traits(allMembers, E))
+            static foreach (attr; __traits(getAttributes, __traits(getMember, E, name)))
+                static if (is(typeof(attr) == SortsBy))
+                    if (!getSortableFields!Element.canFind(attr.field))
+                        result ~= attr.field;
+        return result;
+    }();
 }
 
 // ============================================================================
@@ -94,11 +236,13 @@ template SortingPlugin(alias S) if (isSchema!S) {
 // ============================================================================
 
 /// Get sortable field names from an entity type.
-/// A field is sortable if its D result type supports the `<` operator
-/// and it takes no required arguments beyond the entity expression.
-/// Enum fields are temporarily excluded pending native DB enum type support.
+/// A field is sortable if its D result type is ordered (see
+/// `dunamis.core.sorting.isOrderedValue`: values comparing with `<`, enum
+/// members, and nullable such values) and it takes no required arguments
+/// beyond the entity expression.
 template getSortableFields(Entity) {
     import std.traits : Parameters;
+    import dunamis.core.sorting : isOrderedValue;
 
     /// Check if a method can be called with just Expr!Entity (no extra required args).
     private template isZeroArgField(alias method) {
@@ -128,14 +272,13 @@ template getSortableFields(Entity) {
                     alias ResultT = ExprResultType!(ReturnType!method);
                     // Include if:
                     // - callable with just Expr!Entity (no required extra args)
-                    // - not @GqlHidden
-                    // - not an enum (temporarily excluded: DB sort order may differ from D)
-                    // - result type supports `<` (excludes ForeignKey, Nullable, entities, arrays)
+                    // - public
+                    // - its values are ordered (excludes ForeignKey,
+                    //   entities, arrays)
                     static if (isZeroArgField!method
                             && __traits(getVisibility, method) == "public"
-                            && !hasEnumReturn!method
                             && !isArrayResult!ResultT
-                            && is(typeof(ResultT.init < ResultT.init))) {
+                            && isOrderedValue!ResultT) {
                         fields ~= member;
                     }
                 }
@@ -143,19 +286,6 @@ template getSortableFields(Entity) {
         }}
         return fields;
     }();
-}
-
-/// Check if a method returns an enum type (Expr!SomeEnum or Expr!(Nullable!SomeEnum))
-private template hasEnumReturn(alias method) {
-    import std.traits : ReturnType;
-    import std.typecons : Nullable;
-    import dunamis.core.expr : ExprResultType;
-    alias ResultT = ExprResultType!(ReturnType!method);
-    static if (is(ResultT == Nullable!U, U)) {
-        enum hasEnumReturn = is(U == enum);
-    } else {
-        enum hasEnumReturn = is(ResultT == enum);
-    }
 }
 
 /// Array results (lists) are not sortable; strings are scalars, not lists.
@@ -174,9 +304,10 @@ private template isArrayResult(T) {
 // ============================================================================
 
 /// Eponymous code template for SortedArrayField.
-/// Builds the complete mixin string including OrderBy types, helper functions,
-/// and the sorted method. All metadata stays encapsulated — no leaks.
-template SortedArrayFieldCode(SourceQuery, string fieldName, alias TypeMap) {
+/// Builds the mixin string of the sorted method: the source field's method,
+/// with the `orderBy` argument of the surface `Surface` (if it has one for
+/// the field). All metadata stays encapsulated — no leaks.
+template SortedArrayFieldCode(alias Surface, SourceQuery, string fieldName, alias TypeMap) {
     import std.conv : to;
     import dunamis.schema.forward : ForwardFieldImpl;
 
@@ -187,76 +318,19 @@ template SortedArrayFieldCode(SourceQuery, string fieldName, alias TypeMap) {
     private enum string _I = "dunamis.schema.forward.ForwardFieldImpl!(SourceQuery, \"" ~ fieldName ~ "\", TypeMap)";
     private enum string _Expr = "dunamis.core.expr.Expr";
     private enum string _entityCast = "dunamis.schema.entity_cast.pluginEntityCast";
-    private enum string _sortByField = "dunamis.core.sorting.sortByField";
-    private enum string _SD = "dunamis.core.sorting.SortDirection";
+    // (By the sortable fields of the source's elements: those of this
+    // plugin's elements are not known while it is being instantiated.)
+    private enum string _sortByFields = "dunamis.core.sorting.sortByFieldsAmong!(" ~
+        getSortableFields!_ElementType.stringof ~ ")";
     private enum string _wrap = "dunamis.schema.transform.wrapEntityResult";
-
-    // Field-specific names to avoid conflicts when multiple array fields coexist
-    private enum string _scopeName = getOriginalTypeName!SourceQuery;
-    private enum string _enumName = "_OrderByFieldEnum_" ~ _scopeName ~ "_" ~ fieldName;
-    private enum string _structName = "_OrderByStruct_" ~ _scopeName ~ "_" ~ fieldName;
-    private enum string _singleSort = "_applySingleSort_" ~ fieldName;
-    private enum string _sorting = "_applySorting_" ~ fieldName;
+    // The field's surface
+    private enum string _Surface = "Surface!(SourceQuery, \"" ~ fieldName ~
+        "\", dunamis.schema.plugin.ArrayFieldElementType!(" ~ _I ~ ".srcFn))";
 
     enum SortedArrayFieldCode = () {
         string result = "";
 
-        enum sortableFields = getSortableFields!_ElementType;
-
-        // --- OrderBy types and helper functions ---
-        static if (sortableFields.length > 0) {
-            // Enum
-            result ~= "private enum " ~ _enumName ~ " {\n";
-            static foreach (f; sortableFields) {
-                result ~= "    " ~ f ~ ",\n";
-            }
-            result ~= "}\n\n";
-
-            // Struct
-            result ~= "private struct " ~ _structName ~ " {\n";
-            result ~= "    " ~ _enumName ~ " field;\n";
-            result ~= "    " ~ _SD ~ " direction = " ~ _SD ~ ".ASC;\n";
-            result ~= "}\n\n";
-
-            // _applySingleSort: wraps source with a single-column SortByExpr.
-            // Templated on source type so it works with plugin-wrapped entity types.
-            // Local alias needed: is(S : Expr!(E[]), E) pattern matching doesn't work with .imported.
-            result ~= "private static auto " ~ _singleSort ~ "(S)(S source, " ~ _enumName ~ " field, " ~ _SD ~ " dir) {\n";
-            result ~= "    alias _E = " ~ _Expr ~ ";\n";
-            result ~= "    static assert(is(S : _E!(E[]), E), \"Expected Expr!(E[])\");\n";
-            result ~= "    static if (is(S : _E!(E[]), E)) {\n";
-            result ~= "        _E!(E[]) _result;\n";
-            result ~= "        final switch (field) {\n";
-            static foreach (member; sortableFields) {
-                result ~= "            case " ~ _enumName ~ "." ~ member ~ ":\n";
-                result ~= "                if (dir == " ~ _SD ~ ".ASC)\n";
-                result ~= "                    _result = " ~ _sortByField ~ "!(\"" ~ member ~ "\", " ~ _SD ~ ".ASC)(source);\n";
-                result ~= "                else\n";
-                result ~= "                    _result = " ~ _sortByField ~ "!(\"" ~ member ~ "\", " ~ _SD ~ ".DESC)(source);\n";
-                result ~= "                break;\n";
-            }
-            result ~= "        }\n";
-            result ~= "        return _result;\n";
-            result ~= "    }\n";
-            result ~= "}\n\n";
-
-            // _applySorting: nests SortByExpr wrappers for multi-column sorting.
-            // Applied in reverse so the first spec (highest priority) is the outermost wrapper.
-            result ~= "private static auto " ~ _sorting ~ "(S)(S base, " ~ _structName ~ "[] orderBySpecs) {\n";
-            result ~= "    alias _E = " ~ _Expr ~ ";\n";
-            result ~= "    static assert(is(S : _E!(E[]), E), \"Expected Expr!(E[])\");\n";
-            result ~= "    static if (is(S : _E!(E[]), E)) {\n";
-            result ~= "        _E!(E[]) result = base;\n";
-            result ~= "        if (orderBySpecs is null || orderBySpecs.length == 0) {\n";
-            result ~= "            return result;\n";
-            result ~= "        }\n";
-            result ~= "        foreach_reverse (ob; orderBySpecs) {\n";
-            result ~= "            result = " ~ _singleSort ~ "(result, ob.field, ob.direction);\n";
-            result ~= "        }\n";
-            result ~= "        return result;\n";
-            result ~= "    }\n";
-            result ~= "}\n\n";
-        }
+        enum hasArgument = __traits(hasMember, Surface!(SourceQuery, fieldName, _ElementType), "Argument");
 
         // --- Build parameter list ---
         string paramList = _Expr ~ "!(typeof(this)) " ~ Impl.srcParamNames[0];
@@ -266,8 +340,8 @@ template SortedArrayFieldCode(SourceQuery, string fieldName, alias TypeMap) {
                 paramList ~= " = " ~ _I ~ ".SrcDefaults[" ~ i.to!string ~ "]";
             }
         }}
-        static if (sortableFields.length > 0) {
-            paramList ~= ", " ~ _structName ~ "[] orderBy = null";
+        static if (hasArgument) {
+            paramList ~= ", " ~ _Surface ~ ".Argument orderBy = null";
         }
 
         // --- Build argument list ---
@@ -279,11 +353,11 @@ template SortedArrayFieldCode(SourceQuery, string fieldName, alias TypeMap) {
         // --- Generate method ---
         // Sorting is applied AFTER wrapEntityResult so SortByExpr wraps the
         // entity-cast MapExpr, keeping it visible to the optimizer unwrapping loop.
-        static if (sortableFields.length > 0) {
+        static if (hasArgument) {
             result ~= "@(__traits(getAttributes, " ~ _I ~ ".srcFn)) " ~
                       "static auto " ~ fieldName ~ "(" ~ paramList ~ ") { " ~
-                      "return " ~ _sorting ~ "(" ~ _wrap ~ "!(TypeMap)(" ~
-                      _I ~ ".srcFn(" ~ argList ~ ")), orderBy); }";
+                      "return " ~ _sortByFields ~ "(" ~ _wrap ~ "!(TypeMap)(" ~
+                      _I ~ ".srcFn(" ~ argList ~ ")), " ~ _Surface ~ ".sortFields(orderBy)); }";
         } else {
             result ~= "@(__traits(getAttributes, " ~ _I ~ ".srcFn)) " ~
                       "static auto " ~ fieldName ~ "(" ~ paramList ~ ") { " ~
@@ -295,14 +369,18 @@ template SortedArrayFieldCode(SourceQuery, string fieldName, alias TypeMap) {
     }();
 }
 
-/// Mixin template to create a sorted version of an array-returning field.
+/// Mixin template to create a sorted version of an array-returning field,
+/// with the orderBy argument surface `Surface` (see `SortingPluginWith`).
 /// Zero-leak: delegates to SortedArrayFieldCode eponymous template.
-mixin template SortedArrayField(SourceQuery, string fieldName, alias TypeMap) {
+mixin template SortedArrayField(alias Surface, SourceQuery, string fieldName, alias TypeMap) {
     static import dunamis.schema.forward;
     static import dunamis.core.expr;
     static import dunamis.schema.entity_cast;
+    // (Not this module: with it, some schemas' types would have forward
+    // references.)
     static import dunamis.core.sorting;
     static import dunamis.schema.transform;
+    static import dunamis.schema.plugin;
     import dunamis.core.discovery : isObjectType;
     import dunamis.schema.plugin : ArrayFieldElementType, ForwardField;
     import std.typecons : Nullable;
@@ -310,11 +388,10 @@ mixin template SortedArrayField(SourceQuery, string fieldName, alias TypeMap) {
     static if (is(ArrayFieldElementType!(__traits(getMember, SourceQuery, fieldName)) == Nullable!U, U))
         mixin ForwardField!(SourceQuery, fieldName, TypeMap);
     else static if (isObjectType!(ArrayFieldElementType!(__traits(getMember, SourceQuery, fieldName))))
-        mixin(SortedArrayFieldCode!(SourceQuery, fieldName, TypeMap));
+        mixin(SortedArrayFieldCode!(Surface, SourceQuery, fieldName, TypeMap));
     else
         mixin ForwardField!(SourceQuery, fieldName, TypeMap);
 }
-
 // ============================================================================
 // Unit Tests
 // ============================================================================

@@ -48,6 +48,8 @@
 - Sorting with `SortingPlugin`:
   - `orderBy` argument with `asc`/`desc` direction
   - Nested sorting for HasMany relationships
+  - Sorting by nullable (NULL last ascending, first descending) and enum (declaration order) fields, as PostgreSQL orders them, in SQL and in memory
+  - Replaceable argument surface (`SortingPluginWith`: `{field, direction}` objects by default, `EnumSortSurface`), over the `sortByFields` mechanism
 - Pagination with `PaginationPlugin`:
   - `first`/`after` cursor-based pagination
 - Runtime introspection (`__schema`, `__type`, `__typename`)

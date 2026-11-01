@@ -104,6 +104,7 @@ class PostgresDialect : SqlDialect {
     override string emptyJsonArray() { return "'[]'::json"; }
 
     override string castToText(string sql) { return sql ~ "::text"; }
+    override string orderByTerm(string sql, bool descending) { return sql ~ (descending ? " DESC" : ""); }
 
     override string aggregateLayerJson(int layerId, string orderByClause) {
         if (orderByClause.length > 0) {

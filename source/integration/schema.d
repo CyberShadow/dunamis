@@ -196,7 +196,7 @@ void seedDatabase() {
     writeln("  Created comment: Thanks for sharing (by Charlie on GraphQL Rocks)");
 
     // Create tasks with different statuses
-    auto task1 = graphql(`mutation { createTask(input: {title: "Write tests", status: pending, assigneeId: ` ~ aliceId.toString() ~ `}) { id } }`);
+    auto task1 = graphql(`mutation { createTask(input: {title: "Write tests", status: pending, priority: 2, assigneeId: ` ~ aliceId.toString() ~ `}) { id } }`);
     assertNoErrors(task1);
     writeln("  Created task: Write tests (pending)");
 
@@ -204,7 +204,7 @@ void seedDatabase() {
     assertNoErrors(task2);
     writeln("  Created task: Review PR (inProgress)");
 
-    auto task3 = graphql(`mutation { createTask(input: {title: "Deploy app", status: completed, assigneeId: ` ~ bobId.toString() ~ `}) { id } }`);
+    auto task3 = graphql(`mutation { createTask(input: {title: "Deploy app", status: completed, priority: 1, assigneeId: ` ~ bobId.toString() ~ `}) { id } }`);
     assertNoErrors(task3);
     writeln("  Created task: Deploy app (completed)");
 
@@ -262,6 +262,8 @@ mixin template TestSchema(alias db) {
         mixin HasMany!("posts", Post, "author_id");
         /// Children with a composite key, keyed on part of it and ordered by the rest
         mixin HasMany!("badges", UserBadge, "user_id", ["badge_name"]);
+        /// The tasks assigned to the user (by a nullable foreign key)
+        mixin HasMany!("tasks", Task, "assignee_id", ["id"]);
 
         /// Plain field: populated when entity is fetched (not via lazy column access)
         Nullable!string nickname;
@@ -436,6 +438,8 @@ mixin template TestSchema(alias db) {
         mixin DemoId;
         mixin Col!("title", string);
         mixin Col!("status", TaskStatus);
+        /// A nullable column (for sorting: NULL last ascending, first descending)
+        mixin Col!("priority", Nullable!int);
         mixin Col!("assigneeId", Nullable!(ForeignKey!User));
         mixin BelongsTo!("assignee", "assigneeId");
 

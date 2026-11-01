@@ -920,6 +920,77 @@ reads no item of an enclosing map, filter or sort (whose values would differ
 between equal items). Per-element errors (`GqlResult`) are still reported at
 the path of every item, in the same order.
 
+## Sorting
+
+`SortingPlugin` adds an `orderBy` argument to the list fields of objects:
+a list of `{field, direction}` objects, the first the primary key of the
+order. Each list field has its own input type, `_OrderByStruct_<Type>_<field>`,
+whose `field` is a member of `_OrderByFieldEnum_<Type>_<field>`, the sortable
+fields of the elements:
+
+```graphql
+{ tasks(orderBy: [{field: status, direction: ASC}, {field: priority, direction: DESC}]) { title } }
+```
+
+**Sortable fields** are those without required arguments whose values are
+ordered (`dunamis.core.sorting.isOrderedValue`): values comparing with `<`
+(strings, numbers, custom scalars), enum members, and nullable such values.
+Their order (`compareValues`) is PostgreSQL's ORDER BY order, in memory and
+in every SQL dialect alike:
+
+- NULL comes last in ascending order, first in descending order (SQLite and
+  MySQL queries sort by `x IS NULL` first: `SqlDialect.orderByTerm`);
+- enum members come in the order of their declaration, whatever their values
+  or stored labels (queries sort by the position of the label:
+  `CASE x WHEN 'label0' THEN 0 ...`);
+- a custom scalar's values come in the order of its `opCmp` (e.g. a decimal
+  scalar should compare numerically, as SQL does).
+
+Elements the keys leave tied keep the list's own order (sorts are stable).
+
+**The mechanism and the surface.** The plugin has two parts, which an
+application can use separately:
+
+- the mechanism sorts a list by fields of its elements:
+  `sortByFields(list, [SortField("status"), SortField("priority", SortDirection.DESC)])`
+  (`dunamis.schema.sorting`; `dunamis.core.sorting.sortByFieldsAmong` for
+  lists whose element type is not complete yet). Data sources sort in their
+  queries where they can (root lists: SQL ORDER BY), in memory otherwise;
+- the argument surface is what the `orderBy` argument of a list field is,
+  and which fields its values sort by. `SortingPlugin` is
+  `SortingPluginWith!DefaultSortSurface`; `SortingPluginWith!Surface` takes
+  any surface, a template `Surface!(Scope, fieldName, Element)` (of the list
+  field `fieldName` of `Scope`, with elements of type `Element`, as the
+  plugin's source schema has them) having `Argument` (the argument's type;
+  without it, the field gets no argument) and
+  `static SortField[] sortFields(Argument)`.
+
+`EnumSortSurface!E` takes a list of members of the enum `E`, which sort by
+the fields their `@SortsBy` attributes name (a member without one, e.g.
+`NATURAL`, keeps the list's order). A surface can choose one per field, e.g.
+by the element type:
+
+```d
+enum TasksOrderBy {
+    NATURAL,
+    @SortsBy("priority") PRIORITY_ASC,
+    @SortsBy("priority", SortDirection.DESC) PRIORITY_DESC,
+}
+
+template AppSortSurface(Scope, string fieldName, Element) {
+    static if (getOriginalTypeName!Element == "Task")
+        alias AppSortSurface = EnumSortSurface!TasksOrderBy;
+    else
+        alias AppSortSurface = DefaultSortSurface!(Scope, fieldName, Element);
+}
+
+alias FinalSchema = ApplyPlugins!(Schema!Query, FilterPlugin, SortingPluginWith!AppSortSurface, PaginationPlugin);
+// { tasks(orderBy: [PRIORITY_DESC]) { title } }
+```
+
+`unsortableSortsByFields!(E, Element)` lists the fields an enum's members
+name which are not sortable fields of `Element` (for a compile-time check).
+
 ## Introspection
 
 Runtime introspection is built in. The standard `__schema`, `__type`, and `__typename` meta-fields work out of the box:

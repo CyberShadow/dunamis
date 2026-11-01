@@ -95,9 +95,12 @@ class MockDBImpl : RelationalSession {
             throw new Exception("MockDB cannot evaluate the WHERE clauses of a query of " ~ node.table);
         if (!node.isRoot && (!node.limit_.isNull || !node.offset_.isNull))
             throw new Exception("MockDB cannot paginate the child rows of a query of " ~ node.table);
+        // (It orders by columns of the table, whether the query fetches them
+        // or not, as SQL does; not by computed columns.)
         foreach (spec; node.orderBy_)
-            if (!node.columns.canFind(spec.column))
-                throw new Exception("MockDB cannot order a query of " ~ node.table ~ " by " ~ spec.column);
+            if (node.computedColumns.canFind!(c => c.alias_ == spec.column))
+                throw new Exception("MockDB cannot order a query of " ~ node.table ~ " by the computed column " ~
+                    spec.column);
 
         auto result = new QueryResult();
         AnyRef[] refs;

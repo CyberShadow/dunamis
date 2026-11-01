@@ -818,37 +818,78 @@ final class SqlTranslator {
 /// `NativeSqlInfo`) of them which `dialect` (that of the query of the rows
 /// sorted, null if unknown) has a native form of, rendered on the rows of
 /// `table`; or null if the sort is not such a one.
+///
+/// The predicate is either a `<` / `>` comparison, or an ordering of values
+/// (see `OrderComparisonInfo`), whose nulls come last ascending and first
+/// descending (as the dialects order them, see `SqlDialect.orderByTerm`),
+/// and whose enum members come in declaration order: the key of an enum
+/// value is the position of its label (in a CASE expression), whatever
+/// order the database has of the labels.
 Nullable!SortKey extractSortKey(SortByInfo sort, string table, SqlDialect dialect) {
-    auto binOp = cast(BinaryOpInfo) sort.sortPredicate;
-    if (binOp is null || (binOp.operator != "<" && binOp.operator != ">"))
-        return Nullable!SortKey.init;
-    auto direction = binOp.operator == "<" ? SortDirection.ASC : SortDirection.DESC;
+    import dunamis.core.sorting : OrderComparisonInfo;
+
+    ExprBase leftOperand, rightOperand;
+    SortDirection direction;
+    string[] enumLabels;
+    if (auto ordering = cast(OrderComparisonInfo) sort.sortPredicate) {
+        leftOperand = ordering.left;
+        rightOperand = ordering.right;
+        direction = ordering.direction;
+        enumLabels = ordering.enumLabels;
+    } else {
+        auto binOp = cast(BinaryOpInfo) sort.sortPredicate;
+        if (binOp is null || (binOp.operator != "<" && binOp.operator != ">"))
+            return Nullable!SortKey.init;
+        leftOperand = binOp.left;
+        rightOperand = binOp.right;
+        direction = binOp.operator == "<" ? SortDirection.ASC : SortDirection.DESC;
+    }
     auto leftItem = sort.sortLeftItem, rightItem = sort.sortRightItem;
     auto left = SqlTranslator.ofFilter(dialect, leftItem), right = SqlTranslator.ofFilter(dialect, rightItem);
 
     // A column of the items themselves
-    auto leftColumn = cast(ColumnAccessInfo) binOp.left, rightColumn = cast(ColumnAccessInfo) binOp.right;
+    auto leftColumn = cast(ColumnAccessInfo) leftOperand, rightColumn = cast(ColumnAccessInfo) rightOperand;
     if (leftColumn !is null && rightColumn !is null) {
         auto leftRow = left.resolveRow(leftColumn.inputExpr, leftItem);
         auto rightRow = right.resolveRow(rightColumn.inputExpr, rightItem);
-        if (leftRow.valid && !leftRow.hops.length && rightRow.valid && !rightRow.hops.length &&
-                leftColumn.column == rightColumn.column)
+        if (!(leftRow.valid && !leftRow.hops.length && rightRow.valid && !rightRow.hops.length &&
+                leftColumn.column == rightColumn.column))
+            return Nullable!SortKey.init;
+        if (enumLabels is null)
             return Nullable!SortKey(SortKey(leftColumn.column, null, null, direction));
-        return Nullable!SortKey.init;
+        // An enum column: by the position of its label (rendered for the
+        // dialect, if it is known)
+        if (dialect is null)
+            return Nullable!SortKey.init;
+        auto sql = enumPositionSql(dialect, SqlTranslator.qualified(table, leftColumn.column), enumLabels);
+        return Nullable!SortKey(SortKey(null, sql, typeid(int), direction));
     }
 
     // A native expression of the items themselves (the same on both)
     if (dialect is null)
         return Nullable!SortKey.init;
-    auto leftValue = left.rowValue(binOp.left, leftItem, table);
-    auto rightValue = right.rowValue(binOp.right, rightItem, table);
+    auto leftValue = left.rowValue(leftOperand, leftItem, table);
+    auto rightValue = right.rowValue(rightOperand, rightItem, table);
     if (!leftValue.valid || !rightValue.valid || !leftValue.native || leftValue.constant || rightValue.constant ||
             leftValue.path.hops.length || rightValue.path.hops.length)
         return Nullable!SortKey.init;
     auto sql = leftValue.render(table);
     if (sql != rightValue.render(table))
         return Nullable!SortKey.init;
-    return Nullable!SortKey(SortKey(null, sql, binOp.left.resultType, direction));
+    if (enumLabels !is null)
+        return Nullable!SortKey(SortKey(null, enumPositionSql(dialect, sql, enumLabels), typeid(int), direction));
+    return Nullable!SortKey(SortKey(null, sql, leftOperand.resultType, direction));
+}
+
+/// The SQL of the position of the enum value `sql` (by its stored label)
+/// among the labels `labels`, starting from 0; NULL for NULL (and for a
+/// label which is not one of them).
+string enumPositionSql(SqlDialect dialect, string sql, string[] labels) {
+    import std.conv : to;
+    string result = "CASE " ~ sql;
+    foreach (i, label; labels)
+        result ~= " WHEN " ~ dialect.escapeSqlString(label) ~ " THEN " ~ i.to!string;
+    return result ~ " END";
 }
 
 /// ditto
@@ -947,6 +988,7 @@ unittest {
         override string emptyJsonArray() { return "'[]'::json"; }
         override string aggregateLayerJson(int, string) { return ""; }
         override string castToText(string sql) { return sql ~ "::text"; }
+        override string orderByTerm(string sql, bool descending) { return sql ~ (descending ? " DESC" : ""); }
     }
     auto optimizer = new SqlOptimizer(new TestDialect());
     assert(optimizer !is null);
@@ -1022,6 +1064,7 @@ unittest {
         override string emptyJsonArray() { return "'[]'::json"; }
         override string aggregateLayerJson(int, string) { return ""; }
         override string castToText(string sql) { return sql ~ "::text"; }
+        override string orderByTerm(string sql, bool descending) { return sql ~ (descending ? " DESC" : ""); }
     }
     auto ctx = new OptimizeContext();
     auto sqlOpt = new SqlOptimizer(new TestDialect());

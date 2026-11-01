@@ -2607,6 +2607,116 @@ void testFilterOverNonRowPreservingMap() {
 }
 
 // ============================================================================
+// Sorting by nullable and enum columns
+// ============================================================================
+
+/// The position of a task status (as GraphQL names it) in the order of
+/// TaskStatus's declaration, by which tasks sort (not by their stored
+/// labels: "done" for completed sorts between "cancelled" and "inProgress").
+private long taskStatusRank(string status) {
+    import std.algorithm.searching : countUntil;
+    auto rank = ["pending", "inProgress", "completed", "cancelled"].countUntil(status);
+    assertTrue(rank >= 0, "Unknown task status " ~ status);
+    return rank;
+}
+
+/// Compare two tasks by `key` ("priority": nullable, NULL as the greatest
+/// value, as PostgreSQL orders it; "status": by declaration order).
+private int compareTasks(JSONValue a, JSONValue b, string key) {
+    if (key == "status") {
+        auto x = taskStatusRank(a["status"].str), y = taskStatusRank(b["status"].str);
+        return x < y ? -1 : x > y ? 1 : 0;
+    }
+    auto aNull = a[key].type == JSONType.null_, bNull = b[key].type == JSONType.null_;
+    if (aNull || bNull)
+        return aNull == bNull ? 0 : aNull ? 1 : -1;
+    auto x = a[key].integer, y = b[key].integer;
+    return x < y ? -1 : x > y ? 1 : 0;
+}
+
+/// The IDs of `tasks` (as a query returned them) sorted by the keys (key,
+/// descending), then by ID (as the query's last key).
+private long[] expectedTaskOrder(JSONValue[] tasks, string[] keys, bool[] descending) {
+    import std.algorithm.sorting : sort;
+    import std.algorithm.iteration : map;
+    import std.array : array;
+    auto sorted = tasks.dup;
+    sorted.sort!((a, b) {
+        foreach (i, key; keys) {
+            auto c = compareTasks(a, b, key);
+            if (c != 0)
+                return descending[i] ? c > 0 : c < 0;
+        }
+        return a["id"].integer < b["id"].integer;
+    });
+    return sorted.map!(t => t["id"].integer).array;
+}
+
+private long[] taskIdsOf(JSONValue[] tasks) {
+    long[] ids;
+    foreach (t; tasks)
+        ids ~= t["id"].integer;
+    return ids;
+}
+
+/// Sorting by a nullable column (NULL last ascending, first descending) and
+/// an enum column (in declaration order), at the root (sorted by the
+/// database) and in a relationship (sorted in memory): both orders are
+/// PostgreSQL's, and agree.
+void testSortByNullableAndEnumColumns() {
+    import std.format : format;
+    // (The keys, and the directions of the cases)
+    auto cases = [
+        ["priority"], ["status"], ["status", "priority"], ["priority", "status"],
+    ];
+    foreach (keys; cases) {
+        foreach (directions; [[false, false], [true, true], [false, true], [true, false]]) {
+            string orderBy;
+            foreach (i, key; keys)
+                orderBy ~= format("{field: %s, direction: %s}, ", key, directions[i] ? "DESC" : "ASC");
+            orderBy ~= "{field: id, direction: ASC}";
+            auto response = graphql(`{
+                tasks(orderBy: [` ~ orderBy ~ `]) { id priority status assigneeId }
+                users(orderBy: [{field: id, direction: ASC}]) {
+                    id
+                    tasks(orderBy: [` ~ orderBy ~ `]) { id priority status }
+                }
+            }`);
+            assertNoErrors(response);
+            auto tasks = response["data"]["tasks"].array;
+            assertTrue(tasks.length >= 3, "Expected at least 3 tasks");
+            auto expected = expectedTaskOrder(tasks, keys, directions[0 .. keys.length]);
+            assertTrue(taskIdsOf(tasks) == expected, "Root tasks sorted by " ~ orderBy ~ ": got " ~
+                taskIdsOf(tasks).to!string ~ ", expected " ~ expected.to!string);
+
+            // The tasks of each user, sorted in memory, in the order of the
+            // root list (sorted by the database)
+            foreach (user; response["data"]["users"].array) {
+                long[] fromRoot;
+                foreach (t; tasks)
+                    if (t["assigneeId"].type != JSONType.null_ && t["assigneeId"].integer == user["id"].integer)
+                        fromRoot ~= t["id"].integer;
+                assertTrue(taskIdsOf(user["tasks"].array) == fromRoot, "Tasks of user " ~ user["id"].toString() ~
+                    " sorted by " ~ orderBy ~ ": got " ~ taskIdsOf(user["tasks"].array).to!string ~
+                    ", expected (as at the root) " ~ fromRoot.to!string);
+            }
+        }
+    }
+}
+
+/// Sorting by a nullable column needs data where it is null and not null.
+void testSortByNullableColumnSeeded() {
+    auto response = graphql(`{ tasks(orderBy: [{field: priority, direction: ASC}, {field: id, direction: ASC}]) { priority } }`);
+    assertNoErrors(response);
+    auto tasks = response["data"]["tasks"].array;
+    bool seenNull, nullFirst = tasks.length && tasks[0]["priority"].type == JSONType.null_;
+    foreach (t; tasks)
+        seenNull |= t["priority"].type == JSONType.null_;
+    assertTrue(seenNull, "Expected a task without a priority");
+    assertTrue(!nullFirst, "NULL priorities should come last ascending");
+}
+
+// ============================================================================
 // Test Registration
 // ============================================================================
 
@@ -2635,6 +2745,8 @@ static this() {
     registerTest("Sort posts by title", "tests", &testSortPostsByTitle);
     registerTest("Sort tasks by title", "tests", &testSortTasksByTitle);
     registerTest("Sort without orderBy", "tests", &testSortWithoutOrderBy);
+    registerTest("Sort by a nullable column (seeded)", "tests", &testSortByNullableColumnSeeded);
+    registerTest("Sort by nullable and enum columns", "tests", &testSortByNullableAndEnumColumns);
 
     // Nested sorting tests (HasMany relationships)
     registerTest("Nested sort posts ascending", "tests", &testNestedSortPostsByTitleAscending);

@@ -127,6 +127,8 @@ static this() {
         &testOnlyIfRootCollection);
     registerTest("Naive-path fetches by string keys", "postgres",
         &testNaiveFetchesByStringKeys);
+    registerTest("Sorts by nullable and enum columns are pushed into queries", "postgres",
+        &testNullableAndEnumSortsPushed);
     import integration.postgres_keys : testKeysNeedingQuotes;
     registerTest("Keys needing quotes: rows, parents and children", "postgres",
         &testKeysNeedingQuotes);
@@ -373,6 +375,34 @@ void testOnlyIfRootCollection() {
                 assertTrue(sent.any!(sql => sql.canFind("WHERE") && sql.canFind("Alice")),
                     "The filter over onlyIf was not pushed into the query: " ~ sent.to!string);
         }
+    });
+}
+
+/// Root sorts by a nullable column and by an enum column (by the positions
+/// of its labels, which the database stores as text here) are in the query's
+/// ORDER BY clause, rather than done in memory.
+void testNullableAndEnumSortsPushed() {
+    onEventLoop(() {
+        import dunamis.core.eval : EvalContext;
+        import dunamis.core.expr : evaluateNested;
+        import dunamis.graphql.compiler : compileQuery;
+        import integration.test_framework : assertTrue;
+
+        auto ctx = new EvalContext();
+        auto session = cast(PostgresSession) ctx.getSession(db);
+        session.setup().await;
+        scope (exit) session.teardown(SetupMode.query, false).await;
+
+        string[] sent;
+        session.statementObserver = (const(char)[] sql) { sent ~= sql.idup; };
+        scope (exit) session.statementObserver = null;
+        // (One sort each: of several, only the innermost is pushed)
+        evaluateNested(compileQuery!MySchema(`{ tasks(orderBy: [{field: status, direction: DESC}]) { id } }`), ctx).await;
+        evaluateNested(compileQuery!MySchema(`{ tasks(orderBy: [{field: priority, direction: ASC}]) { id } }`), ctx).await;
+        assertTrue(sent.any!(sql => sql.canFind("ORDER BY") && sql.canFind("CASE tasks.status WHEN 'pending' THEN 0") &&
+            sql.canFind("WHEN 'done' THEN 2")), "The enum sort was not pushed into the query: " ~ sent.to!string);
+        assertTrue(sent.any!(sql => sql.canFind("ORDER BY") && sql.canFind("tasks.priority")),
+            "The nullable sort was not pushed into the query: " ~ sent.to!string);
     });
 }
 

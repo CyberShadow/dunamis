@@ -66,7 +66,7 @@ private string toSQL(QueryNode[] nodes, SqlDialect dialect,
         if (node.orderBy_.length > 0) {
             string[] orderParts;
             foreach (spec; node.orderBy_) {
-                orderParts ~= format("%s%s", spec.column, spec.descending ? " DESC" : "");
+                orderParts ~= dialect.orderByTerm(spec.column, spec.descending);
             }
             orderByClause = orderParts.join(", ");
         }
@@ -177,7 +177,7 @@ private string toCTE(QueryNode node, SqlDialect dialect,
             foreach (computed; node.computedColumns)
                 if (computed.alias_ == spec.column)
                     key = computed.sqlExpr;
-            orderParts ~= format("%s%s", key, spec.descending ? " DESC" : "");
+            orderParts ~= dialect.orderByTerm(key, spec.descending);
         }
         sql ~= format("\n    ORDER BY %s", orderParts.join(", "));
     }
