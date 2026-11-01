@@ -1477,7 +1477,7 @@ void testFilterUsersWithPostsSome() {
     auto response = graphql(`{
         users(filter: {
             posts: {
-                some: {title: {contains: "Hello"}}
+                some: {title: {includes: "Hello"}}
             }
         }) {
             firstName
@@ -1537,7 +1537,7 @@ void testFilterUsersWithPostsNone() {
     auto response = graphql(`{
         users(filter: {
             posts: {
-                none: {title: {contains: "NonExistentTitle12345"}}
+                none: {title: {includes: "NonExistentTitle12345"}}
             }
         }) {
             firstName
@@ -1564,7 +1564,7 @@ void testFilterNestedPosts() {
     auto response = graphql(`{
         users {
             firstName
-            posts(filter: {title: {contains: "GraphQL"}}) {
+            posts(filter: {title: {includes: "GraphQL"}}) {
                 title
             }
         }
@@ -1584,10 +1584,10 @@ void testFilterNestedPosts() {
     }
 }
 
-void testFilterContainsInsensitive() {
+void testFilterIncludesInsensitive() {
     // Filter users whose firstName contains "ali" (case-insensitive, should match "Alice")
     auto response = graphql(`{
-        users(filter: {firstName: {containsInsensitive: "ali"}}) {
+        users(filter: {firstName: {includesInsensitive: "ali"}}) {
             firstName
         }
     }`);
@@ -1628,7 +1628,7 @@ void testRootFilterWithoutSelectedColumns() {
     check(`filter: {title: {notEqualTo: "Hello World"}}, orderBy: [{field: title, direction: DESC}], first: 1`,
         (JSONValue[] posts) => posts.length == 1 && posts[0]["title"].str != "Hello World");
     // A relationship (belongsTo) filter beside a column's
-    check(`first: 10, filter: {title: {containsInsensitive: "PROGRAM"}, author: {firstName: {equalTo: "Bob"}}}`,
+    check(`first: 10, filter: {title: {includesInsensitive: "PROGRAM"}, author: {firstName: {equalTo: "Bob"}}}`,
         (JSONValue[] posts) => posts.length >= 1 && posts.all!(p => p["title"].str == "D Programming"));
 }
 
@@ -1678,7 +1678,7 @@ void testFilterEndsWithInsensitive() {
 void testFilterCaseSensitiveVsInsensitive() {
     // Verify case-sensitive filter does NOT match different case
     auto responseSensitive = graphql(`{
-        users(filter: {firstName: {contains: "ALICE"}}) {
+        users(filter: {firstName: {includes: "ALICE"}}) {
             firstName
         }
     }`);
@@ -1686,18 +1686,18 @@ void testFilterCaseSensitiveVsInsensitive() {
     auto usersSensitive = responseSensitive["data"]["users"].array;
     // "ALICE" should not match "Alice" with case-sensitive contains
     assertTrue(usersSensitive.length == 0,
-        "Case-sensitive 'contains: ALICE' should not match 'Alice'");
+        "Case-sensitive 'includes: ALICE' should not match 'Alice'");
 
     // Verify case-insensitive filter DOES match different case
     auto responseInsensitive = graphql(`{
-        users(filter: {firstName: {containsInsensitive: "ALICE"}}) {
+        users(filter: {firstName: {includesInsensitive: "ALICE"}}) {
             firstName
         }
     }`);
     assertNoErrors(responseInsensitive);
     auto usersInsensitive = responseInsensitive["data"]["users"].array;
     assertTrue(usersInsensitive.length >= 1,
-        "Case-insensitive 'containsInsensitive: ALICE' should match 'Alice'");
+        "Case-insensitive 'includesInsensitive: ALICE' should match 'Alice'");
 }
 
 // ============================================================================
@@ -2122,9 +2122,9 @@ void testFilteredWindowScalar() {
         `{"users": [{"firstName": "Charlie"}]}`, `{"users": []}`);
     checkFilteredWindow(`{ users(first: 1, offset: 1, ` ~ byId ~ `, filter: {lastName: {notEqualTo: "Smith"}}) { firstName } }`,
         `{"users": [{"firstName": "Charlie"}]}`, `{"users": [{"firstName": "Bob"}]}`);
-    checkFilteredWindow(`{ posts(first: 1, ` ~ byIdDesc ~ `, filter: {title: {contains: "o"}}) { title } }`,
+    checkFilteredWindow(`{ posts(first: 1, ` ~ byIdDesc ~ `, filter: {title: {includes: "o"}}) { title } }`,
         `{"posts": [{"title": "D Programming"}]}`, null);
-    checkFilteredWindow(`{ posts(first: 1, ` ~ byId ~ `, filter: {title: {contains: "Rocks"}}) { title } }`,
+    checkFilteredWindow(`{ posts(first: 1, ` ~ byId ~ `, filter: {title: {includes: "Rocks"}}) { title } }`,
         `{"posts": [{"title": "GraphQL Rocks"}]}`, `{"posts": []}`);
     // Pushed into SQL as a whole (WHERE, ORDER BY, OFFSET, LIMIT).
     checkFilteredWindow(`{ users(first: 2, offset: 1, orderBy: [{field: firstName, direction: DESC}], ` ~
@@ -2143,35 +2143,35 @@ void testFilteredWindowBelongsTo() {
 }
 
 void testFilteredWindowHasMany() {
-    checkFilteredWindow(`{ users(first: 1, ` ~ byId ~ `, filter: {posts: {some: {title: {contains: "Programming"}}}}) { firstName } }`,
+    checkFilteredWindow(`{ users(first: 1, ` ~ byId ~ `, filter: {posts: {some: {title: {includes: "Programming"}}}}) { firstName } }`,
         `{"users": [{"firstName": "Bob"}]}`, `{"users": []}`);
-    checkFilteredWindow(`{ users(first: 1, ` ~ byId ~ `, filter: {posts: {none: {title: {contains: "Hello"}}}}) { firstName } }`,
+    checkFilteredWindow(`{ users(first: 1, ` ~ byId ~ `, filter: {posts: {none: {title: {includes: "Hello"}}}}) { firstName } }`,
         `{"users": [{"firstName": "Bob"}]}`, `{"users": []}`);
-    checkFilteredWindow(`{ users(first: 1, offset: 1, ` ~ byId ~ `, filter: {posts: {none: {title: {contains: "Hello"}}}}) { firstName } }`,
+    checkFilteredWindow(`{ users(first: 1, offset: 1, ` ~ byId ~ `, filter: {posts: {none: {title: {includes: "Hello"}}}}) { firstName } }`,
         `{"users": [{"firstName": "Charlie"}]}`, `{"users": [{"firstName": "Bob"}]}`);
-    checkFilteredWindow(`{ users(first: 2, ` ~ byId ~ `, filter: {posts: {every: {title: {contains: "Programming"}}}}) { firstName } }`,
+    checkFilteredWindow(`{ users(first: 2, ` ~ byId ~ `, filter: {posts: {every: {title: {includes: "Programming"}}}}) { firstName } }`,
         `{"users": [{"firstName": "Bob"}, {"firstName": "Charlie"}]}`, `{"users": [{"firstName": "Bob"}]}`);
-    checkFilteredWindow(`{ users(first: 1, ` ~ byIdDesc ~ `, filter: {posts: {some: {title: {contains: "o"}}}}) { firstName } }`,
+    checkFilteredWindow(`{ users(first: 1, ` ~ byIdDesc ~ `, filter: {posts: {some: {title: {includes: "o"}}}}) { firstName } }`,
         `{"users": [{"firstName": "Bob"}]}`, `{"users": []}`);
     // Without orderBy (as a search typically queries)
-    checkFilteredWindow(`{ users(first: 10, filter: {posts: {some: {title: {contains: "Programming"}}}}) { firstName } }`,
+    checkFilteredWindow(`{ users(first: 10, filter: {posts: {some: {title: {includes: "Programming"}}}}) { firstName } }`,
         `{"users": [{"firstName": "Bob"}]}`, null);
 }
 
 void testFilteredWindowScalarAndRelationship() {
-    checkFilteredWindow(`{ users(first: 10, filter: {lastName: {equalTo: "Jones"}, posts: {some: {title: {contains: "D"}}}}) { firstName } }`,
+    checkFilteredWindow(`{ users(first: 10, filter: {lastName: {equalTo: "Jones"}, posts: {some: {title: {includes: "D"}}}}) { firstName } }`,
         `{"users": [{"firstName": "Bob"}]}`, null);
-    checkFilteredWindow(`{ users(first: 10, filter: {lastName: {equalTo: "Smith"}, posts: {some: {title: {contains: "Programming"}}}}) { firstName } }`,
+    checkFilteredWindow(`{ users(first: 10, filter: {lastName: {equalTo: "Smith"}, posts: {some: {title: {includes: "Programming"}}}}) { firstName } }`,
         `{"users": []}`, `{"users": []}`);
-    checkFilteredWindow(`{ posts(first: 1, ` ~ byIdDesc ~ `, filter: {title: {contains: "o"}, author: {lastName: {equalTo: "Smith"}}}) { title } }`,
+    checkFilteredWindow(`{ posts(first: 1, ` ~ byIdDesc ~ `, filter: {title: {includes: "o"}, author: {lastName: {equalTo: "Smith"}}}) { title } }`,
         `{"posts": [{"title": "GraphQL Rocks"}]}`, null);
-    checkFilteredWindow(`{ posts(first: 1, ` ~ byId ~ `, filter: {title: {contains: "Rocks"}, author: {lastName: {equalTo: "Smith"}}}) { title } }`,
+    checkFilteredWindow(`{ posts(first: 1, ` ~ byId ~ `, filter: {title: {includes: "Rocks"}, author: {lastName: {equalTo: "Smith"}}}) { title } }`,
         `{"posts": [{"title": "GraphQL Rocks"}]}`, `{"posts": []}`);
 }
 
 void testFilteredWindowSameTableTwice() {
     checkFilteredWindow(`{
-        a: users(first: 1, ` ~ byId ~ `, filter: {posts: {some: {title: {contains: "Programming"}}}}) { firstName }
+        a: users(first: 1, ` ~ byId ~ `, filter: {posts: {some: {title: {includes: "Programming"}}}}) { firstName }
         b: users(first: 1, ` ~ byId ~ `) { firstName }
     }`, `{"a": [{"firstName": "Bob"}], "b": [{"firstName": "Alice"}]}`,
         `{"a": [], "b": [{"firstName": "Alice"}]}`);
@@ -2254,7 +2254,7 @@ void testComputedRootFields() {
 }
 
 void testFilteredWindowNested() {
-    checkFilteredWindow(`{ users(first: 1, ` ~ byId ~ `) { posts(first: 1, ` ~ byId ~ `, filter: {title: {contains: "Rocks"}}) { title } } }`,
+    checkFilteredWindow(`{ users(first: 1, ` ~ byId ~ `) { posts(first: 1, ` ~ byId ~ `, filter: {title: {includes: "Rocks"}}) { title } } }`,
         `{"users": [{"posts": [{"title": "GraphQL Rocks"}]}]}`, `{"users": [{"posts": []}]}`);
 }
 
@@ -2288,7 +2288,7 @@ void testNestedBelongsToFilters() {
 void testNestedToManyFilters() {
     checkNestedFilter(`{ users(` ~ byId ~ `, filter: {posts: {some: {comments: {some: {author: {firstName: {equalTo: "Bob"}}}}}}}) { firstName } }`,
         `{"users": [{"firstName": "Alice"}]}`);
-    checkNestedFilter(`{ users(` ~ byId ~ `, filter: {posts: {some: {comments: {some: {body: {contains: "Thanks"}}}}}}) { firstName } }`,
+    checkNestedFilter(`{ users(` ~ byId ~ `, filter: {posts: {some: {comments: {some: {body: {includes: "Thanks"}}}}}}) { firstName } }`,
         `{"users": [{"firstName": "Alice"}]}`);
     checkNestedFilter(`{ users(` ~ byId ~ `, filter: {lastName: {in: ["Smith", "Jones", "Brown"]}, ` ~
             `posts: {every: {comments: {some: {id: {isNull: false}}}}}}) { firstName } }`,
@@ -2336,10 +2336,10 @@ void testNestedMixedFilters() {
         `{"posts": [{"title": "D Programming"}]}`);
     // Through a nullable belongs-to: tasks without an assignee match nothing.
     checkNestedFilter(`{ tasks(` ~ byId ~ `, filter: {title: {in: ["Write tests", "Review PR", "Deploy app"]}, ` ~
-            `assignee: {posts: {some: {title: {contains: "Rocks"}}}}}) { title } }`,
+            `assignee: {posts: {some: {title: {includes: "Rocks"}}}}}) { title } }`,
         `{"tasks": [{"title": "Write tests"}, {"title": "Review PR"}]}`);
     checkNestedFilter(`{ tasks(` ~ byId ~ `, filter: {title: {in: ["Write tests", "Review PR", "Deploy app"]}, ` ~
-            `not: {assignee: {posts: {some: {title: {contains: "Rocks"}}}}}}) { title } }`,
+            `not: {assignee: {posts: {some: {title: {includes: "Rocks"}}}}}}) { title } }`,
         `{"tasks": [{"title": "Deploy app"}]}`);
     // Within a nested field's filter
     checkNestedFilter(`{ users(` ~ byId ~ `, filter: {firstName: {equalTo: "Alice"}}) { posts(` ~ byId ~
@@ -2716,6 +2716,67 @@ void testSortByNullableColumnSeeded() {
     assertTrue(!nullFirst, "NULL priorities should come last ascending");
 }
 
+/// The string operators (PostGraphile's connection filter's) select, in the
+/// database's queries, the rows their in-memory evaluation does: literal
+/// operands with wildcards escaped, LIKE patterns, case-insensitivity and
+/// negation.
+void testStringFilterOperators() {
+    import std.algorithm.sorting : sort;
+    import std.uni : toLower;
+    import dunamis.core.expr.operators : escapeLikePattern, likeMatch;
+
+    auto all = graphql(`{ posts { id title } }`);
+    assertNoErrors(all);
+    auto posts = all["data"]["posts"].array;
+    assertTrue(posts.length >= 3, "Expected at least 3 posts");
+
+    // (operator, operand, the LIKE pattern it matches, case-insensitive, negated)
+    static struct Case { string op, operand, pattern; bool insensitive, negated; }
+    Case[] cases;
+    foreach (operand; ["o", "O", "GraphQL", "%", "_", "D Programming"]) {
+        auto literal = escapeLikePattern(operand);
+        foreach (insensitive; [false, true])
+            foreach (negated; [false, true]) {
+                string name(string base) {
+                    auto n = base ~ (insensitive ? "Insensitive" : "");
+                    return negated ? "not" ~ cast(char)(n[0] - 'a' + 'A') ~ n[1 .. $] : n;
+                }
+                cases ~= Case(name("includes"), operand, "%" ~ literal ~ "%", insensitive, negated);
+                cases ~= Case(name("startsWith"), operand, literal ~ "%", insensitive, negated);
+                cases ~= Case(name("endsWith"), operand, "%" ~ literal, insensitive, negated);
+                if (insensitive)
+                    cases ~= Case(name("equalTo"), operand, literal, insensitive, negated);
+            }
+    }
+    foreach (pattern; ["%o%", "G%", "%_o%", "D_Programming", "%\\_%"])
+        foreach (insensitive; [false, true])
+            foreach (negated; [false, true]) {
+                auto n = "like" ~ (insensitive ? "Insensitive" : "");
+                cases ~= Case(negated ? "notL" ~ n[1 .. $] : n, pattern, pattern, insensitive, negated);
+            }
+
+    foreach (c; cases) {
+        auto literal = JSONValue(c.operand).toString();
+        // (As a variable: the query lexer does not take every escape)
+        auto response = graphql(`query($v: String!) { posts(filter: {title: {` ~ c.op ~ `: $v}}) { id } }`,
+            JSONValue(["v": c.operand]));
+        assertNoErrors(response);
+        long[] found, expected;
+        foreach (p; response["data"]["posts"].array)
+            found ~= p["id"].integer;
+        foreach (p; posts) {
+            auto title = p["title"].str;
+            bool match = c.insensitive ? likeMatch(title.toLower, c.pattern.toLower) : likeMatch(title, c.pattern);
+            if (match != c.negated)
+                expected ~= p["id"].integer;
+        }
+        found.sort();
+        expected.sort();
+        assertTrue(found == expected, c.op ~ ": " ~ literal ~ ": got " ~ found.to!string ~ ", expected " ~
+            expected.to!string);
+    }
+}
+
 // ============================================================================
 // Test Registration
 // ============================================================================
@@ -2814,7 +2875,8 @@ static this() {
     registerTest("Filter nested posts", "tests", &testFilterNestedPosts);
 
     // Case-insensitive filtering tests
-    registerTest("Filter containsInsensitive", "tests", &testFilterContainsInsensitive);
+    registerTest("Filter includesInsensitive", "tests", &testFilterIncludesInsensitive);
+    registerTest("String filter operators", "tests", &testStringFilterOperators);
     registerTest("Filter startsWithInsensitive", "tests", &testFilterStartsWithInsensitive);
     registerTest("Root filter, sort and window without selected columns", "tests", &testRootFilterWithoutSelectedColumns);
     registerTest("Filter endsWithInsensitive", "tests", &testFilterEndsWithInsensitive);

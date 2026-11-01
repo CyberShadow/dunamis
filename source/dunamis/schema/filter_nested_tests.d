@@ -137,8 +137,8 @@ unittest {
 
 // To-many within to-many.
 unittest {
-    check("users", `{posts: {some: {comments: {some: {body: {contains: "great"}}}}}}`, [1]);
-    check("users", `{posts: {some: {comments: {some: {body: {containsInsensitive: "great"}}}}}}`, [1, 2]);
+    check("users", `{posts: {some: {comments: {some: {body: {includes: "great"}}}}}}`, [1]);
+    check("users", `{posts: {some: {comments: {some: {body: {includesInsensitive: "great"}}}}}}`, [1, 2]);
     check("departments", `{employees: {some: {posts: {some: {comments: {some: {note: {equalTo: "x"}}}}}}}}`, [2]);
     check("users", `{posts: {none: {comments: {some: {id: {isNull: false}}}}}}`, [4]);
 }

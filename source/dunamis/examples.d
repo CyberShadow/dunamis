@@ -88,6 +88,10 @@ private class TestDialect : SqlDialect {
     override string rowJsonFunc() { return ""; }
     override string emptyJsonArray() { return "'[]'::json"; }
     override string castToText(string sql) { return sql ~ "::text"; }
+    override string arrayPredicateOp(string operandSql, ArrayPredicate predicate, TypeInfo valueType,
+            imported!"std.typecons".Nullable!string[] values) {
+        return null;  // (No arrays)
+    }
     override string orderByTerm(string sql, bool descending) { return sql ~ (descending ? " DESC" : ""); }
     override string aggregateLayerJson(int layerId, string orderByClause) {
         auto layerStr = layerId.to!string;

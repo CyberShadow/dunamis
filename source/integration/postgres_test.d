@@ -149,7 +149,10 @@ package void onEventLoop(void delegate() fn) {
     __gshared string failure;
     failure = null;
     eventLoopThread.runAsync({
-        async(fn).then(() { atomicStore(done, true); }).except((Exception e) {
+        // (On a stack as large as procedures': compiling a query takes more
+        // than ae's default fiber stack, with large filter input types.)
+        import dunamis.core.expr.effects : defaultProcedureStackSize;
+        async(fn, defaultProcedureStackSize).then(() { atomicStore(done, true); }).except((Exception e) {
             failure = e.toString();
             atomicStore(done, true);
         });

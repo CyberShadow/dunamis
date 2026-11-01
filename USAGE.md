@@ -723,22 +723,27 @@ auto result = executor.execute(query);
 
 | Type | Operators |
 |------|-----------|
-| String | `equalTo`, `notEqualTo`, `in`, `notIn`, `isNull`, `lessThan`, `lessThanOrEqualTo`, `greaterThan`, `greaterThanOrEqualTo`, `contains`, `startsWith`, `endsWith`, `containsInsensitive` (alias `includesInsensitive`), `startsWithInsensitive`, `endsWithInsensitive`, `like` (SQL `LIKE` pattern: `%`, `_`, `\` escapes) |
+| String | `equalTo`, `notEqualTo`, `in`, `notIn`, `isNull`, `lessThan`, `lessThanOrEqualTo`, `greaterThan`, `greaterThanOrEqualTo`; `includes`, `startsWith`, `endsWith` (the operand matched literally), `like` (SQL `LIKE` pattern: `%`, `_`, `\` escapes), each also as `not<Op>`, `<op>Insensitive` and `not<Op>Insensitive` (e.g. `notIncludesInsensitive`, `likeInsensitive`); `equalToInsensitive`, `notEqualToInsensitive` |
 | Int/Float | `equalTo`, `notEqualTo`, `in`, `notIn`, `isNull`, `lessThan`, `lessThanOrEqualTo`, `greaterThan`, `greaterThanOrEqualTo` |
-| Boolean | `equalTo`, `notEqualTo`, `isNull` |
+| Boolean | `equalTo`, `notEqualTo`, `in`, `notIn`, `isNull` |
 | Enum | `equalTo`, `notEqualTo`, `in`, `notIn`, `isNull` |
 
 Nullable columns have the filter of their values' type. `isNull` tests for
 null; the other operators only match non-null values (as SQL comparisons do),
 so e.g. `notEqualTo` does not match null. Columns of custom scalar types are
 filtered through `StringFilter`; operators that do not apply to a column's
-type (e.g. `contains` on a date) are rejected.
+type (e.g. `includes` on a date) are rejected. The operators are named, and
+behave, as those of PostGraphile's connection filter (`includes` escapes `%`,
+`_` and `\` in its operand; the `Insensitive` forms are PostgreSQL's ILIKE).
 
 **Case-insensitive string matching:**
 
 ```graphql
 # Find users with "ali" anywhere in firstName (matches "Alice", "Alicia", etc.)
-users(filter: {firstName: {containsInsensitive: "ali"}}) { ... }
+users(filter: {firstName: {includesInsensitive: "ali"}}) { ... }
+
+# The same, as a pattern
+users(filter: {firstName: {likeInsensitive: "%ali%"}}) { ... }
 
 # Find users whose firstName starts with "a" (matches "Alice", "adam", etc.)
 users(filter: {firstName: {startsWithInsensitive: "a"}}) { ... }
@@ -774,13 +779,13 @@ users(filter: {
 
 ```graphql
 # Users who have at least one post with "GraphQL" in the title
-users(filter: {posts: {some: {title: {contains: "GraphQL"}}}}) { ... }
+users(filter: {posts: {some: {title: {includes: "GraphQL"}}}}) { ... }
 
 # Users where ALL posts have "Draft" in the title
-users(filter: {posts: {every: {title: {contains: "Draft"}}}}) { ... }
+users(filter: {posts: {every: {title: {includes: "Draft"}}}}) { ... }
 
 # Users with NO posts containing "Spam"
-users(filter: {posts: {none: {title: {contains: "Spam"}}}}) { ... }
+users(filter: {posts: {none: {title: {includes: "Spam"}}}}) { ... }
 ```
 
 Relationship filters take the related entity's own filter, so they nest to

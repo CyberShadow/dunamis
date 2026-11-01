@@ -306,6 +306,184 @@ unittest {
 }
 
 // ============================================================================
+// Array Predicate Expressions
+// ============================================================================
+
+/// A predicate on arrays (e.g. array columns) and constant operands, with
+/// PostgreSQL's array operators' semantics (null elements match nothing).
+enum ArrayPredicate {
+    /// The array contains all the operand's elements (`array @> operand`)
+    contains,
+    /// All the array's elements are among the operand's (`array <@ operand`)
+    containedBy,
+    /// The array and the operand have an element in common (`array && operand`)
+    overlaps,
+    /// An element of the array is equal to the operand (`operand = ANY(array)`)
+    anyEqualTo,
+    /// An element of the array is not equal to the operand (`operand <> ANY(array)`)
+    anyNotEqualTo,
+}
+
+/// Interface for array predicates (`arrayPredicate`) - allows optimizers to
+/// render them, e.g. as `array @> '{...}'` in PostgreSQL.
+interface ArrayPredicateInfo {
+    /// The array (type-erased)
+    ExprBase operand();
+
+    /// The predicate
+    ArrayPredicate predicate();
+
+    /// The type of the elements (without Nullable)
+    TypeInfo valueType();
+
+    /// The operand's elements (as ConstantInfo.valueAsString represents
+    /// them; null for null elements), in order: one for the `any*`
+    /// predicates
+    Nullable!string[] valuesAsStrings();
+}
+
+/// Expression testing the predicate `predicate` on the values of `operand`
+/// (arrays of elements of type `E`, possibly nullable) and the constant
+/// operand `values` (one value for the `any*` predicates).
+class ArrayPredicateExpr(E) : Expr!bool, ArrayPredicateInfo {
+    static if (is(E == Nullable!V, V))
+        alias Value = V;
+    else
+        alias Value = E;
+
+    private ExprBase _operand;
+    private ArrayPredicate _predicate;
+    private Nullable!Value[] _values;
+
+    this(Expr!(E[]) operand, ArrayPredicate predicate, Nullable!Value[] values) {
+        assert(predicate < ArrayPredicate.anyEqualTo || values.length == 1, "ArrayPredicateExpr: one value expected");
+        _operand = operand;
+        _predicate = predicate;
+        _values = values.dup;
+    }
+
+    override ExprBase[] dependencies() {
+        return [_operand];
+    }
+
+    override void replaceDependency(size_t index, ExprBase newDep) {
+        if (index == 0)
+            _operand = newDep;
+    }
+
+    override Expr!bool optimize(OptimizeContext ctx) {
+        _operand = cast(ExprBase) (cast(Expr!(E[])) _operand).optimize(ctx);
+        return this;
+    }
+
+    override Promise!(bool[]) eval(EvalContext ctx) {
+        auto predicate = _predicate;
+        auto values = _values;
+        return evalAs!(E[])(_operand, ctx).then((E[][] arrays) {
+            auto result = new bool[arrays.length];
+            foreach (i, array; arrays)
+                result[i] = arrayPredicateHolds(predicate, array, values);
+            return result;
+        });
+    }
+
+    // ArrayPredicateInfo implementation
+    override ExprBase operand() { return _operand; }
+    override ArrayPredicate predicate() { return _predicate; }
+    override TypeInfo valueType() { return typeid(Value); }
+    override Nullable!string[] valuesAsStrings() {
+        import dunamis.core.expr.primitives : constantValueString;
+        Nullable!string[] strings;
+        foreach (v; _values)
+            strings ~= v.isNull ? Nullable!string.init : Nullable!string(constantValueString(v.get));
+        return strings;
+    }
+}
+
+/// Whether the array predicate `predicate` holds for the array `array` and
+/// the operand `values`, as PostgreSQL's operators have it: null elements
+/// (of either) are equal to nothing.
+bool arrayPredicateHolds(E, V)(ArrayPredicate predicate, E[] array, Nullable!V[] values) {
+    static bool isNullElement(T)(ref T e) {
+        static if (is(T == Nullable!U, U))
+            return e.isNull;
+        else
+            return false;
+    }
+    static V valueOf(T)(ref T e) {
+        static if (is(T == Nullable!U, U))
+            return e.get;
+        else
+            return e;
+    }
+    // Whether the array has an element equal to `v`, or (`notEqual`) one
+    // not equal to it
+    bool hasElement(Nullable!V v, bool notEqual = false) {
+        if (v.isNull)
+            return false;
+        foreach (ref e; array)
+            if (!isNullElement(e) && (valueOf(e) == v.get) != notEqual)
+                return true;
+        return false;
+    }
+    final switch (predicate) {
+        case ArrayPredicate.contains:
+            foreach (v; values)
+                if (!hasElement(v))
+                    return false;
+            return true;
+        case ArrayPredicate.containedBy:
+            foreach (ref e; array) {
+                if (isNullElement(e))
+                    return false;
+                bool found;
+                foreach (v; values)
+                    found = found || (!v.isNull && v.get == valueOf(e));
+                if (!found)
+                    return false;
+            }
+            return true;
+        case ArrayPredicate.overlaps:
+            foreach (v; values)
+                if (hasElement(v))
+                    return true;
+            return false;
+        case ArrayPredicate.anyEqualTo:
+            return hasElement(values[0]);
+        case ArrayPredicate.anyNotEqualTo:
+            return hasElement(values[0], true);
+    }
+}
+
+/// Whether the predicate `predicate` holds for each array of `operand` and
+/// the operand `values` (one value for the `any*` predicates), with
+/// PostgreSQL's array operators' semantics: data sources can evaluate it
+/// where the arrays are (e.g. as `array @> '{...}'` in PostgreSQL queries).
+Expr!bool arrayPredicate(E, V)(Expr!(E[]) operand, ArrayPredicate predicate, Nullable!V[] values) {
+    return new ArrayPredicateExpr!E(operand, predicate, values);
+}
+
+unittest {
+    alias N = Nullable!int;
+    N[] a = [N(1), N(2), N()];
+    with (ArrayPredicate) {
+        assert(arrayPredicateHolds(contains, a, [N(1), N(2)]));
+        assert(!arrayPredicateHolds(contains, a, [N(1), N(3)]));
+        assert(!arrayPredicateHolds(contains, a, [N()]));  // (NULL matches nothing)
+        assert(arrayPredicateHolds(contains, a, cast(N[]) []));
+        assert(!arrayPredicateHolds(containedBy, a, [N(1), N(2), N(3)]));  // (its NULL is in nothing)
+        assert(arrayPredicateHolds(containedBy, [N(1), N(2)], [N(1), N(2), N(3)]));
+        assert(arrayPredicateHolds(containedBy, cast(N[]) [], [N(1)]));
+        assert(arrayPredicateHolds(overlaps, a, [N(5), N(2)]));
+        assert(!arrayPredicateHolds(overlaps, a, [N(5), N()]));
+        assert(arrayPredicateHolds(anyEqualTo, a, [N(2)]) && !arrayPredicateHolds(anyEqualTo, a, [N(3)]));
+        assert(arrayPredicateHolds(anyNotEqualTo, a, [N(1)]) && !arrayPredicateHolds(anyNotEqualTo, [N(1), N()], [N(1)]));
+        // Arrays of non-nullable elements
+        assert(arrayPredicateHolds(contains, [1, 2], [N(2)]));
+    }
+}
+
+// ============================================================================
 // LIKE Pattern Expressions (for string filtering)
 // ============================================================================
 

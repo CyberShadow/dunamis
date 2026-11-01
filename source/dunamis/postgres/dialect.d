@@ -8,6 +8,7 @@ import std.json : JSONValue, JSONType;
 import std.string : replace;
 
 import dunamis.relational.sql_dialect;
+import std.typecons : Nullable;
 
 /// PostgreSQL dialect - uses || for string concatenation
 class PostgresDialect : SqlDialect {
@@ -104,6 +105,36 @@ class PostgresDialect : SqlDialect {
     override string emptyJsonArray() { return "'[]'::json"; }
 
     override string castToText(string sql) { return sql ~ "::text"; }
+    override string arrayPredicateOp(string operandSql, ArrayPredicate predicate, TypeInfo valueType,
+            Nullable!string[] values) {
+        import std.array : join, replace;
+        import dunamis.relational.sql_dialect : isSqlNumericType;
+
+        // An element of an array literal (quoted unless it is a number), and
+        // a value's literal
+        string element(Nullable!string v) {
+            if (v.isNull)
+                return "NULL";
+            return isSqlNumericType(valueType) ? v.get : `"` ~ v.get.replace(`\`, `\\`).replace(`"`, `\"`) ~ `"`;
+        }
+        string value(Nullable!string v) {
+            if (v.isNull)
+                return "NULL";
+            return isSqlNumericType(valueType) ? v.get : escapeSqlString(v.get);
+        }
+        string[] elements;
+        foreach (v; values)
+            elements ~= element(v);
+        // (Array literals' and values' types PostgreSQL infers from the operand)
+        auto array = "'{" ~ elements.join(",").replace("'", "''") ~ "}'";
+        final switch (predicate) {
+            case ArrayPredicate.contains: return "(" ~ operandSql ~ " @> " ~ array ~ ")";
+            case ArrayPredicate.containedBy: return "(" ~ operandSql ~ " <@ " ~ array ~ ")";
+            case ArrayPredicate.overlaps: return "(" ~ operandSql ~ " && " ~ array ~ ")";
+            case ArrayPredicate.anyEqualTo: return "(" ~ value(values[0]) ~ " = ANY(" ~ operandSql ~ "))";
+            case ArrayPredicate.anyNotEqualTo: return "(" ~ value(values[0]) ~ " <> ANY(" ~ operandSql ~ "))";
+        }
+    }
     override string orderByTerm(string sql, bool descending) { return sql ~ (descending ? " DESC" : ""); }
 
     override string aggregateLayerJson(int layerId, string orderByClause) {
@@ -186,4 +217,22 @@ unittest {
     assert(dialect.membershipOp("t.id", typeid(int), ["1", "-2"]) == "(t.id = ANY('{1,-2}'))");
     assert(dialect.membershipOp("t.name", typeid(string), [`it's`, `a"b`, `c\d`, "x,y"]) ==
            `(t.name = ANY('{"it''s","a\"b","c\\d","x,y"}'))`);
+}
+
+// Array predicates: PostgreSQL's array operators, with array literals (and
+// values) whose types PostgreSQL infers from the array operand
+unittest {
+    auto dialect = new PostgresDialect();
+    alias N = Nullable!string;
+    assert(dialect.arrayPredicateOp("t.ids", ArrayPredicate.contains, typeid(int), [N("1"), N("2")]) ==
+           "(t.ids @> '{1,2}')");
+    assert(dialect.arrayPredicateOp("t.ids", ArrayPredicate.containedBy, typeid(int), [N("1"), N()]) ==
+           "(t.ids <@ '{1,NULL}')");
+    assert(dialect.arrayPredicateOp("t.tags", ArrayPredicate.overlaps, typeid(string), [N(`it's`), N(`a"b`)]) ==
+           `(t.tags && '{"it''s","a\"b"}')`);
+    assert(dialect.arrayPredicateOp("t.tags", ArrayPredicate.anyEqualTo, typeid(string), [N(`it's`)]) ==
+           "('it''s' = ANY(t.tags))");
+    assert(dialect.arrayPredicateOp("t.ids", ArrayPredicate.anyNotEqualTo, typeid(int), [N("3")]) ==
+           "(3 <> ANY(t.ids))");
+    assert(dialect.arrayPredicateOp("t.ids", ArrayPredicate.contains, typeid(int), []) == "(t.ids @> '{}')");
 }

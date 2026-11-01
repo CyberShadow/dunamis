@@ -154,7 +154,7 @@ class SqlOptimizer : ExprOptimizer {
     private static bool isComputable(ExprBase expr) {
         return cast(BinaryOpInfo) expr || cast(UnaryOpInfo) expr || cast(TernaryInfo) expr ||
             cast(IsNullInfo) expr || cast(CollectionPredicateInfo) expr || cast(NativeSqlInfo) expr ||
-            cast(MembershipInfo) expr || cast(LikeInfo) expr;
+            cast(MembershipInfo) expr || cast(LikeInfo) expr || cast(ArrayPredicateInfo) expr;
     }
 
     /// Create a ProjectionExpr of a computed column for the given result type,
@@ -522,7 +522,7 @@ final class SqlTranslator {
         if (auto unaryOp = cast(UnaryOpInfo) expr)
             return unaryOp.operator == "!";
         return cast(IsNullInfo) expr || cast(CollectionPredicateInfo) expr || cast(MembershipInfo) expr ||
-            cast(LikeInfo) expr;
+            cast(LikeInfo) expr || cast(ArrayPredicateInfo) expr;
     }
 
     /// The SQL of the value `expr` of the rows `item` stands for (whose
@@ -763,6 +763,24 @@ final class SqlTranslator {
             return Nullable!DialectSql.init;
         }
 
+        // Handle array predicates of columns, in a dialect with arrays
+        if (auto arrayPred = cast(ArrayPredicateInfo) expr) {
+            RowPath path;
+            string delegate(string) render;
+            auto predicate = arrayPred.predicate;
+            auto valueType = arrayPred.valueType;
+            auto values = arrayPred.valuesAsStrings;
+            if (dialect is null || dialect.arrayPredicateOp("x", predicate, valueType, values) is null)
+                return Nullable!DialectSql.init;
+            if (operandValue(arrayPred.operand, item, table, path, render)) {
+                return Nullable!DialectSql(onRow(path, table, (string rowTable) {
+                    auto operandSql = render(rowTable);
+                    return (SqlDialect d) => d.arrayPredicateOp(operandSql, predicate, valueType, values);
+                }));
+            }
+            return Nullable!DialectSql.init;
+        }
+
         // Handle constant true/false
         if (auto constInfo = cast(ConstantInfo) expr) {
             if (constInfo.valueType == typeid(bool)) {
@@ -988,6 +1006,10 @@ unittest {
         override string emptyJsonArray() { return "'[]'::json"; }
         override string aggregateLayerJson(int, string) { return ""; }
         override string castToText(string sql) { return sql ~ "::text"; }
+        override string arrayPredicateOp(string operandSql, ArrayPredicate predicate, TypeInfo valueType,
+                Nullable!string[] values) {
+            return null;  // (No arrays)
+        }
         override string orderByTerm(string sql, bool descending) { return sql ~ (descending ? " DESC" : ""); }
     }
     auto optimizer = new SqlOptimizer(new TestDialect());
@@ -1064,6 +1086,10 @@ unittest {
         override string emptyJsonArray() { return "'[]'::json"; }
         override string aggregateLayerJson(int, string) { return ""; }
         override string castToText(string sql) { return sql ~ "::text"; }
+        override string arrayPredicateOp(string operandSql, ArrayPredicate predicate, TypeInfo valueType,
+                Nullable!string[] values) {
+            return null;  // (No arrays)
+        }
         override string orderByTerm(string sql, bool descending) { return sql ~ (descending ? " DESC" : ""); }
     }
     auto ctx = new OptimizeContext();

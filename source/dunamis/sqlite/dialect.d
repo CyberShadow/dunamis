@@ -8,6 +8,7 @@ import std.json : JSONValue, JSONType;
 import std.string : replace;
 
 import dunamis.relational.sql_dialect;
+import std.typecons : Nullable;
 
 /// SQLite dialect - uses || for string concatenation (same as PostgreSQL)
 class SQLiteDialect : SqlDialect {
@@ -124,6 +125,10 @@ class SQLiteDialect : SqlDialect {
     override string emptyJsonArray() { return "json('[]')"; }
 
     override string castToText(string sql) { return "CAST(" ~ sql ~ " AS TEXT)"; }
+    override string arrayPredicateOp(string operandSql, ArrayPredicate predicate, TypeInfo valueType,
+            Nullable!string[] values) {
+        return null;  // (No arrays)
+    }
     override string orderByTerm(string sql, bool descending) {
         // (Ordered by itself, NULL would be the least value)
         auto direction = descending ? " DESC" : "";

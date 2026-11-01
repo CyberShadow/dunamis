@@ -30,7 +30,13 @@ import dunamis.graphql.schema.udas : GqlName;
 // ============================================================================
 
 /// String filter input type.
-/// Supports equality, comparison, and pattern matching operations.
+/// Supports equality, comparison, and pattern matching operations, named
+/// and behaving as those of PostGraphile's connection filter: `includes`,
+/// `startsWith` and `endsWith` match their operand literally (`%`, `_` and
+/// `\` in it are escaped), `like` takes a SQL LIKE pattern (`%` matches any
+/// characters, `_` any one character, `\` escapes the next character); the
+/// `Insensitive` forms ignore case (ILIKE in PostgreSQL), and the `not`
+/// forms negate. (On a nullable column, they only match non-null values.)
 struct StringFilter {
     Nullable!string equalTo;
     Nullable!string notEqualTo;
@@ -40,16 +46,24 @@ struct StringFilter {
     Nullable!string lessThanOrEqualTo;
     Nullable!string greaterThan;
     Nullable!string greaterThanOrEqualTo;
-    Nullable!string contains;
-    Nullable!string startsWith;
-    Nullable!string endsWith;
-    Nullable!string containsInsensitive;
+    Nullable!string includes;
+    Nullable!string notIncludes;
     Nullable!string includesInsensitive;
-    /// SQL LIKE pattern: `%` matches any characters, `_` any one character,
-    /// and `\` escapes the next character.
-    Nullable!string like;
+    Nullable!string notIncludesInsensitive;
+    Nullable!string startsWith;
+    Nullable!string notStartsWith;
     Nullable!string startsWithInsensitive;
+    Nullable!string notStartsWithInsensitive;
+    Nullable!string endsWith;
+    Nullable!string notEndsWith;
     Nullable!string endsWithInsensitive;
+    Nullable!string notEndsWithInsensitive;
+    Nullable!string like;
+    Nullable!string notLike;
+    Nullable!string likeInsensitive;
+    Nullable!string notLikeInsensitive;
+    Nullable!string equalToInsensitive;
+    Nullable!string notEqualToInsensitive;
     Nullable!bool isNull;
 }
 
@@ -96,10 +110,12 @@ struct FloatFilter {
 }
 
 /// Boolean filter input type.
-/// Supports equality operations.
+/// Supports equality and set membership operations.
 struct BooleanFilter {
     Nullable!bool equalTo;
     Nullable!bool notEqualTo;
+    @GqlName("in") Nullable!(bool[]) in_;
+    Nullable!(bool[]) notIn;
     Nullable!bool isNull;
 }
 
@@ -121,6 +137,66 @@ template EnumFilter(E) if (is(E == enum)) {
             sink(name);
         }
     }
+}
+
+/// The operators of the filters of array fields (lists of nullable values of
+/// type `T`, e.g. array columns), named and behaving as those of
+/// PostGraphile's connection filter (PostgreSQL's array operators; null
+/// elements match nothing): see `ArrayFilter`.
+mixin template ArrayFilterOperators(T) {
+    Nullable!bool isNull;
+    /// The array contains all these values
+    Nullable!(Nullable!T[]) contains;
+    /// All the array's elements are among these values
+    Nullable!(Nullable!T[]) containedBy;
+    /// The array has an element in common with these values
+    Nullable!(Nullable!T[]) overlaps;
+    /// An element of the array is equal to this value
+    Nullable!T anyEqualTo;
+    /// An element of the array is not equal to this value
+    Nullable!T anyNotEqualTo;
+}
+
+/// The filters of array fields of built-in value types (see `ArrayFilter`).
+struct IntListFilter { mixin ArrayFilterOperators!int; }
+/// ditto
+struct LongListFilter { mixin ArrayFilterOperators!long; }
+/// ditto
+struct FloatListFilter { mixin ArrayFilterOperators!double; }
+/// ditto
+struct StringListFilter { mixin ArrayFilterOperators!string; }
+/// ditto
+struct BooleanListFilter { mixin ArrayFilterOperators!bool; }
+
+/// The filter input type of array fields whose values are lists of
+/// nullable values of type `T` (e.g. array columns): `<T>ListFilter`, with
+/// the operators `contains`, `containedBy`, `overlaps`, `anyEqualTo`,
+/// `anyNotEqualTo` and `isNull` (see `ArrayFilterOperators`); void if there
+/// is none for such values.
+template ArrayFilter(T) {
+    static if (is(T == enum)) {
+        @NamedAfter!T("ListFilter")
+        struct ArrayFilter {
+            mixin ArrayFilterOperators!T;
+
+            /// Formats as the filter type's name (see EnumFilter.toString).
+            void toString(scope void delegate(const(char)[]) sink) const {
+                enum name = getOriginalTypeName!(typeof(this));
+                sink(name);
+            }
+        }
+    } else static if (is(T == int))
+        alias ArrayFilter = IntListFilter;
+    else static if (is(T == long))
+        alias ArrayFilter = LongListFilter;
+    else static if (is(T == double))
+        alias ArrayFilter = FloatListFilter;
+    else static if (is(T == string))
+        alias ArrayFilter = StringListFilter;
+    else static if (is(T == bool))
+        alias ArrayFilter = BooleanListFilter;
+    else
+        alias ArrayFilter = void;
 }
 
 /// UDA on a value type declaring the filter input type `Filter` by which
@@ -357,6 +433,42 @@ template isScalarArrayField(Entity, string member) {
     }
 }
 
+/// Check if a field of `Entity` is an array field of nullable values of a
+/// type with an `ArrayFilter` (e.g. an array column), filtered by it.
+template isNullableArrayField(Entity, string member) {
+    static if (isArrayReturningMethod!(Entity, member)) {
+        alias ElementT = getArrayElementType!(Entity, member);
+        import std.typecons : Nullable;
+        static if (is(ElementT == Nullable!U, U))
+            enum isNullableArrayField = !is(ArrayFilter!U == void);
+        else
+            enum isNullableArrayField = false;
+    } else {
+        enum isNullableArrayField = false;
+    }
+}
+
+/// Get the names of the array fields of nullable values (see
+/// isNullableArrayField) of an entity.
+template getNullableArrayFields(Entity) {
+    enum string[] getNullableArrayFields = () {
+        string[] fields;
+        static foreach (member; __traits(allMembers, Entity)) {{
+            static if (isPublicMember!(Entity, member) && isNullableArrayField!(Entity, member)) {
+                fields ~= member;
+            }
+        }}
+        return fields;
+    }();
+}
+
+/// The value type of the elements of an array field of nullable values.
+template NullableArrayValueType(Entity, string member) {
+    import std.typecons : Nullable;
+    static if (is(getArrayElementType!(Entity, member) == Nullable!U, U))
+        alias NullableArrayValueType = U;
+}
+
 /// Get array-returning field names for an entity.
 template getArrayFields(Entity) {
     enum string[] getArrayFields = () {
@@ -551,6 +663,11 @@ private template entityFilterFieldsCode(Entity) {
                 member ~ "\"))* " ~ member ~ ";\n";
         }
 
+        static foreach (member; getNullableArrayFields!Entity) {
+            code ~= attributes!member ~ "Nullable!(ArrayFilter!(NullableArrayValueType!(Entity, \"" ~
+                member ~ "\"))) " ~ member ~ ";\n";
+        }
+
         static foreach (member; getScalarArrayFields!Entity) {{
             alias ElemType = getArrayElementType!(Entity, member);
             // Enum arrays need an EnumFilter-aware collection predicate. Until
@@ -677,6 +794,17 @@ Expr!bool buildFilterPredicateFromStruct(Entity)(Expr!Entity item, const ref Ent
         }
     }}
 
+    // Array fields of nullable values (e.g. array columns)
+    static foreach (member; getNullableArrayFields!Entity) {{
+        auto arrayFilterField = __traits(getMember, filter, member);
+        if (!arrayFilterField.isNull) {
+            alias arrayMethod = __traits(getMember, Entity, member);
+            auto cond = buildArrayCondition(arrayMethod(item), arrayFilterField.get, item);
+            if (cond !is null)
+                conditions ~= cond;
+        }
+    }}
+
     // Logical combinators
     if (!filter.and.isNull) {
         foreach (ref subFilter; filter.and.get)
@@ -706,6 +834,33 @@ Expr!bool buildFilterPredicateFromStruct(Entity)(Expr!Entity item, const ref Ent
     foreach (c; conditions[1 .. $]) {
         result = result.and(c);
     }
+    return result;
+}
+
+/// Build the condition an array filter (see `ArrayFilter`) puts on an array
+/// field `arrayExpr` (lists of nullable values of type `T`), or null if it
+/// puts none.
+Expr!bool buildArrayCondition(T, ArrayFilterType)(Expr!(Nullable!T[]) arrayExpr, const ArrayFilterType filter,
+        ExprBase lengthSource) {
+    import dunamis.core.expr : arrayPredicate, ArrayPredicate, constant;
+
+    Expr!bool[] conditions;
+    // (An array field is never null.)
+    if (!filter.isNull.isNull)
+        conditions ~= constant(!filter.isNull.get, lengthSource);
+    static foreach (op; ["contains", "containedBy", "overlaps"])
+        if (!__traits(getMember, filter, op).isNull)
+            conditions ~= arrayPredicate(arrayExpr, __traits(getMember, ArrayPredicate, op),
+                __traits(getMember, filter, op).get.dup);
+    static foreach (op; ["anyEqualTo", "anyNotEqualTo"])
+        if (!__traits(getMember, filter, op).isNull)
+            conditions ~= arrayPredicate(arrayExpr, __traits(getMember, ArrayPredicate, op),
+                [Nullable!T(__traits(getMember, filter, op).get)]);
+    if (conditions.length == 0)
+        return null;
+    auto result = conditions[0];
+    foreach (c; conditions[1 .. $])
+        result = result.and(c);
     return result;
 }
 
@@ -748,6 +903,42 @@ Expr!bool buildColumnCondition(ColExpr, ColumnFilter)(ColExpr colExpr, const Col
         result = result.and(c);
     return result;
 }
+
+/// A string pattern operator of StringFilter: a LIKE match of the pattern
+/// `prefix ~ operand ~ suffix` (the operand escaped if `literal`).
+private struct StringPatternOperator {
+    string name;
+    string prefix, suffix;
+    bool literal = true;
+    bool insensitive;
+    bool negated;
+}
+
+/// The string pattern operators (of StringFilter): `like`, `includes`,
+/// `startsWith`, `endsWith` and `equalTo` (matching the operand literally:
+/// as a LIKE pattern without wildcards), and their `Insensitive` and `not`
+/// forms (but `equalTo`'s case-sensitive ones, which are comparisons).
+private enum StringPatternOperator[] stringPatternOperators = () {
+    StringPatternOperator[] result;
+    foreach (base; [StringPatternOperator("like", "", "", false), StringPatternOperator("includes", "%", "%"),
+            StringPatternOperator("startsWith", "", "%"), StringPatternOperator("endsWith", "%", ""),
+            StringPatternOperator("equalTo", "", "")]) {
+        foreach (insensitive; [false, true]) {
+            foreach (negated; [false, true]) {
+                if (base.name == "equalTo" && !insensitive)
+                    continue;
+                auto op = base;
+                op.insensitive = insensitive;
+                op.negated = negated;
+                op.name = base.name ~ (insensitive ? "Insensitive" : "");
+                if (negated)
+                    op.name = "not" ~ cast(char)(op.name[0] - 'a' + 'A') ~ op.name[1 .. $];
+                result ~= op;
+            }
+        }
+    }
+    return result;
+}();
 
 /// Build the condition the value operators of a column filter (all but
 /// `isNull`) put on non-null column values, or null if they put none.
@@ -837,29 +1028,20 @@ private Expr!bool buildValueCondition(T, ColumnFilter)(Expr!T colExpr, const Col
             }
         }
 
-        // String-specific operators
-        static foreach (op; ["contains", "startsWith", "endsWith", "containsInsensitive",
-                "includesInsensitive", "startsWithInsensitive", "endsWithInsensitive", "like"]) {
-            static if (__traits(hasMember, ColumnFilter, op)) {
-                if (!__traits(getMember, filter, op).isNull) {
+        // String-specific operators: LIKE patterns, of the operand (`like`)
+        // or matching it literally, case-insensitive or not, and negated
+        // or not (see StringFilter)
+        static foreach (op; stringPatternOperators) {
+            static if (__traits(hasMember, ColumnFilter, op.name)) {
+                if (!__traits(getMember, filter, op.name).isNull) {
                     static if (is(T == string)) {
-                        auto value = __traits(getMember, filter, op).get;
-                        static if (op == "contains")
-                            conditions ~= colExpr.contains(value);
-                        else static if (op == "startsWith")
-                            conditions ~= colExpr.startsWith(value);
-                        else static if (op == "endsWith")
-                            conditions ~= colExpr.endsWith(value);
-                        else static if (op == "containsInsensitive" || op == "includesInsensitive")
-                            conditions ~= colExpr.containsInsensitive(value);
-                        else static if (op == "startsWithInsensitive")
-                            conditions ~= colExpr.startsWithInsensitive(value);
-                        else static if (op == "endsWithInsensitive")
-                            conditions ~= colExpr.endsWithInsensitive(value);
-                        else
-                            conditions ~= colExpr.like(value);
+                        import dunamis.core.expr.operators : LikeExpr, escapeLikePattern;
+                        auto value = __traits(getMember, filter, op.name).get;
+                        auto pattern = op.prefix ~ (op.literal ? escapeLikePattern(value) : value) ~ op.suffix;
+                        Expr!bool condition = new LikeExpr(colExpr, pattern, op.insensitive);
+                        conditions ~= op.negated ? condition.not() : condition;
                     } else {
-                        unsupported(op);
+                        unsupported(op.name);
                     }
                 }
             }
@@ -1305,9 +1487,9 @@ unittest {
         FilterPlugin!(Schema!Query),
         ApplyPlugins!(Schema!Query, CrudMutationPlugin, FilterPlugin, SortingPlugin),
     )) {
-        check!S(`{some: {title: {contains: "Hello"}}}`, ["Alice", "Bob"]);
-        check!S(`{every: {title: {contains: "Hello"}}}`, ["Alice", "Carol"]);
-        check!S(`{none: {title: {contains: "Hello"}}}`, ["Carol"]);
+        check!S(`{some: {title: {includes: "Hello"}}}`, ["Alice", "Bob"]);
+        check!S(`{every: {title: {includes: "Hello"}}}`, ["Alice", "Carol"]);
+        check!S(`{none: {title: {includes: "Hello"}}}`, ["Carol"]);
     }
 }
 

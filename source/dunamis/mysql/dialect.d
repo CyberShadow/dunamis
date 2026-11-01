@@ -8,6 +8,7 @@ import std.json : JSONValue, JSONType;
 import std.string : replace;
 
 import dunamis.relational.sql_dialect;
+import std.typecons : Nullable;
 
 /// MySQL dialect - uses CONCAT() for string concatenation
 class MySQLDialect : SqlDialect {
@@ -108,6 +109,10 @@ class MySQLDialect : SqlDialect {
     override string emptyJsonArray() { return "JSON_ARRAY()"; }
 
     override string castToText(string sql) { return "CAST(" ~ sql ~ " AS CHAR)"; }
+    override string arrayPredicateOp(string operandSql, ArrayPredicate predicate, TypeInfo valueType,
+            Nullable!string[] values) {
+        return null;  // (No arrays)
+    }
     override string orderByTerm(string sql, bool descending) {
         // (Ordered by itself, NULL would be the least value)
         auto direction = descending ? " DESC" : "";

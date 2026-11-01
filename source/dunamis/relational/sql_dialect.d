@@ -1,6 +1,9 @@
 module dunamis.relational.sql_dialect;
 
 import std.json : JSONValue;
+import std.typecons : Nullable;
+
+public import dunamis.core.expr.operators : ArrayPredicate;
 
 /// SQL dialect interface for database-specific SQL generation.
 /// Each database provides its own implementation in its package.
@@ -59,6 +62,15 @@ interface SqlDialect {
     ///   PostgreSQL: operand = ANY('{"v1","v2"}') (one array literal)
     ///   SQLite/MySQL: operand IN (v1, v2) (see `inListSql`)
     string membershipOp(string operandSql, TypeInfo valueType, string[] values);
+
+    /// Generate SQL for an array predicate (see `arrayPredicate`) on the
+    /// array `operandSql` and the operand `values` (of the type `valueType`,
+    /// as ArrayPredicateInfo.valuesAsStrings represents them), or return
+    /// null if the dialect has no arrays (then it is evaluated in memory).
+    ///   PostgreSQL: operand @> '{"v1","v2"}', '{...}' && operand,
+    ///   'v' = ANY(operand), ...
+    string arrayPredicateOp(string operandSql, ArrayPredicate predicate, TypeInfo valueType,
+        Nullable!string[] values);
 
     /// Get the dialect name for debugging
     string name();

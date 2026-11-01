@@ -44,6 +44,7 @@
   - Logical combinators: `and`, `or`, `not`
   - Relationship filters: `some`, `every`, `none` (to-many) and the target's filter (to-one), nested to any depth, pushed into SQL subqueries on root fields
   - Nullable column filters (`isNull`), `like` patterns
+  - PostGraphile connection-filter string operators (`includes`, `startsWith`, `endsWith`, `like`, their `not`/`Insensitive` forms, `equalToInsensitive`), Boolean `in`/`notIn`, array field filters (`<T>ListFilter`: `contains`, `containedBy`, `overlaps`, `anyEqualTo`, `anyNotEqualTo`; PostgreSQL array operators, in memory elsewhere)
   - Unknown input object fields are validation errors (literals and variables)
 - Sorting with `SortingPlugin`:
   - `orderBy` argument with `asc`/`desc` direction
