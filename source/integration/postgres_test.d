@@ -129,6 +129,9 @@ static this() {
         &testNaiveFetchesByStringKeys);
     registerTest("Sorts by nullable and enum columns are pushed into queries", "postgres",
         &testNullableAndEnumSortsPushed);
+    import integration.postgres_ordering : testSortsByTextSelectedColumns;
+    registerTest("Sorts by columns selected as text, in the database's order", "postgres",
+        &testSortsByTextSelectedColumns);
     import integration.postgres_keys : testKeysNeedingQuotes;
     registerTest("Keys needing quotes: rows, parents and children", "postgres",
         &testKeysNeedingQuotes);

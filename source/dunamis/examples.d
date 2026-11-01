@@ -1218,13 +1218,13 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name::text AS first_name
+    SELECT users.id, users.first_name::text AS first_name, users.first_name AS orderkey__first_name
     FROM users
     WHERE 1=1
     ORDER BY users.first_name
   )
 SELECT json_build_object(
-  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (SELECT * FROM layer0 ORDER BY first_name) t)
+  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (SELECT * FROM layer0 ORDER BY orderkey__first_name) t)
 )
 EOF";
     assert(db.getSQL() == expectedSQL, db.getSQL());
@@ -1267,13 +1267,13 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name::text AS first_name
+    SELECT users.id, users.first_name::text AS first_name, users.first_name AS orderkey__first_name
     FROM users
     WHERE 1=1
     ORDER BY users.first_name DESC
   )
 SELECT json_build_object(
-  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (SELECT * FROM layer0 ORDER BY first_name DESC) t)
+  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (SELECT * FROM layer0 ORDER BY orderkey__first_name DESC) t)
 )
 EOF";
     assert(db.getSQL() == expectedSQL, db.getSQL());
@@ -1375,7 +1375,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name::text AS first_name
+    SELECT users.id, users.first_name::text AS first_name, users.first_name AS orderkey__first_name
     FROM users
     WHERE 1=1
     ORDER BY users.first_name
@@ -1383,7 +1383,7 @@ WITH
     OFFSET 1
   )
 SELECT json_build_object(
-  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (SELECT * FROM layer0 ORDER BY first_name) t)
+  'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (SELECT * FROM layer0 ORDER BY orderkey__first_name) t)
 )
 EOF";
     assert(db.getSQL() == expectedSQL, db.getSQL());

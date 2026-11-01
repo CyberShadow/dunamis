@@ -66,7 +66,7 @@ private string toSQL(QueryNode[] nodes, SqlDialect dialect,
         if (node.orderBy_.length > 0) {
             string[] orderParts;
             foreach (spec; node.orderBy_) {
-                orderParts ~= dialect.orderByTerm(spec.column, spec.descending);
+                orderParts ~= dialect.orderByTerm(orderKeyColumn(node, spec.column), spec.descending);
             }
             orderByClause = orderParts.join(", ");
         }
@@ -231,7 +231,31 @@ string buildSelectColumns(QueryNode node, SqlDialect dialect) {
         selectParts ~= format("%s AS %s", computed.sqlExpr, computed.alias_);
     }
 
+    // The ORDER BY columns which the layer does not select as they are (see
+    // orderKeyColumn), for ordering its rows when they are aggregated
+    foreach (spec; node.orderBy_) {
+        auto key = orderKeyColumn(node, spec.column);
+        if (key != spec.column && !selectParts.canFind(tableName ~ "." ~ spec.column ~ " AS " ~ key))
+            selectParts ~= format("%s.%s AS %s", tableName, spec.column, key);
+    }
+
     return selectParts.join(", ");
+}
+
+/// The column of a layer by which its rows are ordered (when they are
+/// aggregated) for the ORDER BY column `column` of its node: the column
+/// itself, or the computed column of that name; but a column the layer
+/// casts to text (see QueryNode.stringColumns), whose text values would
+/// order otherwise (e.g. numbers, or a database enum's labels), or which it
+/// does not select, is selected as it is under another name
+/// (`orderkey__<column>`).
+private string orderKeyColumn(QueryNode node, string column) {
+    foreach (computed; node.computedColumns)
+        if (computed.alias_ == column)
+            return column;
+    if (column in node.stringColumns || !node.columns.canFind(column))
+        return "orderkey__" ~ column;
+    return column;
 }
 
 /// Build key-value argument pairs for json_object/JSON_OBJECT row wrapping.
@@ -284,6 +308,29 @@ unittest {
     assert(pg == "posts.id, posts.title::text AS title, j0.id AS j0__id, j0.name::text AS j0__name", pg);
     auto my = buildSelectColumns(node, mysqlDialect());
     assert(my == "posts.id, CAST(posts.title AS CHAR) AS title, j0.id AS j0__id, CAST(j0.name AS CHAR) AS j0__name", my);
+}
+
+// The rows of a layer are aggregated in the order of its ORDER BY, by the
+// columns' values: those of a column the layer casts to text (e.g. a numeric
+// read as a string, whose text would order otherwise), or does not select,
+// are selected as they are, under another name
+unittest {
+    import dunamis.postgres.dialect : postgresDialect;
+    import dunamis.core.sorting : OrderBySpec, SortDirection;
+
+    auto node = new QueryNode(QueryNodeId(0), "OrderItem", "order_items", ["id"]);
+    node.addColumn("net_amount");
+    node.markStringColumn("net_amount");
+    node.addColumn("note");
+    node.setRootFilter(FilterType.all);
+    node.addOrderBy(OrderBySpec("net_amount", SortDirection.DESC));
+    node.addOrderBy(OrderBySpec("note"));
+    node.addOrderBy(OrderBySpec("position"));
+    auto sql = toSQL([node], postgresDialect());
+    assert(sql.canFind("SELECT order_items.id, order_items.net_amount::text AS net_amount, order_items.note, " ~
+        "order_items.net_amount AS orderkey__net_amount, order_items.position AS orderkey__position\n"), sql);
+    assert(sql.canFind("ORDER BY order_items.net_amount DESC, order_items.note, order_items.position\n"), sql);
+    assert(sql.canFind("FROM layer0 ORDER BY orderkey__net_amount DESC, note, orderkey__position)"), sql);
 }
 
 unittest {
