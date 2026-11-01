@@ -331,7 +331,9 @@ JSONValue valueToJson(Value val, JSONValue variables = JSONValue.emptyObject) {
             if (objType !is null) {
                 auto vals = objType.vals;
                 while (vals !is null) {
-                    if (vals.val !is null)
+                    // (A field whose variable was not provided is absent, so
+                    // that its type's default applies, as the spec says)
+                    if (vals.val !is null && !isUnprovidedVariable(vals.val, variables))
                         obj[vals.name.value] = valueToJson(vals.val, variables);
                     vals = vals.follow;
                 }
@@ -342,8 +344,11 @@ JSONValue valueToJson(Value val, JSONValue variables = JSONValue.emptyObject) {
             JSONValue[] values;
             auto current = val.arr is null ? null : val.arr.vals;
             while (current !is null) {
+                // (An item whose variable was not provided is null, as the
+                // spec says)
                 if (current.val !is null)
-                    values ~= valueToJson(current.val, variables);
+                    values ~= isUnprovidedVariable(current.val, variables)
+                        ? JSONValue(null) : valueToJson(current.val, variables);
                 current = current.follow;
             }
             return JSONValue(values);
@@ -351,6 +356,12 @@ JSONValue valueToJson(Value val, JSONValue variables = JSONValue.emptyObject) {
         default:
             throw new CompilerException("Unsupported value type: " ~ val.ruleSelection.to!string);
     }
+}
+
+/// Whether `vov` is a variable which `variables` does not provide.
+private bool isUnprovidedVariable(ValueOrVariable vov, JSONValue variables) {
+    return vov !is null && vov.ruleSelection == ValueOrVariableEnum.Var &&
+        (variables.type != JSONType.object || vov.var.name.value !in variables.object);
 }
 
 /// ditto (for a literal value or a variable, e.g. an input object field)

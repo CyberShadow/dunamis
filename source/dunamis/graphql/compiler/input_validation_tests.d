@@ -133,6 +133,18 @@ unittest {
     assert(bookIds(`query($f: IvBookFilter!) { books(filter: {or: [$f, {title: {equalTo: "c"}}]}) { id } }`,
         `{"f": {"title": {"equalTo": "a"}}}`) == [1, 3]);
     assert(bookIds(`{ books(filter: {}) { id } }`, `{}`) == [1, 2, 3]);
+    // Variables which are not provided: absent as fields (here, no condition
+    // on the title), and null as list items (which `in: [String!]` refuses)
+    assert(bookIds(`query($t: StringFilter) { books(filter: {title: $t}) { id } }`, `{}`) == [1, 2, 3]);
+    assert(bookIds(`query($t: String) { books(filter: {title: {equalTo: "a", notEqualTo: $t}}) { id } }`,
+        `{}`) == [1]);
+    {
+        import std.exception : collectExceptionMsg;
+        ivDb = new MockDB!();
+        auto message = collectExceptionMsg(compileQuery!IvSchema(
+            `query($a: String) { books(filter: {title: {in: [$a, "c"]}}) { id } }`, parseJSON(`{}`)));
+        assert(message.canFind("Null value for non-nullable type"), message);
+    }
 
     expectError("query($f: IvBookFilter) {\n  books(filter: {or: [$f]}) { id }\n}",
         `{"f": {"titel": {"equalTo": "x"}}}`,
