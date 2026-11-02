@@ -60,7 +60,63 @@ class MySQLSession : RelationalSession {
 
     /// Execute raw SQL for session setup.
     override Promise!void execute(Sql statement) {
-        return _conn.query(statement.renderInline(mysqlDialect())).array().then((MySqlConnection.Row[] _) { });
+        return run(statement).then((MySqlConnection.Row[] _) { });
+    }
+
+    /// Run the statement `statement`, whose values are its parameters (see
+    /// `Sql.render`): prepared (and closed afterwards), with the values as
+    /// text; a statement without any is sent as it is. Returns its rows
+    /// (and tells `affected`, if not null, the number of rows it affected).
+    private Promise!(MySqlConnection.Row[]) run(Sql statement, void delegate(ulong) affected = null) {
+        auto bound = statement.render(mysqlDialect());
+        if (!bound.params.length) {
+            auto result = _conn.query(bound.text);
+            return result.array().then((MySqlConnection.Row[] rows) {
+                if (affected !is null)
+                    affected(result.affectedRows);
+                return rows;
+            });
+        }
+        auto params = bound.params.map!(v => mysqlParameter(v)).array;
+        return _conn.prepare(bound.text).then((MySqlConnection.PreparedStatement stmt) {
+            auto result = stmt.queryWithParams(params);
+            return result.array().then((MySqlConnection.Row[] rows) {
+                if (affected !is null)
+                    affected(result.affectedRows);
+                stmt.close();
+                return rows;
+            }, delegate MySqlConnection.Row[](Exception e) {
+                stmt.close();
+                throw e;
+            });
+        });
+    }
+
+    /// The value `value` as a parameter (as text, null: NULL; booleans as
+    /// 1 and 0, JSON arrays and objects as their JSON text).
+    private static const(char)[] mysqlParameter(ref const SqlValue value) {
+        import std.json : JSONType;
+        static const(char)[] nonNull(string s) { return s is null ? "" : s; }
+        final switch (value.kind) {
+            case SqlValue.Kind.null_: return null;
+            case SqlValue.Kind.boolean: return value.text == "true" ? "1" : "0";
+            case SqlValue.Kind.number:
+            case SqlValue.Kind.text: return nonNull(value.text);
+            case SqlValue.Kind.array: assert(false, "MySQL has no arrays");
+            case SqlValue.Kind.json:
+                auto json = value.json;
+                final switch (json.type) {
+                    case JSONType.null_: return null;
+                    case JSONType.string: return nonNull(json.str);
+                    case JSONType.integer: return json.integer.to!string;
+                    case JSONType.uinteger: return json.uinteger.to!string;
+                    case JSONType.float_: return json.floating.to!string;
+                    case JSONType.true_: return "1";
+                    case JSONType.false_: return "0";
+                    case JSONType.array:
+                    case JSONType.object: return json.toString();
+                }
+        }
     }
 
     /// Get the generated SQL (for debugging)
@@ -87,7 +143,8 @@ class MySQLSession : RelationalSession {
         SqlValue[] ids;
         if (root.filter == FilterType.byId || root.filter == FilterType.byIds)
             ids = root.refs.map!(r => SqlValue.of(singleKeyValue(r.localId))).array;
-        auto sql = toSQL(allNodes, mysqlDialect(), root.filter, ids).renderInline(mysqlDialect());
+        auto statement = toSQL(allNodes, mysqlDialect(), root.filter, ids);
+        auto sql = statement.renderInline(mysqlDialect());
 
         _cachedSQL = sql;
 
@@ -104,8 +161,7 @@ class MySQLSession : RelationalSession {
             writeln(sql);
         }
 
-        // Execute query using text protocol
-        return _conn.query(sql).array().then((MySqlConnection.Row[] rows) {
+        return run(statement).then((MySqlConnection.Row[] rows) {
             return parseQueryResult(rows, allNodes);
         });
     }
@@ -133,13 +189,13 @@ class MySQLSession : RelationalSession {
     // =========================================================================
 
     /// Generate SQL to fetch a column value, keyed by PK columns.
-    private string buildFetchColumnSQL(string table, string column, string[] validIds) {
+    private Sql buildFetchColumnSQL(string table, string column, string[] validIds) {
         auto pkColumns = getPkColumnsForTable(table);
         auto from = SqlName(table), value = SqlName(column);
 
         if (pkColumns.length == 1) {
             auto pk = SqlName(pkColumns[0]);
-            return sql(i"SELECT $(pk), $(value) FROM $(from) WHERE $(pk) IN ($(idList(validIds)))").renderInline(mysqlDialect());
+            return sql(i"SELECT $(pk), $(value) FROM $(from) WHERE $(pk) IN ($(idList(validIds)))");
         } else {
             Sql[] conditions;
             foreach (id; validIds) {
@@ -150,7 +206,7 @@ class MySQLSession : RelationalSession {
                 conditions ~= sql(i"($(Sql.join!" AND "(eqs)))");
             }
             auto where = Sql.join!" OR "(conditions);
-            return sql(i"SELECT $(columnList(pkColumns)), $(value) FROM $(from) WHERE $(where)").renderInline(mysqlDialect());
+            return sql(i"SELECT $(columnList(pkColumns)), $(value) FROM $(from) WHERE $(where)");
         }
     }
 
@@ -195,7 +251,7 @@ class MySQLSession : RelationalSession {
         auto pkCount = pkColumns.length;
         auto sql = buildFetchColumnSQL(table, column, validIds);
 
-        return _conn.query(sql).array().then((MySqlConnection.Row[] rows) {
+        return run(sql).then((MySqlConnection.Row[] rows) {
             // Build lookup map
             string[string] values;
             foreach (row; rows) {
@@ -230,7 +286,7 @@ class MySQLSession : RelationalSession {
         auto pkCount = pkColumns.length;
         auto sql = buildFetchColumnSQL(table, column, validIds);
 
-        return _conn.query(sql).array().then((MySqlConnection.Row[] rows) {
+        return run(sql).then((MySqlConnection.Row[] rows) {
             // Build lookup map
             long[string] values;
             foreach (row; rows) {
@@ -249,7 +305,7 @@ class MySQLSession : RelationalSession {
             query = sql(i"$(query) ORDER BY $(columnList(orderBy))");
 
         auto numPkCols = pkColumns.length;
-        return _conn.query(query.renderInline(mysqlDialect())).array().then((MySqlConnection.Row[] rows) {
+        return run(query).then((MySqlConnection.Row[] rows) {
             return rows.map!(r => buildKeyFromRow(r, numPkCols)).array;
         });
     }
@@ -287,7 +343,7 @@ class MySQLSession : RelationalSession {
         if (orderBy.length)
             query = sql(i"$(query) ORDER BY $(columnList(orderBy))");
 
-        return _conn.query(query.renderInline(mysqlDialect())).array().then((MySqlConnection.Row[] rows) {
+        return run(query).then((MySqlConnection.Row[] rows) {
             // Group children by parent
             AnyRef[][string] childrenByParent;
             foreach (row; rows) {
@@ -327,7 +383,7 @@ class MySQLSession : RelationalSession {
         auto pkCount = pkColumns.length;
         auto sql = buildFetchColumnSQL(childTable, fk, validIds);
 
-        return _conn.query(sql).array().then((MySqlConnection.Row[] rows) {
+        return run(sql).then((MySqlConnection.Row[] rows) {
             import std.typecons : Nullable;
             // Build lookup map
             string[string] fkValues;
@@ -381,7 +437,7 @@ class MySQLSession : RelationalSession {
         auto pkCount = pkColumns.length;
         auto sql = buildFetchColumnSQL(table, column, validIds);
 
-        return _conn.query(sql).array().then((MySqlConnection.Row[] rows) {
+        return run(sql).then((MySqlConnection.Row[] rows) {
             // Build lookup map
             JSONValue[string] values;
             foreach (row; rows) {
@@ -419,17 +475,17 @@ class MySQLSession : RelationalSession {
     /// Execute INSERT and return the new row.
     /// MySQL doesn't have RETURNING, so we use LAST_INSERT_ID() or PK values.
     override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns, bool isAutoIncrement) {
-        auto insertSql = generateInsertSQL(table, input).renderInline(mysqlDialect());
-        _cachedSQL = insertSql;
+        auto insertSql = generateInsertSQL(table, input);
+        _cachedSQL = insertSql.renderInline(mysqlDialect());
 
         auto columns = input.columns;  // Capture for closure
 
         // Execute INSERT and fetch the inserted row as JSON
-        return _conn.query(insertSql).array().then((MySqlConnection.Row[] _) {
+        return run(insertSql).then((MySqlConnection.Row[] _) {
             // Use LAST_INSERT_ID() for auto-increment, otherwise use PK values from input
             auto selectSql = (isAutoIncrement ? generateSelectLastInsertSQL(table, columns)
-                : generateSelectByPkSQL(table, pkColumns, columns, input)).renderInline(mysqlDialect());
-            return _conn.query(selectSql).array();
+                : generateSelectByPkSQL(table, pkColumns, columns, input));
+            return run(selectSql);
         }).then((MySqlConnection.Row[] rows) {
             return parseJsonResult(rows, typeName, pkColumns);
         });
@@ -437,22 +493,22 @@ class MySQLSession : RelationalSession {
 
     /// Execute UPDATE and return updated rows.
     override Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input, string[] pkColumns) {
-        auto updateSql = generateUpdateSQL(table, input, pkColumns).renderInline(mysqlDialect());
+        auto updateSql = generateUpdateSQL(table, input, pkColumns);
         auto columns = input.columns;  // Capture for closure
         auto ids = input.ids;  // Capture for closure
 
-        if (updateSql.length == 0) {
+        if (updateSql.empty) {
             // No columns to update - return empty result
             return resolve(new QueryResult());
         }
 
-        _cachedSQL = updateSql;
+        _cachedSQL = updateSql.renderInline(mysqlDialect());
 
         // Execute UPDATE and fetch the updated rows as JSON
-        return _conn.query(updateSql).array().then((MySqlConnection.Row[] _) {
+        return run(updateSql).then((MySqlConnection.Row[] _) {
             // Fetch the updated rows
-            auto selectSql = generateSelectUpdatedSQL(table, ids, columns, pkColumns).renderInline(mysqlDialect());
-            return _conn.query(selectSql).array();
+            auto selectSql = generateSelectUpdatedSQL(table, ids, columns, pkColumns);
+            return run(selectSql);
         }).then((MySqlConnection.Row[] rows) {
             return parseJsonResult(rows, typeName, pkColumns);
         });
@@ -460,15 +516,12 @@ class MySQLSession : RelationalSession {
 
     /// Execute DELETE and return count of deleted rows.
     override Promise!int executeDelete(string table, string[] ids, string[] pkColumns) {
-        auto deleteSql = generateDeleteSQL(table, ids, pkColumns).renderInline(mysqlDialect());
-        _cachedSQL = deleteSql;
+        auto deleteSql = generateDeleteSQL(table, ids, pkColumns);
+        _cachedSQL = deleteSql.renderInline(mysqlDialect());
 
-        // Execute DELETE
-        auto result = _conn.query(deleteSql);
-        return result.array().then((MySqlConnection.Row[] _) {
-            // Return affected rows count
-            return cast(int)result.affectedRows;
-        });
+        // Execute DELETE, and return the affected rows count
+        ulong deleted;
+        return run(deleteSql, (ulong n) { deleted = n; }).then((MySqlConnection.Row[] _) => cast(int) deleted);
     }
 
     /// Parse JSON result from SELECT query.
