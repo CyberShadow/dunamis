@@ -191,17 +191,13 @@ class PostgresSession : RelationalSession {
     }
 
 
-    /// `sql`, a query reading the relations `relations`, with their names
-    /// bound (see setRelationResolver). (The statement is text by now: the
-    /// relations are rendered as text too.)
-    private const(char)[] bound(const(char)[] sql, const(string)[] relations) {
+    /// `statement`, a query reading the relations `relations`, with their
+    /// names bound (see setRelationResolver).
+    private Sql bound(Sql statement, const(string)[] relations) {
         import dunamis.postgres.sql : bindRelations;
         if (_relationResolver is null || !relations.length)
-            return sql;
-        return bindRelations(sql, relations, (string name) {
-            auto relation = _relationResolver(name);
-            return relation.empty ? null : relation.render(postgresDialect());
-        });
+            return statement;
+        return bindRelations(statement, relations, _relationResolver);
     }
 
     private static string settingName(string name) {
@@ -232,25 +228,20 @@ class PostgresSession : RelationalSession {
     /// setRelationResolver), and collect its rows. A derived session sends
     /// it between the statements applying its settings and restoring the
     /// request's (see withSettings).
-    private Promise!(PgSqlConnection.Row[]) run(const(char)[] sql, const(string)[] relations = null) {
+    private Promise!(PgSqlConnection.Row[]) run(Sql statement, const(string)[] relations = null) {
         auto conn = connection();
-        sql = bound(sql, relations);
+        auto sql = bound(statement, relations).render(postgresDialect());
         observe(sql);
         if (_base is null || !_applySettings.length)
             return conn.query(sql).array();
         return bracketed(conn, conn.query(sql));
     }
 
-    /// ditto, of the statement `statement`
-    private Promise!(PgSqlConnection.Row[]) run(Sql statement, const(string)[] relations = null) {
-        return run(statement.render(postgresDialect()), relations);
-    }
-
     /// ditto, with the Extended Query protocol and parameters
-    private Promise!(PgSqlConnection.Row[]) runExtended(Args...)(const(char)[] sql, const(string)[] relations,
+    private Promise!(PgSqlConnection.Row[]) runExtended(Args...)(Sql statement, const(string)[] relations,
             Args args) {
         auto conn = connection();
-        sql = bound(sql, relations);
+        auto sql = bound(statement, relations).render(postgresDialect());
         observe(sql);
         if (_base is null || !_applySettings.length)
             return conn.extendedQuery(sql, args).array();
@@ -486,7 +477,8 @@ class PostgresSession : RelationalSession {
         Sql ids;
         if (root.filter == FilterType.byId || root.filter == FilterType.byIds)
             ids = Sql.join!","(root.refs.map!(r => sql(i"$(singleKeyValue(r.localId))")).array);
-        auto sql = toSQL(allNodes, postgresDialect(), root.filter, ids).render(postgresDialect());
+        auto query = toSQL(allNodes, postgresDialect(), root.filter, ids);
+        auto sql = query.render(postgresDialect());
         _cachedSQL = sql;
         debug(sql) {
             import std.stdio : writefln, writeln;
@@ -512,11 +504,11 @@ class PostgresSession : RelationalSession {
         auto relations = relationsOf(allNodes);
         if (idValues.length > 0) {
             // PostgreSQL array as string: {1,2,3}
-            return runExtended(sql, relations, arrayLiteral(idValues))
+            return runExtended(query, relations, arrayLiteral(idValues))
                 .then((PgSqlConnection.Row[] rows) => parseQueryResult(rows, allNodes));
         }
 
-        return runExtended(sql, relations)
+        return runExtended(query, relations)
             .then((PgSqlConnection.Row[] rows) => parseQueryResult(rows, allNodes));
     }
 
@@ -834,11 +826,11 @@ class PostgresSession : RelationalSession {
     /// Execute INSERT and return the new row.
     /// Values are embedded directly in the SQL (properly escaped).
     override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns, bool isAutoIncrement) {
-        auto sql = generateInsertSQL(table, input).render(postgresDialect());
-        _cachedSQL = sql;
+        auto statement = generateInsertSQL(table, input);
+        _cachedSQL = statement.render(postgresDialect());
 
         // No parameters needed - values are embedded in SQL
-        return run(sql).then((PgSqlConnection.Row[] rows) {
+        return run(statement).then((PgSqlConnection.Row[] rows) {
             return parseInsertResult(rows, typeName, pkColumns);
         });
     }
@@ -846,11 +838,11 @@ class PostgresSession : RelationalSession {
     /// Execute UPDATE and return updated rows.
     /// Values are embedded directly in the SQL (properly escaped).
     override Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input, string[] pkColumns) {
-        auto sql = generateUpdateSQL(table, input, pkColumns).render(postgresDialect());
-        _cachedSQL = sql;
+        auto statement = generateUpdateSQL(table, input, pkColumns);
+        _cachedSQL = statement.render(postgresDialect());
 
         // No parameters needed - values are embedded in SQL
-        return run(sql).then((PgSqlConnection.Row[] rows) {
+        return run(statement).then((PgSqlConnection.Row[] rows) {
             return parseUpdateResult(rows, typeName, pkColumns);
         });
     }
@@ -858,11 +850,11 @@ class PostgresSession : RelationalSession {
     /// Execute DELETE and return count of deleted rows.
     /// IDs are embedded directly in the SQL.
     override Promise!int executeDelete(string table, string[] ids, string[] pkColumns) {
-        auto sql = generateDeleteSQL(table, ids, pkColumns).render(postgresDialect());
-        _cachedSQL = sql;
+        auto statement = generateDeleteSQL(table, ids, pkColumns);
+        _cachedSQL = statement.render(postgresDialect());
 
         // No parameters needed - IDs are embedded in SQL
-        return run(sql).then((PgSqlConnection.Row[] rows) {
+        return run(statement).then((PgSqlConnection.Row[] rows) {
             if (rows.length > 0) {
                 return rows[0].column!int(0);
             }

@@ -44,6 +44,21 @@ struct SqlName {
     string name;
 }
 
+/// A value written into a `Sql` fragment's text as a literal of the dialect
+/// (rather than as a parameter of the statement): a constant of the
+/// statement's shape (e.g. the key of a JSON object it builds), or a value
+/// which the database must see when it plans the statement.
+struct Literal {
+    SqlValue value;
+
+    this(T)(T value) {
+        static if (is(T : const SqlValue))
+            this.value = value;
+        else
+            this.value = SqlValue.of(value);
+    }
+}
+
 /// A value in a `Sql` fragment: NULL, a boolean, a number, a string, or a
 /// JSON value (e.g. an input value of a mutation).
 struct SqlValue {
@@ -106,7 +121,7 @@ struct SqlValue {
 /// or `Sql.join`; rendered by `render`.
 struct Sql {
     private static struct Part {
-        enum Kind : ubyte { text, name, ident, value }
+        enum Kind : ubyte { text, name, ident, value, literal }
         Kind kind;
         string text;     // The SQL text, the SQL name, or the identifier
         SqlValue value;
@@ -130,9 +145,28 @@ struct Sql {
         return parts.length == 0;
     }
 
+    /// The fragment without its leading SQL text `prefix`, or null if it
+    /// does not start with it (e.g. to splice another fragment in after the
+    /// `WITH` keyword of a statement).
+    Nullable!Sql withoutPrefix(string prefix)() const {
+        if (!parts.length || parts[0].kind != Part.Kind.text || parts[0].text.length < prefix.length ||
+                parts[0].text[0 .. prefix.length] != prefix)
+            return Nullable!Sql.init;
+        Sql result;
+        result.appendText(parts[0].text[prefix.length .. $]);
+        foreach (part; parts[1 .. $])
+            result.parts ~= part;
+        return Nullable!Sql(result);
+    }
+
     /// The SQL text of the fragment, in `dialect`, its values written as
     /// literals.
     string render(SqlDialect dialect) const {
+        return renderInline(dialect);
+    }
+
+    /// ditto
+    string renderInline(SqlDialect dialect) const {
         import std.array : appender;
         auto result = appender!string;
         foreach (ref part; parts)
@@ -144,6 +178,7 @@ struct Sql {
                     result.put(dialect.quoteIdentifier(part.text));
                     break;
                 case Part.Kind.value:
+                case Part.Kind.literal:
                     assert(dialect !is null, "Rendering the values of SQL without a dialect");
                     result.put(part.value.literal(dialect));
                     break;
@@ -187,6 +222,8 @@ Sql sql(Args...)(InterpolationHeader, Args args, InterpolationFooter) {
             result.parts ~= Sql.Part(Sql.Part.Kind.name, arg.name);
         else static if (is(A : const SqlValue))
             result.parts ~= Sql.Part(Sql.Part.Kind.value, null, arg);
+        else static if (is(A : const Literal))
+            result.parts ~= Sql.Part(Sql.Part.Kind.literal, null, arg.value);
         else
             result.parts ~= Sql.Part(Sql.Part.Kind.value, null, SqlValue.of(arg));
     }
@@ -250,6 +287,13 @@ unittest {
     assert(sql(i"").empty && !sql(i"x").empty);
     // Adjacent text is merged
     assert(sql(i"a$(sql(i"b"))c").parts.length == 1);
+    // A fragment without its leading text
+    auto with_ = sql(i"WITH\n  x AS ($(1))").withoutPrefix!"WITH";
+    assert(!with_.isNull && with_.get.renderInline(d) == "\n  x AS (1)");
+    assert(sql(i"SELECT 1").withoutPrefix!"WITH".isNull && Sql.init.withoutPrefix!"WITH".isNull);
+    assert(sql(i"$(1) WITH").withoutPrefix!"WITH".isNull);
+    // Literals
+    assert(sql(i"json_build_object($(Literal("k")), $(Literal(2)))").renderInline(d) == "json_build_object('k', 2)");
     // Backslashes in wysiwyg sequences
     auto pattern = `a\%`;
     assert(sql(i`LIKE $(pattern) ESCAPE '\'`).render(d) == `LIKE 'a\%' ESCAPE '\'`);
