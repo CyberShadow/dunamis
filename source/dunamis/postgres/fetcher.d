@@ -2,7 +2,7 @@ module dunamis.postgres.fetcher;
 
 import dunamis.relational.native : SqlDataSource;
 import dunamis.relational.sql_dialect : SqlDialect, qualifiedColumn;
-import dunamis.relational.sql_fragment : Sql, SqlName, SqlValue, sql;
+import dunamis.relational.sql_fragment : BoundSql, Sql, SqlName, SqlValue, sql;
 import std.algorithm;
 import std.array;
 import std.conv;
@@ -53,7 +53,7 @@ class PostgresSession : RelationalSession {
     /// and the statements applying them and restoring the request's.
     private PostgresSession _base;
     private string[string] _scopeSettings;
-    private string _applySettings, _restoreSettings;
+    private Sql _applySettings, _restoreSettings;
     /// The relations the session's statements read for the names of
     /// relations in them (see setRelationResolver), or null.
     private Sql delegate(string name) _relationResolver;
@@ -125,8 +125,8 @@ class PostgresSession : RelationalSession {
             restore ~= sql(i"set_config($(name), $(base._settings.get(name, "")), true)");
         }
         if (names.length) {
-            derived._applySettings = sql(i"SELECT $(Sql.join!", "(apply))").renderInline(postgresDialect());
-            derived._restoreSettings = sql(i"SELECT $(Sql.join!", "(restore))").renderInline(postgresDialect());
+            derived._applySettings = sql(i"SELECT $(Sql.join!", "(apply))");
+            derived._restoreSettings = sql(i"SELECT $(Sql.join!", "(restore))");
         }
         return derived;
     }
@@ -236,12 +236,19 @@ class PostgresSession : RelationalSession {
         auto conn = connection();
         auto rendered = bound(statement, relations).render(postgresDialect());
         observe(rendered.text);
-        auto result = rendered.params.length
-            ? conn.extendedQueryWithParams(rendered.text, rendered.params.map!postgresParameter.array)
-            : conn.query(rendered.text);
-        if (_base is null || !_applySettings.length)
+        auto result = send(conn, rendered);
+        if (_base is null || _applySettings.empty)
             return result.array();
         return bracketed(conn, result);
+    }
+
+    /// The result of the statement `rendered` on `conn` (not sent yet):
+    /// with its values as its parameters (see `Sql.render`), with the
+    /// Extended Query protocol; a statement without any as a simple query.
+    private static PgSqlConnection.Result send(PgSqlConnection conn, BoundSql rendered) {
+        return rendered.params.length
+            ? conn.extendedQueryWithParams(rendered.text, rendered.params.map!postgresParameter.array)
+            : conn.query(rendered.text);
     }
 
     private Promise!(PgSqlConnection.Row[]) bracketed(PgSqlConnection conn, PgSqlConnection.Result statement) {
@@ -252,9 +259,9 @@ class PostgresSession : RelationalSession {
         // unhandled when an earlier one fails (e.g. once one has failed, the
         // others fail too, the transaction being aborted).
         alias Rows = PgSqlConnection.Row[];
-        auto applied = conn.query(_applySettings).array().toResult();
+        auto applied = send(conn, _applySettings.render(postgresDialect())).array().toResult();
         auto rows = statement.array().toResult();
-        auto restored = conn.query(_restoreSettings).array().toResult();
+        auto restored = send(conn, _restoreSettings.render(postgresDialect())).array().toResult();
         return applied.then((Result!Rows a) => rows.then((Result!Rows r) => restored.then((Result!Rows s) {
             a.unwrap();
             auto result = r.unwrap();
