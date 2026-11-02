@@ -275,11 +275,6 @@ abstract class RelationalSession : DataSession {
         return sql(i"$(SqlName(table))");
     }
 
-    /// ditto, as text. (Transitional: of the text form of statements, which
-    /// `Sql` fragments replace.)
-    string relationSource(string table) {
-        return table;
-    }
 
     /// Record the PK columns of a table, for naive-path fetches of refs that
     /// did not come from a root fetch (e.g. children with a composite key).

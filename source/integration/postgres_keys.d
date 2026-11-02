@@ -24,6 +24,7 @@ import dunamis.core.eval : EvalContext;
 import dunamis.core.expr : Expr, evaluateNested, fieldAccess, jsonObject, map, use;
 import dunamis.core.types : AnyRef, queryRoot;
 import dunamis.postgres : PostgresSession;
+import dunamis.relational.sql_fragment : Sql, sql;
 import dunamis.relational.schema : Entity, PrimaryKey, Col, ForeignKeyCol, BelongsTo, HasMany, getAll, getByIds;
 
 import integration.postgres_test : db, onEventLoop;
@@ -62,16 +63,12 @@ void testKeysNeedingQuotes() {
         session.setup().await;
         scope (exit) session.teardown(SetupMode.query, false).await;
 
-        session.execute("CREATE TEMP TABLE quoted_key_parents (code text PRIMARY KEY, label text)").await;
-        session.execute("CREATE TEMP TABLE quoted_key_children (id integer PRIMARY KEY, parent_code text, " ~
-            "other_code text)").await;
+        session.execute(sql(i"CREATE TEMP TABLE quoted_key_parents (code text PRIMARY KEY, label text)")).await;
+        session.execute(sql(i"CREATE TEMP TABLE quoted_key_children (id integer PRIMARY KEY, parent_code text, other_code text)")).await;
         foreach (i, code; codes) {
-            auto literal = "'" ~ code.replace("'", "''") ~ "'";
-            auto other = i + 1 < codes.length ? "'" ~ codes[i + 1].replace("'", "''") ~ "'" : "NULL";
-            session.execute("INSERT INTO quoted_key_parents VALUES (" ~ literal ~ ", '" ~
-                labelOf(code).replace("'", "''") ~ "')").await;
-            session.execute("INSERT INTO quoted_key_children VALUES (" ~ (i + 1).to!string ~ ", " ~ literal ~ ", " ~
-                other ~ ")").await;
+            auto other = i + 1 < codes.length ? Nullable!string(codes[i + 1]) : Nullable!string.init;
+            session.execute(sql(i"INSERT INTO quoted_key_parents VALUES ($(code), $(labelOf(code)))")).await;
+            session.execute(sql(i"INSERT INTO quoted_key_children VALUES ($(i + 1), $(code), $(other))")).await;
         }
 
         foreach (optimized; [true, false]) {

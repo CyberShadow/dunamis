@@ -99,23 +99,6 @@ Expr!T postgresSql(T)(Expr!T inMemory, Sql delegate(const Sql[]) render, ExprBas
     return new PostgresSqlExpr!T(inMemory, render, operands);
 }
 
-/// ditto, rendered as text on the SQL text of the operands. (Transitional:
-/// of the text form of native expressions, which `Sql` fragments replace.)
-Expr!T postgresSql(T)(Expr!T inMemory, string delegate(const string[]) render, ExprBase[] operands...) {
-    return new PostgresSqlExpr!T(inMemory, textRendering(render), operands);
-}
-
-/// A rendering of `Sql` fragments rendering the text `render` renders on
-/// their (PostgreSQL) text.
-private Sql delegate(const Sql[]) textRendering(string delegate(const string[]) render) {
-    import dunamis.postgres.dialect : postgresDialect;
-    return (const Sql[] operands) {
-        string[] text;
-        foreach (operand; operands)
-            text ~= operand.render(postgresDialect());
-        return Sql.unsafeRaw(render(text));
-    };
-}
 
 /// A condition on `operands` which PostgreSQL queries test as `render`
 /// renders it (see `postgresSql`), and which is evaluated in memory as
@@ -130,11 +113,6 @@ Expr!bool postgresCondition(Expr!bool inMemory, Sql delegate(const Sql[]) render
     return new PostgresSqlExpr!bool(inMemory, render, operands);
 }
 
-/// ditto, rendered as text on the SQL text of the operands (see the
-/// transitional `postgresSql`).
-Expr!bool postgresCondition(Expr!bool inMemory, string delegate(const string[]) render, ExprBase[] operands...) {
-    return new PostgresSqlExpr!bool(inMemory, textRendering(render), operands);
-}
 
 /// Whether the range `range` (e.g. a column of a PostgreSQL range type)
 /// contains the element `element` (a constant), which PostgreSQL queries test
@@ -252,9 +230,6 @@ unittest {
     auto contains = cast(NativeSqlInfo) rangeContainsElement(day, day, "date", constant(true, singleton(0)));
     assert(contains.hasNativeSql(postgresDialect()));
     assert(contains.nativeSql(postgresDialect(), [sql(i"t.validity"), sql(i"$("2020-01-01")")]).render(postgresDialect()) ==
-        "(t.validity @> '2020-01-01'::date)");
-    // (The transitional text form)
-    assert(contains.nativeSql(postgresDialect(), ["t.validity", "'2020-01-01'"]) ==
         "(t.validity @> '2020-01-01'::date)");
     assert(!contains.hasNativeSql(null));
     bool threw;

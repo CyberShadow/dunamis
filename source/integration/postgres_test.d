@@ -18,7 +18,8 @@ import ae.utils.promise.await : async, await;
 
 import dunamis.core.datasource : SetupMode;
 import dunamis.postgres;
-import dunamis.relational.sql_fragment : sql;
+import dunamis.relational.sql_fragment : Sql, sql;
+import dunamis.postgres.dialect : postgresDialect;
 
 import integration.schema;
 import integration.test_runner;
@@ -187,7 +188,7 @@ void testDerivedSessionSettings() {
 
         auto derived = session.withSettings(["dunamis_test.mode": "scoped"]);
         auto scope_ = ctx.createScope([cast(DataSource) db: derived]);
-        enum modeSql = "SELECT current_setting('dunamis_test.mode')";
+        auto modeSql = sql(i"SELECT current_setting('dunamis_test.mode')");
 
         // Statements of both, sent at the same time
         auto a = derived.queryStrings(modeSql);
@@ -211,12 +212,12 @@ void testDerivedSessionSettings() {
         auto userCount = () => evaluateNested(use((string[] names) => cast(int) names.length,
             map!((Expr!User u) => u.firstName)(Query().singleton().users())), scope_).await;
         auto before = userCount();
-        session.execute("INSERT INTO users (first_name, last_name, age) VALUES ('Derived', 'Uncommitted', 1)").await;
+        session.execute(sql(i"INSERT INTO users (first_name, last_name, age) VALUES ('Derived', 'Uncommitted', 1)")).await;
         assertTrue(userCount() == before + 1, "The scope did not see the request's write");
 
         // The request's atomic sections cover the derived session's work
         auto token = session.beginAtomic().await;
-        derived.execute("INSERT INTO users (first_name, last_name, age) VALUES ('Derived', 'Undone', 1)").await;
+        derived.execute(sql(i"INSERT INTO users (first_name, last_name, age) VALUES ('Derived', 'Undone', 1)")).await;
         assertTrue(userCount() == before + 2, "The scope did not see its own write");
         session.endAtomic(token, false).await;
         assertTrue(userCount() == before + 1, "The atomic section did not undo the scope's write");
@@ -258,29 +259,29 @@ void testSessionRelations() {
         // (Setup actions run in the session's transaction, after its setup)
         session.setSetting("dunamis_test.mode", "request");
         string[] setupSaw;
-        session.addSetupAction(() => session.queryStrings("SELECT current_setting('dunamis_test.mode')")
+        session.addSetupAction(() => session.queryStrings(sql(i"SELECT current_setting('dunamis_test.mode')"))
             .then((string[] values) { setupSaw = values; }));
         session.setup().await;
         scope (exit) session.teardown(SetupMode.query, false).await;
         assertTrue(setupSaw == ["request"], "The setup action did not run after the setup statements");
 
         // The relations: the users named Alice, the posts with an even ID
-        session.execute("CREATE FUNCTION pg_temp.users_named(p_name text) RETURNS SETOF users " ~
-            "LANGUAGE sql STABLE AS $$ SELECT * FROM users WHERE first_name = p_name $$").await;
-        session.execute("CREATE FUNCTION pg_temp.even_posts() RETURNS SETOF posts " ~
-            "LANGUAGE sql STABLE AS $$ SELECT * FROM posts WHERE id % 2 = 0 $$").await;
+        session.execute(sql(i"CREATE FUNCTION pg_temp.users_named(p_name text) RETURNS SETOF users LANGUAGE sql STABLE AS $$ SELECT * FROM users WHERE first_name = p_name $$")).await;
+        session.execute(sql(i"CREATE FUNCTION pg_temp.even_posts() RETURNS SETOF posts LANGUAGE sql STABLE AS $$ SELECT * FROM posts WHERE id % 2 = 0 $$")).await;
         size_t resolved;
         auto scoped = session.withRelations((string name) {
             resolved++;
-            return name == "users" ? "pg_temp.users_named('Alice')" : name == "posts" ? "pg_temp.even_posts()" : null;
+            return name == "users" ? sql(i"pg_temp.users_named($("Alice"))")
+                : name == "posts" ? sql(i"pg_temp.even_posts()") : Sql.init;
         });
-        assertTrue(scoped.relationSource("users") == "pg_temp.users_named('Alice')" &&
-            scoped.relationSource("tasks") == "tasks" && session.relationSource("users") == "users",
+        string relation(PostgresSession s, string name) { return s.relationSql(name).render(postgresDialect()); }
+        assertTrue(relation(scoped, "users") == "pg_temp.users_named('Alice')" &&
+            relation(scoped, "tasks") == "tasks" && relation(session, "users") == "users",
             "Wrong relation sources");
         auto scope_ = ctx.createScope([cast(DataSource) db: scoped]);
 
-        long[] ids(string sql) {
-            auto values = session.queryLongs(sql).await;
+        long[] ids(Sql query) {
+            auto values = session.queryLongs(query).await;
             values.sort();
             return values;
         }
@@ -302,14 +303,12 @@ void testSessionRelations() {
             result.sort();
             return result;
         }
-        enum alice = "SELECT id::bigint FROM users WHERE first_name = 'Alice'";
-        enum alicePosts = "SELECT p.id::bigint FROM posts p JOIN users u ON u.id = p.author_id " ~
-            "WHERE u.first_name = 'Alice' AND p.id % 2 = 0";
-        auto expectAlice = ids(alice), expectPosts = ids(alicePosts);
+        auto alice = sql(i"SELECT id::bigint FROM users WHERE first_name = 'Alice'");
+        auto alicesEvenPosts = sql(i"FROM posts p JOIN users u ON u.id = p.author_id WHERE u.first_name = 'Alice' AND p.id % 2 = 0");
+        auto expectAlice = ids(alice), expectPosts = ids(sql(i"SELECT p.id::bigint $(alicesEvenPosts)"));
         assertTrue(expectAlice.length && expectPosts.length, "Expected Alice's even posts");
-        auto expectTasks = ids("SELECT t.assignee_id::bigint FROM tasks t JOIN users u ON u.id = t.assignee_id " ~
-            "WHERE u.first_name = 'Alice'");
-        auto expectWithPosts = ids("SELECT DISTINCT p.author_id::bigint FROM (" ~ alicePosts.replace("p.id::bigint", "p.*") ~ ") p");
+        auto expectTasks = ids(sql(i"SELECT t.assignee_id::bigint FROM tasks t JOIN users u ON u.id = t.assignee_id WHERE u.first_name = 'Alice'"));
+        auto expectWithPosts = ids(sql(i"SELECT DISTINCT p.author_id::bigint FROM (SELECT p.* $(alicesEvenPosts)) p"));
 
         foreach (optimized; [true, false]) {
             JSONValue run(string query) {
@@ -348,7 +347,7 @@ void testSessionRelations() {
 
         // The request's session reads the tables
         auto all = evaluateNested(compileQuery!MySchema(`{ users { id } }`), ctx).await;
-        assertTrue(idsIn(all, ["users", "id"]) == ids("SELECT id::bigint FROM users"), "The request read the relations");
+        assertTrue(idsIn(all, ["users", "id"]) == ids(sql(i"SELECT id::bigint FROM users")), "The request read the relations");
     });
 }
 
@@ -427,10 +426,10 @@ void testNaiveFetchesByStringKeys() {
         session.setup().await;
         scope (exit) session.teardown(SetupMode.query, false).await;
 
-        session.execute("CREATE TEMP TABLE strkey_parents (code text PRIMARY KEY, label text)").await;
-        session.execute("CREATE TEMP TABLE strkey_children (id integer PRIMARY KEY, parent_code text)").await;
-        session.execute("INSERT INTO strkey_parents VALUES ('a-1', 'first'), ('o''k', 'second'), ('a', 'other')").await;
-        session.execute("INSERT INTO strkey_children VALUES (1, 'a-1'), (2, 'o''k'), (3, 'a')").await;
+        session.execute(sql(i"CREATE TEMP TABLE strkey_parents (code text PRIMARY KEY, label text)")).await;
+        session.execute(sql(i"CREATE TEMP TABLE strkey_children (id integer PRIMARY KEY, parent_code text)")).await;
+        session.execute(sql(i"INSERT INTO strkey_parents VALUES ('a-1', 'first'), ($("o'k"), 'second'), ('a', 'other')")).await;
+        session.execute(sql(i"INSERT INTO strkey_children VALUES (1, 'a-1'), (2, $("o'k")), (3, 'a')")).await;
         session.notePkColumns("strkey_parents", ["code"]);
 
         auto parents = [AnyRef("StrParent:a-1"), AnyRef("StrParent:o'k")];

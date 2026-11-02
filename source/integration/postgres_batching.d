@@ -24,6 +24,7 @@ import dunamis.core.filtering : filterBy;
 import dunamis.core.sorting : SortDirection, sortBy, sortByField;
 import dunamis.graphql.schema : Schema;
 import dunamis.postgres : PostgresSession;
+import dunamis.relational.sql_fragment : Sql, sql;
 import dunamis.relational.schema : Entity, PrimaryKey, Col, ForeignKeyCol, BelongsTo, HasMany, Table, getAll,
     getByIds, entityById;
 import dunamis.relational.schema.attrs : DecodedBy;
@@ -164,23 +165,19 @@ alias Owner = BatchingOwner;
 // owner except for j = 1; item (c, m) has the id (c-1)*k+m and is flagged for
 // odd m. Term t (1 <= t <= n) is valid from 2020-01-01 for t days; term
 // n + 1 has no validity.
-private string[] dataStatements(int n, int k) {
+private Sql[] dataStatements(int n, int k) {
+    auto childRow = sql(i"(p - 1) * $(k) + j, j % 2 = 0, ((p - 1) * $(k) + j) * 10, p, CASE WHEN j = 1 THEN NULL ELSE p % 2 + 1 END");
     return [
-        "CREATE TABLE batching_owners (id int PRIMARY KEY, name text NOT NULL)",
-        "CREATE TABLE batching_parents (id int PRIMARY KEY, name text NOT NULL, owner_id int NOT NULL)",
-        "CREATE TABLE batching_children (id int PRIMARY KEY, flag boolean NOT NULL, amount int NOT NULL, " ~
-            "parent_id int NOT NULL, owner_id int)",
-        "CREATE TABLE batching_items (id int PRIMARY KEY, flag boolean NOT NULL, child_id int NOT NULL)",
-        "CREATE TABLE batching_terms (id int PRIMARY KEY, validity daterange)",
-        "INSERT INTO batching_owners SELECT g, 'o' || g FROM generate_series(1, 2) g",
-        format("INSERT INTO batching_parents SELECT g, 'p' || g, g %% 2 + 1 FROM generate_series(1, %d) g", n),
-        format("INSERT INTO batching_children SELECT (p - 1) * %1$d + j, j %% 2 = 0, ((p - 1) * %1$d + j) * 10, p, " ~
-            "CASE WHEN j = 1 THEN NULL ELSE p %% 2 + 1 END " ~
-            "FROM generate_series(1, %2$d) p, generate_series(1, %1$d) j", k, n),
-        format("INSERT INTO batching_items SELECT (c - 1) * %1$d + m, m %% 2 = 1, c " ~
-            "FROM generate_series(1, %2$d) c, generate_series(1, %1$d) m", k, n * k),
-        format("INSERT INTO batching_terms SELECT g, daterange('2020-01-01', DATE '2020-01-01' + g) " ~
-            "FROM generate_series(1, %1$d) g UNION ALL SELECT %1$d + 1, NULL", n),
+        sql(i"CREATE TABLE batching_owners (id int PRIMARY KEY, name text NOT NULL)"),
+        sql(i"CREATE TABLE batching_parents (id int PRIMARY KEY, name text NOT NULL, owner_id int NOT NULL)"),
+        sql(i"CREATE TABLE batching_children (id int PRIMARY KEY, flag boolean NOT NULL, amount int NOT NULL, parent_id int NOT NULL, owner_id int)"),
+        sql(i"CREATE TABLE batching_items (id int PRIMARY KEY, flag boolean NOT NULL, child_id int NOT NULL)"),
+        sql(i"CREATE TABLE batching_terms (id int PRIMARY KEY, validity daterange)"),
+        sql(i"INSERT INTO batching_owners SELECT g, 'o' || g FROM generate_series(1, 2) g"),
+        sql(i"INSERT INTO batching_parents SELECT g, 'p' || g, g % 2 + 1 FROM generate_series(1, $(n)) g"),
+        sql(i"INSERT INTO batching_children SELECT $(childRow) FROM generate_series(1, $(n)) p, generate_series(1, $(k)) j"),
+        sql(i"INSERT INTO batching_items SELECT (c - 1) * $(k) + m, m % 2 = 1, c FROM generate_series(1, $(n * k)) c, generate_series(1, $(k)) m"),
+        sql(i"INSERT INTO batching_terms SELECT g, daterange('2020-01-01', DATE '2020-01-01' + g) FROM generate_series(1, $(n)) g UNION ALL SELECT $(n) + 1, NULL"),
     ];
 }
 
@@ -675,15 +672,14 @@ void testStatementCountsOfComputedFields() {
             ok = true;
         }
         void dropTables(PostgresSession session, EvalContext) {
-            session.execute("DROP TABLE IF EXISTS batching_owners, batching_parents, batching_children, " ~
-                "batching_items, batching_terms").await;
+            session.execute(sql(i"DROP TABLE IF EXISTS batching_owners, batching_parents, batching_children, batching_items, batching_terms")).await;
         }
 
         foreach (si, data; sizes) {
             inRequest((PostgresSession session, EvalContext) {
                 dropTables(session, null);
-                foreach (sql; dataStatements(data.n, data.k))
-                    session.execute(sql).await;
+                foreach (statement; dataStatements(data.n, data.k))
+                    session.execute(statement).await;
             }, true);
             scope (exit) inRequest(&dropTables, true);
             foreach (i, s; shapes)

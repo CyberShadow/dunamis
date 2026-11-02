@@ -45,15 +45,6 @@ interface NativeSqlInfo {
     /// SQL of the operands.
     Sql nativeSql(SqlDialect dialect, const(Sql)[] operands);
 
-    /// ditto, on the SQL text of the operands, as text. (Transitional: of
-    /// the text form of native expressions, which `Sql` fragments replace.)
-    final string nativeSql(SqlDialect dialect, string[] operandSql) {
-        Sql[] operands;
-        foreach (text; operandSql)
-            operands ~= Sql.unsafeRaw(text);
-        return nativeSql(dialect, operands).render(dialect);
-    }
-
     /// An expression of the expression's result type reading its values
     /// from the computed column `alias_` of the query node `queryNodeId`
     /// (a `dunamis.relational.project.ProjectionExpr` of the arguments

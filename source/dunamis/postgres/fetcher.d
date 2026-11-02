@@ -157,20 +157,6 @@ class PostgresSession : RelationalSession {
         _relationResolver = resolver;
     }
 
-    /// ditto, resolving names to SQL text (null: a name it does not
-    /// resolve). (Transitional: of the text form of statements, which `Sql`
-    /// fragments replace.)
-    void setRelationResolver(string delegate(string name) resolver) {
-        setRelationResolver(textResolver(resolver));
-    }
-
-    /// A resolver of names to the SQL text `resolver` resolves them to.
-    private static Sql delegate(string name) textResolver(string delegate(string name) resolver) {
-        return (string name) {
-            auto relation = resolver(name);
-            return relation is null ? Sql.init : Sql.unsafeRaw(relation);
-        };
-    }
 
     /// A session of the same request whose statements resolve the names of
     /// relations with `resolver` (see setRelationResolver), for evaluating
@@ -191,11 +177,6 @@ class PostgresSession : RelationalSession {
         return derived;
     }
 
-    /// ditto, resolving names to SQL text (see the transitional
-    /// `setRelationResolver`).
-    PostgresSession withRelations(string delegate(string name) resolver) {
-        return withRelations(textResolver(resolver));
-    }
 
     /// The relation the session reads for the relation `table` (e.g. the
     /// table of an entity): the resolver's (see setRelationResolver), or
@@ -209,10 +190,6 @@ class PostgresSession : RelationalSession {
         return super.relationSql(table);
     }
 
-    /// ditto, as text (see the transitional `RelationalSession.relationSource`)
-    override string relationSource(string table) {
-        return relationSql(table).render(postgresDialect());
-    }
 
     /// `sql`, a query reading the relations `relations`, with their names
     /// bound (see setRelationResolver). (The statement is text by now: the
@@ -483,18 +460,6 @@ class PostgresSession : RelationalSession {
             return values;
         });
     }
-
-    // (Transitional: the text form of the statements above, which `Sql`
-    // fragments replace)
-
-    /// ditto, of the SQL text `sql`
-    Promise!void execute(string sql) { return execute(Sql.unsafeRaw(sql)); }
-    /// ditto
-    Promise!(long[]) queryLongs(string sql) { return queryLongs(Sql.unsafeRaw(sql)); }
-    /// ditto
-    Promise!(string[]) queryStrings(string sql) { return queryStrings(Sql.unsafeRaw(sql)); }
-    /// ditto
-    Promise!(JSONValue[]) queryJson(string sql) { return queryJson(Sql.unsafeRaw(sql)); }
 
     /// Get the generated SQL (for debugging)
     @property string lastSql() { return _cachedSQL; }

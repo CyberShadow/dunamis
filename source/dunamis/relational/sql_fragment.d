@@ -14,7 +14,7 @@
 /// already (written as it is), and any other value (see `SqlValue`) is a
 /// value, which the dialect renders as a literal. As the literal text is a
 /// compile-time constant, SQL text computed at run time can only enter a
-/// fragment as a `SqlName` or through `Sql.unsafeRaw`.
+/// fragment as a `SqlName`.
 ///
 /// (Values are kept apart from the text so that a fragment can also be
 /// rendered with its values as parameters of the statement; `render` writes
@@ -37,7 +37,8 @@ struct Ident {
 /// name of a table or column as the schema declares it (see
 /// `dunamis.relational.schema`; e.g. a schema-qualified or quoted name), an
 /// alias the generator makes up, or a function's. Such a name must not be
-/// made of untrusted input (as `Sql.unsafeRaw` text); for a bare name, use
+/// made of untrusted input (it is the one way into fragments for SQL text
+/// computed at run time); for a bare name, use
 /// `Ident`.
 struct SqlName {
     string name;
@@ -101,8 +102,8 @@ struct SqlValue {
     }
 }
 
-/// A fragment of SQL (see the module's documentation): built by `sql`,
-/// `Sql.join`, or `Sql.unsafeRaw`; rendered by `render`.
+/// A fragment of SQL (see the module's documentation): built by `sql`
+/// or `Sql.join`; rendered by `render`.
 struct Sql {
     private static struct Part {
         enum Kind : ubyte { text, name, ident, value }
@@ -111,15 +112,6 @@ struct Sql {
         SqlValue value;
     }
     private Part[] parts;
-
-    /// The fragment of the SQL text `text`, as it is, which must not be
-    /// made of untrusted input (as this is not checked, the text of
-    /// fragments is otherwise only ever that of the source code).
-    static Sql unsafeRaw(string text) {
-        Sql result;
-        result.appendText(text);
-        return result;
-    }
 
     /// The fragments `fragments`, with the SQL text `separator` between
     /// them (e.g. `Sql.join!", "(columns)`).
@@ -264,7 +256,7 @@ unittest {
 }
 
 // The text of fragments is that of the source code: it is no string
-// computed at run time (but through `SqlName` and `unsafeRaw`)
+// computed at run time (but through `SqlName`)
 unittest {
     string text = "SELECT 1";
     static assert(!__traits(compiles, sql(text)));
@@ -273,5 +265,5 @@ unittest {
     // (Even a run-time string spliced as text by the sequence's text
     // positions only ever is a value)
     assert(sql(i"$(text)").render(new TestDialect) == "'SELECT 1'");
-    assert(Sql.unsafeRaw(text).render(new TestDialect) == "SELECT 1");
+    assert(sql(i"$(SqlName(text))").render(new TestDialect) == "SELECT 1");
 }

@@ -19,6 +19,7 @@ import dunamis.core.expr : Expr, evaluateNested, fieldAccess, map;
 import dunamis.core.sorting : SortDirection, sortByField;
 import dunamis.core.types : AnyRef, queryRoot;
 import dunamis.postgres : PostgresSession;
+import dunamis.relational.sql_fragment : Sql, sql;
 import dunamis.relational.schema : Entity, PrimaryKey, Col, Table, getAll;
 import dunamis.graphql : Schema, ApplyPlugins, FilterPlugin, SortingPlugin, PaginationPlugin;
 import dunamis.graphql.compiler : compileQuery;
@@ -65,9 +66,9 @@ void testSortsByTextSelectedColumns() {
         session.setup().await;
         scope (exit) session.teardown(SetupMode.query, false).await;
 
-        session.execute("CREATE TEMP TABLE ordered_amounts (id integer PRIMARY KEY, amount numeric)").await;
+        session.execute(sql(i"CREATE TEMP TABLE ordered_amounts (id integer PRIMARY KEY, amount numeric)")).await;
         foreach (i, amount; amounts)
-            session.execute("INSERT INTO ordered_amounts VALUES (" ~ (i + 1).to!string ~ ", " ~ amount ~ ")").await;
+            session.execute(sql(i"INSERT INTO ordered_amounts VALUES ($(i + 1), $(amount)::numeric)")).await;
 
         string[] sent;
         session.statementObserver = (const(char)[] sql) { sent ~= sql.idup; };
