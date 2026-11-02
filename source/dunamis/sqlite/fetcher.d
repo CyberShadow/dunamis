@@ -10,6 +10,7 @@ import std.json;
 import std.string;
 
 import ae.sys.sqlite3 : SQLite;
+import std.typecons : Nullable;
 import ae.utils.promise : Promise, resolve;
 
 import dunamis.core.types : AnyRef, makeAnyRef;
@@ -52,10 +53,81 @@ class SQLiteSession : RelationalSession {
         return super.teardown(mode, success);
     }
 
-    /// Execute raw SQL for session setup.
+    /// Execute the statement `statement`.
     override Promise!void execute(Sql statement) {
-        _db.exec(statement.renderInline(sqliteDialect()));
+        exec(statement);
         return resolve();
+    }
+
+    /// The rows of the statement `statement`, whose values are its
+    /// parameters (see `Sql.render`): an iteration of each row's cells (as
+    /// text; null: NULL) and of the names of the columns.
+    private auto query(Sql statement) {
+        static struct Rows {
+            SQLite.PreparedStatement stmt;
+
+            int opApply(scope int delegate(const(char)[][] cells, const(char)[][] columns) dg) {
+                scope (exit) destroy(stmt);  // (finalized)
+                const(char)[][] columns;
+                foreach (c; 0 .. stmt.columnCount())
+                    columns ~= stmt.columnName(c);
+                while (stmt.step()) {
+                    auto cells = new const(char)[][columns.length];
+                    foreach (c, ref cell; cells) {
+                        auto value = stmt.column!(Nullable!string)(cast(int) c);
+                        cell = value.isNull ? null : value.get is null ? "" : value.get;
+                    }
+                    if (auto result = dg(cells, columns)) {
+                        stmt.reset();
+                        return result;
+                    }
+                }
+                return 0;
+            }
+        }
+        auto bound = statement.render(sqliteDialect());
+        auto stmt = _db.prepare(bound.text);
+        foreach (i, ref value; bound.params)
+            bindParameter(stmt, cast(int) i + 1, value);
+        return Rows(stmt);
+    }
+
+    /// Execute the statement `statement` (see `query`), discarding its rows.
+    private void exec(Sql statement) {
+        foreach (cells, columns; query(statement)) {}
+    }
+
+    /// Bind the value `value` as the parameter `index` of `stmt`: as the
+    /// literal of the value would be (SQLite's booleans are integers, JSON
+    /// arrays and objects their JSON text).
+    private static void bindParameter(SQLite.PreparedStatement stmt, int index, ref const SqlValue value) {
+        import std.json : JSONType;
+        final switch (value.kind) {
+            case SqlValue.Kind.null_: stmt.bind(index, cast(void*) null); break;
+            case SqlValue.Kind.boolean: stmt.bind(index, value.text == "true" ? 1 : 0); break;
+            case SqlValue.Kind.number:
+                if (value.isInteger)
+                    stmt.bind(index, value.text.to!long);
+                else
+                    stmt.bind(index, value.text.to!double);
+                break;
+            case SqlValue.Kind.text: stmt.bind(index, value.text is null ? "" : value.text); break;
+            case SqlValue.Kind.array: assert(false, "SQLite has no arrays");
+            case SqlValue.Kind.json:
+                auto json = value.json;
+                final switch (json.type) {
+                    case JSONType.null_: stmt.bind(index, cast(void*) null); break;
+                    case JSONType.string: stmt.bind(index, json.str is null ? "" : json.str); break;
+                    case JSONType.integer: stmt.bind(index, json.integer); break;
+                    case JSONType.uinteger: stmt.bind(index, cast(long) json.uinteger); break;
+                    case JSONType.float_: stmt.bind(index, json.floating); break;
+                    case JSONType.true_: stmt.bind(index, 1); break;
+                    case JSONType.false_: stmt.bind(index, 0); break;
+                    case JSONType.array:
+                    case JSONType.object: stmt.bind(index, json.toString()); break;
+                }
+                break;
+        }
     }
 
     /// Get the generated SQL (for debugging)
@@ -81,7 +153,8 @@ class SQLiteSession : RelationalSession {
         SqlValue[] ids;
         if (root.filter == FilterType.byId || root.filter == FilterType.byIds)
             ids = root.refs.map!(r => SqlValue.of(singleKeyValue(r.localId))).array;
-        auto sql = toSQL(allNodes, sqliteDialect(), root.filter, ids).renderInline(sqliteDialect());
+        auto statement = toSQL(allNodes, sqliteDialect(), root.filter, ids);
+        auto sql = statement.renderInline(sqliteDialect());
 
         _cachedSQL = sql;
 
@@ -97,7 +170,7 @@ class SQLiteSession : RelationalSession {
 
         // Execute synchronously
         string jsonResult;
-        foreach (cells, columns; _db.query(sql)) {
+        foreach (cells, columns; query(statement)) {
             if (cells.length > 0 && cells[0] !is null) {
                 jsonResult = cells[0].idup;
             }
@@ -129,13 +202,13 @@ class SQLiteSession : RelationalSession {
     /// Generate SQL to fetch a column value, keyed by PK columns.
     /// For single PK: SELECT pk, column FROM table WHERE pk IN (...)
     /// For composite PK: SELECT pk1, pk2, ..., column FROM table WHERE (pk1=v1 AND pk2=v2) OR ...
-    private string buildFetchColumnSQL(string table, string column, string[] validIds) {
+    private Sql buildFetchColumnSQL(string table, string column, string[] validIds) {
         auto pkColumns = getPkColumnsForTable(table);
         auto from = SqlName(table), value = SqlName(column);
 
         if (pkColumns.length == 1) {
             auto pk = SqlName(pkColumns[0]);
-            return sql(i"SELECT $(pk), $(value) FROM $(from) WHERE $(pk) IN ($(idList(validIds)))").renderInline(sqliteDialect());
+            return sql(i"SELECT $(pk), $(value) FROM $(from) WHERE $(pk) IN ($(idList(validIds)))");
         } else {
             // Composite PK: build OR conditions
             Sql[] conditions;
@@ -147,7 +220,7 @@ class SQLiteSession : RelationalSession {
                 conditions ~= sql(i"($(Sql.join!" AND "(eqs)))");
             }
             auto where = Sql.join!" OR "(conditions);
-            return sql(i"SELECT $(columnList(pkColumns)), $(value) FROM $(from) WHERE $(where)").renderInline(sqliteDialect());
+            return sql(i"SELECT $(columnList(pkColumns)), $(value) FROM $(from) WHERE $(where)");
         }
     }
 
@@ -195,7 +268,7 @@ class SQLiteSession : RelationalSession {
 
         // Build value lookup map
         string[string] values;
-        foreach (cells, columns; _db.query(sql)) {
+        foreach (cells, columns; query(sql)) {
             auto pkCount = pkColumns.length;
             if (cells.length > pkCount) {
                 auto key = buildKeyFromCells(cells, pkCount);
@@ -234,7 +307,7 @@ class SQLiteSession : RelationalSession {
 
         // Build value lookup map
         long[string] values;
-        foreach (cells, columns; _db.query(sql)) {
+        foreach (cells, columns; query(sql)) {
             auto pkCount = pkColumns.length;
             if (cells.length > pkCount) {
                 auto key = buildKeyFromCells(cells, pkCount);
@@ -253,7 +326,7 @@ class SQLiteSession : RelationalSession {
             query = sql(i"$(query) ORDER BY $(columnList(orderBy))");
         string[] result;
 
-        foreach (cells, columns; _db.query(query.renderInline(sqliteDialect()))) {
+        foreach (cells, columns; this.query(query)) {
             if (cells.length >= 1 && cells[0] !is null)
                 result ~= buildKeyFromCells(cells, pkColumns.length);
         }
@@ -292,7 +365,7 @@ class SQLiteSession : RelationalSession {
                 query = sql(i"$(query) ORDER BY $(columnList(orderBy))");
 
             // Group children by parent FK
-            foreach (cells, columns; _db.query(query.renderInline(sqliteDialect()))) {
+            foreach (cells, columns; this.query(query)) {
                 auto pkCount = childPkColumns.length;
                 if (cells.length > pkCount) {
                     auto childId = buildKeyFromCells(cells, pkCount);
@@ -350,7 +423,7 @@ class SQLiteSession : RelationalSession {
 
         // Build id -> fk value map from query results
         string[string] fkByChildId;
-        foreach (cells, columns; _db.query(sql)) {
+        foreach (cells, columns; query(sql)) {
             auto pkCount = pkColumns.length;
             if (cells.length > pkCount) {
                 auto key = buildKeyFromCells(cells, pkCount);
@@ -408,7 +481,7 @@ class SQLiteSession : RelationalSession {
 
         // Build value lookup map
         JSONValue[string] values;
-        foreach (cells, columns; _db.query(sql)) {
+        foreach (cells, columns; query(sql)) {
             auto pkCount = pkColumns.length;
             if (cells.length > pkCount) {
                 auto key = buildKeyFromCells(cells, pkCount);
@@ -440,19 +513,19 @@ class SQLiteSession : RelationalSession {
     /// Execute INSERT and return the new row.
     /// SQLite is synchronous, so we return an immediately resolved promise.
     override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns, bool isAutoIncrement) {
-        auto insertSql = generateInsertSQL(table, input).renderInline(sqliteDialect());
-        _cachedSQL = insertSql;
+        auto insertSql = generateInsertSQL(table, input);
+        _cachedSQL = insertSql.renderInline(sqliteDialect());
 
         // Execute INSERT
-        _db.exec(insertSql);
+        exec(insertSql);
 
         // Fetch the inserted row — use last_insert_rowid() for auto-increment,
         // otherwise use PK values from input
         auto selectSql = (isAutoIncrement ? generateSelectLastInsertSQL(table)
-            : generateSelectByPkSQL(table, pkColumns, input)).renderInline(sqliteDialect());
+            : generateSelectByPkSQL(table, pkColumns, input));
         auto result = new QueryResult();
 
-        foreach (cells, columns; _db.query(selectSql)) {
+        foreach (cells, columns; query(selectSql)) {
             auto jsonRow = rowToJson(cells, columns);
             result.loadFromRows([jsonRow], typeName, pkColumns);
             break;
@@ -463,18 +536,18 @@ class SQLiteSession : RelationalSession {
 
     /// Execute UPDATE and return updated rows.
     override Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input, string[] pkColumns) {
-        auto updateSql = generateUpdateSQL(table, input, pkColumns).renderInline(sqliteDialect());
-        _cachedSQL = updateSql;
+        auto updateSql = generateUpdateSQL(table, input, pkColumns);
+        _cachedSQL = updateSql.renderInline(sqliteDialect());
 
         // Execute UPDATE
-        _db.exec(updateSql);
+        exec(updateSql);
 
         // Fetch the updated rows
-        auto selectSql = generateSelectUpdatedSQL(table, input.ids, pkColumns).renderInline(sqliteDialect());
+        auto selectSql = generateSelectUpdatedSQL(table, input.ids, pkColumns);
         auto result = new QueryResult();
 
         JSONValue[] rows;
-        foreach (cells, columns; _db.query(selectSql)) {
+        foreach (cells, columns; query(selectSql)) {
             rows ~= rowToJson(cells, columns);
         }
 
@@ -487,11 +560,11 @@ class SQLiteSession : RelationalSession {
 
     /// Execute DELETE and return count of deleted rows.
     override Promise!int executeDelete(string table, string[] ids, string[] pkColumns) {
-        auto deleteSql = generateDeleteSQL(table, ids, pkColumns).renderInline(sqliteDialect());
-        _cachedSQL = deleteSql;
+        auto deleteSql = generateDeleteSQL(table, ids, pkColumns);
+        _cachedSQL = deleteSql.renderInline(sqliteDialect());
 
         // Execute DELETE
-        _db.exec(deleteSql);
+        exec(deleteSql);
 
         // Return the number of changes
         return resolve(_db.changes);
