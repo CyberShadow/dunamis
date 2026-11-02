@@ -10,16 +10,17 @@ import dunamis.core.optimize : OptimizeContext;
 import dunamis.core.types : makeAnyRef;
 import dunamis.postgres.fetcher : PostgresSession;
 import dunamis.relational.schema : EntityID, makeEntityFromRef;
+import dunamis.relational.sql_fragment : Sql;
 
 /// A value computed by an SQL query (yielding at most one row), the same for
 /// every element of the batch of `lengthSource` (e.g. the Query object).
 private abstract class RawPostgresExpr(T) : Expr!T {
     protected DataSource _db;
-    protected string _sql;
+    protected Sql _query;
     protected ExprBase _lengthSource;
-    this(DataSource db, string sql, ExprBase lengthSource) {
+    this(DataSource db, Sql query, ExprBase lengthSource) {
         assert(lengthSource !is null, "Raw SQL expressions require a length source");
-        _db = db; _sql = sql; _lengthSource = lengthSource;
+        _db = db; _query = query; _lengthSource = lengthSource;
     }
     override ExprBase[] dependencies() { return [_lengthSource]; }
     override void replaceDependency(size_t index, ExprBase newDep) {
@@ -37,27 +38,27 @@ private abstract class RawPostgresExpr(T) : Expr!T {
         auto session = cast(PostgresSession) context.getSession(_db);
         return _lengthSource.evalResultLength(context).then((size_t count) {
             if (count == 0) return resolve(cast(T[]) null);
-            return session.queryLongs(_sql).then((long[] values) => value(values).repeat(count).array);
+            return session.queryLongs(_query).then((long[] values) => value(values).repeat(count).array);
         });
     }
 }
 
 private class RawIntExpr : RawPostgresExpr!int {
-    this(DataSource db, string sql, ExprBase lengthSource) { super(db, sql, lengthSource); }
+    this(DataSource db, Sql query, ExprBase lengthSource) { super(db, query, lengthSource); }
     override int value(long[] values) {
         return values.length ? values[0].to!int : 0;
     }
 }
 
 private class RawNullableIntExpr : RawPostgresExpr!(Nullable!int) {
-    this(DataSource db, string sql, ExprBase lengthSource) { super(db, sql, lengthSource); }
+    this(DataSource db, Sql query, ExprBase lengthSource) { super(db, query, lengthSource); }
     override Nullable!int value(long[] values) {
         return values.length ? Nullable!int(values[0].to!int) : Nullable!int.init;
     }
 }
 
 private class RawEntityExpr(Entity) : RawPostgresExpr!Entity {
-    this(DataSource db, string sql, ExprBase lengthSource) { super(db, sql, lengthSource); }
+    this(DataSource db, Sql query, ExprBase lengthSource) { super(db, query, lengthSource); }
     override Entity value(long[] values) {
         if (!values.length) return Entity.init;
         return makeEntityFromRef!Entity(
@@ -66,7 +67,7 @@ private class RawEntityExpr(Entity) : RawPostgresExpr!Entity {
 }
 
 private class RawNullableEntityExpr(Entity) : RawPostgresExpr!(Nullable!Entity) {
-    this(DataSource db, string sql, ExprBase lengthSource) { super(db, sql, lengthSource); }
+    this(DataSource db, Sql query, ExprBase lengthSource) { super(db, query, lengthSource); }
     override Nullable!Entity value(long[] values) {
         if (!values.length) return Nullable!Entity.init;
         return Nullable!Entity(makeEntityFromRef!Entity(
@@ -74,20 +75,20 @@ private class RawNullableEntityExpr(Entity) : RawPostgresExpr!(Nullable!Entity) 
     }
 }
 
-/// The value of `sql` (a query yielding at most one row of one integer
+/// The value of `query` (a query yielding at most one row of one integer
 /// column) for each element of `lengthSource`'s batch.
-Expr!int rawInt(DataSource db, string sql, ExprBase lengthSource) {
-    return new RawIntExpr(db, sql, lengthSource);
+Expr!int rawInt(DataSource db, Sql query, ExprBase lengthSource) {
+    return new RawIntExpr(db, query, lengthSource);
 }
 /// ditto
-Expr!(Nullable!int) rawNullableInt(DataSource db, string sql, ExprBase lengthSource) {
-    return new RawNullableIntExpr(db, sql, lengthSource);
+Expr!(Nullable!int) rawNullableInt(DataSource db, Sql query, ExprBase lengthSource) {
+    return new RawNullableIntExpr(db, query, lengthSource);
 }
 /// ditto, the integer being the id of an Entity
-Expr!Entity rawEntity(Entity)(DataSource db, string sql, ExprBase lengthSource) {
-    return new RawEntityExpr!Entity(db, sql, lengthSource);
+Expr!Entity rawEntity(Entity)(DataSource db, Sql query, ExprBase lengthSource) {
+    return new RawEntityExpr!Entity(db, query, lengthSource);
 }
 /// ditto
-Expr!(Nullable!Entity) rawNullableEntity(Entity)(DataSource db, string sql, ExprBase lengthSource) {
-    return new RawNullableEntityExpr!Entity(db, sql, lengthSource);
+Expr!(Nullable!Entity) rawNullableEntity(Entity)(DataSource db, Sql query, ExprBase lengthSource) {
+    return new RawNullableEntityExpr!Entity(db, query, lengthSource);
 }

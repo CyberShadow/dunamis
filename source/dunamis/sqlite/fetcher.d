@@ -53,8 +53,8 @@ class SQLiteSession : RelationalSession {
     }
 
     /// Execute raw SQL for session setup.
-    override Promise!void execute(string sql) {
-        _db.exec(sql);
+    override Promise!void execute(Sql statement) {
+        _db.exec(statement.render(sqliteDialect()));
         return resolve();
     }
 

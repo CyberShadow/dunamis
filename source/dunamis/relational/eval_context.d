@@ -12,6 +12,7 @@ import dunamis.core.datasource : DataSource, DataSession, SetupMode, ChangeEvent
 import dunamis.core.types;
 import dunamis.core.sorting : OrderBySpec, SortDirection;
 import dunamis.relational.query_node;
+import dunamis.relational.sql_fragment : Sql, SqlName, sql;
 
 /// Whether column values of type `T` are records: structs decoded from a
 /// JSON object of their fields (see `extractJsonValue`).
@@ -267,9 +268,15 @@ abstract class RelationalSession : DataSession {
     }
 
     /// The relation the session reads for the table (or logical relation
-    /// name) `table` of entities: by default, `table` itself. A session may
-    /// resolve names to other relations (e.g. PostgresSession's
-    /// setRelationResolver).
+    /// name) `table` of entities: by default, `table` itself (as the schema
+    /// names it, see `SqlName`). A session may resolve names to other
+    /// relations (e.g. PostgresSession's setRelationResolver).
+    Sql relationSql(string table) {
+        return sql(i"$(SqlName(table))");
+    }
+
+    /// ditto, as text. (Transitional: of the text form of statements, which
+    /// `Sql` fragments replace.)
     string relationSource(string table) {
         return table;
     }
@@ -440,10 +447,11 @@ abstract class RelationalSession : DataSession {
         return true;
     }
 
-    /// Execute raw SQL for session setup (SET LOCAL, SET TRANSACTION, etc.).
+    /// Execute the statement `statement` (e.g. of the session's setup: SET
+    /// LOCAL, SET TRANSACTION, etc.).
     /// Override in subclasses to execute against the actual database connection.
     /// Default: no-op.
-    Promise!void execute(string sql) {
+    Promise!void execute(Sql statement) {
         return resolve();
     }
 

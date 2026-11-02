@@ -59,8 +59,8 @@ class MySQLSession : RelationalSession {
     }
 
     /// Execute raw SQL for session setup.
-    override Promise!void execute(string sql) {
-        return _conn.query(sql).array().then((MySqlConnection.Row[] _) { });
+    override Promise!void execute(Sql statement) {
+        return _conn.query(statement.render(mysqlDialect())).array().then((MySqlConnection.Row[] _) { });
     }
 
     /// Get the generated SQL (for debugging)

@@ -41,7 +41,7 @@ class PostgresSession : RelationalSession {
     private bool _disconnectOnTeardown;
     private size_t _setupDepth;
     private string _cachedSQL;
-    private string[] _setupStatements;
+    private Sql[] _setupStatements;
     private Promise!void delegate()[] _setupActions;
     /// Numbers the session's transactions (incremented at each BEGIN), to
     /// tell whether an atomic section's savepoint still exists.
@@ -56,13 +56,13 @@ class PostgresSession : RelationalSession {
     private string _applySettings, _restoreSettings;
     /// The relations the session's statements read for the names of
     /// relations in them (see setRelationResolver), or null.
-    private string delegate(string name) _relationResolver;
+    private Sql delegate(string name) _relationResolver;
 
     /// Add transaction-local initialization SQL for this request (for
     /// example SET LOCAL application context values).
-    void addSetupStatement(string sql) {
+    void addSetupStatement(Sql statement) {
         assert(_base is null, "addSetupStatement: a derived session has no setup of its own");
-        _setupStatements ~= sql;
+        _setupStatements ~= statement;
     }
 
     /// Add an action to run when the session is set up for the request, in
@@ -84,7 +84,7 @@ class PostgresSession : RelationalSession {
     void setSetting(string name, string value) {
         assert(_base is null, "setSetting: a derived session has no setup of its own");
         _settings[settingName(name)] = value;
-        addSetupStatement(sql(i"SET LOCAL $(SqlName(name)) = $(value)").render(postgresDialect()));
+        addSetupStatement(sql(i"SET LOCAL $(SqlName(name)) = $(value)"));
     }
 
     /// A session of the same request whose statements see the configuration
@@ -136,7 +136,7 @@ class PostgresSession : RelationalSession {
 
     /// Resolve the names of relations (the tables of entities) with
     /// `resolver`: a name it resolves (to a FROM item, e.g. a call of a
-    /// set-returning function with constant arguments; null: a name it does
+    /// set-returning function with constant arguments; empty: a name it does
     /// not resolve) is read as that relation by the queries Dunamis
     /// generates (of the optimized and of the naive path), which know the
     /// relations they read (see `QueryNode.relations`): such a query is sent
@@ -148,13 +148,28 @@ class PostgresSession : RelationalSession {
     /// also the alias of the relation in the statements) and should not name
     /// a relation of the database. The statements of `execute`, `queryLongs`
     /// etc. are sent as they are: they read the relation of a name as
-    /// `relationSource` gives it. Mutations write the tables themselves. The
+    /// `relationSql` gives it. Mutations write the tables themselves. The
     /// resolver is called when a statement is sent (so it may resolve a
     /// name differently over the request). Sessions derived from this one
     /// (see withSettings, withRelations) resolve names with it too, unless
     /// given their own.
-    void setRelationResolver(string delegate(string name) resolver) {
+    void setRelationResolver(Sql delegate(string name) resolver) {
         _relationResolver = resolver;
+    }
+
+    /// ditto, resolving names to SQL text (null: a name it does not
+    /// resolve). (Transitional: of the text form of statements, which `Sql`
+    /// fragments replace.)
+    void setRelationResolver(string delegate(string name) resolver) {
+        setRelationResolver(textResolver(resolver));
+    }
+
+    /// A resolver of names to the SQL text `resolver` resolves them to.
+    private static Sql delegate(string name) textResolver(string delegate(string name) resolver) {
+        return (string name) {
+            auto relation = resolver(name);
+            return relation is null ? Sql.init : Sql.unsafeRaw(relation);
+        };
     }
 
     /// A session of the same request whose statements resolve the names of
@@ -165,7 +180,7 @@ class PostgresSession : RelationalSession {
     /// issues its statements on this session's connection, in its
     /// transaction, and has result caches of its own; unlike one, its
     /// statements are sent as they are, without statements around them.
-    PostgresSession withRelations(string delegate(string name) resolver) {
+    PostgresSession withRelations(Sql delegate(string name) resolver) {
         auto base = _base is null ? this : _base;
         auto derived = new PostgresSession(_connFactory, _disconnectOnTeardown, _acquireConnection, _releaseConnection);
         derived._base = base;
@@ -176,23 +191,40 @@ class PostgresSession : RelationalSession {
         return derived;
     }
 
+    /// ditto, resolving names to SQL text (see the transitional
+    /// `setRelationResolver`).
+    PostgresSession withRelations(string delegate(string name) resolver) {
+        return withRelations(textResolver(resolver));
+    }
+
     /// The relation the session reads for the relation `table` (e.g. the
     /// table of an entity): the resolver's (see setRelationResolver), or
     /// `table`.
-    override string relationSource(string table) {
-        if (_relationResolver !is null)
-            if (auto relation = _relationResolver(table))
+    override Sql relationSql(string table) {
+        if (_relationResolver !is null) {
+            auto relation = _relationResolver(table);
+            if (!relation.empty)
                 return relation;
-        return table;
+        }
+        return super.relationSql(table);
+    }
+
+    /// ditto, as text (see the transitional `RelationalSession.relationSource`)
+    override string relationSource(string table) {
+        return relationSql(table).render(postgresDialect());
     }
 
     /// `sql`, a query reading the relations `relations`, with their names
-    /// bound (see setRelationResolver).
+    /// bound (see setRelationResolver). (The statement is text by now: the
+    /// relations are rendered as text too.)
     private const(char)[] bound(const(char)[] sql, const(string)[] relations) {
         import dunamis.postgres.sql : bindRelations;
         if (_relationResolver is null || !relations.length)
             return sql;
-        return bindRelations(sql, relations, _relationResolver);
+        return bindRelations(sql, relations, (string name) {
+            auto relation = _relationResolver(name);
+            return relation.empty ? null : relation.render(postgresDialect());
+        });
     }
 
     private static string settingName(string name) {
@@ -364,7 +396,7 @@ class PostgresSession : RelationalSession {
         if (_base !is null || _conn is null || !_setupDepth)
             return resolve(0UL);
         auto transaction = _transaction;
-        return execute("SAVEPOINT dunamis_atomic").then(() => transaction);
+        return execute(sql(i"SAVEPOINT dunamis_atomic")).then(() => transaction);
     }
 
     /// ditto
@@ -373,9 +405,9 @@ class PostgresSession : RelationalSession {
         if (token == 0 || token != _transaction || _conn is null)
             return resolve();
         if (success)
-            return execute("RELEASE SAVEPOINT dunamis_atomic");
-        return execute("ROLLBACK TO SAVEPOINT dunamis_atomic")
-            .then(() => execute("RELEASE SAVEPOINT dunamis_atomic"));
+            return execute(sql(i"RELEASE SAVEPOINT dunamis_atomic"));
+        return execute(sql(i"ROLLBACK TO SAVEPOINT dunamis_atomic"))
+            .then(() => execute(sql(i"RELEASE SAVEPOINT dunamis_atomic")));
     }
 
     /// Commit or rollback the transaction, then fire pending events.
@@ -407,17 +439,17 @@ class PostgresSession : RelationalSession {
         });
     }
 
-    /// Execute raw SQL for session setup.
-    override Promise!void execute(string sql) {
-        return run(sql).then((PgSqlConnection.Row[] _) { });
+    /// Execute the statement `statement`.
+    override Promise!void execute(Sql statement) {
+        return run(statement).then((PgSqlConnection.Row[] _) { });
     }
 
-    /// Execute SQL which returns one integer column.  This is intentionally a
+    /// Execute a query which returns one integer column.  This is intentionally a
     /// small escape hatch for application-specific database shims whose
     /// semantics cannot be expressed as relational query nodes (for example
     /// versioned writes).
-    Promise!(long[]) queryLongs(string sql) {
-        return run(sql).then((PgSqlConnection.Row[] rows) {
+    Promise!(long[]) queryLongs(Sql query) {
+        return run(query).then((PgSqlConnection.Row[] rows) {
             long[] values;
             values.reserve(rows.length);
             foreach (row; rows)
@@ -426,9 +458,9 @@ class PostgresSession : RelationalSession {
         });
     }
 
-    /// Execute SQL which returns one text column.
-    Promise!(string[]) queryStrings(string sql) {
-        return run(sql).then((PgSqlConnection.Row[] rows) {
+    /// Execute a query which returns one text column.
+    Promise!(string[]) queryStrings(Sql query) {
+        return run(query).then((PgSqlConnection.Row[] rows) {
             string[] values;
             values.reserve(rows.length);
             foreach (row; rows)
@@ -442,8 +474,8 @@ class PostgresSession : RelationalSession {
     /// they can request application-specific projections while retaining the
     /// current transaction and request-local database settings, instead of
     /// recursively entering GraphQL over HTTP.
-    Promise!(JSONValue[]) queryJson(string sql) {
-        return run(sql).then((PgSqlConnection.Row[] rows) {
+    Promise!(JSONValue[]) queryJson(Sql query) {
+        return run(query).then((PgSqlConnection.Row[] rows) {
             JSONValue[] values;
             values.reserve(rows.length);
             foreach (row; rows)
@@ -451,6 +483,18 @@ class PostgresSession : RelationalSession {
             return values;
         });
     }
+
+    // (Transitional: the text form of the statements above, which `Sql`
+    // fragments replace)
+
+    /// ditto, of the SQL text `sql`
+    Promise!void execute(string sql) { return execute(Sql.unsafeRaw(sql)); }
+    /// ditto
+    Promise!(long[]) queryLongs(string sql) { return queryLongs(Sql.unsafeRaw(sql)); }
+    /// ditto
+    Promise!(string[]) queryStrings(string sql) { return queryStrings(Sql.unsafeRaw(sql)); }
+    /// ditto
+    Promise!(JSONValue[]) queryJson(string sql) { return queryJson(Sql.unsafeRaw(sql)); }
 
     /// Get the generated SQL (for debugging)
     @property string lastSql() { return _cachedSQL; }

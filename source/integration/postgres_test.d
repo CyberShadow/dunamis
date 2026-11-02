@@ -18,6 +18,7 @@ import ae.utils.promise.await : async, await;
 
 import dunamis.core.datasource : SetupMode;
 import dunamis.postgres;
+import dunamis.relational.sql_fragment : sql;
 
 import integration.schema;
 import integration.test_runner;
@@ -198,7 +199,7 @@ void testDerivedSessionSettings() {
 
         // Nested evaluations, in the scope and next to it in the request
         auto modeLength = (Expr!Query q) => rawInt(db,
-            "SELECT length(current_setting('dunamis_test.mode'))::bigint", q);
+            sql(i"SELECT length(current_setting('dunamis_test.mode'))::bigint"), q);
         auto inScope = evaluateNested(modeLength(Query().singleton()), scope_);
         auto inRequest = evaluateNested(modeLength(Query().singleton()), ctx);
         auto inNestedScope = evaluateNested(modeLength(Query().singleton()), scope_.createScope());
@@ -225,7 +226,7 @@ void testDerivedSessionSettings() {
         token = session.beginAtomic().await;
         string error;
         try
-            evaluateNested(rawInt(db, "SELECT (1 / 0)::bigint", Query().singleton()), scope_).await;
+            evaluateNested(rawInt(db, sql(i"SELECT (1 / 0)::bigint"), Query().singleton()), scope_).await;
         catch (Exception e)
             error = e.msg;
         assertTrue(error !is null, "The failing statement did not fail its evaluation");
