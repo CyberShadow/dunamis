@@ -139,23 +139,31 @@ unittest {
     check(`{or: [{colors: {overlaps: [red]}}, {tagIds: {contains: [3]}}]}`, [1, 4]);
 }
 
-// Escapes in operands (given as variables): a backslash, and escaped wildcards
+// Escapes in operands: a backslash, and escaped wildcards, given as variables
+// and as (escaped) string literals
 unittest {
+    import std.array : replace;
     import std.json : JSONValue;
-    void checkVariable(string op, string operand, long[] expected) {
+    void checkOperand(string op, string operand, long[] expected) {
+        const literal = `"` ~ operand.replace(`\`, `\\`).replace(`"`, `\"`) ~ `"`;
         foreach (optimize; [false, true]) {
-            seed();
-            auto result = awaitSync(new Executor().execute(compileQuery!FvSchema(
-                `query($v: String!) { items(filter: {name: {` ~ op ~ `: $v}}) { id } }`, JSONValue(["v": operand])), optimize));
-            long[] found;
-            foreach (row; result["items"].array)
-                found ~= row["id"].integer;
-            assert(found == expected, op ~ " " ~ operand ~ ": expected " ~ expected.to!string ~ ", got " ~ found.to!string);
+            foreach (query; [
+                compileQuery!FvSchema(`query($v: String!) { items(filter: {name: {` ~ op ~ `: $v}}) { id } }`,
+                    JSONValue(["v": operand])),
+                compileQuery!FvSchema(`{ items(filter: {name: {` ~ op ~ `: ` ~ literal ~ `}}) { id } }`),
+            ]) {
+                seed();
+                auto result = awaitSync(new Executor().execute(query, optimize));
+                long[] found;
+                foreach (row; result["items"].array)
+                    found ~= row["id"].integer;
+                assert(found == expected, op ~ " " ~ operand ~ ": expected " ~ expected.to!string ~ ", got " ~ found.to!string);
+            }
         }
     }
-    checkVariable("includes", `\`, [4]);
-    checkVariable("includes", `a\b`, [4]);
-    checkVariable("like", `%\_%`, [1]);
-    checkVariable("like", `a\\b`, [4]);
-    checkVariable("likeInsensitive", `A\%`, []);
+    checkOperand("includes", `\`, [4]);
+    checkOperand("includes", `a\b`, [4]);
+    checkOperand("like", `%\_%`, [1]);
+    checkOperand("like", `a\\b`, [4]);
+    checkOperand("likeInsensitive", `A\%`, []);
 }
