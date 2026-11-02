@@ -151,3 +151,19 @@ unittest {
         `Variable "$f" got invalid value; Field "titel" is not defined by type "IvBookFilter".`, 2, 23);
     assert(errorsOf(`{ books(filter: {or: [{}], title: {}}) { id } }`).length == 0);
 }
+
+// A field selected more than once (here, by a fragment and by the selection
+// set itself) has the fields of all of its selection sets.
+unittest {
+    import ae.utils.promise.await : awaitSync;
+    import dunamis.core : Executor;
+
+    ivDb = new MockDB!();
+    ivDb.setTableData("iv_authors", `[{"id":7,"name":"Ann"}]`);
+    ivDb.setTableData("iv_books", `[{"id":1,"title":"a","author_id":7}]`);
+    auto expression = compileQuery!IvSchema(
+        `{ books { ...withAuthorId author { name } } } fragment withAuthorId on IvBook { author { id } }`,
+        JSONValue.emptyObject);
+    auto result = awaitSync(new Executor().execute(expression));
+    assert(result.toString() == `{"books":[{"author":{"id":7,"name":"Ann"}}]}`, result.toString());
+}

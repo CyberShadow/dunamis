@@ -256,13 +256,51 @@ void processSelections(string typeName, string[] abstractNames = null)(
     ref string[] fieldNames, ref ExprBase[] fieldExprs,
     ExprBase delegate(Field) processField
 ) {
+    // The fields by response key, in the order of their first occurrence:
+    // a key selected more than once (e.g. by a fragment and by the selection
+    // set itself) is one field, whose selection set is all of theirs (as
+    // the spec merges them: CollectFields, MergeSelectionSets)
+    string[] keys;
+    Field[][string] occurrences;
     foreachSelectedField(ss, fragments, &variables,
         (Token typeCondition, SelectionSet _) => typeConditionApplies(typeCondition.value, typeName, abstractNames),
         (Field field) {
-            fieldNames ~= getOutputName(field);
-            fieldExprs ~= processField(field);
+            auto key = getOutputName(field);
+            if (key !in occurrences)
+                keys ~= key;
+            occurrences[key] ~= field;
         },
         FragmentSpreads(true));
+    foreach (key; keys) {
+        fieldNames ~= key;
+        fieldExprs ~= processField(mergedField(occurrences[key]));
+    }
+}
+
+/// The field `fields` (the occurrences of one response key) select: the
+/// first, with the selection sets of all (if it has one).
+private Field mergedField(Field[] fields) @safe {
+    import graphql.ast : FieldEnum, Selections, SelectionsEnum, SelectionSetEnum;
+
+    if (fields.length == 1 || fields[0].ss is null)
+        return fields[0];
+    // The selections of all, chained (each occurrence's in its order)
+    Selections head, tail;
+    foreach (field; fields) {
+        if (field.ss is null)
+            continue;
+        for (auto sels = field.ss.sel; sels !is null; sels = sels.follow) {
+            auto link = new Selections(SelectionsEnum.Sels, sels.sel);
+            if (head is null)
+                head = link;
+            else
+                tail.follow = link;
+            tail = link;
+        }
+    }
+    auto merged = new Field(fields[0].ruleSelection, fields[0].name, fields[0].args, fields[0].dirs,
+        new SelectionSet(SelectionSetEnum.SS, head));
+    return merged;
 }
 
 // ============================================================================
