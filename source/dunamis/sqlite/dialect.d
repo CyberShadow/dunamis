@@ -81,6 +81,10 @@ class SQLiteDialect : SqlDialect {
     // Query SQL generation vocabulary
     // =========================================================================
 
+    override string quoteIdentifier(string name) {
+        return `"` ~ name.replace(`"`, `""`) ~ `"`;
+    }
+
     override string escapeSqlString(string s) {
         return "'" ~ s.replace("'", "''") ~ "'";
     }
@@ -109,38 +113,34 @@ class SQLiteDialect : SqlDialect {
         }
     }
 
-    override string rootIdFilter(string table, string[] pkColumns) {
-        if (pkColumns.length == 1) {
-            return format("%s.%s IN ({{IDS}})", table, pkColumns[0]);
-        }
-        auto cols = pkColumns.map!(c => table ~ "." ~ c).array.join(", ");
-        return format("(%s) IN ({{IDS}})", cols);
+    override Sql rootIdFilter(string table, string[] pkColumns, Sql ids) {
+        if (pkColumns.length == 1)
+            return sql(i"$(qualifiedColumn(table, pkColumns[0])) IN ($(ids))");
+        auto columns = Sql.join!", "(pkColumns.map!(c => qualifiedColumn(table, c)).array);
+        return sql(i"($(columns)) IN ($(ids))");
     }
 
-    override string jsonObjectFunc() { return "json_object"; }
+    override Sql jsonObjectFunc() { return sql(i"json_object"); }
 
-    override string rowJsonFunc() { return "json_object"; }
+    override Sql rowJsonFunc() { return sql(i"json_object"); }
 
-    override string emptyJsonArray() { return "json('[]')"; }
+    override Sql emptyJsonArray() { return sql(i"json('[]')"); }
 
-    override string castToText(string sql) { return "CAST(" ~ sql ~ " AS TEXT)"; }
+    override Sql castToText(Sql expr) { return sql(i"CAST($(expr) AS TEXT)"); }
     override Nullable!Sql arrayPredicateOp(Sql operand, ArrayPredicate predicate, TypeInfo valueType,
             Nullable!string[] values) {
         return Nullable!Sql.init;  // (No arrays)
     }
-    override string orderByTerm(string sql, bool descending) {
+    override Sql orderByTerm(Sql expr, bool descending) {
         // (Ordered by itself, NULL would be the least value)
-        auto direction = descending ? " DESC" : "";
-        return "(" ~ sql ~ " IS NULL)" ~ direction ~ ", " ~ sql ~ direction;
+        return descending ? sql(i"($(expr) IS NULL) DESC, $(expr) DESC") : sql(i"($(expr) IS NULL), $(expr)");
     }
 
-    override string aggregateLayerJson(int layerId, string orderByClause) {
-        if (orderByClause.length > 0) {
-            return format("COALESCE((SELECT json_group_array(json(row_json)) FROM (SELECT * FROM layer%d ORDER BY %s)), %s)",
-                layerId, orderByClause, emptyJsonArray());
-        }
-        return format("COALESCE((SELECT json_group_array(json(row_json)) FROM layer%d), %s)",
-            layerId, emptyJsonArray());
+    override Sql aggregateLayerJson(int layerId, Sql orderByClause) {
+        auto layer = layerName(layerId);
+        if (!orderByClause.empty)
+            return sql(i"COALESCE((SELECT json_group_array(json(row_json)) FROM (SELECT * FROM $(layer) ORDER BY $(orderByClause))), $(emptyJsonArray()))");
+        return sql(i"COALESCE((SELECT json_group_array(json(row_json)) FROM $(layer)), $(emptyJsonArray()))");
     }
 }
 

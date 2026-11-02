@@ -4,55 +4,75 @@
 ///
 /// ---
 /// Sql cond = sql(i"$(Ident(column)) = $(value)");
-/// Sql q = sql(i"SELECT id FROM $(Ident(table)) WHERE $(cond)");
-/// q.render(dialect);  // e.g. "SELECT id FROM users WHERE name = 'it''s'"
+/// Sql q = sql(i"SELECT id FROM $(SqlName(table)) WHERE $(cond)");
+/// q.render(dialect);  // e.g. `SELECT id FROM app."Users" WHERE "name" = 'it''s'`
 /// ---
 ///
 /// In `sql(i"...")`, the literal text of the sequence is SQL; of the
-/// expressions interpolated, a `Sql` is spliced in, an `Ident` is a name
-/// (of a table, column or alias), and any other value (see `SqlValue`) is a
+/// expressions interpolated, a `Sql` is spliced in, an `Ident` is an
+/// identifier (which the dialect quotes), a `SqlName` is a name which is SQL
+/// already (written as it is), and any other value (see `SqlValue`) is a
 /// value, which the dialect renders as a literal. As the literal text is a
 /// compile-time constant, SQL text computed at run time can only enter a
-/// fragment through `Sql.unsafeRaw`.
+/// fragment as a `SqlName` or through `Sql.unsafeRaw`.
+///
+/// (Values are kept apart from the text so that a fragment can also be
+/// rendered with its values as parameters of the statement; `render` writes
+/// them as literals.)
 module dunamis.relational.sql_fragment;
 
 import core.interpolation : InterpolatedExpression, InterpolatedLiteral, InterpolationFooter, InterpolationHeader;
+import std.json : JSONValue;
 import std.typecons : Nullable;
 
 import dunamis.relational.sql_dialect : SqlDialect, isSqlNumericType;
 
-/// The name of a table, column or table alias in a `Sql` fragment.
-///
-/// It is rendered as it is given: the names of the schema (see
-/// `dunamis.relational.schema`) are SQL already (e.g. a schema-qualified
-/// or quoted name), as are the aliases the generator makes up.
+/// An identifier (e.g. of a column) in a `Sql` fragment: a bare name, which
+/// the dialect quotes (see `SqlDialect.quoteIdentifier`).
 struct Ident {
     string name;
 }
 
-/// A value in a `Sql` fragment: NULL, a boolean, a number or a string.
+/// A name in a `Sql` fragment which is SQL already, written as it is: the
+/// name of a table or column as the schema declares it (see
+/// `dunamis.relational.schema`; e.g. a schema-qualified or quoted name), an
+/// alias the generator makes up, or a function's. Such a name must not be
+/// made of untrusted input (as `Sql.unsafeRaw` text); for a bare name, use
+/// `Ident`.
+struct SqlName {
+    string name;
+}
+
+/// A value in a `Sql` fragment: NULL, a boolean, a number, a string, or a
+/// JSON value (e.g. an input value of a mutation).
 struct SqlValue {
-    enum Kind : ubyte { null_, boolean, number, text }
+    enum Kind : ubyte { null_, boolean, number, text, json }
 
     Kind kind;  /// (The default value is NULL.)
     /// The value's text: of a number, as SQL writes it; of a boolean,
     /// "true" or "false".
     string text;
+    /// The JSON value (of a `json` value), which the dialect writes as it
+    /// writes JSON values (see `SqlDialect.jsonToSqlLiteral`).
+    JSONValue json;
 
     /// The value of the D value `value`: of a boolean, a number, a string,
-    /// a `Nullable` of these, or `null` (NULL).
+    /// a `JSONValue`, a `Nullable` of these, or `null` (NULL).
     static SqlValue of(T)(T value) {
         import std.conv : to;
+        import std.traits : Unqual;
         static if (is(T == typeof(null)))
             return SqlValue.init;
-        else static if (is(T : Nullable!U, U))
+        else static if (is(Unqual!T == Nullable!U, U))
             return value.isNull ? SqlValue.init : of(value.get);
-        else static if (is(T == bool))
+        else static if (is(Unqual!T == bool))
             return SqlValue(Kind.boolean, value ? "true" : "false");
         else static if (__traits(isIntegral, T) || __traits(isFloating, T))
             return SqlValue(Kind.number, value.to!string);
         else static if (is(T : const(char)[]))
             return SqlValue(Kind.text, value.idup);
+        else static if (is(T : const JSONValue))
+            return SqlValue(Kind.json, null, value);
         else
             static assert(false, "Not a value of SQL: " ~ T.stringof);
     }
@@ -76,6 +96,7 @@ struct SqlValue {
             case Kind.boolean: return text == "true" ? "TRUE" : "FALSE";
             case Kind.number: return text;
             case Kind.text: return dialect.escapeSqlString(text);
+            case Kind.json: return dialect.jsonToSqlLiteral(json);
         }
     }
 }
@@ -84,9 +105,9 @@ struct SqlValue {
 /// `Sql.join`, or `Sql.unsafeRaw`; rendered by `render`.
 struct Sql {
     private static struct Part {
-        enum Kind : ubyte { text, ident, value }
+        enum Kind : ubyte { text, name, ident, value }
         Kind kind;
-        string text;     // The SQL text, or the name of the identifier
+        string text;     // The SQL text, the SQL name, or the identifier
         SqlValue value;
     }
     private Part[] parts;
@@ -125,7 +146,11 @@ struct Sql {
         foreach (ref part; parts)
             final switch (part.kind) {
                 case Part.Kind.text: result.put(part.text); break;
-                case Part.Kind.ident: result.put(part.text); break;
+                case Part.Kind.name: result.put(part.text); break;
+                case Part.Kind.ident:
+                    assert(dialect !is null, "Rendering the identifiers of SQL without a dialect");
+                    result.put(dialect.quoteIdentifier(part.text));
+                    break;
                 case Part.Kind.value:
                     assert(dialect !is null, "Rendering the values of SQL without a dialect");
                     result.put(part.value.literal(dialect));
@@ -166,6 +191,8 @@ Sql sql(Args...)(InterpolationHeader, Args args, InterpolationFooter) {
             result.append(arg);
         else static if (is(A : const Ident))
             result.parts ~= Sql.Part(Sql.Part.Kind.ident, arg.name);
+        else static if (is(A : const SqlName))
+            result.parts ~= Sql.Part(Sql.Part.Kind.name, arg.name);
         else static if (is(A : const SqlValue))
             result.parts ~= Sql.Part(Sql.Part.Kind.value, null, arg);
         else
@@ -177,25 +204,36 @@ Sql sql(Args...)(InterpolationHeader, Args args, InterpolationFooter) {
 version (unittest) {
     import std.typecons : BlackHole;
 
-    /// A dialect writing string literals as PostgreSQL does.
+    /// A dialect writing string literals and identifiers as PostgreSQL
+    /// does.
     private class TestDialect : BlackHole!SqlDialect {
         override string escapeSqlString(string s) {
             import std.array : replace;
             return "'" ~ s.replace("'", "''") ~ "'";
         }
+        override string quoteIdentifier(string name) {
+            import std.array : replace;
+            return `"` ~ name.replace(`"`, `""`) ~ `"`;
+        }
+        override string jsonToSqlLiteral(JSONValue value) {
+            return value.isNull ? "NULL" : escapeSqlString(value.toString());
+        }
     }
 }
 
-// The text of the sequence is SQL; identifiers are names; other values
-// are values, written as literals
+// The text of the sequence is SQL; identifiers are quoted, SQL names are
+// SQL; other values are values, written as literals
 unittest {
     auto d = new TestDialect;
-    string table = "users", name = "it's";
+    string table = `app."Users"`, column = `it's "x"`, name = "it's";
     long id = -3;
-    assert(sql(i"SELECT id FROM $(Ident(table)) WHERE name = $(name) AND id <> $(id)").render(d) ==
-        "SELECT id FROM users WHERE name = 'it''s' AND id <> -3");
+    assert(sql(i"SELECT $(Ident(column)) FROM $(SqlName(table)) WHERE name = $(name) AND id <> $(id)").render(d) ==
+        `SELECT "it's ""x""" FROM app."Users" WHERE name = 'it''s' AND id <> -3`);
     assert(sql(i"$(true), $(false), $(null), $(1.5), $(Nullable!int()), $(Nullable!int(7))").render(d) ==
         "TRUE, FALSE, NULL, 1.5, NULL, 7");
+    const Nullable!int none, some = 3;
+    const yes = true;
+    assert(sql(i"$(none), $(some), $(yes)").render(d) == "NULL, 3, TRUE");
     // A string value is never SQL, whatever its text
     string evil = "x'; DROP TABLE users; --";
     assert(sql(i"name = $(evil)").render(d) == "name = 'x''; DROP TABLE users; --'");
@@ -203,6 +241,9 @@ unittest {
     auto n = SqlValue.ofConstant(typeid(int), "42"), b = SqlValue.ofConstant(typeid(bool), "true");
     auto s = SqlValue.ofConstant(typeid(string), "42");
     assert(sql(i"$(n), $(b), $(s)").render(d) == "42, TRUE, '42'");
+    // JSON values, as the dialect writes them
+    auto j = JSONValue(["a": 1]);
+    assert(sql(i"$(j), $(JSONValue(null))").render(d) == `'{"a":1}', NULL`);
 }
 
 // Fragments compose: interpolated fragments are spliced in (with their
@@ -223,7 +264,7 @@ unittest {
 }
 
 // The text of fragments is that of the source code: it is no string
-// computed at run time (but through `unsafeRaw`)
+// computed at run time (but through `SqlName` and `unsafeRaw`)
 unittest {
     string text = "SELECT 1";
     static assert(!__traits(compiles, sql(text)));

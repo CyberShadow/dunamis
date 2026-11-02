@@ -8,6 +8,7 @@ import dunamis.core.datasource : DataSource;
 import dunamis.core.expr : ExprBase;
 import dunamis.relational.query_node : QueryNodeId;
 import dunamis.relational.sql_dialect : SqlDialect;
+import dunamis.relational.sql_fragment : Sql;
 
 /// Interface for expressions a SQL dialect may compute natively (for the SQL
 /// optimizer's pattern matching), e.g. ones implemented by a database
@@ -42,7 +43,16 @@ interface NativeSqlInfo {
 
     /// The expression in `dialect` (which has a native form of it), on the
     /// SQL of the operands.
-    string nativeSql(SqlDialect dialect, string[] operandSql);
+    Sql nativeSql(SqlDialect dialect, const(Sql)[] operands);
+
+    /// ditto, on the SQL text of the operands, as text. (Transitional: of
+    /// the text form of native expressions, which `Sql` fragments replace.)
+    final string nativeSql(SqlDialect dialect, string[] operandSql) {
+        Sql[] operands;
+        foreach (text; operandSql)
+            operands ~= Sql.unsafeRaw(text);
+        return nativeSql(dialect, operands).render(dialect);
+    }
 
     /// An expression of the expression's result type reading its values
     /// from the computed column `alias_` of the query node `queryNodeId`

@@ -51,7 +51,7 @@ enum FilterType {
 /// A computed column added to a QueryNode's SELECT clause by SQL push-down.
 struct ComputedColumn {
     string alias_;     // SQL alias (e.g., "computed_0")
-    string sqlExpr;    // SQL expression (e.g., "first_name || ' ' || last_name")
+    Sql sqlExpr;       // SQL expression (e.g., "first_name || ' ' || last_name")
     TypeInfo type;     // Result type for creating typed projection
     string[] relations; // The relations its subqueries read (see QueryNode.relations)
 }
@@ -312,12 +312,12 @@ class QueryNode {
         return result;
     }
 
-    /// The combined WHERE predicate for `dialect` (empty if none).
-    string whereClause(SqlDialect dialect) {
+    /// The combined WHERE predicate (empty if none).
+    Sql whereClause() {
         Sql result;
         foreach (clause; whereClauses_)
             result = result.empty ? clause : sql(i"($(result)) AND ($(clause))");
-        return result.render(dialect);
+        return result;
     }
 
     /// The node whose SQL layer holds this node's rows: itself, or the node
@@ -348,7 +348,7 @@ class QueryNode {
         if (other.orderBy_ != orderBy_ || other.limit_ != limit_ || other.offset_ != offset_)
             return false;
         if (other.whereClauses_.length != whereClauses_.length ||
-                (whereClauses_.length && other.whereClause(dialect) != whereClause(dialect)))
+                (whereClauses_.length && other.whereClause().render(dialect) != whereClause().render(dialect)))
             return false;
         // (LEFT JOINs of belongs-to parents by their keys select no other
         // rows; the joins of both are named alike)
@@ -494,7 +494,7 @@ unittest {
     posts1.addJoinedColumn(j, "name");
     posts2.addColumn("body");
     posts2.markStringColumn("body");
-    posts2.addComputedColumn(ComputedColumn("computed_0", "length(body)", typeid(int)));
+    posts2.addComputedColumn(ComputedColumn("computed_0", sql(i"length(body)"), typeid(int)));
 
     auto dialect = postgresDialect();
     assert(posts1.selectsSameRowsAs(posts2, dialect) && posts2.selectsSameRowsAs(posts1, dialect));

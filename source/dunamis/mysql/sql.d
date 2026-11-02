@@ -8,180 +8,123 @@ import std.json;
 
 import dunamis.relational.mutation : InsertInput, UpdateInput;
 import dunamis.mysql.dialect : mysqlDialect;
+import dunamis.relational.sql_fragment : Sql, SqlName, sql;
 
 // ============================================================================
 // Mutation SQL Generation
 // ============================================================================
 
-/// Escape a string for use in MySQL SQL.
-private string escapeSqlString(string s) {
-    return mysqlDialect().escapeSqlString(s);
+/// The columns `columns` (as the schema names them), comma-separated.
+private Sql columnList(string[] columns) {
+    return Sql.join!", "(columns.map!(c => sql(i"$(SqlName(c))")).array);
 }
 
-/// Convert JSONValue to a properly quoted MySQL SQL literal.
-private string jsonToSqlLiteral(JSONValue val) {
-    return mysqlDialect().jsonToSqlLiteral(val);
+/// The arguments of JSON_OBJECT of the columns `columns` (each once): their
+/// names (as keys) and values.
+private Sql jsonObjectArgs(string[] columns) {
+    Sql[] args;
+    bool[string] seen;
+    foreach (col; columns) {
+        if (col in seen)
+            continue;
+        seen[col] = true;
+        args ~= sql(i"$(col), $(SqlName(col))");
+    }
+    return Sql.join!", "(args);
 }
 
 /// Generate INSERT SQL for MySQL.
 /// MySQL doesn't have a RETURNING clause, so we need to use LAST_INSERT_ID().
-string generateInsertSQL(string table, InsertInput input) {
+Sql generateInsertSQL(string table, InsertInput input) {
     auto columns = input.columns;
 
     if (columns.length == 0) {
         // No columns - use default values
-        return format("INSERT INTO %s () VALUES ()", table);
+        return sql(i"INSERT INTO $(SqlName(table)) () VALUES ()");
     }
 
-    // Convert values to SQL literals
-    auto values = input.orderedValues;
-    auto literals = values.map!(v => jsonToSqlLiteral(v)).array;
-
-    return format(
-        "INSERT INTO %s (%s) VALUES (%s)",
-        table,
-        columns.join(", "),
-        literals.join(", ")
-    );
+    // The values (as literals)
+    auto values = Sql.join!", "(input.orderedValues.map!(v => sql(i"$(v)")).array);
+    return sql(i"INSERT INTO $(SqlName(table)) ($(columnList(columns))) VALUES ($(values))");
 }
 
 /// Generate SELECT SQL to fetch the last inserted row as JSON.
 /// Uses LAST_INSERT_ID() to get the auto-generated ID.
 /// Returns JSON with 'id' and the provided columns.
-string generateSelectLastInsertSQL(string table, string[] columns) {
-    // Build JSON_OBJECT arguments: 'id', id, 'col1', col1, ...
-    string[] jsonArgs = ["'id'", "id"];
-    foreach (col; columns) {
-        jsonArgs ~= format("'%s'", col);
-        jsonArgs ~= col;
-    }
-
-    return format(
-        "SELECT JSON_OBJECT(%s) AS json_row FROM %s WHERE id = LAST_INSERT_ID()",
-        jsonArgs.join(", "),
-        table
-    );
+Sql generateSelectLastInsertSQL(string table, string[] columns) {
+    // JSON_OBJECT arguments: 'id', id, 'col1', col1, ...
+    // (`id` is not deduplicated against the columns, as it never was)
+    Sql[] args = [sql(i"'id', id")];
+    foreach (col; columns)
+        args ~= sql(i"$(col), $(SqlName(col))");
+    return sql(i"SELECT JSON_OBJECT($(Sql.join!", "(args))) AS json_row FROM $(SqlName(table)) WHERE id = LAST_INSERT_ID()");
 }
 
 /// Generate SELECT SQL to fetch a row by PK values from insert input.
 /// Used for composite PKs or non-auto-increment PKs where LAST_INSERT_ID() doesn't apply.
 /// Returns JSON with PK columns and all other input columns.
-string generateSelectByPkSQL(string table, string[] pkColumns, string[] inputColumns, InsertInput input) {
-    import std.algorithm : canFind;
+Sql generateSelectByPkSQL(string table, string[] pkColumns, string[] inputColumns, InsertInput input) {
+    // WHERE clause from PK values
+    Sql[] conditions;
+    foreach (col; pkColumns)
+        if (col in input.values)
+            conditions ~= sql(i"$(SqlName(col)) = $(input.values[col])");
 
-    // Build JSON_OBJECT arguments from PK columns + input columns
-    string[] jsonArgs;
-    bool[string] seen;
-    foreach (col; pkColumns) {
-        jsonArgs ~= format("'%s'", col);
-        jsonArgs ~= col;
-        seen[col] = true;
-    }
-    foreach (col; inputColumns) {
-        if (col !in seen) {
-            jsonArgs ~= format("'%s'", col);
-            jsonArgs ~= col;
-            seen[col] = true;
-        }
-    }
-
-    // Build WHERE clause from PK values
-    string[] conditions;
-    foreach (col; pkColumns) {
-        if (col in input.values) {
-            conditions ~= format("%s = %s", col, jsonToSqlLiteral(input.values[col]));
-        }
-    }
-
-    return format(
-        "SELECT JSON_OBJECT(%s) AS json_row FROM %s WHERE %s",
-        jsonArgs.join(", "),
-        table,
-        conditions.join(" AND ")
-    );
+    auto object = jsonObjectArgs(pkColumns ~ inputColumns);
+    return sql(i"SELECT JSON_OBJECT($(object)) AS json_row FROM $(SqlName(table)) WHERE $(Sql.join!" AND "(conditions))");
 }
 
 /// Generate a WHERE clause for PK column(s) matching a set of IDs.
-private string generatePkWhereClause(string[] pkColumns, string[] ids) {
+private Sql generatePkWhereClause(string[] pkColumns, string[] ids) {
     import dunamis.relational.keys : keyValues, singleKeyValue;
-    auto dialect = mysqlDialect();
 
     if (pkColumns.length == 1) {
         // Single PK: col IN ('id1','id2')
-        auto quotedIds = ids.map!(id => dialect.escapeSqlString(singleKeyValue(id))).join(",");
-        return format("%s IN (%s)", pkColumns[0], quotedIds);
+        auto quotedIds = Sql.join!","(ids.map!(id => sql(i"$(singleKeyValue(id))")).array);
+        return sql(i"$(SqlName(pkColumns[0])) IN ($(quotedIds))");
     } else {
         // Composite PK: (col1 = 'v1' AND col2 = 'v2') OR ...
-        string[] conditions;
+        Sql[] conditions;
         foreach (id; ids) {
             auto parts = keyValues(id);
-            string[] eqs;
-            foreach (i, col; pkColumns) {
-                eqs ~= format("%s = %s", col, dialect.escapeSqlString(i < parts.length ? parts[i] : ""));
-            }
-            conditions ~= "(" ~ eqs.join(" AND ") ~ ")";
+            Sql[] eqs;
+            foreach (i, col; pkColumns)
+                eqs ~= sql(i"$(SqlName(col)) = $(i < parts.length ? parts[i] : "")");
+            conditions ~= sql(i"($(Sql.join!" AND "(eqs)))");
         }
-        return conditions.join(" OR ");
+        return Sql.join!" OR "(conditions);
     }
 }
 
-/// Generate UPDATE SQL for MySQL.
-string generateUpdateSQL(string table, UpdateInput input, string[] pkColumns) {
+/// Generate UPDATE SQL for MySQL (empty if there is nothing to update).
+Sql generateUpdateSQL(string table, UpdateInput input, string[] pkColumns) {
     auto columns = input.columns;
 
     if (columns.length == 0) {
         // No columns to update - nothing to do
-        return "";
+        return Sql.init;
     }
 
-    // Build SET clauses with embedded values
+    // The SET clauses, with the values (as literals)
     auto values = input.orderedValues;
-    string[] setClauses;
-    foreach (i, col; columns) {
-        setClauses ~= format("%s = %s", col, jsonToSqlLiteral(values[i]));
-    }
+    Sql[] setClauses;
+    foreach (i, col; columns)
+        setClauses ~= sql(i"$(SqlName(col)) = $(values[i])");
 
-    return format(
-        "UPDATE %s SET %s WHERE %s",
-        table,
-        setClauses.join(", "),
-        generatePkWhereClause(pkColumns, input.ids)
-    );
+    auto where = generatePkWhereClause(pkColumns, input.ids);
+    return sql(i"UPDATE $(SqlName(table)) SET $(Sql.join!", "(setClauses)) WHERE $(where)");
 }
 
 /// Generate SELECT SQL to fetch updated rows as JSON.
 /// Returns JSON with PK columns and the provided value columns.
-string generateSelectUpdatedSQL(string table, string[] ids, string[] columns, string[] pkColumns) {
-    // Build JSON_OBJECT arguments from PK columns + value columns
-    string[] jsonArgs;
-    bool[string] seen;
-    foreach (col; pkColumns) {
-        jsonArgs ~= format("'%s'", col);
-        jsonArgs ~= col;
-        seen[col] = true;
-    }
-    foreach (col; columns) {
-        if (col !in seen) {
-            jsonArgs ~= format("'%s'", col);
-            jsonArgs ~= col;
-        }
-    }
-
-    return format(
-        "SELECT JSON_OBJECT(%s) AS json_row FROM %s WHERE %s",
-        jsonArgs.join(", "),
-        table,
-        generatePkWhereClause(pkColumns, ids)
-    );
+Sql generateSelectUpdatedSQL(string table, string[] ids, string[] columns, string[] pkColumns) {
+    auto object = jsonObjectArgs(pkColumns ~ columns);
+    return sql(i"SELECT JSON_OBJECT($(object)) AS json_row FROM $(SqlName(table)) WHERE $(generatePkWhereClause(pkColumns, ids))");
 }
 
 /// Generate DELETE SQL for MySQL.
-string generateDeleteSQL(string table, string[] ids, string[] pkColumns) {
-    return format(
-        "DELETE FROM %s WHERE %s",
-        table,
-        generatePkWhereClause(pkColumns, ids)
-    );
+Sql generateDeleteSQL(string table, string[] ids, string[] pkColumns) {
+    return sql(i"DELETE FROM $(SqlName(table)) WHERE $(generatePkWhereClause(pkColumns, ids))");
 }
 
 // ============================================================================
@@ -214,7 +157,7 @@ unittest {
         "email": JSONValue("alice@test.com")
     ]);
 
-    auto sql = generateInsertSQL("users", input);
+    auto sql = generateInsertSQL("users", input).render(mysqlDialect());
     assert(sql.canFind("INSERT INTO users"));
     assert(sql.canFind("'Alice'") || sql.canFind("'alice@test.com'"));
 }
@@ -222,7 +165,7 @@ unittest {
 unittest {
     // Test INSERT with no columns
     auto input = InsertInput.init;
-    auto sql = generateInsertSQL("users", input);
+    auto sql = generateInsertSQL("users", input).render(mysqlDialect());
     assert(sql.canFind("() VALUES ()"));
 }
 
@@ -233,7 +176,7 @@ unittest {
         ["first_name": JSONValue("Bob")]
     );
 
-    auto sql = generateUpdateSQL("users", input, ["id"]);
+    auto sql = generateUpdateSQL("users", input, ["id"]).render(mysqlDialect());
     assert(sql.canFind("UPDATE users"));
     assert(sql.canFind("first_name = 'Bob'"));
     assert(sql.canFind("IN ('1','2','3')"));
@@ -241,14 +184,14 @@ unittest {
 
 unittest {
     // Test DELETE SQL generation
-    auto sql = generateDeleteSQL("users", ["1", "2", "3"], ["id"]);
+    auto sql = generateDeleteSQL("users", ["1", "2", "3"], ["id"]).render(mysqlDialect());
     assert(sql.canFind("DELETE FROM users"));
     assert(sql.canFind("IN ('1','2','3')"));
 }
 
 unittest {
     // Test SELECT after INSERT SQL generation
-    auto sql = generateSelectLastInsertSQL("users", ["first_name", "email"]);
+    auto sql = generateSelectLastInsertSQL("users", ["first_name", "email"]).render(mysqlDialect());
     assert(sql.canFind("JSON_OBJECT"));
     assert(sql.canFind("'id', id"));
     assert(sql.canFind("'first_name', first_name"));
@@ -257,7 +200,7 @@ unittest {
 
 unittest {
     // Test SELECT after UPDATE SQL generation
-    auto sql = generateSelectUpdatedSQL("users", ["1", "2"], ["first_name"], ["id"]);
+    auto sql = generateSelectUpdatedSQL("users", ["1", "2"], ["first_name"], ["id"]).render(mysqlDialect());
     assert(sql.canFind("JSON_OBJECT"));
     assert(sql.canFind("'id', id"));
     assert(sql.canFind("'first_name', first_name"));

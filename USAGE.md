@@ -875,6 +875,26 @@ Expr!bool condition(V)(Expr!V range, ExprBase lengthSource) const {
 Expr!(Nullable!string) validityEnd(Expr!Term t) {
     return rangeUpperBound(t.validity, "text", use((Nullable!Period p) => p.isNull ? Nullable!string.init : p.get.end, t.validity));
 }
+
+// `(high - low)` in PostgreSQL queries: the rendering of a native expression
+// writes a SQL fragment (see below) of the fragments of its operands
+Expr!int width(Expr!Span s) {
+    return postgresSql(use((int low, int high) => high - low, s.low, s.high),
+        (const Sql[] operands) => sql(i"($(operands[1]) - $(operands[0]))"), s.low, s.high);
+}
+```
+
+**SQL fragments:** Dunamis writes SQL as `Sql` fragments
+(`dunamis.relational.sql_fragment`), built from interpolated expression
+sequences: in `sql(i"... $(x) ...")`, the literal text is SQL (only source
+code supplies SQL text); an interpolated `Sql` is spliced in, an `Ident` is
+an identifier the dialect quotes, a `SqlName` a name which is SQL already
+(e.g. a table's, as the schema declares it), and any other value (a string,
+number, boolean, `JSONValue`, `Nullable` or `null`) is a value, which the
+dialect writes as a literal when the fragment is rendered (`render`):
+
+```d
+Sql q = sql(i"SELECT $(Ident(column)) FROM $(SqlName(table)) WHERE token = $(token)");
 ```
 
 **Unknown filter fields:** like all input objects, filters must only contain

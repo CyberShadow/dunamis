@@ -8,19 +8,15 @@ import std.json;
 
 import dunamis.relational.mutation : InsertInput, UpdateInput;
 import dunamis.postgres.dialect : postgresDialect;
+import dunamis.relational.sql_fragment : Sql, SqlName, sql;
 
 // ============================================================================
 // Mutation SQL Generation
 // ============================================================================
 
-/// Escape a string for use in PostgreSQL SQL.
-private string escapeSqlString(string s) {
-    return postgresDialect().escapeSqlString(s);
-}
-
-/// Convert JSONValue to a properly quoted SQL literal.
-private string jsonToSqlLiteral(JSONValue val) {
-    return postgresDialect().jsonToSqlLiteral(val);
+/// The columns `columns` (as the schema names them), comma-separated.
+private Sql columnList(string[] columns) {
+    return Sql.join!", "(columns.map!(c => sql(i"$(SqlName(c))")).array);
 }
 
 /// Generate INSERT SQL with RETURNING clause.
@@ -37,31 +33,41 @@ private string jsonToSqlLiteral(JSONValue val) {
 /// )
 /// SELECT row_to_json(t) FROM inserted t
 /// ```
-string generateInsertSQL(string table, InsertInput input) {
+Sql generateInsertSQL(string table, InsertInput input) {
     auto columns = input.columns;
+    auto into = SqlName(table);
 
     if (columns.length == 0) {
         // No columns - use DEFAULT VALUES
-        return format(
-            "WITH inserted AS (" ~
-            "INSERT INTO %s DEFAULT VALUES RETURNING *" ~
-            ") SELECT row_to_json(t) FROM inserted t",
-            table
-        );
+        return sql(i"WITH inserted AS (INSERT INTO $(into) DEFAULT VALUES RETURNING *) SELECT row_to_json(t) FROM inserted t");
     }
 
-    // Convert values to SQL literals
-    auto values = input.orderedValues;
-    auto literals = values.map!(v => jsonToSqlLiteral(v)).array;
+    // The values (as literals)
+    auto values = Sql.join!", "(input.orderedValues.map!(v => sql(i"$(v)")).array);
+    auto insert = sql(i"INSERT INTO $(into) ($(columnList(columns))) VALUES ($(values)) RETURNING *");
+    return sql(i"WITH inserted AS ($(insert)) SELECT row_to_json(t) FROM inserted t");
+}
 
-    return format(
-        "WITH inserted AS (" ~
-        "INSERT INTO %s (%s) VALUES (%s) RETURNING *" ~
-        ") SELECT row_to_json(t) FROM inserted t",
-        table,
-        columns.join(", "),
-        literals.join(", ")
-    );
+/// Generate a WHERE clause for PK column(s) matching a set of IDs.
+private Sql generatePkWhereClause(string[] pkColumns, string[] ids) {
+    import dunamis.relational.keys : keyValues, singleKeyValue;
+
+    if (pkColumns.length == 1) {
+        // Single PK: col = ANY(ARRAY['id1','id2'])
+        auto quotedIds = Sql.join!","(ids.map!(id => sql(i"$(singleKeyValue(id))")).array);
+        return sql(i"$(SqlName(pkColumns[0])) = ANY(ARRAY[$(quotedIds)])");
+    } else {
+        // Composite PK: (col1 = 'v1' AND col2 = 'v2') OR ...
+        Sql[] conditions;
+        foreach (id; ids) {
+            auto parts = keyValues(id);
+            Sql[] eqs;
+            foreach (i, col; pkColumns)
+                eqs ~= sql(i"$(SqlName(col)) = $(i < parts.length ? parts[i] : "")");
+            conditions ~= sql(i"($(Sql.join!" AND "(eqs)))");
+        }
+        return Sql.join!" OR "(conditions);
+    }
 }
 
 /// Generate UPDATE SQL with RETURNING clause.
@@ -79,72 +85,30 @@ string generateInsertSQL(string table, InsertInput input) {
 /// )
 /// SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM updated t
 /// ```
-/// Generate a WHERE clause for PK column(s) matching a set of IDs.
-private string generatePkWhereClause(string[] pkColumns, string[] ids) {
-    import dunamis.relational.keys : keyValues, singleKeyValue;
-    auto dialect = postgresDialect();
-
-    if (pkColumns.length == 1) {
-        // Single PK: col = ANY(ARRAY['id1','id2'])
-        auto quotedIds = ids.map!(id => dialect.escapeSqlString(singleKeyValue(id))).join(",");
-        return format("%s = ANY(ARRAY[%s])", pkColumns[0], quotedIds);
-    } else {
-        // Composite PK: (col1 = 'v1' AND col2 = 'v2') OR ...
-        string[] conditions;
-        foreach (id; ids) {
-            auto parts = keyValues(id);
-            string[] eqs;
-            foreach (i, col; pkColumns) {
-                eqs ~= format("%s = %s", col, dialect.escapeSqlString(i < parts.length ? parts[i] : ""));
-            }
-            conditions ~= "(" ~ eqs.join(" AND ") ~ ")";
-        }
-        return conditions.join(" OR ");
-    }
-}
-
-string generateUpdateSQL(string table, UpdateInput input, string[] pkColumns) {
+Sql generateUpdateSQL(string table, UpdateInput input, string[] pkColumns) {
     auto columns = input.columns;
     auto whereClause = generatePkWhereClause(pkColumns, input.ids);
+    auto target = SqlName(table);
 
     if (columns.length == 0) {
         // No columns to update - just return the rows
-        return format(
-            "SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (" ~
-            "SELECT * FROM %s WHERE %s" ~
-            ") t",
-            table,
-            whereClause
-        );
+        return sql(i"SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (SELECT * FROM $(target) WHERE $(whereClause)) t");
     }
 
-    // Build SET clauses with embedded values
+    // The SET clauses, with the values (as literals)
     auto values = input.orderedValues;
-    string[] setClauses;
-    foreach (i, col; columns) {
-        setClauses ~= format("%s = %s", col, jsonToSqlLiteral(values[i]));
-    }
+    Sql[] setClauses;
+    foreach (i, col; columns)
+        setClauses ~= sql(i"$(SqlName(col)) = $(values[i])");
 
-    return format(
-        "WITH updated AS (" ~
-        "UPDATE %s SET %s WHERE %s RETURNING *" ~
-        ") SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM updated t",
-        table,
-        setClauses.join(", "),
-        whereClause
-    );
+    auto update = sql(i"UPDATE $(target) SET $(Sql.join!", "(setClauses)) WHERE $(whereClause) RETURNING *");
+    return sql(i"WITH updated AS ($(update)) SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM updated t");
 }
 
 /// Generate DELETE SQL returning count of deleted rows.
-string generateDeleteSQL(string table, string[] ids, string[] pkColumns) {
+Sql generateDeleteSQL(string table, string[] ids, string[] pkColumns) {
     auto whereClause = generatePkWhereClause(pkColumns, ids);
-    return format(
-        "WITH deleted AS (" ~
-        "DELETE FROM %s WHERE %s RETURNING *" ~
-        ") SELECT COUNT(*)::int FROM deleted",
-        table,
-        whereClause
-    );
+    return sql(i"WITH deleted AS (DELETE FROM $(SqlName(table)) WHERE $(whereClause) RETURNING *) SELECT COUNT(*)::int FROM deleted");
 }
 
 // ============================================================================
@@ -158,7 +122,7 @@ unittest {
         "email": JSONValue("alice@test.com")
     ]);
 
-    auto sql = generateInsertSQL("users", input);
+    auto sql = generateInsertSQL("users", input).render(postgresDialect());
     assert(sql.canFind("INSERT INTO users"));
     assert(sql.canFind("RETURNING *"));
     assert(sql.canFind("row_to_json"));
@@ -168,7 +132,7 @@ unittest {
 unittest {
     // Test INSERT with no columns
     auto input = InsertInput.init;
-    auto sql = generateInsertSQL("users", input);
+    auto sql = generateInsertSQL("users", input).render(postgresDialect());
     assert(sql.canFind("DEFAULT VALUES"));
 }
 
@@ -179,7 +143,7 @@ unittest {
         ["first_name": JSONValue("Bob")]
     );
 
-    auto sql = generateUpdateSQL("users", input, ["id"]);
+    auto sql = generateUpdateSQL("users", input, ["id"]).render(postgresDialect());
     assert(sql.canFind("UPDATE users"));
     assert(sql.canFind("first_name = 'Bob'"));
     assert(sql.canFind("ARRAY['1','2','3']"));
@@ -189,7 +153,7 @@ unittest {
 
 unittest {
     // Test DELETE SQL generation with embedded IDs
-    auto sql = generateDeleteSQL("users", ["1", "2", "3"], ["id"]);
+    auto sql = generateDeleteSQL("users", ["1", "2", "3"], ["id"]).render(postgresDialect());
     assert(sql.canFind("DELETE FROM users"));
     assert(sql.canFind("ARRAY['1','2','3']"));
     assert(sql.canFind("COUNT(*)"));

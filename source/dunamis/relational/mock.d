@@ -760,7 +760,7 @@ class DebugSqlDB(DBConfig config = defaultDBConfig) : DataSource {
     string getSQL() {
         if (_cachedSQL.length == 0 && _executedNodes.length > 0) {
             import dunamis.relational.sql : toSQL;
-            _cachedSQL = toSQL(_executedNodes, _dialect);
+            _cachedSQL = toSQL(_executedNodes, _dialect).render(_dialect);
         }
         return _cachedSQL;
     }

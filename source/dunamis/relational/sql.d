@@ -3,20 +3,15 @@ module dunamis.relational.sql;
 import std.algorithm;
 import std.array;
 import std.conv;
-import std.format;
 import std.typecons : Nullable;
 
 import dunamis.relational.query_node : QueryNode, QueryNodeId, FilterType;
-import dunamis.relational.sql_dialect : SqlDialect;
+import dunamis.relational.sql_dialect : SqlDialect, layerName, qualifiedColumn;
+import dunamis.relational.sql_fragment : Sql, SqlName, sql;
 
 // ============================================================================
 // Query SQL Generation (CTE-based, dialect-agnostic)
 // ============================================================================
-
-/// Generate a complete CTE-based SQL query (without computed columns or dialect).
-string toSQL(QueryNode[] nodes) {
-    return toSQL(nodes, null);
-}
 
 /// The most layers the final SELECT of a query puts into one JSON object;
 /// the layers of a query with more are grouped into objects (of at most as
@@ -28,71 +23,58 @@ enum string layerGroupKey = "layers";
 
 /// Generate a complete CTE-based SQL query with computed columns.
 /// Root nodes are filtered by their own root filter.
-string toSQL(QueryNode[] nodes, SqlDialect dialect) {
-    return toSQL(nodes, dialect, Nullable!FilterType.init);
+Sql toSQL(QueryNode[] nodes, SqlDialect dialect) {
+    return toSQL(nodes, dialect, Nullable!FilterType.init, Sql.init);
 }
 
 /// ditto, filtering the root node(s) by `rootFilter` (the root selection
-/// of the evaluation executing the query) instead.
-string toSQL(QueryNode[] nodes, SqlDialect dialect, FilterType rootFilter) {
-    return toSQL(nodes, dialect, Nullable!FilterType(rootFilter));
+/// of the evaluation executing the query) instead: by their keys, `rootIds`
+/// (the list of their values, see `SqlDialect.rootIdFilter`).
+Sql toSQL(QueryNode[] nodes, SqlDialect dialect, FilterType rootFilter, Sql rootIds = Sql.init) {
+    return toSQL(nodes, dialect, Nullable!FilterType(rootFilter), rootIds);
 }
 
-private string toSQL(QueryNode[] nodes, SqlDialect dialect,
-        Nullable!FilterType rootFilter) {
+private Sql toSQL(QueryNode[] nodes, SqlDialect dialect, Nullable!FilterType rootFilter, Sql rootIds) {
     if (nodes.length == 0)
-        return "";
-
-    auto sql = appender!string;
-
-    // Build CTEs for each layer
-    sql ~= "WITH\n";
+        return Sql.init;
 
     // Nodes whose rows another node's layer holds have no layer of their
     // own (see QueryNode.mergeFrom)
     nodes = nodes.filter!(node => node.sameRowsAs is null).array;
 
-    string[] ctes;
-    foreach (node; nodes) {
-        ctes ~= toCTE(node, dialect,
-            rootFilter.isNull ? node.rootFilter : rootFilter.get);
-    }
-    sql ~= ctes.join(",\n");
+    // A CTE for each layer
+    Sql[] ctes;
+    foreach (node; nodes)
+        ctes ~= toCTE(node, dialect, rootFilter.isNull ? node.rootFilter : rootFilter.get, rootIds);
 
     // Final SELECT: aggregate all layers into JSON
-    string[] jsonParts;
+    Sql[] jsonParts;
     foreach (node; nodes) {
-        string orderByClause;
-        if (node.orderBy_.length > 0) {
-            string[] orderParts;
-            foreach (spec; node.orderBy_) {
-                orderParts ~= dialect.orderByTerm(orderKeyColumn(node, spec.column), spec.descending);
-            }
-            orderByClause = orderParts.join(", ");
-        }
-        jsonParts ~= format("  'layer%d', %s",
-            node.id.value, dialect.aggregateLayerJson(node.id.value, orderByClause));
+        Sql[] orderParts;
+        foreach (spec; node.orderBy_)
+            orderParts ~= dialect.orderByTerm(sql(i"$(SqlName(orderKeyColumn(node, spec.column)))"), spec.descending);
+        auto layer = dialect.aggregateLayerJson(node.id.value, Sql.join!", "(orderParts));
+        jsonParts ~= sql(i"  $(layerName(node.id.value).name), $(layer)");
     }
     // (Functions take at most 100 arguments in PostgreSQL: more layers are
     // grouped into objects of `layerGroupSize` layers, see layerGroupKey.)
-    string object(string[] parts) {
-        return format("%s(\n%s\n)", dialect.jsonObjectFunc(), parts.join(",\n"));
+    Sql object(Sql[] parts) {
+        return sql(i"$(dialect.jsonObjectFunc())(\n$(Sql.join!",\n"(parts))\n)");
     }
     if (jsonParts.length > layerGroupSize) {
-        string[] groups;
+        Sql[] groups;
         for (size_t i = 0; i < jsonParts.length; i += layerGroupSize) {
             auto end = i + layerGroupSize < jsonParts.length ? i + layerGroupSize : jsonParts.length;
-            groups ~= format("  '%s%d', %s", layerGroupKey, i / layerGroupSize, object(jsonParts[i .. end]));
+            auto key = layerGroupKey ~ (i / layerGroupSize).to!string;
+            groups ~= sql(i"  $(key), $(object(jsonParts[i .. end]))");
         }
         jsonParts = groups;
     }
-    sql ~= "\nSELECT " ~ object(jsonParts) ~ "\n";
-
-    auto result = sql.data;
+    auto result = sql(i"WITH\n$(Sql.join!",\n"(ctes))\nSELECT $(object(jsonParts))\n");
 
     debug(sql) {
         import std.stdio : writeln;
-        writeln(result);
+        writeln(result.render(dialect));
     }
 
     return result;
@@ -111,102 +93,96 @@ string[] relationsOf(QueryNode[] nodes) {
 }
 
 /// Generate CTE for a single QueryNode.
-private string toCTE(QueryNode node, SqlDialect dialect) {
-    return toCTE(node, dialect, node.rootFilter);
+private Sql toCTE(QueryNode node, SqlDialect dialect) {
+    return toCTE(node, dialect, node.rootFilter, Sql.init);
 }
 
-/// ditto, filtering a root node by `rootFilter`.
-private string toCTE(QueryNode node, SqlDialect dialect,
-        FilterType rootFilter) {
-    auto sql = appender!string;
+/// ditto, filtering a root node by `rootFilter` (by the keys `rootIds`).
+private Sql toCTE(QueryNode node, SqlDialect dialect, FilterType rootFilter, Sql rootIds) {
+    auto table = SqlName(node.table);
+    Sql[] parts;
 
-    sql ~= format("  layer%d AS (\n", node.id.value);
-    sql ~= "    SELECT ";
-    sql ~= buildSelectColumns(node, dialect);
+    parts ~= sql(i"  $(layerName(node.id.value)) AS (\n    SELECT $(buildSelectColumns(node, dialect))");
 
     // Dialect-specific: add per-row JSON wrapping if needed
     auto rowJsonFunc = dialect.rowJsonFunc();
-    if (rowJsonFunc.length > 0) {
-        sql ~= format(",\n           %s(%s) AS row_json",
-            rowJsonFunc, buildJsonObjectArgs(node));
-    }
+    if (!rowJsonFunc.empty)
+        parts ~= sql(i",\n           $(rowJsonFunc)($(buildJsonObjectArgs(node))) AS row_json");
 
-    sql ~= format("\n    FROM %s", node.table);
+    parts ~= sql(i"\n    FROM $(table)");
 
     // JOINs for belongsTo relationships
     foreach (joinInfo; node.joins) {
         auto sourceRef = !joinInfo.sourceAlias.isNull ? joinInfo.sourceAlias.get.value : node.table;
         // (A foreign key column refers to a single-column key)
         assert(joinInfo.targetPkColumns.length == 1, "A JOIN of " ~ joinInfo.targetTable ~ " by a composite key");
-        sql ~= format("\n    LEFT JOIN %s %s ON %s.%s = %s.%s",
-            joinInfo.targetTable, joinInfo.alias_.value,
-            sourceRef, joinInfo.fk, joinInfo.alias_.value, joinInfo.targetPkColumns[0]);
+        auto target = SqlName(joinInfo.targetTable), alias_ = SqlName(joinInfo.alias_.value);
+        auto fk = qualifiedColumn(sourceRef, joinInfo.fk);
+        auto pk = qualifiedColumn(joinInfo.alias_.value, joinInfo.targetPkColumns[0]);
+        parts ~= sql(i"\n    LEFT JOIN $(target) $(alias_) ON $(fk) = $(pk)");
     }
 
     // WHERE clause
-    sql ~= "\n    WHERE ";
     if (node.isRoot) {
         final switch (rootFilter) {
             case FilterType.none:
             case FilterType.all:
-                sql ~= "1=1";
+                parts ~= sql(i"\n    WHERE 1=1");
                 break;
             case FilterType.byId:
             case FilterType.byIds:
-                sql ~= dialect.rootIdFilter(node.table, node.pkColumns);
+                parts ~= sql(i"\n    WHERE $(dialect.rootIdFilter(node.table, node.pkColumns, rootIds))");
                 break;
         }
     } else {
         // Use parent's PK columns for the subselect
-        auto parentPkCols = node.parentLinkColumns;
-        auto parentPkSelect = parentPkCols.length == 1 ? parentPkCols[0] : parentPkCols.join(", ");
-        sql ~= format("%s.%s IN (SELECT %s FROM layer%d)",
-            node.table, node.parentFk, parentPkSelect, node.parent.layerNode.id.value);
+        auto parentPk = Sql.join!", "(node.parentLinkColumns.map!(c => sql(i"$(SqlName(c))")).array);
+        auto parentLayer = layerName(node.parent.layerNode.id.value);
+        parts ~= sql(i"\n    WHERE $(qualifiedColumn(node.table, node.parentFk)) IN (SELECT $(parentPk) FROM $(parentLayer))");
     }
 
     // Custom WHERE clause from filter predicates
-    if (auto where = node.whereClause(dialect)) {
-        sql ~= format("\n      AND (%s)", where);
-    }
+    auto where = node.whereClause();
+    if (!where.empty)
+        parts ~= sql(i"\n      AND ($(where))");
 
     // ORDER BY (a column, or a computed column, as its expression)
     if (node.orderBy_.length > 0) {
-        string[] orderParts;
+        Sql[] orderParts;
         foreach (spec; node.orderBy_) {
-            string key = node.table ~ "." ~ spec.column;
+            auto key = qualifiedColumn(node.table, spec.column);
             foreach (computed; node.computedColumns)
                 if (computed.alias_ == spec.column)
                     key = computed.sqlExpr;
             orderParts ~= dialect.orderByTerm(key, spec.descending);
         }
-        sql ~= format("\n    ORDER BY %s", orderParts.join(", "));
+        parts ~= sql(i"\n    ORDER BY $(Sql.join!", "(orderParts))");
     }
 
     // LIMIT
-    if (!node.limit_.isNull) {
-        sql ~= format("\n    LIMIT %d", node.limit_.get);
-    }
+    if (!node.limit_.isNull)
+        parts ~= sql(i"\n    LIMIT $(node.limit_.get)");
 
     // OFFSET
-    if (!node.offset_.isNull) {
-        sql ~= format("\n    OFFSET %d", node.offset_.get);
-    }
+    if (!node.offset_.isNull)
+        parts ~= sql(i"\n    OFFSET $(node.offset_.get)");
 
-    sql ~= "\n  )";
-    return sql.data;
+    parts ~= sql(i"\n  )");
+    return Sql.join!""(parts);
 }
 
 /// Generate SQL SELECT clause including computed columns.
-string buildSelectColumns(QueryNode node, SqlDialect dialect) {
-    string[] selectParts;
+Sql buildSelectColumns(QueryNode node, SqlDialect dialect) {
+    Sql[] selectParts;
 
     auto tableName = node.table;
 
     // Regular columns from main table
     foreach (col; node.columns) {
+        auto column = qualifiedColumn(tableName, col);
         selectParts ~= col in node.stringColumns
-            ? format("%s AS %s", dialect.castToText(tableName ~ "." ~ col), col)
-            : format("%s.%s", tableName, col);
+            ? sql(i"$(dialect.castToText(column)) AS $(SqlName(col))")
+            : column;
     }
 
     // Columns from JOINed tables
@@ -216,30 +192,29 @@ string buildSelectColumns(QueryNode node, SqlDialect dialect) {
                 bool isStringColumn;
                 if (auto stringCols = joinInfo.alias_ in node.joinedStringColumns)
                     isStringColumn = (col in *stringCols) !is null;
+                auto column = qualifiedColumn(joinInfo.alias_.value, col);
+                auto alias_ = SqlName(joinInfo.alias_.value ~ "__" ~ col);
                 selectParts ~= isStringColumn
-                    ? format("%s AS %s__%s",
-                        dialect.castToText(joinInfo.alias_.value ~ "." ~ col),
-                        joinInfo.alias_.value, col)
-                    : format("%s.%s AS %s__%s",
-                        joinInfo.alias_.value, col, joinInfo.alias_.value, col);
+                    ? sql(i"$(dialect.castToText(column)) AS $(alias_)")
+                    : sql(i"$(column) AS $(alias_)");
             }
         }
     }
 
     // Computed columns
-    foreach (computed; node.computedColumns) {
-        selectParts ~= format("%s AS %s", computed.sqlExpr, computed.alias_);
-    }
+    foreach (computed; node.computedColumns)
+        selectParts ~= sql(i"$(computed.sqlExpr) AS $(SqlName(computed.alias_))");
 
     // The ORDER BY columns which the layer does not select as they are (see
     // orderKeyColumn), for ordering its rows when they are aggregated
     foreach (spec; node.orderBy_) {
         auto key = orderKeyColumn(node, spec.column);
-        if (key != spec.column && !selectParts.canFind(tableName ~ "." ~ spec.column ~ " AS " ~ key))
-            selectParts ~= format("%s.%s AS %s", tableName, spec.column, key);
+        auto keyColumn = sql(i"$(qualifiedColumn(tableName, spec.column)) AS $(SqlName(key))");
+        if (key != spec.column && !selectParts.canFind(keyColumn))
+            selectParts ~= keyColumn;
     }
 
-    return selectParts.join(", ");
+    return Sql.join!", "(selectParts);
 }
 
 /// The column of a layer by which its rows are ordered (when they are
@@ -258,34 +233,32 @@ private string orderKeyColumn(QueryNode node, string column) {
     return column;
 }
 
-/// Build key-value argument pairs for json_object/JSON_OBJECT row wrapping.
-/// Returns "'col1', table.col1, 'col2', table.col2, ..." format.
-string buildJsonObjectArgs(QueryNode node) {
-    string[] args;
+/// Build key-value argument pairs for json_object/JSON_OBJECT row wrapping:
+/// "'col1', table.col1, 'col2', table.col2, ...".
+Sql buildJsonObjectArgs(QueryNode node) {
+    Sql[] args;
 
     auto tableName = node.table;
 
     // Regular columns from main table
-    foreach (col; node.columns) {
-        args ~= format("'%s', %s.%s", col, tableName, col);
-    }
+    foreach (col; node.columns)
+        args ~= sql(i"$(col), $(qualifiedColumn(tableName, col))");
 
     // Columns from JOINed tables
     foreach (joinInfo; node.joins) {
         if (auto cols = joinInfo.alias_ in node.joinedColumns) {
             foreach (col; *cols) {
-                args ~= format("'%s__%s', %s.%s",
-                    joinInfo.alias_.value, col, joinInfo.alias_.value, col);
+                auto key = joinInfo.alias_.value ~ "__" ~ col;
+                args ~= sql(i"$(key), $(qualifiedColumn(joinInfo.alias_.value, col))");
             }
         }
     }
 
     // Computed columns
-    foreach (computed; node.computedColumns) {
-        args ~= format("'%s', %s", computed.alias_, computed.sqlExpr);
-    }
+    foreach (computed; node.computedColumns)
+        args ~= sql(i"$(computed.alias_), $(computed.sqlExpr)");
 
-    return args.join(", ");
+    return Sql.join!", "(args);
 }
 
 // ============================================================================
@@ -304,9 +277,9 @@ unittest {
     node.addJoinedColumn(j, "name");
     node.markJoinedStringColumn(j, "name");
 
-    auto pg = buildSelectColumns(node, postgresDialect());
+    auto pg = buildSelectColumns(node, postgresDialect()).render(postgresDialect());
     assert(pg == "posts.id, posts.title::text AS title, j0.id AS j0__id, j0.name::text AS j0__name", pg);
-    auto my = buildSelectColumns(node, mysqlDialect());
+    auto my = buildSelectColumns(node, mysqlDialect()).render(mysqlDialect());
     assert(my == "posts.id, CAST(posts.title AS CHAR) AS title, j0.id AS j0__id, CAST(j0.name AS CHAR) AS j0__name", my);
 }
 
@@ -326,7 +299,7 @@ unittest {
     node.addOrderBy(OrderBySpec("net_amount", SortDirection.DESC));
     node.addOrderBy(OrderBySpec("note"));
     node.addOrderBy(OrderBySpec("position"));
-    auto sql = toSQL([node], postgresDialect());
+    auto sql = toSQL([node], postgresDialect()).render(postgresDialect());
     assert(sql.canFind("SELECT order_items.id, order_items.net_amount::text AS net_amount, order_items.note, " ~
         "order_items.net_amount AS orderkey__net_amount, order_items.position AS orderkey__position\n"), sql);
     assert(sql.canFind("ORDER BY order_items.net_amount DESC, order_items.note, order_items.position\n"), sql);
@@ -343,7 +316,7 @@ unittest {
     node.setLimit(10);
     node.setOffset(20);
 
-    auto sql = toCTE(node, postgresDialect());
+    auto sql = toCTE(node, postgresDialect()).render(postgresDialect());
 
     assert(sql.canFind("LIMIT 10"), "SQL should contain LIMIT 10: " ~ sql);
     assert(sql.canFind("OFFSET 20"), "SQL should contain OFFSET 20: " ~ sql);
@@ -359,7 +332,7 @@ unittest {
     node.setRootFilter(FilterType.all);
     node.setLimit(5);
 
-    auto sql = toCTE(node, postgresDialect());
+    auto sql = toCTE(node, postgresDialect()).render(postgresDialect());
 
     assert(sql.canFind("LIMIT 5"), "SQL should contain LIMIT 5: " ~ sql);
     assert(!sql.canFind("OFFSET"), "SQL should not contain OFFSET: " ~ sql);
@@ -374,7 +347,7 @@ unittest {
     node.setRootFilter(FilterType.all);
     node.setOffset(15);
 
-    auto sql = toCTE(node, postgresDialect());
+    auto sql = toCTE(node, postgresDialect()).render(postgresDialect());
 
     assert(sql.canFind("OFFSET 15"), "SQL should contain OFFSET 15: " ~ sql);
     assert(!sql.canFind("LIMIT"), "SQL should not contain LIMIT: " ~ sql);
@@ -388,7 +361,7 @@ unittest {
     node.addColumn("first_name");
     node.setRootFilter(FilterType.byIds);
 
-    auto sql = toCTE(node, postgresDialect());
+    auto sql = toCTE(node, postgresDialect()).render(postgresDialect());
 
     assert(sql.canFind("ANY($1)"), "PostgreSQL should use ANY($1): " ~ sql);
     assert(!sql.canFind("row_json"), "PostgreSQL should not have row_json in CTE: " ~ sql);
@@ -411,7 +384,7 @@ unittest {
     comments.setParent(posts2, "post_id", "Post");
     posts1.mergeFrom(posts2);
 
-    auto sql = toSQL(users.allNodesInTree(), postgresDialect());
+    auto sql = toSQL(users.allNodesInTree(), postgresDialect()).render(postgresDialect());
     assert(sql.canFind("layer1 AS") && !sql.canFind("layer2") && sql.canFind("layer3 AS"), sql);
     assert(sql.canFind("posts.title, posts.body"), sql);
     assert(sql.canFind("comments.post_id IN (SELECT id FROM layer1)"), sql);

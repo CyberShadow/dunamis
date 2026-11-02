@@ -100,8 +100,9 @@ struct Span {
 /// The width of a span: natively `high - low` in PostgreSQL only.
 Expr!int spanWidth(Expr!Span s) {
     import dunamis.postgres.predicates : postgresSql;
+    import dunamis.relational.sql_fragment : Sql, sql;
     return postgresSql(use((int low, int high) => high - low, s.low, s.high),
-        (const string[] sql) => "(" ~ sql[1] ~ " - " ~ sql[0] ~ ")", s.low, s.high);
+        (const Sql[] operands) => sql(i"($(operands[1]) - $(operands[0]))"), s.low, s.high);
 }
 
 /// Expressions computed natively in PostgreSQL's queries only (see

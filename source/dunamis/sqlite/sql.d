@@ -8,136 +8,97 @@ import std.json;
 
 import dunamis.relational.mutation : InsertInput, UpdateInput;
 import dunamis.sqlite.dialect : sqliteDialect;
+import dunamis.relational.sql_fragment : Sql, SqlName, sql;
 
 // ============================================================================
 // Mutation SQL Generation
 // ============================================================================
 
-/// Escape a string for use in SQLite SQL.
-private string escapeSqlString(string s) {
-    return sqliteDialect().escapeSqlString(s);
-}
-
-/// Convert JSONValue to a properly quoted SQLite SQL literal.
-private string jsonToSqlLiteral(JSONValue val) {
-    return sqliteDialect().jsonToSqlLiteral(val);
+/// The columns `columns` (as the schema names them), comma-separated.
+private Sql columnList(string[] columns) {
+    return Sql.join!", "(columns.map!(c => sql(i"$(SqlName(c))")).array);
 }
 
 /// Generate INSERT SQL for SQLite.
 /// SQLite 3.35+ supports RETURNING, but for compatibility we use last_insert_rowid().
-/// Returns the SQL and a flag indicating if we need a follow-up SELECT.
-string generateInsertSQL(string table, InsertInput input) {
+Sql generateInsertSQL(string table, InsertInput input) {
     auto columns = input.columns;
 
     if (columns.length == 0) {
         // No columns - use DEFAULT VALUES
-        return format("INSERT INTO %s DEFAULT VALUES", table);
+        return sql(i"INSERT INTO $(SqlName(table)) DEFAULT VALUES");
     }
 
-    // Convert values to SQL literals
-    auto values = input.orderedValues;
-    auto literals = values.map!(v => jsonToSqlLiteral(v)).array;
-
-    return format(
-        "INSERT INTO %s (%s) VALUES (%s)",
-        table,
-        columns.join(", "),
-        literals.join(", ")
-    );
+    // The values (as literals)
+    auto values = Sql.join!", "(input.orderedValues.map!(v => sql(i"$(v)")).array);
+    return sql(i"INSERT INTO $(SqlName(table)) ($(columnList(columns))) VALUES ($(values))");
 }
 
 /// Generate SELECT SQL to fetch the last inserted row.
-string generateSelectLastInsertSQL(string table) {
-    return format(
-        "SELECT * FROM %s WHERE id = last_insert_rowid()",
-        table
-    );
+Sql generateSelectLastInsertSQL(string table) {
+    return sql(i"SELECT * FROM $(SqlName(table)) WHERE id = last_insert_rowid()");
 }
 
 /// Generate SELECT SQL to fetch a row by PK values from insert input.
 /// Used for composite PKs or non-auto-increment PKs where last_insert_rowid() doesn't apply.
-string generateSelectByPkSQL(string table, string[] pkColumns, InsertInput input) {
-    string[] conditions;
-    foreach (col; pkColumns) {
-        if (col in input.values) {
-            conditions ~= format("%s = %s", col, jsonToSqlLiteral(input.values[col]));
-        }
-    }
-    return format(
-        "SELECT * FROM %s WHERE %s",
-        table,
-        conditions.join(" AND ")
-    );
+Sql generateSelectByPkSQL(string table, string[] pkColumns, InsertInput input) {
+    Sql[] conditions;
+    foreach (col; pkColumns)
+        if (col in input.values)
+            conditions ~= sql(i"$(SqlName(col)) = $(input.values[col])");
+    return sql(i"SELECT * FROM $(SqlName(table)) WHERE $(Sql.join!" AND "(conditions))");
 }
 
 /// Generate a WHERE clause for PK column(s) matching a set of IDs.
-private string generatePkWhereClause(string table, string[] pkColumns, string[] ids) {
+private Sql generatePkWhereClause(string table, string[] pkColumns, string[] ids) {
     import dunamis.relational.keys : keyValues, singleKeyValue;
-    auto dialect = sqliteDialect();
 
     if (pkColumns.length == 1) {
         // Single PK: WHERE col IN ('id1','id2')
-        auto quotedIds = ids.map!(id => dialect.escapeSqlString(singleKeyValue(id))).join(",");
-        return format("%s IN (%s)", pkColumns[0], quotedIds);
+        auto quotedIds = Sql.join!","(ids.map!(id => sql(i"$(singleKeyValue(id))")).array);
+        return sql(i"$(SqlName(pkColumns[0])) IN ($(quotedIds))");
     } else {
         // Composite PK: WHERE (col1 = 'v1' AND col2 = 'v2') OR ...
-        string[] conditions;
+        Sql[] conditions;
         foreach (id; ids) {
             auto parts = keyValues(id);
-            string[] eqs;
-            foreach (i, col; pkColumns) {
-                eqs ~= format("%s = %s", col, dialect.escapeSqlString(i < parts.length ? parts[i] : ""));
-            }
-            conditions ~= "(" ~ eqs.join(" AND ") ~ ")";
+            Sql[] eqs;
+            foreach (i, col; pkColumns)
+                eqs ~= sql(i"$(SqlName(col)) = $(i < parts.length ? parts[i] : "")");
+            conditions ~= sql(i"($(Sql.join!" AND "(eqs)))");
         }
-        return conditions.join(" OR ");
+        return Sql.join!" OR "(conditions);
     }
 }
 
 /// Generate UPDATE SQL for SQLite.
-string generateUpdateSQL(string table, UpdateInput input, string[] pkColumns) {
+Sql generateUpdateSQL(string table, UpdateInput input, string[] pkColumns) {
     auto columns = input.columns;
+    auto target = SqlName(table);
 
     if (columns.length == 0) {
         // No columns to update - just return the rows
-        return format(
-            "SELECT * FROM %s WHERE %s",
-            table,
-            generatePkWhereClause(table, pkColumns, input.ids)
-        );
+        return sql(i"SELECT * FROM $(target) WHERE $(generatePkWhereClause(table, pkColumns, input.ids))");
     }
 
-    // Build SET clauses with embedded values
+    // The SET clauses, with the values (as literals)
     auto values = input.orderedValues;
-    string[] setClauses;
-    foreach (i, col; columns) {
-        setClauses ~= format("%s = %s", col, jsonToSqlLiteral(values[i]));
-    }
+    Sql[] setClauses;
+    foreach (i, col; columns)
+        setClauses ~= sql(i"$(SqlName(col)) = $(values[i])");
 
-    return format(
-        "UPDATE %s SET %s WHERE %s",
-        table,
-        setClauses.join(", "),
-        generatePkWhereClause(table, pkColumns, input.ids)
-    );
+    auto where = generatePkWhereClause(table, pkColumns, input.ids);
+    return sql(i"UPDATE $(target) SET $(Sql.join!", "(setClauses)) WHERE $(where)");
 }
 
 /// Generate SELECT SQL to fetch updated rows.
-string generateSelectUpdatedSQL(string table, string[] ids, string[] pkColumns) {
-    return format(
-        "SELECT * FROM %s WHERE %s",
-        table,
-        generatePkWhereClause(table, pkColumns, ids)
-    );
+Sql generateSelectUpdatedSQL(string table, string[] ids, string[] pkColumns) {
+    return sql(i"SELECT * FROM $(SqlName(table)) WHERE $(generatePkWhereClause(table, pkColumns, ids))");
 }
 
 /// Generate DELETE SQL for SQLite.
-string generateDeleteSQL(string table, string[] ids, string[] pkColumns) {
-    return format(
-        "DELETE FROM %s WHERE %s",
-        table,
-        generatePkWhereClause(table, pkColumns, ids)
-    );
+Sql generateDeleteSQL(string table, string[] ids, string[] pkColumns) {
+    return sql(i"DELETE FROM $(SqlName(table)) WHERE $(generatePkWhereClause(table, pkColumns, ids))");
 }
 
 // ============================================================================
@@ -169,7 +130,7 @@ unittest {
         "email": JSONValue("alice@test.com")
     ]);
 
-    auto sql = generateInsertSQL("users", input);
+    auto sql = generateInsertSQL("users", input).render(sqliteDialect());
     assert(sql.canFind("INSERT INTO users"));
     assert(sql.canFind("'Alice'") || sql.canFind("'alice@test.com'"));
 }
@@ -177,7 +138,7 @@ unittest {
 unittest {
     // Test INSERT with no columns
     auto input = InsertInput.init;
-    auto sql = generateInsertSQL("users", input);
+    auto sql = generateInsertSQL("users", input).render(sqliteDialect());
     assert(sql.canFind("DEFAULT VALUES"));
 }
 
@@ -188,7 +149,7 @@ unittest {
         ["first_name": JSONValue("Bob")]
     );
 
-    auto sql = generateUpdateSQL("users", input, ["id"]);
+    auto sql = generateUpdateSQL("users", input, ["id"]).render(sqliteDialect());
     assert(sql.canFind("UPDATE users"));
     assert(sql.canFind("first_name = 'Bob'"));
     assert(sql.canFind("IN ('1','2','3')"));
@@ -196,7 +157,7 @@ unittest {
 
 unittest {
     // Test DELETE SQL generation
-    auto sql = generateDeleteSQL("users", ["1", "2", "3"], ["id"]);
+    auto sql = generateDeleteSQL("users", ["1", "2", "3"], ["id"]).render(sqliteDialect());
     assert(sql.canFind("DELETE FROM users"));
     assert(sql.canFind("IN ('1','2','3')"));
 }

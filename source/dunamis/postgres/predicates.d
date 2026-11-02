@@ -15,6 +15,7 @@ import dunamis.postgres.dialect : PostgresDialect;
 import dunamis.relational.native : NativeSqlInfo;
 import dunamis.relational.query_node : QueryNodeId;
 import dunamis.relational.sql_dialect : SqlDialect;
+import dunamis.relational.sql_fragment : Sql, SqlName, sql;
 
 /// An expression of type `T` which PostgreSQL queries compute natively, as
 /// `render` renders it on the SQL of its operands, and which is evaluated in
@@ -28,9 +29,9 @@ import dunamis.relational.sql_dialect : SqlDialect;
 final class PostgresSqlExpr(T) : Expr!T, NativeSqlInfo {
     private ExprBase _inMemory;
     private ExprBase[] _operands;
-    private string delegate(const string[]) _render;
+    private Sql delegate(const Sql[]) _render;
 
-    this(Expr!T inMemory, string delegate(const string[]) render, ExprBase[] operands) {
+    this(Expr!T inMemory, Sql delegate(const Sql[]) render, ExprBase[] operands) {
         assert(inMemory !is null && render !is null, "PostgresSqlExpr: null in-memory form or rendering");
         _inMemory = inMemory;
         _render = render;
@@ -66,10 +67,10 @@ final class PostgresSqlExpr(T) : Expr!T, NativeSqlInfo {
         return cast(PostgresDialect) dialect !is null;
     }
 
-    string nativeSql(SqlDialect dialect, string[] operandSql) {
+    Sql nativeSql(SqlDialect dialect, const(Sql)[] operands) {
         assert(hasNativeSql(dialect), "PostgresSqlExpr: not a PostgreSQL dialect");
-        assert(operandSql.length == _operands.length, "PostgresSqlExpr: wrong number of operands");
-        return _render(operandSql);
+        assert(operands.length == _operands.length, "PostgresSqlExpr: wrong number of operands");
+        return _render(operands);
     }
 
     ExprBase projectComputed(QueryNodeId queryNodeId, string alias_, ExprBase input, ExprBase prefetch) {
@@ -92,10 +93,28 @@ alias PostgresConditionExpr = PostgresSqlExpr!bool;
 /// ---
 /// // The end of a `daterange` column (null if the range is null or has no end)
 /// auto end = postgresSql(use((Nullable!Period p) => p.isNull ? Nullable!string.init : p.get.end, e.period),
-///     (const string[] sql) => "upper(" ~ sql[0] ~ ")::text", e.period);
+///     (const Sql[] operands) => sql(i"upper($(operands[0]))::text"), e.period);
 /// ---
-Expr!T postgresSql(T)(Expr!T inMemory, string delegate(const string[]) render, ExprBase[] operands...) {
+Expr!T postgresSql(T)(Expr!T inMemory, Sql delegate(const Sql[]) render, ExprBase[] operands...) {
     return new PostgresSqlExpr!T(inMemory, render, operands);
+}
+
+/// ditto, rendered as text on the SQL text of the operands. (Transitional:
+/// of the text form of native expressions, which `Sql` fragments replace.)
+Expr!T postgresSql(T)(Expr!T inMemory, string delegate(const string[]) render, ExprBase[] operands...) {
+    return new PostgresSqlExpr!T(inMemory, textRendering(render), operands);
+}
+
+/// A rendering of `Sql` fragments rendering the text `render` renders on
+/// their (PostgreSQL) text.
+private Sql delegate(const Sql[]) textRendering(string delegate(const string[]) render) {
+    import dunamis.postgres.dialect : postgresDialect;
+    return (const Sql[] operands) {
+        string[] text;
+        foreach (operand; operands)
+            text ~= operand.render(postgresDialect());
+        return Sql.unsafeRaw(render(text));
+    };
 }
 
 /// A condition on `operands` which PostgreSQL queries test as `render`
@@ -105,10 +124,16 @@ Expr!T postgresSql(T)(Expr!T inMemory, string delegate(const string[]) render, E
 /// Example:
 /// ---
 /// auto isEven = postgresCondition(use((int n) => n % 2 == 0, e.count),
-///     (const string[] sql) => "(" ~ sql[0] ~ " % 2 = 0)", e.count);
+///     (const Sql[] operands) => sql(i"($(operands[0]) % 2 = 0)"), e.count);
 /// ---
-Expr!bool postgresCondition(Expr!bool inMemory, string delegate(const string[]) render, ExprBase[] operands...) {
+Expr!bool postgresCondition(Expr!bool inMemory, Sql delegate(const Sql[]) render, ExprBase[] operands...) {
     return new PostgresSqlExpr!bool(inMemory, render, operands);
+}
+
+/// ditto, rendered as text on the SQL text of the operands (see the
+/// transitional `postgresSql`).
+Expr!bool postgresCondition(Expr!bool inMemory, string delegate(const string[]) render, ExprBase[] operands...) {
+    return new PostgresSqlExpr!bool(inMemory, textRendering(render), operands);
 }
 
 /// Whether the range `range` (e.g. a column of a PostgreSQL range type)
@@ -119,7 +144,7 @@ Expr!bool postgresCondition(Expr!bool inMemory, string delegate(const string[]) 
 Expr!bool rangeContainsElement(R, E)(Expr!R range, Expr!E element, string elementType, Expr!bool inMemory) {
     checkSqlTypeName(elementType, "rangeContainsElement");
     return postgresCondition(inMemory,
-        (const string[] sql) => "(" ~ sql[0] ~ " @> " ~ sql[1] ~ "::" ~ elementType ~ ")",
+        (const Sql[] operands) => sql(i"($(operands[0]) @> $(operands[1])::$(SqlName(elementType)))"),
         range, element);
 }
 
@@ -130,17 +155,17 @@ Expr!bool rangeContainsElement(R, E)(Expr!R range, Expr!E element, string elemen
 /// evaluated in memory as `inMemory`.
 Expr!T rangeUpperBound(T, R)(Expr!R range, string sqlType, Expr!T inMemory) {
     checkSqlTypeName(sqlType, "rangeUpperBound");
-    return postgresSql(inMemory, (const string[] sql) => "upper(" ~ sql[0] ~ ")::" ~ sqlType, range);
+    return postgresSql(inMemory, (const Sql[] operands) => sql(i"upper($(operands[0]))::$(SqlName(sqlType))"), range);
 }
 
 /// ditto, of the lower bound (`lower(range)::sqlType`)
 Expr!T rangeLowerBound(T, R)(Expr!R range, string sqlType, Expr!T inMemory) {
     checkSqlTypeName(sqlType, "rangeLowerBound");
-    return postgresSql(inMemory, (const string[] sql) => "lower(" ~ sql[0] ~ ")::" ~ sqlType, range);
+    return postgresSql(inMemory, (const Sql[] operands) => sql(i"lower($(operands[0]))::$(SqlName(sqlType))"), range);
 }
 
 /// Reject SQL type names which are not plain (possibly qualified or
-/// multi-word) identifiers, as they are pasted into SQL.
+/// multi-word) identifiers, as they are pasted into SQL (as `SqlName`s).
 private void checkSqlTypeName(string typeName, string what) {
     import std.ascii : isAlphaNum;
     foreach (c; typeName)
@@ -174,7 +199,7 @@ version (unittest) {
     private Expr!int width(Expr!Span s) {
         import dunamis.core.expr : use;
         return postgresSql(use((int low, int high) => high - low, s.low, s.high),
-            (const string[] sql) => "(" ~ sql[1] ~ " - " ~ sql[0] ~ ")", s.low, s.high);
+            (const Sql[] operands) => sql(i"($(operands[1]) - $(operands[0]))"), s.low, s.high);
     }
 }
 
@@ -226,6 +251,9 @@ unittest {
     auto day = constant("2020-01-01", singleton(0));
     auto contains = cast(NativeSqlInfo) rangeContainsElement(day, day, "date", constant(true, singleton(0)));
     assert(contains.hasNativeSql(postgresDialect()));
+    assert(contains.nativeSql(postgresDialect(), [sql(i"t.validity"), sql(i"$("2020-01-01")")]).render(postgresDialect()) ==
+        "(t.validity @> '2020-01-01'::date)");
+    // (The transitional text form)
     assert(contains.nativeSql(postgresDialect(), ["t.validity", "'2020-01-01'"]) ==
         "(t.validity @> '2020-01-01'::date)");
     assert(!contains.hasNativeSql(null));
@@ -235,6 +263,6 @@ unittest {
     assert(threw);
 
     auto end = cast(NativeSqlInfo) rangeUpperBound(day, "text", constant(Nullable!string.init, singleton(0)));
-    assert(end.nativeSql(postgresDialect(), ["t.validity"]) == "upper(t.validity)::text");
+    assert(end.nativeSql(postgresDialect(), [sql(i"t.validity")]).render(postgresDialect()) == "upper(t.validity)::text");
     assert(cast(Expr!(Nullable!string)) end !is null);
 }

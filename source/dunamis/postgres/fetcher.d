@@ -1,7 +1,8 @@
 module dunamis.postgres.fetcher;
 
 import dunamis.relational.native : SqlDataSource;
-import dunamis.relational.sql_dialect : SqlDialect;
+import dunamis.relational.sql_dialect : SqlDialect, qualifiedColumn;
+import dunamis.relational.sql_fragment : Sql, SqlName, sql;
 import std.algorithm;
 import std.array;
 import std.conv;
@@ -83,7 +84,7 @@ class PostgresSession : RelationalSession {
     void setSetting(string name, string value) {
         assert(_base is null, "setSetting: a derived session has no setup of its own");
         _settings[settingName(name)] = value;
-        addSetupStatement("SET LOCAL " ~ name ~ " = " ~ sqlLiteral(value));
+        addSetupStatement(sql(i"SET LOCAL $(SqlName(name)) = $(value)").render(postgresDialect()));
     }
 
     /// A session of the same request whose statements see the configuration
@@ -117,15 +118,15 @@ class PostgresSession : RelationalSession {
             derived._scopeSettings[settingName(name)] = value;
         auto names = derived._scopeSettings.keys;
         names.sort();
-        string apply, restore;
-        foreach (i, name; names) {
-            apply ~= (i ? ", " : "SELECT ") ~ "set_config(" ~ sqlLiteral(name) ~ ", " ~
-                sqlLiteral(derived._scopeSettings[name]) ~ ", true)";
-            restore ~= (i ? ", " : "SELECT ") ~ "set_config(" ~ sqlLiteral(name) ~ ", " ~
-                sqlLiteral(base._settings.get(name, "")) ~ ", true)";
+        Sql[] apply, restore;
+        foreach (name; names) {
+            apply ~= sql(i"set_config($(name), $(derived._scopeSettings[name]), true)");
+            restore ~= sql(i"set_config($(name), $(base._settings.get(name, "")), true)");
         }
-        derived._applySettings = apply;
-        derived._restoreSettings = restore;
+        if (names.length) {
+            derived._applySettings = sql(i"SELECT $(Sql.join!", "(apply))").render(postgresDialect());
+            derived._restoreSettings = sql(i"SELECT $(Sql.join!", "(restore))").render(postgresDialect());
+        }
         return derived;
     }
 
@@ -204,10 +205,6 @@ class PostgresSession : RelationalSession {
         return name;
     }
 
-    private static string sqlLiteral(string value) {
-        return "'" ~ value.replace("'", "''") ~ "'";
-    }
-
     /// Called with the text of each statement the session sends (other than
     /// the BEGIN and COMMIT/ROLLBACK of its transaction, and the statements
     /// applying a derived session's settings), e.g. to count the database
@@ -233,6 +230,11 @@ class PostgresSession : RelationalSession {
         if (_base is null || !_applySettings.length)
             return conn.query(sql).array();
         return bracketed(conn, conn.query(sql));
+    }
+
+    /// ditto, of the statement `statement`
+    private Promise!(PgSqlConnection.Row[]) run(Sql statement, const(string)[] relations = null) {
+        return run(statement.render(postgresDialect()), relations);
     }
 
     /// ditto, with the Extended Query protocol and parameters
@@ -451,7 +453,7 @@ class PostgresSession : RelationalSession {
     }
 
     /// Get the generated SQL (for debugging)
-    @property string sql() { return _cachedSQL; }
+    @property string lastSql() { return _cachedSQL; }
 
     /// Execute a QueryNode by running SQL against PostgreSQL.
     override Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult,
@@ -470,7 +472,12 @@ class PostgresSession : RelationalSession {
         auto allNodes = node.allNodesInTree();
 
         // Generate the full CTE query for entire node tree
-        auto sql = toSQL(allNodes, postgresDialect(), root.filter);
+        // (The root rows' keys are the query's parameter, but for a
+        // composite key, see PostgresDialect.rootIdFilter)
+        Sql ids;
+        if (root.filter == FilterType.byId || root.filter == FilterType.byIds)
+            ids = Sql.join!","(root.refs.map!(r => sql(i"$(singleKeyValue(r.localId))")).array);
+        auto sql = toSQL(allNodes, postgresDialect(), root.filter, ids).render(postgresDialect());
         _cachedSQL = sql;
         debug(sql) {
             import std.stdio : writefln, writeln;
@@ -539,9 +546,8 @@ class PostgresSession : RelationalSession {
 
     /// The values of the single-column keys `ids` as a list of SQL string
     /// literals (which compare with columns of any key type).
-    private static string sqlLiterals(string[] ids) {
-        auto dialect = postgresDialect();
-        return ids.map!(id => dialect.escapeSqlString(singleKeyValue(id))).join(",");
+    private static Sql sqlLiterals(string[] ids) {
+        return Sql.join!","(ids.map!(id => sql(i"$(singleKeyValue(id))")).array);
     }
 
     /// The keys `ids` as a PostgreSQL array literal (of quoted elements).
@@ -550,28 +556,35 @@ class PostgresSession : RelationalSession {
         return "{" ~ ids.map!(id => `"` ~ id.replace(`\`, `\\`).replace(`"`, `\"`) ~ `"`).join(",") ~ "}";
     }
 
-    /// Generate SQL to fetch a column value, keyed by PK columns.
-    private string buildFetchColumnSQL(string table, string column, string[] validIds) {
-        import std.format : format;
+    /// Generate SQL to fetch a column value (`column`, of the table's
+    /// rows), keyed by PK columns.
+    private Sql buildFetchColumnSQL(string table, Sql column, string[] validIds) {
         auto pkColumns = getPkColumnsForTable(table);
 
         if (pkColumns.length == 1) {
-            return format("SELECT %s, %s FROM %s WHERE %s IN (%s)",
-                pkColumns[0], column, table, pkColumns[0], sqlLiterals(validIds));
+            auto pk = SqlName(pkColumns[0]);
+            return sql(i"SELECT $(pk), $(column) FROM $(SqlName(table)) WHERE $(pk) IN ($(sqlLiterals(validIds)))");
         } else {
-            auto dialect = postgresDialect();
-            string[] conditions;
+            Sql[] conditions;
             foreach (id; validIds) {
                 auto parts = keyValues(id);
-                string[] eqs;
-                foreach (i, col; pkColumns) {
-                    eqs ~= format("%s = %s", col, dialect.escapeSqlString(i < parts.length ? parts[i] : ""));
-                }
-                conditions ~= "(" ~ eqs.join(" AND ") ~ ")";
+                Sql[] eqs;
+                foreach (i, col; pkColumns)
+                    eqs ~= sql(i"$(SqlName(col)) = $(i < parts.length ? parts[i] : "")");
+                conditions ~= sql(i"($(Sql.join!" AND "(eqs)))");
             }
-            return format("SELECT %s, %s FROM %s WHERE %s",
-                pkColumns.join(", "), column, table, conditions.join(" OR "));
+            return sql(i"SELECT $(columnList(pkColumns)), $(column) FROM $(SqlName(table)) WHERE $(Sql.join!" OR "(conditions))");
         }
+    }
+
+    /// ditto, of the column `column`
+    private Sql buildFetchColumnSQL(string table, string column, string[] validIds) {
+        return buildFetchColumnSQL(table, sql(i"$(SqlName(column))"), validIds);
+    }
+
+    /// The columns `columns` (as the schema names them), comma-separated.
+    private static Sql columnList(string[] columns) {
+        return Sql.join!", "(columns.map!(c => sql(i"$(SqlName(c))")).array);
     }
 
     /// The key of a row of a result (its key columns come first, see
@@ -644,12 +657,12 @@ class PostgresSession : RelationalSession {
     }
 
     override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns, string[] orderBy = null) {
-        auto sql = "SELECT " ~ pkColumns.join(", ") ~ " FROM " ~ table;
+        auto query = sql(i"SELECT $(columnList(pkColumns)) FROM $(SqlName(table))");
         if (orderBy.length)
-            sql ~= " ORDER BY " ~ orderBy.join(", ");
+            query = sql(i"$(query) ORDER BY $(columnList(orderBy))");
 
         auto numPkCols = pkColumns.length;
-        return run(sql, [table]).then((PgSqlConnection.Row[] rows) {
+        return run(query, [table]).then((PgSqlConnection.Row[] rows) {
             return rows.map!(r => buildKeyFromRow(r, numPkCols)).array;
         });
     }
@@ -676,12 +689,13 @@ class PostgresSession : RelationalSession {
         // Naive path: query children grouped by parent FK
         auto childPkColumns = getPkColumnsForTable(childTable);
         auto childPkCount = childPkColumns.length;
-        auto sql = "SELECT " ~ childPkColumns.join(", ") ~ ", " ~ fk ~ " FROM " ~ childTable ~
-                   " WHERE " ~ fk ~ " IN (" ~ sqlLiterals(validIds) ~ ")";
+        auto fkColumn = SqlName(fk);
+        auto children = sql(i"SELECT $(columnList(childPkColumns)), $(fkColumn) FROM $(SqlName(childTable))");
+        auto query = sql(i"$(children) WHERE $(fkColumn) IN ($(sqlLiterals(validIds)))");
         if (orderBy.length)
-            sql ~= " ORDER BY " ~ orderBy.join(", ");
+            query = sql(i"$(query) ORDER BY $(columnList(orderBy))");
 
-        return run(sql, [childTable]).then((PgSqlConnection.Row[] rows) {
+        return run(query, [childTable]).then((PgSqlConnection.Row[] rows) {
             // Group children by parent
             AnyRef[][string] childrenByParent;
             foreach (row; rows) {
@@ -766,7 +780,9 @@ class PostgresSession : RelationalSession {
 
         auto pkColumns = getPkColumnsForTable(table);
         auto pkCount = pkColumns.length;
-        auto sql = buildFetchColumnSQL(table, asJson ? "to_json(" ~ column ~ ")::text" : column, validIds);
+        auto columnSql = sql(i"$(SqlName(column))");
+        auto fetched = asJson ? sql(i"to_json($(columnSql))::text") : columnSql;
+        auto sql = buildFetchColumnSQL(table, fetched, validIds);
 
         return run(sql, [table]).then((PgSqlConnection.Row[] rows) {
             // Build lookup map
@@ -809,7 +825,7 @@ class PostgresSession : RelationalSession {
     /// Execute INSERT and return the new row.
     /// Values are embedded directly in the SQL (properly escaped).
     override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns, bool isAutoIncrement) {
-        auto sql = generateInsertSQL(table, input);
+        auto sql = generateInsertSQL(table, input).render(postgresDialect());
         _cachedSQL = sql;
 
         // No parameters needed - values are embedded in SQL
@@ -821,7 +837,7 @@ class PostgresSession : RelationalSession {
     /// Execute UPDATE and return updated rows.
     /// Values are embedded directly in the SQL (properly escaped).
     override Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input, string[] pkColumns) {
-        auto sql = generateUpdateSQL(table, input, pkColumns);
+        auto sql = generateUpdateSQL(table, input, pkColumns).render(postgresDialect());
         _cachedSQL = sql;
 
         // No parameters needed - values are embedded in SQL
@@ -833,7 +849,7 @@ class PostgresSession : RelationalSession {
     /// Execute DELETE and return count of deleted rows.
     /// IDs are embedded directly in the SQL.
     override Promise!int executeDelete(string table, string[] ids, string[] pkColumns) {
-        auto sql = generateDeleteSQL(table, ids, pkColumns);
+        auto sql = generateDeleteSQL(table, ids, pkColumns).render(postgresDialect());
         _cachedSQL = sql;
 
         // No parameters needed - IDs are embedded in SQL

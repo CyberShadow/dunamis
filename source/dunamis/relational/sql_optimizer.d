@@ -18,7 +18,7 @@ import dunamis.relational.query_node;
 import dunamis.relational.schema;
 import dunamis.relational.project;
 import dunamis.relational.sql_dialect;
-import dunamis.relational.sql_fragment : Ident, Sql, SqlValue, sql;
+import dunamis.relational.sql_fragment : Sql, SqlName, SqlValue, sql;
 
 /// The SQL of a constant: its value (see `SqlValue.ofConstant`).
 Sql constantSql(ConstantInfo info) {
@@ -136,7 +136,7 @@ class SqlOptimizer : ExprOptimizer {
         if (translator is null)
             return null;
         auto computed = translator.computedColumn(expr);
-        if (computed is null)
+        if (computed.isNull)
             return null;
         auto node = translator.node;
         auto prefetch = relCtx.getPrefetchExpr(node);
@@ -146,7 +146,7 @@ class SqlOptimizer : ExprOptimizer {
             : computedProjection(node.id, alias_, expr.resultType, translator.nodeRefs, prefetch, expr);
         if (projection is null)
             return null;
-        node.addComputedColumn(ComputedColumn(alias_, computed, expr.resultType, translator.relations));
+        node.addComputedColumn(ComputedColumn(alias_, computed.get, expr.resultType, translator.relations));
         return projection;
     }
 
@@ -325,14 +325,13 @@ final class SqlTranslator {
 
     /// The SQL computing `expr` in the query of the translator's node (node
     /// mode), as a column of its SELECT clause, or null if it cannot be
-    /// computed there (or the refs of its rows are unknown). (Rendered, as
-    /// the SQL of computed columns is text, see `ComputedColumn`.)
-    string computedColumn(ExprBase expr) {
+    /// computed there (or the refs of its rows are unknown).
+    Nullable!Sql computedColumn(ExprBase expr) {
         assert(relCtx !is null, "computedColumn: not a translator of a node's values");
         auto value = rowValue(expr, null, node.table);
         if (!value.valid || value.constant || value.path.hops.length || nodeRefs is null)
-            return null;
-        return value.render(node.table).render(dialect);
+            return Nullable!Sql.init;
+        return nullable(value.render(node.table));
     }
 
     /// The query node (see `nodeOfMap`) of the first projection
@@ -446,13 +445,13 @@ final class SqlTranslator {
         auto alias_ = newAlias();
         auto inner = onRow(RowPath(true, path.hops[1 .. $]), alias_, condition);
         relations ~= hop.parentTable;
-        auto parents = sql(i"SELECT $(qualified(alias_, hop.parentPk)) FROM $(Ident(hop.parentTable)) $(Ident(alias_))");
+        auto parents = sql(i"SELECT $(qualified(alias_, hop.parentPk)) FROM $(SqlName(hop.parentTable)) $(SqlName(alias_))");
         return sql(i"($(qualified(table, hop.fk)) IN ($(parents) WHERE $(inner)))");
     }
 
     /// The column `column` of the table reference `table` (if not empty).
     private static Sql qualified(string table, string column) {
-        return table.length ? sql(i"$(Ident(table)).$(Ident(column))") : sql(i"$(Ident(column))");
+        return qualifiedColumn(table, column);
     }
 
     /// The column an operand reads, on the row it belongs to.
@@ -552,8 +551,7 @@ final class SqlTranslator {
             auto queryDialect = dialect;
             // (Native expressions render SQL text, of their operands' text)
             auto value = combined(native.nativeOperands.map!(operand => rowValue(operand, item, table)).array,
-                (Sql[] operands) => Sql.unsafeRaw(native.nativeSql(queryDialect,
-                    operands.map!(operand => operand.render(queryDialect)).array)));
+                (Sql[] operands) => native.nativeSql(queryDialect, operands));
             value.native = true;
             return value;
         }
@@ -601,8 +599,7 @@ final class SqlTranslator {
             case ProjectedColumn.Kind.computed:
                 foreach (computed; node.computedColumns)
                     if (computed.alias_ == projected.name) {
-                        // (The SQL of computed columns is text, see `computedColumn`)
-                        auto computedSql = Sql.unsafeRaw(computed.sqlExpr);
+                        auto computedSql = computed.sqlExpr;
                         return RowValue(true, false, false, RowPath(true), (string) => computedSql);
                     }
                 return RowValue.init;
@@ -730,7 +727,7 @@ final class SqlTranslator {
             auto fk = hasMany.fkColumn;
             auto parentPk = hasMany.parentPkColumns[0];
             return nullable(onRow(path, table, (string rowTable) {
-                auto children = sql(i"SELECT 1 FROM $(Ident(childTable)) $(Ident(childAlias))");
+                auto children = sql(i"SELECT 1 FROM $(SqlName(childTable)) $(SqlName(childAlias))");
                 auto link = sql(i"$(qualified(childAlias, fk)) = $(qualified(rowTable, parentPk))");
                 return dialect.existsSubquery(sql(i"$(children) WHERE $(link) AND $(pred)"));
             }));
@@ -848,13 +845,13 @@ Nullable!SortKey extractSortKey(SortByInfo sort, string table, SqlDialect dialec
                 leftColumn.column == rightColumn.column))
             return Nullable!SortKey.init;
         if (enumLabels is null)
-            return Nullable!SortKey(SortKey(leftColumn.column, null, null, direction));
+            return Nullable!SortKey(SortKey(leftColumn.column, Sql.init, null, direction));
         // An enum column: by the position of its label (rendered for the
         // dialect, if it is known)
         if (dialect is null)
             return Nullable!SortKey.init;
         auto position = enumPositionSql(SqlTranslator.qualified(table, leftColumn.column), enumLabels);
-        return Nullable!SortKey(SortKey(null, position.render(dialect), typeid(int), direction));
+        return Nullable!SortKey(SortKey(null, position, typeid(int), direction));
     }
 
     // A native expression of the items themselves (the same on both)
@@ -869,8 +866,8 @@ Nullable!SortKey extractSortKey(SortByInfo sort, string table, SqlDialect dialec
     if (key != rightValue.render(table))
         return Nullable!SortKey.init;
     if (enumLabels !is null)
-        return Nullable!SortKey(SortKey(null, enumPositionSql(key, enumLabels).render(dialect), typeid(int), direction));
-    return Nullable!SortKey(SortKey(null, key.render(dialect), leftOperand.resultType, direction));
+        return Nullable!SortKey(SortKey(null, enumPositionSql(key, enumLabels), typeid(int), direction));
+    return Nullable!SortKey(SortKey(null, key, leftOperand.resultType, direction));
 }
 
 /// The SQL of the position of the enum value `value` (by its stored label)
@@ -888,7 +885,7 @@ struct SortKey {
     /// The column of the items (or null)
     string column;
     /// Or the SQL of the native expression, and its result type
-    string sql;
+    Sql sql;
     TypeInfo type;
     SortDirection direction;
 }
@@ -952,19 +949,22 @@ unittest {
             return sql(i`($(operand) LIKE $(pattern) ESCAPE '\')`);
         }
         override string name() { return "Test"; }
+        override string quoteIdentifier(string name) { return `"` ~ name ~ `"`; }
         override string escapeSqlString(string s) { return "'" ~ s ~ "'"; }
         override string jsonToSqlLiteral(JSONValue) { return "NULL"; }
-        override string rootIdFilter(string table, string[] pkColumns) { return table ~ "." ~ pkColumns[0] ~ " = ANY($1)"; }
-        override string jsonObjectFunc() { return "json_build_object"; }
-        override string rowJsonFunc() { return ""; }
-        override string emptyJsonArray() { return "'[]'::json"; }
-        override string aggregateLayerJson(int, string) { return ""; }
-        override string castToText(string sql) { return sql ~ "::text"; }
+        override Sql rootIdFilter(string table, string[] pkColumns, Sql) {
+            return sql(i"$(qualifiedColumn(table, pkColumns[0])) = ANY($1)");
+        }
+        override Sql jsonObjectFunc() { return sql(i"json_build_object"); }
+        override Sql rowJsonFunc() { return Sql.init; }
+        override Sql emptyJsonArray() { return sql(i"'[]'::json"); }
+        override Sql aggregateLayerJson(int, Sql) { return Sql.init; }
+        override Sql castToText(Sql expr) { return sql(i"$(expr)::text"); }
         override Nullable!Sql arrayPredicateOp(Sql operand, ArrayPredicate predicate, TypeInfo valueType,
                 Nullable!string[] values) {
             return Nullable!Sql.init;  // (No arrays)
         }
-        override string orderByTerm(string sql, bool descending) { return sql ~ (descending ? " DESC" : ""); }
+        override Sql orderByTerm(Sql expr, bool descending) { return descending ? sql(i"$(expr) DESC") : expr; }
     }
     auto optimizer = new SqlOptimizer(new TestDialect());
     assert(optimizer !is null);
@@ -1028,19 +1028,22 @@ unittest {
             return sql(i`($(operand) LIKE $(pattern) ESCAPE '\')`);
         }
         override string name() { return "Test"; }
+        override string quoteIdentifier(string name) { return `"` ~ name ~ `"`; }
         override string escapeSqlString(string s) { return "'" ~ s ~ "'"; }
         override string jsonToSqlLiteral(JSONValue) { return "NULL"; }
-        override string rootIdFilter(string table, string[] pkColumns) { return table ~ "." ~ pkColumns[0] ~ " = ANY($1)"; }
-        override string jsonObjectFunc() { return "json_build_object"; }
-        override string rowJsonFunc() { return ""; }
-        override string emptyJsonArray() { return "'[]'::json"; }
-        override string aggregateLayerJson(int, string) { return ""; }
-        override string castToText(string sql) { return sql ~ "::text"; }
+        override Sql rootIdFilter(string table, string[] pkColumns, Sql) {
+            return sql(i"$(qualifiedColumn(table, pkColumns[0])) = ANY($1)");
+        }
+        override Sql jsonObjectFunc() { return sql(i"json_build_object"); }
+        override Sql rowJsonFunc() { return Sql.init; }
+        override Sql emptyJsonArray() { return sql(i"'[]'::json"); }
+        override Sql aggregateLayerJson(int, Sql) { return Sql.init; }
+        override Sql castToText(Sql expr) { return sql(i"$(expr)::text"); }
         override Nullable!Sql arrayPredicateOp(Sql operand, ArrayPredicate predicate, TypeInfo valueType,
                 Nullable!string[] values) {
             return Nullable!Sql.init;  // (No arrays)
         }
-        override string orderByTerm(string sql, bool descending) { return sql ~ (descending ? " DESC" : ""); }
+        override Sql orderByTerm(Sql expr, bool descending) { return descending ? sql(i"$(expr) DESC") : expr; }
     }
     auto ctx = new OptimizeContext();
     auto sqlOpt = new SqlOptimizer(new TestDialect());

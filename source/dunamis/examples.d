@@ -9,7 +9,7 @@ import ae.utils.promise.await : awaitSync;
 
 import dunamis.core;
 import dunamis.relational;
-import dunamis.relational.sql_dialect : SqlDialect, inListSql, sqlBinaryOperator;
+import dunamis.relational.sql_dialect : SqlDialect, inListSql, layerName, qualifiedColumn, sqlBinaryOperator;
 import dunamis.relational.sql_fragment : Sql, sql;
 
 // ============================================================================
@@ -47,6 +47,10 @@ private class TestDialect : SqlDialect {
     override string name() { return "Test"; }
 
     // Query SQL generation vocabulary (PostgreSQL-compatible for tests)
+    override string quoteIdentifier(string name) {
+        import std.string : replace;
+        return `"` ~ name.replace(`"`, `""`) ~ `"`;
+    }
     override string escapeSqlString(string s) {
         import std.string : replace;
         return "'" ~ s.replace("'", "''") ~ "'";
@@ -66,29 +70,26 @@ private class TestDialect : SqlDialect {
             case JSONType.object: return escapeSqlString(val.toString());
         }
     }
-    override string rootIdFilter(string table, string[] pkColumns) {
+    override Sql rootIdFilter(string table, string[] pkColumns, Sql ids) {
         if (pkColumns.length == 1)
-            return table ~ "." ~ pkColumns[0] ~ " = ANY($1)";
-        auto cols = pkColumns.map!(c => table ~ "." ~ c).array.join(", ");
-        return "(" ~ cols ~ ") IN ({{IDS}})";
+            return sql(i"$(qualifiedColumn(table, pkColumns[0])) = ANY($1)");
+        auto columns = Sql.join!", "(pkColumns.map!(c => qualifiedColumn(table, c)).array);
+        return sql(i"($(columns)) IN ($(ids))");
     }
-    override string jsonObjectFunc() { return "json_build_object"; }
-    override string rowJsonFunc() { return ""; }
-    override string emptyJsonArray() { return "'[]'::json"; }
-    override string castToText(string sql) { return sql ~ "::text"; }
+    override Sql jsonObjectFunc() { return sql(i"json_build_object"); }
+    override Sql rowJsonFunc() { return Sql.init; }
+    override Sql emptyJsonArray() { return sql(i"'[]'::json"); }
+    override Sql castToText(Sql expr) { return sql(i"$(expr)::text"); }
     override imported!"std.typecons".Nullable!Sql arrayPredicateOp(Sql operand, ArrayPredicate predicate,
             TypeInfo valueType, imported!"std.typecons".Nullable!string[] values) {
         return typeof(return).init;  // (No arrays)
     }
-    override string orderByTerm(string sql, bool descending) { return sql ~ (descending ? " DESC" : ""); }
-    override string aggregateLayerJson(int layerId, string orderByClause) {
-        auto layerStr = layerId.to!string;
-        if (orderByClause.length > 0) {
-            return "(SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (SELECT * FROM layer"
-                ~ layerStr ~ " ORDER BY " ~ orderByClause ~ ") t)";
-        }
-        return "(SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer"
-            ~ layerStr ~ " t)";
+    override Sql orderByTerm(Sql expr, bool descending) { return descending ? sql(i"$(expr) DESC") : expr; }
+    override Sql aggregateLayerJson(int layerId, Sql orderByClause) {
+        auto layer = layerName(layerId);
+        if (!orderByClause.empty)
+            return sql(i"(SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (SELECT * FROM $(layer) ORDER BY $(orderByClause)) t)");
+        return sql(i"(SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM $(layer) t)");
     }
 }
 /// Singleton test dialect instance
@@ -857,7 +858,7 @@ unittest {
     assert(computed.length >= 1, "Should have at least 1 computed column for fullName");
 
     // Verify the full SQL output
-    auto sql = toSQL(relCtx.nodesInOrder(), testDialect());
+    auto sql = toSQL(relCtx.nodesInOrder(), testDialect()).render(testDialect());
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
@@ -895,8 +896,8 @@ unittest {
     auto nodesB = optimizeWith(map!((Expr!User user) => user.lastName ~ ", " ~ user.firstName)(
         getByIds!User([3])));
 
-    auto sqlA = toSQL(nodesA, testDialect());
-    auto sqlB = toSQL(nodesB, testDialect());
+    auto sqlA = toSQL(nodesA, testDialect()).render(testDialect());
+    auto sqlB = toSQL(nodesB, testDialect()).render(testDialect());
     assert(sqlA.canFind("((users.first_name || ' ') || users.last_name) AS computed_0"), sqlA);
     assert(!sqlA.canFind("', '"), sqlA);
     assert(sqlB.canFind("((users.last_name || ', ') || users.first_name) AS computed_0"), sqlB);

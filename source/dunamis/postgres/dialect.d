@@ -8,7 +8,7 @@ import std.json : JSONValue, JSONType;
 import std.string : replace;
 
 import dunamis.relational.sql_dialect;
-import dunamis.relational.sql_fragment : Sql, SqlValue, sql;
+import dunamis.relational.sql_fragment : Sql, SqlName, SqlValue, sql;
 import std.typecons : Nullable, nullable;
 
 /// PostgreSQL dialect - uses || for string concatenation
@@ -56,6 +56,10 @@ class PostgresDialect : SqlDialect {
     // Query SQL generation vocabulary
     // =========================================================================
 
+    override string quoteIdentifier(string name) {
+        return `"` ~ name.replace(`"`, `""`) ~ `"`;
+    }
+
     override string escapeSqlString(string s) {
         return "'" ~ s.replace("'", "''") ~ "'";
     }
@@ -84,22 +88,22 @@ class PostgresDialect : SqlDialect {
         }
     }
 
-    override string rootIdFilter(string table, string[] pkColumns) {
-        if (pkColumns.length == 1) {
-            return format("%s.%s = ANY($1)", table, pkColumns[0]);
-        }
-        // Composite PK: use IN ({{IDS}}) with tuple syntax
-        auto cols = pkColumns.map!(c => table ~ "." ~ c).array.join(", ");
-        return format("(%s) IN ({{IDS}})", cols);
+    override Sql rootIdFilter(string table, string[] pkColumns, Sql ids) {
+        // (The keys are the query's parameter $1, an array)
+        if (pkColumns.length == 1)
+            return sql(i"$(qualifiedColumn(table, pkColumns[0])) = ANY($1)");
+        // Composite PK: tuple syntax
+        auto columns = Sql.join!", "(pkColumns.map!(c => qualifiedColumn(table, c)).array);
+        return sql(i"($(columns)) IN ($(ids))");
     }
 
-    override string jsonObjectFunc() { return "json_build_object"; }
+    override Sql jsonObjectFunc() { return sql(i"json_build_object"); }
 
-    override string rowJsonFunc() { return ""; }
+    override Sql rowJsonFunc() { return Sql.init; }
 
-    override string emptyJsonArray() { return "'[]'::json"; }
+    override Sql emptyJsonArray() { return sql(i"'[]'::json"); }
 
-    override string castToText(string sql) { return sql ~ "::text"; }
+    override Sql castToText(Sql expr) { return sql(i"$(expr)::text"); }
     override Nullable!Sql arrayPredicateOp(Sql operand, ArrayPredicate predicate, TypeInfo valueType,
             Nullable!string[] values) {
         // (Array literals' and values' types PostgreSQL infers from the operand)
@@ -130,15 +134,13 @@ class PostgresDialect : SqlDialect {
         return "{" ~ elements.join(",") ~ "}";
     }
 
-    override string orderByTerm(string sql, bool descending) { return sql ~ (descending ? " DESC" : ""); }
+    override Sql orderByTerm(Sql expr, bool descending) { return descending ? sql(i"$(expr) DESC") : expr; }
 
-    override string aggregateLayerJson(int layerId, string orderByClause) {
-        if (orderByClause.length > 0) {
-            return format("(SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (SELECT * FROM layer%d ORDER BY %s) t)",
-                layerId, orderByClause);
-        }
-        return format("(SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer%d t)",
-            layerId);
+    override Sql aggregateLayerJson(int layerId, Sql orderByClause) {
+        auto layer = layerName(layerId);
+        if (!orderByClause.empty)
+            return sql(i"(SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (SELECT * FROM $(layer) ORDER BY $(orderByClause)) t)");
+        return sql(i"(SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM $(layer) t)");
     }
 }
 

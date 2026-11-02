@@ -135,8 +135,9 @@ Nullable!string batchingPeriodEnd(Nullable!BatchingPeriod period) {
 /// natively in PostgreSQL's queries (see `dunamis.postgres.predicates`).
 Expr!int termDays(Expr!BatchingTerm t) {
     import dunamis.postgres.predicates : postgresSql;
+    import dunamis.relational.sql_fragment : Sql, sql;
     return postgresSql(use(&batchingPeriodDays, t.validity),
-        (const string[] sql) => "COALESCE(upper(" ~ sql[0] ~ ") - lower(" ~ sql[0] ~ "), 0)", t.validity);
+        (const Sql[] operands) => sql(i"COALESCE(upper($(operands[0])) - lower($(operands[0])), 0)"), t.validity);
 }
 
 /// The end of a term's validity (null if it has none), natively

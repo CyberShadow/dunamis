@@ -3,7 +3,7 @@ module dunamis.relational.sql_dialect;
 import std.json : JSONValue;
 import std.typecons : Nullable, nullable;
 
-import dunamis.relational.sql_fragment : Sql, SqlValue, sql;
+import dunamis.relational.sql_fragment : Sql, SqlName, SqlValue, sql;
 
 public import dunamis.core.expr.operators : ArrayPredicate;
 
@@ -78,39 +78,46 @@ interface SqlDialect {
     // Query SQL generation vocabulary
     // =========================================================================
 
-    /// Escape a string for use in SQL literals.
+    /// The SQL identifier `name` (a bare name), quoted (see `Ident`).
+    ///   PostgreSQL/SQLite: "name" (double quotes doubled)
+    ///   MySQL: `name` (backquotes doubled)
+    string quoteIdentifier(string name);
+
+    /// The SQL string literal of `s` (see `SqlValue.literal`).
     /// Uses single-quote doubling; MySQL additionally escapes backslashes.
     string escapeSqlString(string s);
 
-    /// Convert a JSONValue to a properly quoted SQL literal.
+    /// The SQL literal of a JSON value (see `SqlValue.literal`).
     /// Handles strings, integers, floats, booleans, nulls, arrays, and objects.
     /// Boolean and array syntax varies by dialect.
     string jsonToSqlLiteral(JSONValue val);
 
-    /// SQL expression for filtering root entity IDs.
+    /// SQL expression for filtering the root rows of `table` by their keys
+    /// (of the columns `pkColumns`): `ids`, the list of the keys' values
+    /// (unless the dialect passes them as a parameter of the query).
     ///   PostgreSQL: "users.id = ANY($1)" (single PK)
-    ///   SQLite/MySQL: "users.id IN ({{IDS}})" (single PK)
-    ///   Composite: "(table.col1, table.col2) IN ({{IDS}})" (all dialects)
-    string rootIdFilter(string table, string[] pkColumns);
+    ///   SQLite/MySQL: "users.id IN (ids)" (single PK)
+    ///   Composite: "(table.col1, table.col2) IN (ids)" (all dialects)
+    Sql rootIdFilter(string table, string[] pkColumns, Sql ids);
 
     /// Name of the top-level JSON object constructor function.
     ///   PostgreSQL: "json_build_object"
     ///   SQLite: "json_object"
     ///   MySQL: "JSON_OBJECT"
-    string jsonObjectFunc();
+    Sql jsonObjectFunc();
 
     /// Name of the per-row JSON object function used inside CTEs,
-    /// or empty string if the dialect handles row-to-JSON at aggregation time.
+    /// or empty if the dialect handles row-to-JSON at aggregation time.
     ///   PostgreSQL: "" (uses row_to_json in aggregation)
     ///   SQLite: "json_object"
     ///   MySQL: "JSON_OBJECT"
-    string rowJsonFunc();
+    Sql rowJsonFunc();
 
     /// SQL literal for an empty JSON array.
     ///   PostgreSQL: "'[]'::json"
     ///   SQLite: "json('[]')"
     ///   MySQL: "JSON_ARRAY()"
-    string emptyJsonArray();
+    Sql emptyJsonArray();
 
     /// Build the complete SQL expression for aggregating all rows of a CTE layer
     /// into a JSON array. Encapsulates aggregation function, ORDER BY strategy
@@ -121,7 +128,7 @@ interface SqlDialect {
     ///   PostgreSQL: "(SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer0 t)"
     ///   SQLite: "COALESCE((SELECT json_group_array(json(row_json)) FROM layer0), json('[]'))"
     ///   MySQL: "COALESCE((SELECT JSON_ARRAYAGG(row_json) FROM layer0), JSON_ARRAY())"
-    string aggregateLayerJson(int layerId, string orderByClause);
+    Sql aggregateLayerJson(int layerId, Sql orderByClause);
 
     /// Cast an SQL expression to the dialect's text type, so that columns
     /// read as D strings (e.g. enum, date or numeric-string columns) are
@@ -129,15 +136,28 @@ interface SqlDialect {
     ///   PostgreSQL: "expr::text"
     ///   SQLite: "CAST(expr AS TEXT)"
     ///   MySQL: "CAST(expr AS CHAR)"
-    string castToText(string sql);
+    Sql castToText(Sql expr);
 
-    /// A term of an ORDER BY clause ordering by the SQL expression `sql`,
+    /// A term of an ORDER BY clause ordering by the SQL expression `expr`,
     /// in descending order if `descending`, with NULL last in ascending
     /// order and first in descending order, as PostgreSQL orders it (and
     /// as `dunamis.core.sorting.compareValues` does).
     ///   PostgreSQL: "expr", "expr DESC"
     ///   SQLite/MySQL: "(expr IS NULL), expr", "(expr IS NULL) DESC, expr DESC"
-    string orderByTerm(string sql, bool descending);
+    Sql orderByTerm(Sql expr, bool descending);
+}
+
+/// The name of the CTE of the layer `layerId` of a query (see
+/// `SqlDialect.aggregateLayerJson`).
+SqlName layerName(int layerId) {
+    import std.conv : to;
+    return SqlName("layer" ~ layerId.to!string);
+}
+
+/// The column `column` of the table (or alias) `table` (if not empty), as
+/// the schema names them (see `SqlName`).
+Sql qualifiedColumn(string table, string column) {
+    return table.length ? sql(i"$(SqlName(table)).$(SqlName(column))") : sql(i"$(SqlName(column))");
 }
 
 /// Whether constants of the type `type` are rendered as bare SQL numbers.
