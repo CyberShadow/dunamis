@@ -19,7 +19,7 @@ import dunamis.relational.sql_dialect : SqlDialect;
 /// themselves (e.g. other native expressions, or comparisons). Where the
 /// dialect of the query has a native form of the expression (`hasNativeSql`)
 /// and all its operands can be rendered as SQL (a column as the column, a
-/// constant as its literal, see `sqlLiteral`), the expression is rendered as
+/// constant as its literal, see `SqlValue.ofConstant`), the expression is rendered as
 /// `nativeSql` renders it on the operands' SQL, wherever the SQL optimizer
 /// puts expressions:
 /// - (of a `bool` expression) in a query's WHERE clause, as (part of) a

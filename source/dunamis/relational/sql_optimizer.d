@@ -4,7 +4,7 @@ import std.algorithm;
 import std.array;
 import std.conv;
 import std.json : JSONValue;
-import std.typecons : Nullable;
+import std.typecons : Nullable, nullable;
 
 import dunamis.core.types;
 import dunamis.core.expr;
@@ -18,10 +18,11 @@ import dunamis.relational.query_node;
 import dunamis.relational.schema;
 import dunamis.relational.project;
 import dunamis.relational.sql_dialect;
+import dunamis.relational.sql_fragment : Ident, Sql, SqlValue, sql;
 
-/// Convert a ConstantInfo to SQL literal using runtime type dispatch
-string constantToSqlLiteral(ConstantInfo info) {
-    return sqlLiteral(info.valueType, info.valueAsString);
+/// The SQL of a constant: its value (see `SqlValue.ofConstant`).
+Sql constantSql(ConstantInfo info) {
+    return sql(i"$(SqlValue.ofConstant(info.valueType, info.valueAsString))");
 }
 
 // ============================================================================
@@ -134,8 +135,8 @@ class SqlOptimizer : ExprOptimizer {
         auto translator = SqlTranslator.ofNodeRows(_dialect, relCtx, ctx, expr);
         if (translator is null)
             return null;
-        auto sql = translator.computedColumn(expr);
-        if (sql is null)
+        auto computed = translator.computedColumn(expr);
+        if (computed is null)
             return null;
         auto node = translator.node;
         auto prefetch = relCtx.getPrefetchExpr(node);
@@ -145,7 +146,7 @@ class SqlOptimizer : ExprOptimizer {
             : computedProjection(node.id, alias_, expr.resultType, translator.nodeRefs, prefetch, expr);
         if (projection is null)
             return null;
-        node.addComputedColumn(ComputedColumn(alias_, sql, expr.resultType, translator.relations));
+        node.addComputedColumn(ComputedColumn(alias_, computed, expr.resultType, translator.relations));
         return projection;
     }
 
@@ -181,7 +182,7 @@ private import std.meta : AliasSeq;
 struct FilterWhereClause {
     /// The SQL condition, or null if no part of the predicate can be
     /// expressed in SQL.
-    Nullable!DialectSql sql;
+    Nullable!Sql sql;
     /// Whether `sql` is equivalent to the whole predicate; otherwise it is
     /// only implied by it (it is the conjunction of those top-level `&&`
     /// conjuncts of the predicate which can be expressed in SQL), so it can
@@ -195,8 +196,10 @@ struct FilterWhereClause {
 /// predicate (see `extractWhereFromExpr`): of the predicate, or else of
 /// those of its top-level `&&` conjuncts which can be expressed in SQL.
 /// `dialect` is the dialect of the query (null if unknown, e.g. not a SQL
-/// data source's): native SQL expressions (see `NativeSqlInfo`) are only
-/// expressed in a dialect which has a native form of them. `plainFieldColumn`
+/// data source's): conditions which the dialect renders (e.g. LIKE patterns,
+/// membership tests, subqueries) are only expressed in a known dialect, and
+/// native SQL expressions (see `NativeSqlInfo`) only in a dialect which has
+/// a native form of them. `plainFieldColumn`
 /// (if not null) gives the columns of the plain fields of the filtered entity
 /// (see `PlainFieldInfo`), so that conditions on them can be expressed too.
 FilterWhereClause extractFilterWhereClause(FilterByInfo filterInfo, string table = null,
@@ -211,12 +214,12 @@ FilterWhereClause extractFilterWhereClause(FilterByInfo filterInfo, string table
                     return FilterWhereClause(right.sql, false);
                 if (right.sql.isNull)
                     return FilterWhereClause(left.sql, false);
-                return FilterWhereClause(Nullable!DialectSql(conjunction(left.sql.get, right.sql.get)),
-                    left.complete && right.complete);
+                auto l = left.sql.get, r = right.sql.get;
+                return FilterWhereClause(nullable(sql(i"($(l) AND $(r))")), left.complete && right.complete);
             }
         }
-        auto sql = translator.condition(expr, filterItem, table);
-        return FilterWhereClause(sql, !sql.isNull);
+        auto condition = translator.condition(expr, filterItem, table);
+        return FilterWhereClause(condition, !condition.isNull);
     }
     auto clause = extract(filterInfo.filterPredicate);
     clause.relations = translator.relations;
@@ -229,14 +232,9 @@ FilterWhereClause extractFilterWhereClause(FilterByInfo filterInfo, string table
 /// `PlainFieldInfo`) are reads of their columns that `plainFieldColumn`
 /// gives (if not null). A predicate with any part that cannot be expressed
 /// in SQL gives null.
-Nullable!DialectSql extractWhereFromExpr(Object expr, Object filterItem, string table = null,
+Nullable!Sql extractWhereFromExpr(Object expr, Object filterItem, string table = null,
         SqlDialect dialect = null, string delegate(string) plainFieldColumn = null) {
     return SqlTranslator.ofFilter(dialect, filterItem, plainFieldColumn).condition(expr, filterItem, table);
-}
-
-/// `l AND r`
-private DialectSql conjunction(DialectSql l, DialectSql r) {
-    return (SqlDialect d) => "(" ~ l(d) ~ " AND " ~ r(d) ~ ")";
 }
 
 // ============================================================================
@@ -327,13 +325,14 @@ final class SqlTranslator {
 
     /// The SQL computing `expr` in the query of the translator's node (node
     /// mode), as a column of its SELECT clause, or null if it cannot be
-    /// computed there (or the refs of its rows are unknown).
+    /// computed there (or the refs of its rows are unknown). (Rendered, as
+    /// the SQL of computed columns is text, see `ComputedColumn`.)
     string computedColumn(ExprBase expr) {
         assert(relCtx !is null, "computedColumn: not a translator of a node's values");
         auto value = rowValue(expr, null, node.table);
         if (!value.valid || value.constant || value.path.hops.length || nodeRefs is null)
             return null;
-        return value.render(node.table);
+        return value.render(node.table).render(dialect);
     }
 
     /// The query node (see `nodeOfMap`) of the first projection
@@ -440,21 +439,20 @@ final class SqlTranslator {
 
     /// The SQL condition, on the rows of `table`, that the row `path` leads to
     /// satisfies the condition `condition` renders for a table reference.
-    private DialectSql onRow(RowPath path, string table, DialectSql delegate(string rowTable) condition) {
+    private Sql onRow(RowPath path, string table, Sql delegate(string rowTable) condition) {
         if (path.hops.length == 0)
             return condition(table);
         auto hop = path.hops[0];
         auto alias_ = newAlias();
         auto inner = onRow(RowPath(true, path.hops[1 .. $]), alias_, condition);
-        auto fk = qualified(table, hop.fk);
-        auto subquery = "SELECT " ~ alias_ ~ "." ~ hop.parentPk ~ " FROM " ~ hop.parentTable ~ " " ~ alias_ ~
-            " WHERE ";
         relations ~= hop.parentTable;
-        return (SqlDialect d) => "(" ~ fk ~ " IN (" ~ subquery ~ inner(d) ~ "))";
+        auto parents = sql(i"SELECT $(qualified(alias_, hop.parentPk)) FROM $(Ident(hop.parentTable)) $(Ident(alias_))");
+        return sql(i"($(qualified(table, hop.fk)) IN ($(parents) WHERE $(inner)))");
     }
 
-    private static string qualified(string table, string column) {
-        return (table.length ? table ~ "." : "") ~ column;
+    /// The column `column` of the table reference `table` (if not empty).
+    private static Sql qualified(string table, string column) {
+        return table.length ? sql(i"$(Ident(table)).$(Ident(column))") : sql(i"$(Ident(column))");
     }
 
     /// The column an operand reads, on the row it belongs to.
@@ -487,12 +485,12 @@ final class SqlTranslator {
         bool constant;
         bool native;     // Is it (or does it contain) a native SQL expression?
         RowPath path;
-        string delegate(string rowTable) render;
+        Sql delegate(string rowTable) render;
     }
 
     /// The value of the values `values` (of one row, or constants), as
     /// `render` renders it on their SQL; invalid if they are not.
-    private static RowValue combined(RowValue[] values, string delegate(string[] sql) render) {
+    private static RowValue combined(RowValue[] values, Sql delegate(Sql[] operands) render) {
         auto result = RowValue(true, true, false, RowPath(true));
         foreach (value; values) {
             if (!value.valid)
@@ -505,12 +503,7 @@ final class SqlTranslator {
             result.constant = false;
             result.path = value.path;
         }
-        result.render = (string rowTable) {
-            auto sql = new string[values.length];
-            foreach (i, value; values)
-                sql[i] = value.render(rowTable);
-            return render(sql);
-        };
+        result.render = (string rowTable) => render(values.map!(value => value.render(rowTable)).array);
         return result;
     }
 
@@ -530,19 +523,20 @@ final class SqlTranslator {
     /// `resolveColumn`), or a native SQL expression (see `NativeSqlInfo`)
     /// having a native form in the dialect, on such values of one row; in
     /// node mode, also a projection of a column of the node, and (see
-    /// `anyValues`) an operation on such values of one row, or a condition.
+    /// `anyValues`) an operation on such values of one row which the
+    /// dialect has an operator of, or a condition.
     private RowValue rowValue(Object expr, Object item, string table) {
         if (anyValues && isCondition(expr)) {
             auto condition = condition(expr, item, table);
             if (condition.isNull)
                 return RowValue.init;
-            auto sql = condition.get()(dialect);
-            return RowValue(true, false, false, RowPath(true), (string) => sql);
+            auto conditionSql = condition.get;
+            return RowValue(true, false, false, RowPath(true), (string) => conditionSql);
         }
         auto literal = extractConstant(expr);
         if (!literal.isNull) {
-            auto sql = literal.get;
-            return RowValue(true, true, false, RowPath(true), (string) => sql);
+            auto literalSql = literal.get;
+            return RowValue(true, true, false, RowPath(true), (string) => literalSql);
         }
         RowPath path;
         string column;
@@ -556,28 +550,34 @@ final class SqlTranslator {
             if (dialect is null || !native.hasNativeSql(dialect))
                 return RowValue.init;
             auto queryDialect = dialect;
+            // (Native expressions render SQL text, of their operands' text)
             auto value = combined(native.nativeOperands.map!(operand => rowValue(operand, item, table)).array,
-                (string[] sql) => native.nativeSql(queryDialect, sql));
+                (Sql[] operands) => Sql.unsafeRaw(native.nativeSql(queryDialect,
+                    operands.map!(operand => operand.render(queryDialect)).array)));
             value.native = true;
             return value;
         }
-        if (!anyValues)
+        if (!anyValues || dialect is null)
             return RowValue.init;
         auto queryDialect = dialect;
         if (auto binOp = cast(BinaryOpInfo) expr) {
             auto op = binOp.operator;
+            if (sqlBinaryOperator(op).isNull)
+                return RowValue.init;
             return combined([rowValue(binOp.left, item, table), rowValue(binOp.right, item, table)],
-                (string[] sql) => queryDialect.binaryOp(op, sql[0], sql[1]));
+                (Sql[] operands) => queryDialect.binaryOp(op, operands[0], operands[1]));
         }
         if (auto unaryOp = cast(UnaryOpInfo) expr) {
             auto op = unaryOp.operator;
+            if (!isSqlUnaryOperator(op))
+                return RowValue.init;
             return combined([rowValue(unaryOp.operand, item, table)],
-                (string[] sql) => queryDialect.unaryOp(op, sql[0]));
+                (Sql[] operands) => queryDialect.unaryOp(op, operands[0]));
         }
         if (auto ternary = cast(TernaryInfo) expr)
             return combined([rowValue(ternary.condition, item, table), rowValue(ternary.trueExpr, item, table),
                     rowValue(ternary.falseExpr, item, table)],
-                (string[] sql) => queryDialect.caseWhen(sql[0], sql[1], sql[2]));
+                (Sql[] operands) => queryDialect.caseWhen(operands[0], operands[1], operands[2]));
         return RowValue.init;
     }
 
@@ -596,13 +596,14 @@ final class SqlTranslator {
                 auto column = projected.name;
                 return RowValue(true, false, false, RowPath(true), (string rowTable) => qualified(rowTable, column));
             case ProjectedColumn.Kind.joined:
-                auto sql = projected.join.value ~ "." ~ projected.name;
-                return RowValue(true, false, false, RowPath(true), (string) => sql);
+                auto joinedColumn = qualified(projected.join.value, projected.name);
+                return RowValue(true, false, false, RowPath(true), (string) => joinedColumn);
             case ProjectedColumn.Kind.computed:
                 foreach (computed; node.computedColumns)
                     if (computed.alias_ == projected.name) {
-                        auto sql = computed.sqlExpr;
-                        return RowValue(true, false, false, RowPath(true), (string) => sql);
+                        // (The SQL of computed columns is text, see `computedColumn`)
+                        auto computedSql = Sql.unsafeRaw(computed.sqlExpr);
+                        return RowValue(true, false, false, RowPath(true), (string) => computedSql);
                     }
                 return RowValue.init;
         }
@@ -612,7 +613,7 @@ final class SqlTranslator {
     /// to (see resolveRow): a column, or (see anyValues) any value of a row
     /// (not a constant).
     private bool operandValue(Object expr, Object item, string table, out RowPath path,
-            out string delegate(string rowTable) render) {
+            out Sql delegate(string rowTable) render) {
         string column;
         if (resolveColumn(expr, item, path, column)) {
             render = (string rowTable) => qualified(rowTable, column);
@@ -630,22 +631,21 @@ final class SqlTranslator {
 
     /// The SQL condition the predicate `expr` puts on the rows of `table`
     /// which `item` stands for (in node mode, `item` being null, the rows of
-    /// the translator's node), or null if it cannot be expressed in SQL.
-    Nullable!DialectSql condition(Object expr, Object item, string table) {
+    /// the translator's node), or null if it cannot be expressed in SQL
+    /// (also if the dialect, which renders some conditions, is unknown).
+    Nullable!Sql condition(Object expr, Object item, string table) {
         // Handle binary operators: AND, OR, comparison operators
         if (auto binOp = cast(BinaryOpInfo) expr) {
             string op = binOp.operator;
 
             // Logical operators: AND, OR
             if (op == "&&" || op == "||") {
-                auto leftSql = condition(binOp.left, item, table);
-                auto rightSql = condition(binOp.right, item, table);
-                if (!leftSql.isNull && !rightSql.isNull) {
-                    string sqlOp = (op == "&&") ? "AND" : "OR";
-                    auto l = leftSql.get, r = rightSql.get;
-                    return Nullable!DialectSql((SqlDialect d) => "(" ~ l(d) ~ " " ~ sqlOp ~ " " ~ r(d) ~ ")");
-                }
-                return Nullable!DialectSql.init;
+                auto left = condition(binOp.left, item, table);
+                auto right = condition(binOp.right, item, table);
+                if (left.isNull || right.isNull)
+                    return Nullable!Sql.init;
+                auto l = left.get, r = right.get;
+                return nullable(op == "&&" ? sql(i"($(l) AND $(r))") : sql(i"($(l) OR $(r))"));
             }
 
             // Comparison operators: ==, !=, <, <=, >, >=
@@ -653,7 +653,7 @@ final class SqlTranslator {
                 // Try to match: column op constant or constant op column
                 RowPath path;
                 string column;
-                string value;
+                Sql value;
                 bool isColumnOnLeft;
                 auto leftConst = extractConstant(binOp.left);
                 auto rightConst = extractConstant(binOp.right);
@@ -672,32 +672,25 @@ final class SqlTranslator {
                     if (!left.valid || !right.valid || !(left.native || right.native || anyValues) ||
                             (left.constant && right.constant) ||
                             (!left.constant && !right.constant && left.path.hops != right.path.hops))
-                        return Nullable!DialectSql.init;
+                        return Nullable!Sql.init;
                     auto valueOp = translateComparisonOp(op, true);
-                    return Nullable!DialectSql(onRow(left.constant ? right.path : left.path, table,
-                        (string rowTable) {
-                            auto sql = "(" ~ left.render(rowTable) ~ " " ~ valueOp ~ " " ~ right.render(rowTable) ~ ")";
-                            return (SqlDialect _) => sql;
-                        }));
+                    return nullable(onRow(left.constant ? right.path : left.path, table,
+                        (string rowTable) => sql(i"($(left.render(rowTable)) $(valueOp) $(right.render(rowTable)))")));
                 }
 
-                string sqlOp = translateComparisonOp(op, isColumnOnLeft);
-                return Nullable!DialectSql(onRow(path, table, (string rowTable) {
-                    auto sql = qualified(rowTable, column) ~ " " ~ sqlOp ~ " " ~ value;
-                    return (SqlDialect _) => sql;
-                }));
+                auto sqlOp = translateComparisonOp(op, isColumnOnLeft);
+                return nullable(onRow(path, table,
+                    (string rowTable) => sql(i"$(qualified(rowTable, column)) $(sqlOp) $(value)")));
             }
         }
 
         // Handle unary NOT operator
         if (auto unaryOp = cast(UnaryOpInfo) expr) {
             if (unaryOp.operator == "!") {
-                auto operandSql = condition(unaryOp.operand, item, table);
-                if (!operandSql.isNull) {
-                    auto operand = operandSql.get;
-                    return Nullable!DialectSql((SqlDialect d) => "NOT " ~ operand(d));
-                }
-                return Nullable!DialectSql.init;
+                auto operand = condition(unaryOp.operand, item, table);
+                if (operand.isNull)
+                    return Nullable!Sql.init;
+                return nullable(sql(i"NOT $(operand.get)"));
             }
         }
 
@@ -705,7 +698,7 @@ final class SqlTranslator {
         // anyValues) and of any values
         if (auto isNullOp = cast(IsNullInfo) expr) {
             RowPath path;
-            string delegate(string) render;
+            Sql delegate(string) render;
             if (auto belongsTo = cast(BelongsToInfo) isNullOp.operand) {
                 // A nullable belongs-to relationship is null if its foreign key is.
                 path = resolveRow(belongsTo.inputExpr, item, item is null ? belongsTo.inputAsAnyRefExpr : null);
@@ -714,98 +707,83 @@ final class SqlTranslator {
             } else
                 operandValue(isNullOp.operand, item, table, path, render);
             if (!path.valid)
-                return Nullable!DialectSql.init;
-            return Nullable!DialectSql(onRow(path, table, (string rowTable) {
-                auto sql = "(" ~ render(rowTable) ~ " IS NULL)";
-                return (SqlDialect _) => sql;
-            }));
+                return Nullable!Sql.init;
+            return nullable(onRow(path, table, (string rowTable) => sql(i"($(render(rowTable)) IS NULL)")));
         }
 
         // Handle `some` over a to-many relationship
         if (auto collPred = cast(CollectionPredicateInfo) expr) {
             // The collection, seen through element-wise entity casts
             auto hasMany = cast(HasManyInfo) seeThrough(collPred.collection, Transparent.elements);
-            if (hasMany is null || hasMany.parentPkColumns.length != 1)
-                return Nullable!DialectSql.init;
+            if (dialect is null || hasMany is null || hasMany.parentPkColumns.length != 1)
+                return Nullable!Sql.init;
             auto path = resolveRow(hasMany.inputExpr, item, item is null ? hasMany.inputAsAnyRefExpr : null);
             if (!path.valid)
-                return Nullable!DialectSql.init;
+                return Nullable!Sql.init;
             auto childAlias = newAlias();
             auto predicate = condition(collPred.predicate, collPred.itemPlaceholder, childAlias);
             if (predicate.isNull)
-                return Nullable!DialectSql.init;
+                return Nullable!Sql.init;
             auto pred = predicate.get;
             auto childTable = hasMany.childTable;
             relations ~= childTable;
             auto fk = hasMany.fkColumn;
             auto parentPk = hasMany.parentPkColumns[0];
-            return Nullable!DialectSql(onRow(path, table, (string rowTable) {
-                auto subquery = "SELECT 1 FROM " ~ childTable ~ " " ~ childAlias ~
-                    " WHERE " ~ childAlias ~ "." ~ fk ~ " = " ~ qualified(rowTable, parentPk) ~ " AND ";
-                return (SqlDialect d) => d.existsSubquery(subquery ~ pred(d));
+            return nullable(onRow(path, table, (string rowTable) {
+                auto children = sql(i"SELECT 1 FROM $(Ident(childTable)) $(Ident(childAlias))");
+                auto link = sql(i"$(qualified(childAlias, fk)) = $(qualified(rowTable, parentPk))");
+                return dialect.existsSubquery(sql(i"$(children) WHERE $(link) AND $(pred)"));
             }));
         }
 
         // Handle membership tests of columns (isAmong)
         if (auto membership = cast(MembershipInfo) expr) {
             RowPath path;
-            string delegate(string) render;
-            if (operandValue(membership.operand, item, table, path, render)) {
-                auto valueType = membership.valueType;
-                auto values = membership.valuesAsStrings;
-                if (values.length == 0)
-                    return dialectAgnostic("1=0");
-                return Nullable!DialectSql(onRow(path, table, (string rowTable) {
-                    auto operandSql = render(rowTable);
-                    return (SqlDialect d) => d.membershipOp(operandSql, valueType, values);
-                }));
-            }
-            return Nullable!DialectSql.init;
+            Sql delegate(string) render;
+            if (dialect is null || !operandValue(membership.operand, item, table, path, render))
+                return Nullable!Sql.init;
+            auto valueType = membership.valueType;
+            auto values = membership.valuesAsStrings;
+            if (values.length == 0)
+                return nullable(sql(i"1=0"));
+            return nullable(onRow(path, table,
+                (string rowTable) => dialect.membershipOp(render(rowTable), valueType, values)));
         }
 
         // Handle array predicates of columns, in a dialect with arrays
         if (auto arrayPred = cast(ArrayPredicateInfo) expr) {
             RowPath path;
-            string delegate(string) render;
+            Sql delegate(string) render;
             auto predicate = arrayPred.predicate;
             auto valueType = arrayPred.valueType;
             auto values = arrayPred.valuesAsStrings;
-            if (dialect is null || dialect.arrayPredicateOp("x", predicate, valueType, values) is null)
-                return Nullable!DialectSql.init;
-            if (operandValue(arrayPred.operand, item, table, path, render)) {
-                return Nullable!DialectSql(onRow(path, table, (string rowTable) {
-                    auto operandSql = render(rowTable);
-                    return (SqlDialect d) => d.arrayPredicateOp(operandSql, predicate, valueType, values);
-                }));
-            }
-            return Nullable!DialectSql.init;
+            if (dialect is null || dialect.arrayPredicateOp(sql(i"x"), predicate, valueType, values).isNull)
+                return Nullable!Sql.init;
+            if (!operandValue(arrayPred.operand, item, table, path, render))
+                return Nullable!Sql.init;
+            return nullable(onRow(path, table,
+                (string rowTable) => dialect.arrayPredicateOp(render(rowTable), predicate, valueType, values).get));
         }
 
         // Handle constant true/false
         if (auto constInfo = cast(ConstantInfo) expr) {
-            if (constInfo.valueType == typeid(bool)) {
-                bool val = constInfo.valueAsString == "true";
-                return dialectAgnostic(val ? "1=1" : "1=0");
-            }
+            if (constInfo.valueType == typeid(bool))
+                return nullable(constInfo.valueAsString == "true" ? sql(i"1=1") : sql(i"1=0"));
         }
 
         // Handle LIKE expressions (contains, startsWith, endsWith, like)
         if (auto likeInfo = cast(LikeInfo) expr) {
             RowPath path;
-            string delegate(string) render;
-            if (operandValue(likeInfo.likeOperand, item, table, path, render)) {
-                // The pattern already has % and _ escaped as \% and \_ by
-                // escapeLikePattern() (or is a LIKE pattern); the dialect
-                // quotes it and picks the (case-sensitive or -insensitive)
-                // matching operator.
-                string escapedPattern = likeInfo.likePattern.replace("'", "''");
-                bool caseInsensitive = likeInfo.caseInsensitive;
-                return Nullable!DialectSql(onRow(path, table, (string rowTable) {
-                    auto operandSql = render(rowTable);
-                    return (SqlDialect d) => d.likeOp(operandSql, escapedPattern, caseInsensitive);
-                }));
-            }
-            return Nullable!DialectSql.init;
+            Sql delegate(string) render;
+            if (dialect is null || !operandValue(likeInfo.likeOperand, item, table, path, render))
+                return Nullable!Sql.init;
+            // The pattern already has % and _ escaped as \% and \_ by
+            // escapeLikePattern() (or is a LIKE pattern); the dialect
+            // picks the (case-sensitive or -insensitive) matching operator.
+            auto pattern = likeInfo.likePattern;
+            bool caseInsensitive = likeInfo.caseInsensitive;
+            return nullable(onRow(path, table,
+                (string rowTable) => dialect.likeOp(render(rowTable), pattern, caseInsensitive)));
         }
 
         // Handle native conditions, in a dialect which has a native form of
@@ -814,15 +792,11 @@ final class SqlTranslator {
         auto exprBase = cast(ExprBase) expr;
         if (exprBase is null || exprBase.resultType != typeid(bool) || isCondition(expr) ||
                 (cast(NativeSqlInfo) expr is null && !anyValues))
-            return Nullable!DialectSql.init;
+            return Nullable!Sql.init;
         auto value = rowValue(expr, item, table);
         if (!value.valid || value.constant)
-            return Nullable!DialectSql.init;
-        auto render = value.render;
-        return Nullable!DialectSql(onRow(value.path, table, (string rowTable) {
-            auto sql = render(rowTable);
-            return (SqlDialect _) => sql;
-        }));
+            return Nullable!Sql.init;
+        return nullable(onRow(value.path, table, value.render));
     }
 }
 
@@ -879,8 +853,8 @@ Nullable!SortKey extractSortKey(SortByInfo sort, string table, SqlDialect dialec
         // dialect, if it is known)
         if (dialect is null)
             return Nullable!SortKey.init;
-        auto sql = enumPositionSql(dialect, SqlTranslator.qualified(table, leftColumn.column), enumLabels);
-        return Nullable!SortKey(SortKey(null, sql, typeid(int), direction));
+        auto position = enumPositionSql(SqlTranslator.qualified(table, leftColumn.column), enumLabels);
+        return Nullable!SortKey(SortKey(null, position.render(dialect), typeid(int), direction));
     }
 
     // A native expression of the items themselves (the same on both)
@@ -891,23 +865,22 @@ Nullable!SortKey extractSortKey(SortByInfo sort, string table, SqlDialect dialec
     if (!leftValue.valid || !rightValue.valid || !leftValue.native || leftValue.constant || rightValue.constant ||
             leftValue.path.hops.length || rightValue.path.hops.length)
         return Nullable!SortKey.init;
-    auto sql = leftValue.render(table);
-    if (sql != rightValue.render(table))
+    auto key = leftValue.render(table);
+    if (key != rightValue.render(table))
         return Nullable!SortKey.init;
     if (enumLabels !is null)
-        return Nullable!SortKey(SortKey(null, enumPositionSql(dialect, sql, enumLabels), typeid(int), direction));
-    return Nullable!SortKey(SortKey(null, sql, leftOperand.resultType, direction));
+        return Nullable!SortKey(SortKey(null, enumPositionSql(key, enumLabels).render(dialect), typeid(int), direction));
+    return Nullable!SortKey(SortKey(null, key.render(dialect), leftOperand.resultType, direction));
 }
 
-/// The SQL of the position of the enum value `sql` (by its stored label)
+/// The SQL of the position of the enum value `value` (by its stored label)
 /// among the labels `labels`, starting from 0; NULL for NULL (and for a
 /// label which is not one of them).
-string enumPositionSql(SqlDialect dialect, string sql, string[] labels) {
-    import std.conv : to;
-    string result = "CASE " ~ sql;
+Sql enumPositionSql(Sql value, string[] labels) {
+    Sql[] cases;
     foreach (i, label; labels)
-        result ~= " WHEN " ~ dialect.escapeSqlString(label) ~ " THEN " ~ i.to!string;
-    return result ~ " END";
+        cases ~= sql(i"WHEN $(label) THEN $(i)");
+    return sql(i"CASE $(value) $(Sql.join!" "(cases)) END");
 }
 
 /// ditto
@@ -920,43 +893,28 @@ struct SortKey {
     SortDirection direction;
 }
 
-private Nullable!DialectSql dialectAgnostic(string sql) {
-    return Nullable!DialectSql((SqlDialect) => sql);
-}
-
-/// Extract SQL literal from a constant expression.
-private Nullable!string extractConstant(Object expr) {
+/// The SQL of a constant expression (or null if it is not one).
+private Nullable!Sql extractConstant(Object expr) {
     auto constInfo = cast(ConstantInfo) expr;
-    if (constInfo is null) return Nullable!string.init;
+    if (constInfo is null) return Nullable!Sql.init;
 
-    return Nullable!string(constantToSqlLiteral(constInfo));
+    return nullable(constantSql(constInfo));
 }
 
-/// Convert comparison operator to SQL, handling operand order.
-string translateComparisonOp(string op, bool columnOnLeft) {
-    if (columnOnLeft) {
-        // column op value - use operator as-is
+/// The SQL operator of the comparison `op` (`==`, `!=`, `<`, `<=`, `>`,
+/// `>=`) of a column with a value, the column being on its left (or else on
+/// its right: then the SQL operator compares the column with the value,
+/// e.g. `value < column` is `column > value`).
+Sql translateComparisonOp(string op, bool columnOnLeft) {
+    if (!columnOnLeft)
         switch (op) {
-            case "==": return "=";
-            case "!=": return "<>";
-            case "<": return "<";
-            case "<=": return "<=";
-            case ">": return ">";
-            case ">=": return ">=";
-            default: return op;
+            case "<": op = ">"; break;
+            case "<=": op = ">="; break;
+            case ">": op = "<"; break;
+            case ">=": op = "<="; break;
+            default: break;
         }
-    } else {
-        // value op column - reverse operator
-        switch (op) {
-            case "==": return "=";
-            case "!=": return "<>";
-            case "<": return ">";    // value < column → column > value
-            case "<=": return ">=";
-            case ">": return "<";
-            case ">=": return "<=";
-            default: return op;
-        }
-    }
+    return sqlBinaryOperator(op).get;
 }
 
 // ============================================================================
@@ -967,35 +925,31 @@ unittest {
     // Test SqlOptimizer creation
     // Use a simple test dialect
     static class TestDialect : SqlDialect {
-        override string binaryOp(string op, string leftSql, string rightSql) {
-            return "(" ~ leftSql ~ " " ~ op ~ " " ~ rightSql ~ ")";
+        override Sql binaryOp(string op, Sql left, Sql right) {
+            return sql(i"($(left) $(sqlBinaryOperator(op).get) $(right))");
         }
-        override string unaryOp(string op, string operandSql) {
-            if (op == "!") return "(NOT " ~ operandSql ~ ")";
-            return "(" ~ op ~ operandSql ~ ")";
+        override Sql unaryOp(string op, Sql operand) {
+            return op == "!" ? sql(i"(NOT $(operand))") : sql(i"(-$(operand))");
         }
-        override string caseWhen(string conditionSql, string trueSql, string falseSql) {
-            return "(CASE WHEN " ~ conditionSql ~ " THEN " ~ trueSql ~ " ELSE " ~ falseSql ~ " END)";
+        override Sql caseWhen(Sql condition, Sql whenTrue, Sql whenFalse) {
+            return sql(i"(CASE WHEN $(condition) THEN $(whenTrue) ELSE $(whenFalse) END)");
         }
-        override string isNullOp(string operandSql) {
-            return "(" ~ operandSql ~ " IS NULL)";
+        override Sql isNullOp(Sql operand) {
+            return sql(i"($(operand) IS NULL)");
         }
-        override string existsSubquery(string subquery) {
-            return "EXISTS (" ~ subquery ~ ")";
+        override Sql existsSubquery(Sql subquery) {
+            return sql(i"EXISTS ($(subquery))");
         }
-        override string notExistsSubquery(string subquery) {
-            return "NOT EXISTS (" ~ subquery ~ ")";
+        override Sql notExistsSubquery(Sql subquery) {
+            return sql(i"NOT EXISTS ($(subquery))");
         }
-        override string membershipOp(string operandSql, TypeInfo valueType, string[] values) {
-            import dunamis.relational.sql_dialect : inListSql;
-            return inListSql(operandSql, valueType, values);
+        override Sql membershipOp(Sql operand, TypeInfo valueType, string[] values) {
+            return inListSql(operand, valueType, values);
         }
-
-        override string likeOp(string operandSql, string pattern, bool caseInsensitive) {
-            if (caseInsensitive) {
-                return "(LOWER(" ~ operandSql ~ ") LIKE LOWER('" ~ pattern ~ `') ESCAPE '\')`;
-            }
-            return "(" ~ operandSql ~ " LIKE '" ~ pattern ~ `' ESCAPE '\')`;
+        override Sql likeOp(Sql operand, string pattern, bool caseInsensitive) {
+            if (caseInsensitive)
+                return sql(i`(LOWER($(operand)) LIKE LOWER($(pattern)) ESCAPE '\')`);
+            return sql(i`($(operand) LIKE $(pattern) ESCAPE '\')`);
         }
         override string name() { return "Test"; }
         override string escapeSqlString(string s) { return "'" ~ s ~ "'"; }
@@ -1006,9 +960,9 @@ unittest {
         override string emptyJsonArray() { return "'[]'::json"; }
         override string aggregateLayerJson(int, string) { return ""; }
         override string castToText(string sql) { return sql ~ "::text"; }
-        override string arrayPredicateOp(string operandSql, ArrayPredicate predicate, TypeInfo valueType,
+        override Nullable!Sql arrayPredicateOp(Sql operand, ArrayPredicate predicate, TypeInfo valueType,
                 Nullable!string[] values) {
-            return null;  // (No arrays)
+            return Nullable!Sql.init;  // (No arrays)
         }
         override string orderByTerm(string sql, bool descending) { return sql ~ (descending ? " DESC" : ""); }
     }
@@ -1047,35 +1001,31 @@ unittest {
 
     // Run SQL optimizer with test dialect
     static class TestDialect : SqlDialect {
-        override string binaryOp(string op, string leftSql, string rightSql) {
-            return "(" ~ leftSql ~ " " ~ op ~ " " ~ rightSql ~ ")";
+        override Sql binaryOp(string op, Sql left, Sql right) {
+            return sql(i"($(left) $(sqlBinaryOperator(op).get) $(right))");
         }
-        override string unaryOp(string op, string operandSql) {
-            if (op == "!") return "(NOT " ~ operandSql ~ ")";
-            return "(" ~ op ~ operandSql ~ ")";
+        override Sql unaryOp(string op, Sql operand) {
+            return op == "!" ? sql(i"(NOT $(operand))") : sql(i"(-$(operand))");
         }
-        override string caseWhen(string conditionSql, string trueSql, string falseSql) {
-            return "(CASE WHEN " ~ conditionSql ~ " THEN " ~ trueSql ~ " ELSE " ~ falseSql ~ " END)";
+        override Sql caseWhen(Sql condition, Sql whenTrue, Sql whenFalse) {
+            return sql(i"(CASE WHEN $(condition) THEN $(whenTrue) ELSE $(whenFalse) END)");
         }
-        override string isNullOp(string operandSql) {
-            return "(" ~ operandSql ~ " IS NULL)";
+        override Sql isNullOp(Sql operand) {
+            return sql(i"($(operand) IS NULL)");
         }
-        override string existsSubquery(string subquery) {
-            return "EXISTS (" ~ subquery ~ ")";
+        override Sql existsSubquery(Sql subquery) {
+            return sql(i"EXISTS ($(subquery))");
         }
-        override string notExistsSubquery(string subquery) {
-            return "NOT EXISTS (" ~ subquery ~ ")";
+        override Sql notExistsSubquery(Sql subquery) {
+            return sql(i"NOT EXISTS ($(subquery))");
         }
-        override string membershipOp(string operandSql, TypeInfo valueType, string[] values) {
-            import dunamis.relational.sql_dialect : inListSql;
-            return inListSql(operandSql, valueType, values);
+        override Sql membershipOp(Sql operand, TypeInfo valueType, string[] values) {
+            return inListSql(operand, valueType, values);
         }
-
-        override string likeOp(string operandSql, string pattern, bool caseInsensitive) {
-            if (caseInsensitive) {
-                return "(LOWER(" ~ operandSql ~ ") LIKE LOWER('" ~ pattern ~ `') ESCAPE '\')`;
-            }
-            return "(" ~ operandSql ~ " LIKE '" ~ pattern ~ `' ESCAPE '\')`;
+        override Sql likeOp(Sql operand, string pattern, bool caseInsensitive) {
+            if (caseInsensitive)
+                return sql(i`(LOWER($(operand)) LIKE LOWER($(pattern)) ESCAPE '\')`);
+            return sql(i`($(operand) LIKE $(pattern) ESCAPE '\')`);
         }
         override string name() { return "Test"; }
         override string escapeSqlString(string s) { return "'" ~ s ~ "'"; }
@@ -1086,9 +1036,9 @@ unittest {
         override string emptyJsonArray() { return "'[]'::json"; }
         override string aggregateLayerJson(int, string) { return ""; }
         override string castToText(string sql) { return sql ~ "::text"; }
-        override string arrayPredicateOp(string operandSql, ArrayPredicate predicate, TypeInfo valueType,
+        override Nullable!Sql arrayPredicateOp(Sql operand, ArrayPredicate predicate, TypeInfo valueType,
                 Nullable!string[] values) {
-            return null;  // (No arrays)
+            return Nullable!Sql.init;  // (No arrays)
         }
         override string orderByTerm(string sql, bool descending) { return sql ~ (descending ? " DESC" : ""); }
     }

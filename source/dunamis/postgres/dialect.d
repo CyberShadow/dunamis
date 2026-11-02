@@ -8,51 +8,46 @@ import std.json : JSONValue, JSONType;
 import std.string : replace;
 
 import dunamis.relational.sql_dialect;
-import std.typecons : Nullable;
+import dunamis.relational.sql_fragment : Sql, SqlValue, sql;
+import std.typecons : Nullable, nullable;
 
 /// PostgreSQL dialect - uses || for string concatenation
 class PostgresDialect : SqlDialect {
-    override string binaryOp(string op, string leftSql, string rightSql) {
-        auto sqlOp = toSqlOp(op);
-        return "(" ~ leftSql ~ " " ~ sqlOp ~ " " ~ rightSql ~ ")";
+    override Sql binaryOp(string op, Sql left, Sql right) {
+        return sql(i"($(left) $(sqlBinaryOperator(op).get) $(right))");
     }
 
-    override string unaryOp(string op, string operandSql) {
-        if (op == "!") return "(NOT " ~ operandSql ~ ")";
-        return "(" ~ op ~ operandSql ~ ")";
+    override Sql unaryOp(string op, Sql operand) {
+        assert(isSqlUnaryOperator(op), "No SQL operator of " ~ op);
+        return op == "!" ? sql(i"(NOT $(operand))") : sql(i"(-$(operand))");
     }
 
-    override string caseWhen(string conditionSql, string trueSql, string falseSql) {
-        return "(CASE WHEN " ~ conditionSql ~ " THEN " ~ trueSql ~ " ELSE " ~ falseSql ~ " END)";
+    override Sql caseWhen(Sql condition, Sql whenTrue, Sql whenFalse) {
+        return sql(i"(CASE WHEN $(condition) THEN $(whenTrue) ELSE $(whenFalse) END)");
     }
 
-    override string isNullOp(string operandSql) {
-        return "(" ~ operandSql ~ " IS NULL)";
+    override Sql isNullOp(Sql operand) {
+        return sql(i"($(operand) IS NULL)");
     }
 
-    override string existsSubquery(string subquery) {
-        return "EXISTS (" ~ subquery ~ ")";
+    override Sql existsSubquery(Sql subquery) {
+        return sql(i"EXISTS ($(subquery))");
     }
 
-    override string notExistsSubquery(string subquery) {
-        return "NOT EXISTS (" ~ subquery ~ ")";
+    override Sql notExistsSubquery(Sql subquery) {
+        return sql(i"NOT EXISTS ($(subquery))");
     }
 
-    override string membershipOp(string operandSql, TypeInfo valueType, string[] values) {
-        import std.array : join, replace;
-        import dunamis.relational.sql_dialect : isSqlNumericType;
-
-        // One array literal (whose type PostgreSQL infers from the
-        // operand's), with the elements quoted unless they are numbers
-        string[] elements;
-        foreach (v; values)
-            elements ~= isSqlNumericType(valueType) ? v : `"` ~ v.replace(`\`, `\\`).replace(`"`, `\"`) ~ `"`;
-        return "(" ~ operandSql ~ " = ANY('{" ~ elements.join(",").replace("'", "''") ~ "}'))";
+    override Sql membershipOp(Sql operand, TypeInfo valueType, string[] values) {
+        // One array literal (whose type PostgreSQL infers from the operand's)
+        auto array = arrayLiteral(valueType, values.map!(v => Nullable!string(v)).array);
+        return sql(i"($(operand) = ANY($(array)))");
     }
 
-    override string likeOp(string operandSql, string pattern, bool caseInsensitive) {
-        string op = caseInsensitive ? "ILIKE" : "LIKE";
-        return "(" ~ operandSql ~ " " ~ op ~ " '" ~ pattern ~ `' ESCAPE '\')`;
+    override Sql likeOp(Sql operand, string pattern, bool caseInsensitive) {
+        return caseInsensitive
+            ? sql(i`($(operand) ILIKE $(pattern) ESCAPE '\')`)
+            : sql(i`($(operand) LIKE $(pattern) ESCAPE '\')`);
     }
 
     override string name() { return "PostgreSQL"; }
@@ -105,36 +100,36 @@ class PostgresDialect : SqlDialect {
     override string emptyJsonArray() { return "'[]'::json"; }
 
     override string castToText(string sql) { return sql ~ "::text"; }
-    override string arrayPredicateOp(string operandSql, ArrayPredicate predicate, TypeInfo valueType,
+    override Nullable!Sql arrayPredicateOp(Sql operand, ArrayPredicate predicate, TypeInfo valueType,
             Nullable!string[] values) {
-        import std.array : join, replace;
-        import dunamis.relational.sql_dialect : isSqlNumericType;
-
-        // An element of an array literal (quoted unless it is a number), and
-        // a value's literal
-        string element(Nullable!string v) {
-            if (v.isNull)
-                return "NULL";
-            return isSqlNumericType(valueType) ? v.get : `"` ~ v.get.replace(`\`, `\\`).replace(`"`, `\"`) ~ `"`;
-        }
-        string value(Nullable!string v) {
-            if (v.isNull)
-                return "NULL";
-            return isSqlNumericType(valueType) ? v.get : escapeSqlString(v.get);
-        }
-        string[] elements;
-        foreach (v; values)
-            elements ~= element(v);
         // (Array literals' and values' types PostgreSQL infers from the operand)
-        auto array = "'{" ~ elements.join(",").replace("'", "''") ~ "}'";
+        auto array = arrayLiteral(valueType, values);
+        Sql value() {
+            // (NULL, a number, or else a string)
+            auto v = values[0];
+            auto sqlValue = v.isNull ? SqlValue.init
+                : isSqlNumericType(valueType) ? SqlValue.ofConstant(valueType, v.get) : SqlValue.of(v.get);
+            return sql(i"$(sqlValue)");
+        }
         final switch (predicate) {
-            case ArrayPredicate.contains: return "(" ~ operandSql ~ " @> " ~ array ~ ")";
-            case ArrayPredicate.containedBy: return "(" ~ operandSql ~ " <@ " ~ array ~ ")";
-            case ArrayPredicate.overlaps: return "(" ~ operandSql ~ " && " ~ array ~ ")";
-            case ArrayPredicate.anyEqualTo: return "(" ~ value(values[0]) ~ " = ANY(" ~ operandSql ~ "))";
-            case ArrayPredicate.anyNotEqualTo: return "(" ~ value(values[0]) ~ " <> ANY(" ~ operandSql ~ "))";
+            case ArrayPredicate.contains: return nullable(sql(i"($(operand) @> $(array))"));
+            case ArrayPredicate.containedBy: return nullable(sql(i"($(operand) <@ $(array))"));
+            case ArrayPredicate.overlaps: return nullable(sql(i"($(operand) && $(array))"));
+            case ArrayPredicate.anyEqualTo: return nullable(sql(i"($(value()) = ANY($(operand)))"));
+            case ArrayPredicate.anyNotEqualTo: return nullable(sql(i"($(value()) <> ANY($(operand)))"));
         }
     }
+
+    /// The text of the array literal of `values` (of the type
+    /// `valueType`), its elements quoted unless they are numbers (or NULL).
+    private static string arrayLiteral(TypeInfo valueType, Nullable!string[] values) {
+        string[] elements;
+        foreach (v; values)
+            elements ~= v.isNull ? "NULL"
+                : isSqlNumericType(valueType) ? v.get : `"` ~ v.get.replace(`\`, `\\`).replace(`"`, `\"`) ~ `"`;
+        return "{" ~ elements.join(",") ~ "}";
+    }
+
     override string orderByTerm(string sql, bool descending) { return sql ~ (descending ? " DESC" : ""); }
 
     override string aggregateLayerJson(int layerId, string orderByClause) {
@@ -144,18 +139,6 @@ class PostgresDialect : SqlDialect {
         }
         return format("(SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer%d t)",
             layerId);
-    }
-
-    private static string toSqlOp(string op) {
-        switch (op) {
-            case "~": return "||";   // String concatenation
-            case "==": return "=";   // Equality
-            case "!=": return "<>";  // Inequality
-            case "&&": return "AND"; // Logical and
-            case "||": return "OR";  // Logical or
-            case "%": return "%";    // Modulo
-            default: return op;      // +, -, *, /, <, >, <=, >= are the same
-        }
     }
 }
 
@@ -176,47 +159,53 @@ SqlDialect postgresDialect() {
 
 unittest {
     auto dialect = postgresDialect();
+    string r(Sql fragment) { return fragment.render(dialect); }
+    auto a = sql(i"a"), b = sql(i"b");
 
     // String concatenation uses ||
-    assert(dialect.binaryOp("~", "'a'", "'b'") == "('a' || 'b')");
+    assert(r(dialect.binaryOp("~", sql(i"$("a")"), sql(i"$("b")"))) == "('a' || 'b')");
 
     // Arithmetic operators
-    assert(dialect.binaryOp("+", "1", "2") == "(1 + 2)");
-    assert(dialect.binaryOp("-", "5", "3") == "(5 - 3)");
-    assert(dialect.binaryOp("*", "2", "3") == "(2 * 3)");
-    assert(dialect.binaryOp("/", "6", "2") == "(6 / 2)");
+    assert(r(dialect.binaryOp("+", sql(i"$(1)"), sql(i"$(2)"))) == "(1 + 2)");
+    assert(r(dialect.binaryOp("-", a, b)) == "(a - b)");
+    assert(r(dialect.binaryOp("*", a, b)) == "(a * b)");
+    assert(r(dialect.binaryOp("/", a, b)) == "(a / b)");
 
     // Comparison operators
-    assert(dialect.binaryOp("==", "a", "b") == "(a = b)");
-    assert(dialect.binaryOp("!=", "a", "b") == "(a <> b)");
-    assert(dialect.binaryOp("<", "a", "b") == "(a < b)");
-    assert(dialect.binaryOp(">", "a", "b") == "(a > b)");
+    assert(r(dialect.binaryOp("==", a, b)) == "(a = b)");
+    assert(r(dialect.binaryOp("!=", a, b)) == "(a <> b)");
+    assert(r(dialect.binaryOp("<", a, b)) == "(a < b)");
+    assert(r(dialect.binaryOp(">", a, b)) == "(a > b)");
 
     // Logical operators
-    assert(dialect.binaryOp("&&", "a", "b") == "(a AND b)");
-    assert(dialect.binaryOp("||", "a", "b") == "(a OR b)");
+    assert(r(dialect.binaryOp("&&", a, b)) == "(a AND b)");
+    assert(r(dialect.binaryOp("||", a, b)) == "(a OR b)");
 
     // Unary operators
-    assert(dialect.unaryOp("!", "a") == "(NOT a)");
-    assert(dialect.unaryOp("-", "5") == "(-5)");
+    assert(r(dialect.unaryOp("!", a)) == "(NOT a)");
+    assert(r(dialect.unaryOp("-", sql(i"$(5)"))) == "(-5)");
 
     // Case when
-    assert(dialect.caseWhen("a > 0", "'positive'", "'negative'") ==
+    assert(r(dialect.caseWhen(sql(i"a > 0"), sql(i"$("positive")"), sql(i"$("negative")"))) ==
            "(CASE WHEN a > 0 THEN 'positive' ELSE 'negative' END)");
 
     // IS NULL
-    assert(dialect.isNullOp("a") == "(a IS NULL)");
+    assert(r(dialect.isNullOp(a)) == "(a IS NULL)");
 
     // EXISTS / NOT EXISTS
-    assert(dialect.existsSubquery("SELECT 1 FROM posts WHERE author_id = users.id") ==
-           "EXISTS (SELECT 1 FROM posts WHERE author_id = users.id)");
-    assert(dialect.notExistsSubquery("SELECT 1 FROM posts WHERE author_id = users.id") ==
-           "NOT EXISTS (SELECT 1 FROM posts WHERE author_id = users.id)");
+    auto subquery = sql(i"SELECT 1 FROM posts WHERE author_id = users.id");
+    assert(r(dialect.existsSubquery(subquery)) == "EXISTS (SELECT 1 FROM posts WHERE author_id = users.id)");
+    assert(r(dialect.notExistsSubquery(subquery)) == "NOT EXISTS (SELECT 1 FROM posts WHERE author_id = users.id)");
 
     // Membership: one array literal
-    assert(dialect.membershipOp("t.id", typeid(int), ["1", "-2"]) == "(t.id = ANY('{1,-2}'))");
-    assert(dialect.membershipOp("t.name", typeid(string), [`it's`, `a"b`, `c\d`, "x,y"]) ==
+    assert(r(dialect.membershipOp(sql(i"t.id"), typeid(int), ["1", "-2"])) == "(t.id = ANY('{1,-2}'))");
+    assert(r(dialect.membershipOp(sql(i"t.name"), typeid(string), [`it's`, `a"b`, `c\d`, "x,y"])) ==
            `(t.name = ANY('{"it''s","a\"b","c\\d","x,y"}'))`);
+
+    // LIKE: the pattern is a string literal (backslashes are not escapes
+    // of PostgreSQL's string literals)
+    assert(r(dialect.likeOp(a, `it's 50\%%`, false)) == `(a LIKE 'it''s 50\%%' ESCAPE '\')`);
+    assert(r(dialect.likeOp(a, `x\_%`, true)) == `(a ILIKE 'x\_%' ESCAPE '\')`);
 }
 
 // Array predicates: PostgreSQL's array operators, with array literals (and
@@ -224,15 +213,16 @@ unittest {
 unittest {
     auto dialect = new PostgresDialect();
     alias N = Nullable!string;
-    assert(dialect.arrayPredicateOp("t.ids", ArrayPredicate.contains, typeid(int), [N("1"), N("2")]) ==
+    string r(Nullable!Sql fragment) { return fragment.get.render(dialect); }
+    assert(r(dialect.arrayPredicateOp(sql(i"t.ids"), ArrayPredicate.contains, typeid(int), [N("1"), N("2")])) ==
            "(t.ids @> '{1,2}')");
-    assert(dialect.arrayPredicateOp("t.ids", ArrayPredicate.containedBy, typeid(int), [N("1"), N()]) ==
+    assert(r(dialect.arrayPredicateOp(sql(i"t.ids"), ArrayPredicate.containedBy, typeid(int), [N("1"), N()])) ==
            "(t.ids <@ '{1,NULL}')");
-    assert(dialect.arrayPredicateOp("t.tags", ArrayPredicate.overlaps, typeid(string), [N(`it's`), N(`a"b`)]) ==
-           `(t.tags && '{"it''s","a\"b"}')`);
-    assert(dialect.arrayPredicateOp("t.tags", ArrayPredicate.anyEqualTo, typeid(string), [N(`it's`)]) ==
+    assert(r(dialect.arrayPredicateOp(sql(i"t.tags"), ArrayPredicate.overlaps, typeid(string),
+           [N(`it's`), N(`a"b`)])) == `(t.tags && '{"it''s","a\"b"}')`);
+    assert(r(dialect.arrayPredicateOp(sql(i"t.tags"), ArrayPredicate.anyEqualTo, typeid(string), [N(`it's`)])) ==
            "('it''s' = ANY(t.tags))");
-    assert(dialect.arrayPredicateOp("t.ids", ArrayPredicate.anyNotEqualTo, typeid(int), [N("3")]) ==
+    assert(r(dialect.arrayPredicateOp(sql(i"t.ids"), ArrayPredicate.anyNotEqualTo, typeid(int), [N("3")])) ==
            "(3 <> ANY(t.ids))");
-    assert(dialect.arrayPredicateOp("t.ids", ArrayPredicate.contains, typeid(int), []) == "(t.ids @> '{}')");
+    assert(r(dialect.arrayPredicateOp(sql(i"t.ids"), ArrayPredicate.contains, typeid(int), [])) == "(t.ids @> '{}')");
 }

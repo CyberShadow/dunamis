@@ -8,48 +8,47 @@ import std.json : JSONValue, JSONType;
 import std.string : replace;
 
 import dunamis.relational.sql_dialect;
+import dunamis.relational.sql_fragment : Sql, sql;
 import std.typecons : Nullable;
 
 /// SQLite dialect - uses || for string concatenation (same as PostgreSQL)
 class SQLiteDialect : SqlDialect {
-    override string binaryOp(string op, string leftSql, string rightSql) {
-        auto sqlOp = toSqlOp(op);
-        return "(" ~ leftSql ~ " " ~ sqlOp ~ " " ~ rightSql ~ ")";
+    override Sql binaryOp(string op, Sql left, Sql right) {
+        return sql(i"($(left) $(sqlBinaryOperator(op).get) $(right))");
     }
 
-    override string unaryOp(string op, string operandSql) {
-        if (op == "!") return "(NOT " ~ operandSql ~ ")";
-        return "(" ~ op ~ operandSql ~ ")";
+    override Sql unaryOp(string op, Sql operand) {
+        assert(isSqlUnaryOperator(op), "No SQL operator of " ~ op);
+        return op == "!" ? sql(i"(NOT $(operand))") : sql(i"(-$(operand))");
     }
 
-    override string caseWhen(string conditionSql, string trueSql, string falseSql) {
-        return "(CASE WHEN " ~ conditionSql ~ " THEN " ~ trueSql ~ " ELSE " ~ falseSql ~ " END)";
+    override Sql caseWhen(Sql condition, Sql whenTrue, Sql whenFalse) {
+        return sql(i"(CASE WHEN $(condition) THEN $(whenTrue) ELSE $(whenFalse) END)");
     }
 
-    override string isNullOp(string operandSql) {
-        return "(" ~ operandSql ~ " IS NULL)";
+    override Sql isNullOp(Sql operand) {
+        return sql(i"($(operand) IS NULL)");
     }
 
-    override string existsSubquery(string subquery) {
-        return "EXISTS (" ~ subquery ~ ")";
+    override Sql existsSubquery(Sql subquery) {
+        return sql(i"EXISTS ($(subquery))");
     }
 
-    override string notExistsSubquery(string subquery) {
-        return "NOT EXISTS (" ~ subquery ~ ")";
+    override Sql notExistsSubquery(Sql subquery) {
+        return sql(i"NOT EXISTS ($(subquery))");
     }
 
-    override string membershipOp(string operandSql, TypeInfo valueType, string[] values) {
-        import dunamis.relational.sql_dialect : inListSql;
-        return inListSql(operandSql, valueType, values);
+    override Sql membershipOp(Sql operand, TypeInfo valueType, string[] values) {
+        return inListSql(operand, valueType, values);
     }
 
-    override string likeOp(string operandSql, string pattern, bool caseInsensitive) {
+    override Sql likeOp(Sql operand, string pattern, bool caseInsensitive) {
         if (caseInsensitive) {
             // Use LOWER() for consistent case-insensitive behavior
-            return "(LOWER(" ~ operandSql ~ ") LIKE LOWER('" ~ pattern ~ `') ESCAPE '\')`;
+            return sql(i`(LOWER($(operand)) LIKE LOWER($(pattern)) ESCAPE '\')`);
         }
         // SQLite's LIKE is case-insensitive for ASCII; GLOB is case-sensitive.
-        return "(" ~ operandSql ~ " GLOB '" ~ likeToGlob(pattern) ~ "')";
+        return sql(i"($(operand) GLOB $(likeToGlob(pattern)))");
     }
 
     /// Translate a backslash-escaped LIKE pattern to an equivalent GLOB pattern.
@@ -125,9 +124,9 @@ class SQLiteDialect : SqlDialect {
     override string emptyJsonArray() { return "json('[]')"; }
 
     override string castToText(string sql) { return "CAST(" ~ sql ~ " AS TEXT)"; }
-    override string arrayPredicateOp(string operandSql, ArrayPredicate predicate, TypeInfo valueType,
+    override Nullable!Sql arrayPredicateOp(Sql operand, ArrayPredicate predicate, TypeInfo valueType,
             Nullable!string[] values) {
-        return null;  // (No arrays)
+        return Nullable!Sql.init;  // (No arrays)
     }
     override string orderByTerm(string sql, bool descending) {
         // (Ordered by itself, NULL would be the least value)
@@ -142,18 +141,6 @@ class SQLiteDialect : SqlDialect {
         }
         return format("COALESCE((SELECT json_group_array(json(row_json)) FROM layer%d), %s)",
             layerId, emptyJsonArray());
-    }
-
-    private static string toSqlOp(string op) {
-        switch (op) {
-            case "~": return "||";   // String concatenation
-            case "==": return "=";   // Equality
-            case "!=": return "<>";  // Inequality
-            case "&&": return "AND"; // Logical and
-            case "||": return "OR";  // Logical or
-            case "%": return "%";    // Modulo
-            default: return op;
-        }
     }
 }
 
@@ -175,34 +162,43 @@ SqlDialect sqliteDialect() {
 unittest {
     auto dialect = sqliteDialect();
 
+    string r(Sql fragment) { return fragment.render(dialect); }
+    auto a = sql(i"a"), b = sql(i"b");
+
     // String concatenation uses ||
-    assert(dialect.binaryOp("~", "'a'", "'b'") == "('a' || 'b')");
+    assert(r(dialect.binaryOp("~", sql(i"$("a")"), sql(i"$("b")"))) == "('a' || 'b')");
 
     // Arithmetic operators
-    assert(dialect.binaryOp("+", "1", "2") == "(1 + 2)");
+    assert(r(dialect.binaryOp("+", sql(i"$(1)"), sql(i"$(2)"))) == "(1 + 2)");
 
     // Comparison operators
-    assert(dialect.binaryOp("==", "a", "b") == "(a = b)");
-    assert(dialect.binaryOp("!=", "a", "b") == "(a <> b)");
+    assert(r(dialect.binaryOp("==", a, b)) == "(a = b)");
+    assert(r(dialect.binaryOp("!=", a, b)) == "(a <> b)");
 
     // Logical operators
-    assert(dialect.binaryOp("&&", "a", "b") == "(a AND b)");
-    assert(dialect.binaryOp("||", "a", "b") == "(a OR b)");
+    assert(r(dialect.binaryOp("&&", a, b)) == "(a AND b)");
+    assert(r(dialect.binaryOp("||", a, b)) == "(a OR b)");
 
     // Unary operators
-    assert(dialect.unaryOp("!", "a") == "(NOT a)");
-    assert(dialect.unaryOp("-", "5") == "(-5)");
+    assert(r(dialect.unaryOp("!", a)) == "(NOT a)");
+    assert(r(dialect.unaryOp("-", sql(i"$(5)"))) == "(-5)");
 
     // Case when
-    assert(dialect.caseWhen("a > 0", "'positive'", "'negative'") ==
+    assert(r(dialect.caseWhen(sql(i"a > 0"), sql(i"$("positive")"), sql(i"$("negative")"))) ==
            "(CASE WHEN a > 0 THEN 'positive' ELSE 'negative' END)");
 
     // IS NULL
-    assert(dialect.isNullOp("a") == "(a IS NULL)");
+    assert(r(dialect.isNullOp(a)) == "(a IS NULL)");
 
     // EXISTS / NOT EXISTS
-    assert(dialect.existsSubquery("SELECT 1 FROM posts WHERE author_id = users.id") ==
-           "EXISTS (SELECT 1 FROM posts WHERE author_id = users.id)");
-    assert(dialect.notExistsSubquery("SELECT 1 FROM posts WHERE author_id = users.id") ==
-           "NOT EXISTS (SELECT 1 FROM posts WHERE author_id = users.id)");
+    auto subquery = sql(i"SELECT 1 FROM posts WHERE author_id = users.id");
+    assert(r(dialect.existsSubquery(subquery)) == "EXISTS (SELECT 1 FROM posts WHERE author_id = users.id)");
+    assert(r(dialect.notExistsSubquery(subquery)) == "NOT EXISTS (SELECT 1 FROM posts WHERE author_id = users.id)");
+
+    // Membership: an IN list
+    assert(r(dialect.membershipOp(sql(i"t.name"), typeid(string), [`it's`, `c\d`])) == `(t.name IN ('it''s', 'c\d'))`);
+
+    // LIKE: case-sensitive matching as GLOB
+    assert(r(dialect.likeOp(a, `it's 50\%*%`, false)) == `(a GLOB 'it''s 50%[*]*')`);
+    assert(r(dialect.likeOp(a, `x\_%`, true)) == `(LOWER(a) LIKE LOWER('x\_%') ESCAPE '\')`);
 }

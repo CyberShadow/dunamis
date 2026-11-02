@@ -9,7 +9,8 @@ import ae.utils.promise.await : awaitSync;
 
 import dunamis.core;
 import dunamis.relational;
-import dunamis.relational.sql_dialect : SqlDialect;
+import dunamis.relational.sql_dialect : SqlDialect, inListSql, sqlBinaryOperator;
+import dunamis.relational.sql_fragment : Sql, sql;
 
 // ============================================================================
 // Data Source Configuration
@@ -17,44 +18,31 @@ import dunamis.relational.sql_dialect : SqlDialect;
 
 /// Simple test dialect for examples - uses PostgreSQL-compatible SQL
 private class TestDialect : SqlDialect {
-    override string binaryOp(string op, string leftSql, string rightSql) {
-        string sqlOp = op;
-        switch (op) {
-            case "~": sqlOp = "||"; break;   // String concatenation
-            case "==": sqlOp = "="; break;   // Equality
-            case "!=": sqlOp = "<>"; break;  // Inequality
-            case "&&": sqlOp = "AND"; break; // Logical and
-            case "||": sqlOp = "OR"; break;  // Logical or
-            default: break;
-        }
-        return "(" ~ leftSql ~ " " ~ sqlOp ~ " " ~ rightSql ~ ")";
+    override Sql binaryOp(string op, Sql left, Sql right) {
+        return sql(i"($(left) $(sqlBinaryOperator(op).get) $(right))");
     }
-    override string unaryOp(string op, string operandSql) {
-        if (op == "!") return "(NOT " ~ operandSql ~ ")";
-        return "(" ~ op ~ operandSql ~ ")";
+    override Sql unaryOp(string op, Sql operand) {
+        return op == "!" ? sql(i"(NOT $(operand))") : sql(i"(-$(operand))");
     }
-    override string caseWhen(string conditionSql, string trueSql, string falseSql) {
-        return "(CASE WHEN " ~ conditionSql ~ " THEN " ~ trueSql ~ " ELSE " ~ falseSql ~ " END)";
+    override Sql caseWhen(Sql condition, Sql whenTrue, Sql whenFalse) {
+        return sql(i"(CASE WHEN $(condition) THEN $(whenTrue) ELSE $(whenFalse) END)");
     }
-    override string isNullOp(string operandSql) {
-        return "(" ~ operandSql ~ " IS NULL)";
+    override Sql isNullOp(Sql operand) {
+        return sql(i"($(operand) IS NULL)");
     }
-    override string existsSubquery(string subquery) {
-        return "EXISTS (" ~ subquery ~ ")";
+    override Sql existsSubquery(Sql subquery) {
+        return sql(i"EXISTS ($(subquery))");
     }
-    override string notExistsSubquery(string subquery) {
-        return "NOT EXISTS (" ~ subquery ~ ")";
+    override Sql notExistsSubquery(Sql subquery) {
+        return sql(i"NOT EXISTS ($(subquery))");
     }
-    override string membershipOp(string operandSql, TypeInfo valueType, string[] values) {
-        import dunamis.relational.sql_dialect : inListSql;
-        return inListSql(operandSql, valueType, values);
+    override Sql membershipOp(Sql operand, TypeInfo valueType, string[] values) {
+        return inListSql(operand, valueType, values);
     }
-
-    override string likeOp(string operandSql, string pattern, bool caseInsensitive) {
-        if (caseInsensitive) {
-            return "(LOWER(" ~ operandSql ~ ") LIKE LOWER('" ~ pattern ~ `') ESCAPE '\')`;
-        }
-        return "(" ~ operandSql ~ " LIKE '" ~ pattern ~ `' ESCAPE '\')`;
+    override Sql likeOp(Sql operand, string pattern, bool caseInsensitive) {
+        if (caseInsensitive)
+            return sql(i`(LOWER($(operand)) LIKE LOWER($(pattern)) ESCAPE '\')`);
+        return sql(i`($(operand) LIKE $(pattern) ESCAPE '\')`);
     }
     override string name() { return "Test"; }
 
@@ -88,9 +76,9 @@ private class TestDialect : SqlDialect {
     override string rowJsonFunc() { return ""; }
     override string emptyJsonArray() { return "'[]'::json"; }
     override string castToText(string sql) { return sql ~ "::text"; }
-    override string arrayPredicateOp(string operandSql, ArrayPredicate predicate, TypeInfo valueType,
-            imported!"std.typecons".Nullable!string[] values) {
-        return null;  // (No arrays)
+    override imported!"std.typecons".Nullable!Sql arrayPredicateOp(Sql operand, ArrayPredicate predicate,
+            TypeInfo valueType, imported!"std.typecons".Nullable!string[] values) {
+        return typeof(return).init;  // (No arrays)
     }
     override string orderByTerm(string sql, bool descending) { return sql ~ (descending ? " DESC" : ""); }
     override string aggregateLayerJson(int layerId, string orderByClause) {
@@ -1476,7 +1464,7 @@ unittest {
 
     auto filtered = filterBy!((Expr!User u) => some!((Expr!Post p) => p.title.ne(""))(u.posts))(getAll!User());
     auto where = extractFilterWhereClause(cast(FilterByInfo) filtered, "users", testDialect());
-    assert(where.complete && where.sql.get()(testDialect()) == condition, where.sql.get()(testDialect()));
+    assert(where.complete && where.sql.get.render(testDialect()) == condition, where.sql.get.render(testDialect()));
 }
 
 // Test every() - all items must match
