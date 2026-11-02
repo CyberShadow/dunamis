@@ -2,7 +2,7 @@ module dunamis.sqlite.fetcher;
 
 import dunamis.relational.native : SqlDataSource;
 import dunamis.relational.sql_dialect : SqlDialect;
-import dunamis.relational.sql_fragment : Sql, SqlName, sql;
+import dunamis.relational.sql_fragment : Sql, SqlName, SqlValue, sql;
 import std.algorithm;
 import std.array;
 import std.conv;
@@ -54,7 +54,7 @@ class SQLiteSession : RelationalSession {
 
     /// Execute raw SQL for session setup.
     override Promise!void execute(Sql statement) {
-        _db.exec(statement.render(sqliteDialect()));
+        _db.exec(statement.renderInline(sqliteDialect()));
         return resolve();
     }
 
@@ -78,10 +78,10 @@ class SQLiteSession : RelationalSession {
 
         // Generate the full CTE query (of the root rows' keys, if it
         // selects them by their keys)
-        Sql ids;
+        SqlValue[] ids;
         if (root.filter == FilterType.byId || root.filter == FilterType.byIds)
-            ids = idList(root.refs.map!(r => r.localId).array);
-        auto sql = toSQL(allNodes, sqliteDialect(), root.filter, ids).render(sqliteDialect());
+            ids = root.refs.map!(r => SqlValue.of(singleKeyValue(r.localId))).array;
+        auto sql = toSQL(allNodes, sqliteDialect(), root.filter, ids).renderInline(sqliteDialect());
 
         _cachedSQL = sql;
 
@@ -135,7 +135,7 @@ class SQLiteSession : RelationalSession {
 
         if (pkColumns.length == 1) {
             auto pk = SqlName(pkColumns[0]);
-            return sql(i"SELECT $(pk), $(value) FROM $(from) WHERE $(pk) IN ($(idList(validIds)))").render(sqliteDialect());
+            return sql(i"SELECT $(pk), $(value) FROM $(from) WHERE $(pk) IN ($(idList(validIds)))").renderInline(sqliteDialect());
         } else {
             // Composite PK: build OR conditions
             Sql[] conditions;
@@ -147,7 +147,7 @@ class SQLiteSession : RelationalSession {
                 conditions ~= sql(i"($(Sql.join!" AND "(eqs)))");
             }
             auto where = Sql.join!" OR "(conditions);
-            return sql(i"SELECT $(columnList(pkColumns)), $(value) FROM $(from) WHERE $(where)").render(sqliteDialect());
+            return sql(i"SELECT $(columnList(pkColumns)), $(value) FROM $(from) WHERE $(where)").renderInline(sqliteDialect());
         }
     }
 
@@ -253,7 +253,7 @@ class SQLiteSession : RelationalSession {
             query = sql(i"$(query) ORDER BY $(columnList(orderBy))");
         string[] result;
 
-        foreach (cells, columns; _db.query(query.render(sqliteDialect()))) {
+        foreach (cells, columns; _db.query(query.renderInline(sqliteDialect()))) {
             if (cells.length >= 1 && cells[0] !is null)
                 result ~= buildKeyFromCells(cells, pkColumns.length);
         }
@@ -292,7 +292,7 @@ class SQLiteSession : RelationalSession {
                 query = sql(i"$(query) ORDER BY $(columnList(orderBy))");
 
             // Group children by parent FK
-            foreach (cells, columns; _db.query(query.render(sqliteDialect()))) {
+            foreach (cells, columns; _db.query(query.renderInline(sqliteDialect()))) {
                 auto pkCount = childPkColumns.length;
                 if (cells.length > pkCount) {
                     auto childId = buildKeyFromCells(cells, pkCount);
@@ -440,7 +440,7 @@ class SQLiteSession : RelationalSession {
     /// Execute INSERT and return the new row.
     /// SQLite is synchronous, so we return an immediately resolved promise.
     override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns, bool isAutoIncrement) {
-        auto insertSql = generateInsertSQL(table, input).render(sqliteDialect());
+        auto insertSql = generateInsertSQL(table, input).renderInline(sqliteDialect());
         _cachedSQL = insertSql;
 
         // Execute INSERT
@@ -449,7 +449,7 @@ class SQLiteSession : RelationalSession {
         // Fetch the inserted row — use last_insert_rowid() for auto-increment,
         // otherwise use PK values from input
         auto selectSql = (isAutoIncrement ? generateSelectLastInsertSQL(table)
-            : generateSelectByPkSQL(table, pkColumns, input)).render(sqliteDialect());
+            : generateSelectByPkSQL(table, pkColumns, input)).renderInline(sqliteDialect());
         auto result = new QueryResult();
 
         foreach (cells, columns; _db.query(selectSql)) {
@@ -463,14 +463,14 @@ class SQLiteSession : RelationalSession {
 
     /// Execute UPDATE and return updated rows.
     override Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input, string[] pkColumns) {
-        auto updateSql = generateUpdateSQL(table, input, pkColumns).render(sqliteDialect());
+        auto updateSql = generateUpdateSQL(table, input, pkColumns).renderInline(sqliteDialect());
         _cachedSQL = updateSql;
 
         // Execute UPDATE
         _db.exec(updateSql);
 
         // Fetch the updated rows
-        auto selectSql = generateSelectUpdatedSQL(table, input.ids, pkColumns).render(sqliteDialect());
+        auto selectSql = generateSelectUpdatedSQL(table, input.ids, pkColumns).renderInline(sqliteDialect());
         auto result = new QueryResult();
 
         JSONValue[] rows;
@@ -487,7 +487,7 @@ class SQLiteSession : RelationalSession {
 
     /// Execute DELETE and return count of deleted rows.
     override Promise!int executeDelete(string table, string[] ids, string[] pkColumns) {
-        auto deleteSql = generateDeleteSQL(table, ids, pkColumns).render(sqliteDialect());
+        auto deleteSql = generateDeleteSQL(table, ids, pkColumns).renderInline(sqliteDialect());
         _cachedSQL = deleteSql;
 
         // Execute DELETE

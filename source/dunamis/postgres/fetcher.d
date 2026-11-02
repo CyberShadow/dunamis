@@ -2,7 +2,7 @@ module dunamis.postgres.fetcher;
 
 import dunamis.relational.native : SqlDataSource;
 import dunamis.relational.sql_dialect : SqlDialect, qualifiedColumn;
-import dunamis.relational.sql_fragment : Sql, SqlName, sql;
+import dunamis.relational.sql_fragment : Sql, SqlName, SqlValue, sql;
 import std.algorithm;
 import std.array;
 import std.conv;
@@ -22,7 +22,7 @@ import dunamis.relational.eval_context;
 import dunamis.relational.keys : keyOf, keyOfTexts, keyValues, singleKeyValue;
 import dunamis.relational.query_node;
 import dunamis.relational.sql_optimizer;
-import dunamis.postgres.dialect : postgresDialect;
+import dunamis.postgres.dialect : postgresDialect, postgresParameter;
 import dunamis.relational.sql : relationsOf, toSQL;
 import dunamis.core.json_text : parseJsonText;
 
@@ -59,7 +59,7 @@ class PostgresSession : RelationalSession {
     private Sql delegate(string name) _relationResolver;
 
     /// Add transaction-local initialization SQL for this request (for
-    /// example SET LOCAL application context values).
+    /// example of application context values).
     void addSetupStatement(Sql statement) {
         assert(_base is null, "addSetupStatement: a derived session has no setup of its own");
         _setupStatements ~= statement;
@@ -75,7 +75,7 @@ class PostgresSession : RelationalSession {
         _setupActions ~= action;
     }
 
-    /// Set the configuration parameter `name` (as `SET LOCAL`) for the
+    /// Set the configuration parameter `name` (as `SET LOCAL` does) for the
     /// request, to `value` (an empty value reads as unset with
     /// `NULLIF(current_setting(name, true), '')`). Sessions derived with
     /// `withSettings` restore the request's values of the parameters they
@@ -84,7 +84,8 @@ class PostgresSession : RelationalSession {
     void setSetting(string name, string value) {
         assert(_base is null, "setSetting: a derived session has no setup of its own");
         _settings[settingName(name)] = value;
-        addSetupStatement(sql(i"SET LOCAL $(SqlName(name)) = $(value)"));
+        // (SET LOCAL, which takes no parameters)
+        addSetupStatement(sql(i"SELECT set_config($(name), $(value), true)"));
     }
 
     /// A session of the same request whose statements see the configuration
@@ -124,8 +125,8 @@ class PostgresSession : RelationalSession {
             restore ~= sql(i"set_config($(name), $(base._settings.get(name, "")), true)");
         }
         if (names.length) {
-            derived._applySettings = sql(i"SELECT $(Sql.join!", "(apply))").render(postgresDialect());
-            derived._restoreSettings = sql(i"SELECT $(Sql.join!", "(restore))").render(postgresDialect());
+            derived._applySettings = sql(i"SELECT $(Sql.join!", "(apply))").renderInline(postgresDialect());
+            derived._restoreSettings = sql(i"SELECT $(Sql.join!", "(restore))").renderInline(postgresDialect());
         }
         return derived;
     }
@@ -228,24 +229,19 @@ class PostgresSession : RelationalSession {
     /// setRelationResolver), and collect its rows. A derived session sends
     /// it between the statements applying its settings and restoring the
     /// request's (see withSettings).
+    /// The statement's values are its parameters (see `Sql.render`), sent
+    /// with the Extended Query protocol; a statement without any is sent as
+    /// a simple query.
     private Promise!(PgSqlConnection.Row[]) run(Sql statement, const(string)[] relations = null) {
         auto conn = connection();
-        auto sql = bound(statement, relations).render(postgresDialect());
-        observe(sql);
+        auto rendered = bound(statement, relations).render(postgresDialect());
+        observe(rendered.text);
+        auto result = rendered.params.length
+            ? conn.extendedQueryWithParams(rendered.text, rendered.params.map!postgresParameter.array)
+            : conn.query(rendered.text);
         if (_base is null || !_applySettings.length)
-            return conn.query(sql).array();
-        return bracketed(conn, conn.query(sql));
-    }
-
-    /// ditto, with the Extended Query protocol and parameters
-    private Promise!(PgSqlConnection.Row[]) runExtended(Args...)(Sql statement, const(string)[] relations,
-            Args args) {
-        auto conn = connection();
-        auto sql = bound(statement, relations).render(postgresDialect());
-        observe(sql);
-        if (_base is null || !_applySettings.length)
-            return conn.extendedQuery(sql, args).array();
-        return bracketed(conn, conn.extendedQuery(sql, args));
+            return result.array();
+        return bracketed(conn, result);
     }
 
     private Promise!(PgSqlConnection.Row[]) bracketed(PgSqlConnection conn, PgSqlConnection.Result statement) {
@@ -471,14 +467,13 @@ class PostgresSession : RelationalSession {
         // Root node: generate CTE for entire tree (including all children)
         auto allNodes = node.allNodesInTree();
 
-        // Generate the full CTE query for entire node tree
-        // (The root rows' keys are the query's parameter, but for a
-        // composite key, see PostgresDialect.rootIdFilter)
-        Sql ids;
+        // Generate the full CTE query for entire node tree (of the root
+        // rows' keys, if it selects them by their keys)
+        SqlValue[] ids;
         if (root.filter == FilterType.byId || root.filter == FilterType.byIds)
-            ids = Sql.join!","(root.refs.map!(r => sql(i"$(singleKeyValue(r.localId))")).array);
+            ids = root.refs.map!(r => SqlValue.of(singleKeyValue(r.localId))).array;
         auto query = toSQL(allNodes, postgresDialect(), root.filter, ids);
-        auto sql = query.render(postgresDialect());
+        auto sql = query.renderInline(postgresDialect());
         _cachedSQL = sql;
         debug(sql) {
             import std.stdio : writefln, writeln;
@@ -493,22 +488,7 @@ class PostgresSession : RelationalSession {
             writeln(sql);
         }
 
-        // Build parameter value for root filter
-        // PostgreSQL Extended Query uses $1, $2, etc. for parameters
-        // We need to pass the IDs as a PostgreSQL array
-        string[] idValues;
-        if (root.filter == FilterType.byId || root.filter == FilterType.byIds) {
-            idValues = root.refs.map!(r => singleKeyValue(r.localId)).array;
-        }
-
-        auto relations = relationsOf(allNodes);
-        if (idValues.length > 0) {
-            // PostgreSQL array as string: {1,2,3}
-            return runExtended(query, relations, arrayLiteral(idValues))
-                .then((PgSqlConnection.Row[] rows) => parseQueryResult(rows, allNodes));
-        }
-
-        return runExtended(query, relations)
+        return run(query, relationsOf(allNodes))
             .then((PgSqlConnection.Row[] rows) => parseQueryResult(rows, allNodes));
     }
 
@@ -545,16 +525,10 @@ class PostgresSession : RelationalSession {
         return ids;
     }
 
-    /// The values of the single-column keys `ids` as a list of SQL string
-    /// literals (which compare with columns of any key type).
-    private static Sql sqlLiterals(string[] ids) {
-        return Sql.join!","(ids.map!(id => sql(i"$(singleKeyValue(id))")).array);
-    }
-
-    /// The keys `ids` as a PostgreSQL array literal (of quoted elements).
-    private static string arrayLiteral(string[] ids) {
-        import std.array : replace;
-        return "{" ~ ids.map!(id => `"` ~ id.replace(`\`, `\\`).replace(`"`, `\"`) ~ `"`).join(",") ~ "}";
+    /// The values of the single-column keys `ids`, as one array (of
+    /// strings, which PostgreSQL reads as the key column's type).
+    private static SqlValue keyArray(string[] ids) {
+        return SqlValue.array(ids.map!(id => SqlValue.of(singleKeyValue(id))).array);
     }
 
     /// Generate SQL to fetch a column value (`column`, of the table's
@@ -564,7 +538,7 @@ class PostgresSession : RelationalSession {
 
         if (pkColumns.length == 1) {
             auto pk = SqlName(pkColumns[0]);
-            return sql(i"SELECT $(pk), $(column) FROM $(SqlName(table)) WHERE $(pk) IN ($(sqlLiterals(validIds)))");
+            return sql(i"SELECT $(pk), $(column) FROM $(SqlName(table)) WHERE $(pk) = ANY($(keyArray(validIds)))");
         } else {
             Sql[] conditions;
             foreach (id; validIds) {
@@ -692,7 +666,7 @@ class PostgresSession : RelationalSession {
         auto childPkCount = childPkColumns.length;
         auto fkColumn = SqlName(fk);
         auto children = sql(i"SELECT $(columnList(childPkColumns)), $(fkColumn) FROM $(SqlName(childTable))");
-        auto query = sql(i"$(children) WHERE $(fkColumn) IN ($(sqlLiterals(validIds)))");
+        auto query = sql(i"$(children) WHERE $(fkColumn) = ANY($(keyArray(validIds)))");
         if (orderBy.length)
             query = sql(i"$(query) ORDER BY $(columnList(orderBy))");
 
@@ -827,7 +801,7 @@ class PostgresSession : RelationalSession {
     /// Values are embedded directly in the SQL (properly escaped).
     override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns, bool isAutoIncrement) {
         auto statement = generateInsertSQL(table, input);
-        _cachedSQL = statement.render(postgresDialect());
+        _cachedSQL = statement.renderInline(postgresDialect());
 
         // No parameters needed - values are embedded in SQL
         return run(statement).then((PgSqlConnection.Row[] rows) {
@@ -839,7 +813,7 @@ class PostgresSession : RelationalSession {
     /// Values are embedded directly in the SQL (properly escaped).
     override Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input, string[] pkColumns) {
         auto statement = generateUpdateSQL(table, input, pkColumns);
-        _cachedSQL = statement.render(postgresDialect());
+        _cachedSQL = statement.renderInline(postgresDialect());
 
         // No parameters needed - values are embedded in SQL
         return run(statement).then((PgSqlConnection.Row[] rows) {
@@ -851,7 +825,7 @@ class PostgresSession : RelationalSession {
     /// IDs are embedded directly in the SQL.
     override Promise!int executeDelete(string table, string[] ids, string[] pkColumns) {
         auto statement = generateDeleteSQL(table, ids, pkColumns);
-        _cachedSQL = statement.render(postgresDialect());
+        _cachedSQL = statement.renderInline(postgresDialect());
 
         // No parameters needed - IDs are embedded in SQL
         return run(statement).then((PgSqlConnection.Row[] rows) {

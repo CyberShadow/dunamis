@@ -229,7 +229,7 @@ unittest {
     auto day = constant("2020-01-01", singleton(0));
     auto contains = cast(NativeSqlInfo) rangeContainsElement(day, day, "date", constant(true, singleton(0)));
     assert(contains.hasNativeSql(postgresDialect()));
-    assert(contains.nativeSql(postgresDialect(), [sql(i"t.validity"), sql(i"$("2020-01-01")")]).render(postgresDialect()) ==
+    assert(contains.nativeSql(postgresDialect(), [sql(i"t.validity"), sql(i"$("2020-01-01")")]).renderInline(postgresDialect()) ==
         "(t.validity @> '2020-01-01'::date)");
     assert(!contains.hasNativeSql(null));
     bool threw;
@@ -238,6 +238,6 @@ unittest {
     assert(threw);
 
     auto end = cast(NativeSqlInfo) rangeUpperBound(day, "text", constant(Nullable!string.init, singleton(0)));
-    assert(end.nativeSql(postgresDialect(), [sql(i"t.validity")]).render(postgresDialect()) == "upper(t.validity)::text");
+    assert(end.nativeSql(postgresDialect(), [sql(i"t.validity")]).renderInline(postgresDialect()) == "upper(t.validity)::text");
     assert(cast(Expr!(Nullable!string)) end !is null);
 }

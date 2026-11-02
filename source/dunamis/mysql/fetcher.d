@@ -2,7 +2,7 @@ module dunamis.mysql.fetcher;
 
 import dunamis.relational.native : SqlDataSource;
 import dunamis.relational.sql_dialect : SqlDialect;
-import dunamis.relational.sql_fragment : Sql, SqlName, sql;
+import dunamis.relational.sql_fragment : Sql, SqlName, SqlValue, sql;
 import std.algorithm;
 import std.array;
 import std.conv;
@@ -60,7 +60,7 @@ class MySQLSession : RelationalSession {
 
     /// Execute raw SQL for session setup.
     override Promise!void execute(Sql statement) {
-        return _conn.query(statement.render(mysqlDialect())).array().then((MySqlConnection.Row[] _) { });
+        return _conn.query(statement.renderInline(mysqlDialect())).array().then((MySqlConnection.Row[] _) { });
     }
 
     /// Get the generated SQL (for debugging)
@@ -84,10 +84,10 @@ class MySQLSession : RelationalSession {
 
         // Generate the full CTE query for entire node tree (of the root
         // rows' keys, if it selects them by their keys)
-        Sql ids;
+        SqlValue[] ids;
         if (root.filter == FilterType.byId || root.filter == FilterType.byIds)
-            ids = idList(root.refs.map!(r => r.localId).array);
-        auto sql = toSQL(allNodes, mysqlDialect(), root.filter, ids).render(mysqlDialect());
+            ids = root.refs.map!(r => SqlValue.of(singleKeyValue(r.localId))).array;
+        auto sql = toSQL(allNodes, mysqlDialect(), root.filter, ids).renderInline(mysqlDialect());
 
         _cachedSQL = sql;
 
@@ -139,7 +139,7 @@ class MySQLSession : RelationalSession {
 
         if (pkColumns.length == 1) {
             auto pk = SqlName(pkColumns[0]);
-            return sql(i"SELECT $(pk), $(value) FROM $(from) WHERE $(pk) IN ($(idList(validIds)))").render(mysqlDialect());
+            return sql(i"SELECT $(pk), $(value) FROM $(from) WHERE $(pk) IN ($(idList(validIds)))").renderInline(mysqlDialect());
         } else {
             Sql[] conditions;
             foreach (id; validIds) {
@@ -150,7 +150,7 @@ class MySQLSession : RelationalSession {
                 conditions ~= sql(i"($(Sql.join!" AND "(eqs)))");
             }
             auto where = Sql.join!" OR "(conditions);
-            return sql(i"SELECT $(columnList(pkColumns)), $(value) FROM $(from) WHERE $(where)").render(mysqlDialect());
+            return sql(i"SELECT $(columnList(pkColumns)), $(value) FROM $(from) WHERE $(where)").renderInline(mysqlDialect());
         }
     }
 
@@ -249,7 +249,7 @@ class MySQLSession : RelationalSession {
             query = sql(i"$(query) ORDER BY $(columnList(orderBy))");
 
         auto numPkCols = pkColumns.length;
-        return _conn.query(query.render(mysqlDialect())).array().then((MySqlConnection.Row[] rows) {
+        return _conn.query(query.renderInline(mysqlDialect())).array().then((MySqlConnection.Row[] rows) {
             return rows.map!(r => buildKeyFromRow(r, numPkCols)).array;
         });
     }
@@ -287,7 +287,7 @@ class MySQLSession : RelationalSession {
         if (orderBy.length)
             query = sql(i"$(query) ORDER BY $(columnList(orderBy))");
 
-        return _conn.query(query.render(mysqlDialect())).array().then((MySqlConnection.Row[] rows) {
+        return _conn.query(query.renderInline(mysqlDialect())).array().then((MySqlConnection.Row[] rows) {
             // Group children by parent
             AnyRef[][string] childrenByParent;
             foreach (row; rows) {
@@ -419,7 +419,7 @@ class MySQLSession : RelationalSession {
     /// Execute INSERT and return the new row.
     /// MySQL doesn't have RETURNING, so we use LAST_INSERT_ID() or PK values.
     override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns, bool isAutoIncrement) {
-        auto insertSql = generateInsertSQL(table, input).render(mysqlDialect());
+        auto insertSql = generateInsertSQL(table, input).renderInline(mysqlDialect());
         _cachedSQL = insertSql;
 
         auto columns = input.columns;  // Capture for closure
@@ -428,7 +428,7 @@ class MySQLSession : RelationalSession {
         return _conn.query(insertSql).array().then((MySqlConnection.Row[] _) {
             // Use LAST_INSERT_ID() for auto-increment, otherwise use PK values from input
             auto selectSql = (isAutoIncrement ? generateSelectLastInsertSQL(table, columns)
-                : generateSelectByPkSQL(table, pkColumns, columns, input)).render(mysqlDialect());
+                : generateSelectByPkSQL(table, pkColumns, columns, input)).renderInline(mysqlDialect());
             return _conn.query(selectSql).array();
         }).then((MySqlConnection.Row[] rows) {
             return parseJsonResult(rows, typeName, pkColumns);
@@ -437,7 +437,7 @@ class MySQLSession : RelationalSession {
 
     /// Execute UPDATE and return updated rows.
     override Promise!QueryResult executeUpdate(string table, string typeName, UpdateInput input, string[] pkColumns) {
-        auto updateSql = generateUpdateSQL(table, input, pkColumns).render(mysqlDialect());
+        auto updateSql = generateUpdateSQL(table, input, pkColumns).renderInline(mysqlDialect());
         auto columns = input.columns;  // Capture for closure
         auto ids = input.ids;  // Capture for closure
 
@@ -451,7 +451,7 @@ class MySQLSession : RelationalSession {
         // Execute UPDATE and fetch the updated rows as JSON
         return _conn.query(updateSql).array().then((MySqlConnection.Row[] _) {
             // Fetch the updated rows
-            auto selectSql = generateSelectUpdatedSQL(table, ids, columns, pkColumns).render(mysqlDialect());
+            auto selectSql = generateSelectUpdatedSQL(table, ids, columns, pkColumns).renderInline(mysqlDialect());
             return _conn.query(selectSql).array();
         }).then((MySqlConnection.Row[] rows) {
             return parseJsonResult(rows, typeName, pkColumns);
@@ -460,7 +460,7 @@ class MySQLSession : RelationalSession {
 
     /// Execute DELETE and return count of deleted rows.
     override Promise!int executeDelete(string table, string[] ids, string[] pkColumns) {
-        auto deleteSql = generateDeleteSQL(table, ids, pkColumns).render(mysqlDialect());
+        auto deleteSql = generateDeleteSQL(table, ids, pkColumns).renderInline(mysqlDialect());
         _cachedSQL = deleteSql;
 
         // Execute DELETE

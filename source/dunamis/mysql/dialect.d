@@ -8,7 +8,7 @@ import std.json : JSONValue, JSONType;
 import std.string : replace;
 
 import dunamis.relational.sql_dialect;
-import dunamis.relational.sql_fragment : Sql, sql;
+import dunamis.relational.sql_fragment : Sql, SqlValue, sql;
 import std.typecons : Nullable;
 
 /// MySQL dialect - uses CONCAT() for string concatenation
@@ -67,6 +67,10 @@ class MySQLDialect : SqlDialect {
         return "`" ~ name.replace("`", "``") ~ "`";
     }
 
+    override string parameter(size_t number, ref const SqlValue value) {
+        return "?";
+    }
+
     override string escapeSqlString(string s) {
         return "'" ~ s.replace("\\", "\\\\").replace("'", "''") ~ "'";
     }
@@ -95,11 +99,11 @@ class MySQLDialect : SqlDialect {
         }
     }
 
-    override Sql rootIdFilter(string table, string[] pkColumns, Sql ids) {
+    override Sql rootIdFilter(string table, string[] pkColumns, const(SqlValue)[] ids) {
         if (pkColumns.length == 1)
-            return sql(i"$(qualifiedColumn(table, pkColumns[0])) IN ($(ids))");
+            return sql(i"$(qualifiedColumn(table, pkColumns[0])) IN ($(valueList(ids)))");
         auto columns = Sql.join!", "(pkColumns.map!(c => qualifiedColumn(table, c)).array);
-        return sql(i"($(columns)) IN ($(ids))");
+        return sql(i"($(columns)) IN ($(valueList(ids)))");
     }
 
     override Sql jsonObjectFunc() { return sql(i"JSON_OBJECT"); }
@@ -144,7 +148,7 @@ SqlDialect mysqlDialect() {
 unittest {
     auto dialect = mysqlDialect();
 
-    string r(Sql fragment) { return fragment.render(dialect); }
+    string r(Sql fragment) { return fragment.renderInline(dialect); }
     auto a = sql(i"a"), b = sql(i"b");
 
     // String concatenation uses CONCAT()

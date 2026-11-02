@@ -8,7 +8,7 @@ import std.json;
 
 import dunamis.relational.mutation : InsertInput, UpdateInput;
 import dunamis.mysql.dialect : mysqlDialect;
-import dunamis.relational.sql_fragment : Sql, SqlName, sql;
+import dunamis.relational.sql_fragment : Literal, Sql, SqlName, sql;
 
 // ============================================================================
 // Mutation SQL Generation
@@ -28,7 +28,7 @@ private Sql jsonObjectArgs(string[] columns) {
         if (col in seen)
             continue;
         seen[col] = true;
-        args ~= sql(i"$(col), $(SqlName(col))");
+        args ~= sql(i"$(Literal(col)), $(SqlName(col))");
     }
     return Sql.join!", "(args);
 }
@@ -56,7 +56,7 @@ Sql generateSelectLastInsertSQL(string table, string[] columns) {
     // (`id` is not deduplicated against the columns, as it never was)
     Sql[] args = [sql(i"'id', id")];
     foreach (col; columns)
-        args ~= sql(i"$(col), $(SqlName(col))");
+        args ~= sql(i"$(Literal(col)), $(SqlName(col))");
     return sql(i"SELECT JSON_OBJECT($(Sql.join!", "(args))) AS json_row FROM $(SqlName(table)) WHERE id = LAST_INSERT_ID()");
 }
 
@@ -157,7 +157,7 @@ unittest {
         "email": JSONValue("alice@test.com")
     ]);
 
-    auto sql = generateInsertSQL("users", input).render(mysqlDialect());
+    auto sql = generateInsertSQL("users", input).renderInline(mysqlDialect());
     assert(sql.canFind("INSERT INTO users"));
     assert(sql.canFind("'Alice'") || sql.canFind("'alice@test.com'"));
 }
@@ -165,7 +165,7 @@ unittest {
 unittest {
     // Test INSERT with no columns
     auto input = InsertInput.init;
-    auto sql = generateInsertSQL("users", input).render(mysqlDialect());
+    auto sql = generateInsertSQL("users", input).renderInline(mysqlDialect());
     assert(sql.canFind("() VALUES ()"));
 }
 
@@ -176,7 +176,7 @@ unittest {
         ["first_name": JSONValue("Bob")]
     );
 
-    auto sql = generateUpdateSQL("users", input, ["id"]).render(mysqlDialect());
+    auto sql = generateUpdateSQL("users", input, ["id"]).renderInline(mysqlDialect());
     assert(sql.canFind("UPDATE users"));
     assert(sql.canFind("first_name = 'Bob'"));
     assert(sql.canFind("IN ('1','2','3')"));
@@ -184,14 +184,14 @@ unittest {
 
 unittest {
     // Test DELETE SQL generation
-    auto sql = generateDeleteSQL("users", ["1", "2", "3"], ["id"]).render(mysqlDialect());
+    auto sql = generateDeleteSQL("users", ["1", "2", "3"], ["id"]).renderInline(mysqlDialect());
     assert(sql.canFind("DELETE FROM users"));
     assert(sql.canFind("IN ('1','2','3')"));
 }
 
 unittest {
     // Test SELECT after INSERT SQL generation
-    auto sql = generateSelectLastInsertSQL("users", ["first_name", "email"]).render(mysqlDialect());
+    auto sql = generateSelectLastInsertSQL("users", ["first_name", "email"]).renderInline(mysqlDialect());
     assert(sql.canFind("JSON_OBJECT"));
     assert(sql.canFind("'id', id"));
     assert(sql.canFind("'first_name', first_name"));
@@ -200,7 +200,7 @@ unittest {
 
 unittest {
     // Test SELECT after UPDATE SQL generation
-    auto sql = generateSelectUpdatedSQL("users", ["1", "2"], ["first_name"], ["id"]).render(mysqlDialect());
+    auto sql = generateSelectUpdatedSQL("users", ["1", "2"], ["first_name"], ["id"]).renderInline(mysqlDialect());
     assert(sql.canFind("JSON_OBJECT"));
     assert(sql.canFind("'id', id"));
     assert(sql.canFind("'first_name', first_name"));

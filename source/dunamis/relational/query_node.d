@@ -348,7 +348,7 @@ class QueryNode {
         if (other.orderBy_ != orderBy_ || other.limit_ != limit_ || other.offset_ != offset_)
             return false;
         if (other.whereClauses_.length != whereClauses_.length ||
-                (whereClauses_.length && other.whereClause().render(dialect) != whereClause().render(dialect)))
+                (whereClauses_.length && other.whereClause().renderInline(dialect) != whereClause().renderInline(dialect)))
             return false;
         // (LEFT JOINs of belongs-to parents by their keys select no other
         // rows; the joins of both are named alike)

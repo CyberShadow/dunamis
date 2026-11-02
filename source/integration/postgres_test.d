@@ -274,7 +274,7 @@ void testSessionRelations() {
             return name == "users" ? sql(i"pg_temp.users_named($("Alice"))")
                 : name == "posts" ? sql(i"pg_temp.even_posts()") : Sql.init;
         });
-        string relation(PostgresSession s, string name) { return s.relationSql(name).render(postgresDialect()); }
+        string relation(PostgresSession s, string name) { return s.relationSql(name).renderInline(postgresDialect()); }
         assertTrue(relation(scoped, "users") == "pg_temp.users_named('Alice')" &&
             relation(scoped, "tasks") == "tasks" && relation(session, "users") == "users",
             "Wrong relation sources");
@@ -378,7 +378,7 @@ void testOnlyIfRootCollection() {
             assertTrue(condition ? names.length && names.all!(n => n == "Alice") : !names.length, "onlyIf(" ~ condition.to!string ~ "): " ~ names.to!string);
             // (The filter is in the query's WHERE clause)
             if (condition)
-                assertTrue(sent.any!(sql => sql.canFind("WHERE") && sql.canFind("Alice")),
+                assertTrue(sent.any!(sql => sql.canFind("WHERE") && sql.canFind("users.first_name = $")),
                     "The filter over onlyIf was not pushed into the query: " ~ sent.to!string);
         }
     });
@@ -405,8 +405,9 @@ void testNullableAndEnumSortsPushed() {
         // (One sort each: of several, only the innermost is pushed)
         evaluateNested(compileQuery!MySchema(`{ tasks(orderBy: [{field: status, direction: DESC}]) { id } }`), ctx).await;
         evaluateNested(compileQuery!MySchema(`{ tasks(orderBy: [{field: priority, direction: ASC}]) { id } }`), ctx).await;
-        assertTrue(sent.any!(sql => sql.canFind("ORDER BY") && sql.canFind("CASE tasks.status WHEN 'pending' THEN 0") &&
-            sql.canFind("WHEN 'done' THEN 2")), "The enum sort was not pushed into the query: " ~ sent.to!string);
+        // (The labels and positions are the statement's parameters)
+        assertTrue(sent.any!(sql => sql.canFind("ORDER BY") && sql.canFind("CASE tasks.status WHEN $") &&
+            sql.canFind("::integer WHEN $")), "The enum sort was not pushed into the query: " ~ sent.to!string);
         assertTrue(sent.any!(sql => sql.canFind("ORDER BY") && sql.canFind("tasks.priority")),
             "The nullable sort was not pushed into the query: " ~ sent.to!string);
     });

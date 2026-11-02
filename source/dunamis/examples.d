@@ -9,8 +9,9 @@ import ae.utils.promise.await : awaitSync;
 
 import dunamis.core;
 import dunamis.relational;
-import dunamis.relational.sql_dialect : SqlDialect, inListSql, layerName, qualifiedColumn, sqlBinaryOperator;
-import dunamis.relational.sql_fragment : Sql, sql;
+import dunamis.relational.sql_dialect : SqlDialect, inListSql, layerName, qualifiedColumn, sqlBinaryOperator,
+    valueList;
+import dunamis.relational.sql_fragment : Sql, SqlValue, sql;
 
 // ============================================================================
 // Data Source Configuration
@@ -70,12 +71,13 @@ private class TestDialect : SqlDialect {
             case JSONType.object: return escapeSqlString(val.toString());
         }
     }
-    override Sql rootIdFilter(string table, string[] pkColumns, Sql ids) {
+    override Sql rootIdFilter(string table, string[] pkColumns, const(SqlValue)[] ids) {
         if (pkColumns.length == 1)
-            return sql(i"$(qualifiedColumn(table, pkColumns[0])) = ANY($1)");
+            return sql(i"$(qualifiedColumn(table, pkColumns[0])) = ANY($(SqlValue.array(ids)))");
         auto columns = Sql.join!", "(pkColumns.map!(c => qualifiedColumn(table, c)).array);
-        return sql(i"($(columns)) IN ($(ids))");
+        return sql(i"($(columns)) IN ($(valueList(ids)))");
     }
+    override string parameter(size_t number, ref const SqlValue value) { return "$" ~ number.to!string; }
     override Sql jsonObjectFunc() { return sql(i"json_build_object"); }
     override Sql rowJsonFunc() { return Sql.init; }
     override Sql emptyJsonArray() { return sql(i"'[]'::json"); }
@@ -421,10 +423,10 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT posts.id, posts.title::text AS title, posts.body::text AS body, posts.author_id, j0.id AS j0__id, j0.first_name::text AS j0__first_name, j0.last_name::text AS j0__last_name, ((j0.first_name || ' ') || j0.last_name) AS computed_0
+    SELECT posts.id, posts.title::text AS title, posts.body::text AS body, posts.author_id, j0.id AS j0__id, j0.first_name::text AS j0__first_name, j0.last_name::text AS j0__last_name, ((j0.first_name || $1) || j0.last_name) AS computed_0
     FROM posts
     LEFT JOIN users j0 ON posts.author_id = j0.id
-    WHERE posts.id = ANY($1)
+    WHERE posts.id = ANY($2)
   )
 SELECT json_build_object(
   'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer0 t)
@@ -461,13 +463,13 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT posts.id, posts.title::text AS title, posts.body::text AS body, posts.author_id, j0.id AS j0__id, j0.first_name::text AS j0__first_name, j0.last_name::text AS j0__last_name, ((j0.first_name || ' ') || j0.last_name) AS computed_0
+    SELECT posts.id, posts.title::text AS title, posts.body::text AS body, posts.author_id, j0.id AS j0__id, j0.first_name::text AS j0__first_name, j0.last_name::text AS j0__last_name, ((j0.first_name || $1) || j0.last_name) AS computed_0
     FROM posts
     LEFT JOIN users j0 ON posts.author_id = j0.id
-    WHERE posts.id = ANY($1)
+    WHERE posts.id = ANY($2)
   ),
   layer1 AS (
-    SELECT comments.id, comments.post_id, comments.body::text AS body, comments.author_id, j0.id AS j0__id, j0.first_name::text AS j0__first_name, j0.last_name::text AS j0__last_name, ((j0.first_name || ' ') || j0.last_name) AS computed_1
+    SELECT comments.id, comments.post_id, comments.body::text AS body, comments.author_id, j0.id AS j0__id, j0.first_name::text AS j0__first_name, j0.last_name::text AS j0__last_name, ((j0.first_name || $3) || j0.last_name) AS computed_1
     FROM comments
     LEFT JOIN users j0 ON comments.author_id = j0.id
     WHERE comments.post_id IN (SELECT id FROM layer0)
@@ -696,7 +698,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name::text AS first_name, users.last_name::text AS last_name, ((users.first_name || ' ') || users.last_name) AS computed_0
+    SELECT users.id, users.first_name::text AS first_name, users.last_name::text AS last_name, ((users.first_name || $1) || users.last_name) AS computed_0
     FROM users
     WHERE 1=1
   ),
@@ -756,7 +758,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name::text AS first_name, users.last_name::text AS last_name, ((users.first_name || ' ') || users.last_name) AS computed_0
+    SELECT users.id, users.first_name::text AS first_name, users.last_name::text AS last_name, ((users.first_name || $1) || users.last_name) AS computed_0
     FROM users
     WHERE 1=1
   ),
@@ -813,7 +815,7 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name::text AS first_name, (('Hello ' || users.first_name) || '!') AS computed_0
+    SELECT users.id, users.first_name::text AS first_name, (($1 || users.first_name) || $2) AS computed_0
     FROM users
     WHERE 1=1
   )
@@ -858,19 +860,22 @@ unittest {
     assert(computed.length >= 1, "Should have at least 1 computed column for fullName");
 
     // Verify the full SQL output
-    auto sql = toSQL(relCtx.nodesInOrder(), testDialect()).render(testDialect());
+    // (A statement with parameters: the constant, and the root rows' keys)
+    auto bound = toSQL(relCtx.nodesInOrder(), testDialect()).render(testDialect());
+    auto sql = bound.text;
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name::text AS first_name, users.last_name::text AS last_name, ((users.first_name || ' ') || users.last_name) AS computed_0
+    SELECT users.id, users.first_name::text AS first_name, users.last_name::text AS last_name, ((users.first_name || $1) || users.last_name) AS computed_0
     FROM users
-    WHERE users.id = ANY($1)
+    WHERE users.id = ANY($2)
   )
 SELECT json_build_object(
   'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer0 t)
 )
 EOF";
     assert(sql == expectedSQL, "Generated SQL does not match expected:\n---ACTUAL---\n" ~ sql ~ "\n---EXPECTED---\n" ~ expectedSQL);
+    assert(bound.params == [SqlValue.of(" "), SqlValue.array(null)]);
 
     debug(sql) {
         writeln("\n=== Test: SQL push-down for computed fullName ===");
@@ -896,8 +901,8 @@ unittest {
     auto nodesB = optimizeWith(map!((Expr!User user) => user.lastName ~ ", " ~ user.firstName)(
         getByIds!User([3])));
 
-    auto sqlA = toSQL(nodesA, testDialect()).render(testDialect());
-    auto sqlB = toSQL(nodesB, testDialect()).render(testDialect());
+    auto sqlA = toSQL(nodesA, testDialect()).renderInline(testDialect());
+    auto sqlB = toSQL(nodesB, testDialect()).renderInline(testDialect());
     assert(sqlA.canFind("((users.first_name || ' ') || users.last_name) AS computed_0"), sqlA);
     assert(!sqlA.canFind("', '"), sqlA);
     assert(sqlB.canFind("((users.last_name || ', ') || users.first_name) AS computed_0"), sqlB);
@@ -926,9 +931,9 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name::text AS first_name, (('Hello ' || users.first_name) || '!') AS computed_0
+    SELECT users.id, users.first_name::text AS first_name, (($1 || users.first_name) || $2) AS computed_0
     FROM users
-    WHERE users.id = ANY($1)
+    WHERE users.id = ANY($3)
   )
 SELECT json_build_object(
   'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer0 t)
@@ -1368,8 +1373,8 @@ WITH
     FROM users
     WHERE 1=1
     ORDER BY users.first_name
-    LIMIT 2
-    OFFSET 1
+    LIMIT $1
+    OFFSET $2
   )
 SELECT json_build_object(
   'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (SELECT * FROM layer0 ORDER BY orderkey__first_name) t)
@@ -1426,9 +1431,9 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name::text AS first_name, EXISTS (SELECT 1 FROM posts _f1 WHERE _f1.author_id = users.id AND _f1.title <> '') AS computed_0
+    SELECT users.id, users.first_name::text AS first_name, EXISTS (SELECT 1 FROM posts _f1 WHERE _f1.author_id = users.id AND _f1.title <> $1) AS computed_0
     FROM users
-    WHERE users.id = ANY($1)
+    WHERE users.id = ANY($2)
   )
 SELECT json_build_object(
   'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer0 t)
@@ -1455,7 +1460,8 @@ unittest {
         {"id": 2, "author_id": 2, "title": "", "body": ""}]`);
     db = new DebugSqlDB!()(mock, testDialect());
 
-    enum condition = "EXISTS (SELECT 1 FROM posts _f1 WHERE _f1.author_id = users.id AND _f1.title <> '')";
+    // (Its constant, the statement's first parameter in both)
+    enum condition = "EXISTS (SELECT 1 FROM posts _f1 WHERE _f1.author_id = users.id AND _f1.title <> $1)";
     auto field = map!((Expr!User u) => jsonObject("name", u.firstName,
         "hasTitledPost", some!((Expr!Post p) => p.title.ne(""))(u.posts)))(getByIds!User([1, 2]));
     auto result = awaitSync(new Executor().execute(field));
@@ -1465,7 +1471,8 @@ unittest {
 
     auto filtered = filterBy!((Expr!User u) => some!((Expr!Post p) => p.title.ne(""))(u.posts))(getAll!User());
     auto where = extractFilterWhereClause(cast(FilterByInfo) filtered, "users", testDialect());
-    assert(where.complete && where.sql.get.render(testDialect()) == condition, where.sql.get.render(testDialect()));
+    auto whereSql = where.sql.get.render(testDialect());
+    assert(where.complete && whereSql.text == condition && whereSql.params == [SqlValue.of("")], whereSql.text);
 }
 
 // Test every() - all items must match
@@ -1512,9 +1519,9 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name::text AS first_name, NOT EXISTS (SELECT 1 FROM posts _f1 WHERE _f1.author_id = users.id AND NOT _f1.title <> '') AS computed_0
+    SELECT users.id, users.first_name::text AS first_name, NOT EXISTS (SELECT 1 FROM posts _f1 WHERE _f1.author_id = users.id AND NOT _f1.title <> $1) AS computed_0
     FROM users
-    WHERE users.id = ANY($1)
+    WHERE users.id = ANY($2)
   )
 SELECT json_build_object(
   'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer0 t)
@@ -1787,9 +1794,9 @@ unittest {
     enum expectedSQL = q"EOF
 WITH
   layer0 AS (
-    SELECT users.id, users.first_name::text AS first_name, (('Hello ' || users.first_name) || '!') AS computed_0
+    SELECT users.id, users.first_name::text AS first_name, (($1 || users.first_name) || $2) AS computed_0
     FROM users
-    WHERE users.id = ANY($1)
+    WHERE users.id = ANY($3)
   )
 SELECT json_build_object(
   'layer0', (SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM layer0 t)
@@ -1864,7 +1871,7 @@ unittest {
     // Verify CTE-based SQL has LIMIT
     auto sql = db.getSQL();
     assert(sql.length > 0, "Expected CTE SQL to be generated (optimization active)");
-    assert(sql.canFind("LIMIT 2"), "Expected LIMIT 2 in generated SQL: " ~ sql);
+    assert(sql.canFind("LIMIT $1"), "Expected LIMIT (a parameter) in generated SQL: " ~ sql);
 }
 
 // Test: compileQuery with nested HasMany generates multi-layer CTE

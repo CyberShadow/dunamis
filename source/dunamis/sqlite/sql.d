@@ -130,7 +130,7 @@ unittest {
         "email": JSONValue("alice@test.com")
     ]);
 
-    auto sql = generateInsertSQL("users", input).render(sqliteDialect());
+    auto sql = generateInsertSQL("users", input).renderInline(sqliteDialect());
     assert(sql.canFind("INSERT INTO users"));
     assert(sql.canFind("'Alice'") || sql.canFind("'alice@test.com'"));
 }
@@ -138,7 +138,7 @@ unittest {
 unittest {
     // Test INSERT with no columns
     auto input = InsertInput.init;
-    auto sql = generateInsertSQL("users", input).render(sqliteDialect());
+    auto sql = generateInsertSQL("users", input).renderInline(sqliteDialect());
     assert(sql.canFind("DEFAULT VALUES"));
 }
 
@@ -149,7 +149,7 @@ unittest {
         ["first_name": JSONValue("Bob")]
     );
 
-    auto sql = generateUpdateSQL("users", input, ["id"]).render(sqliteDialect());
+    auto sql = generateUpdateSQL("users", input, ["id"]).renderInline(sqliteDialect());
     assert(sql.canFind("UPDATE users"));
     assert(sql.canFind("first_name = 'Bob'"));
     assert(sql.canFind("IN ('1','2','3')"));
@@ -157,7 +157,7 @@ unittest {
 
 unittest {
     // Test DELETE SQL generation
-    auto sql = generateDeleteSQL("users", ["1", "2", "3"], ["id"]).render(sqliteDialect());
+    auto sql = generateDeleteSQL("users", ["1", "2", "3"], ["id"]).renderInline(sqliteDialect());
     assert(sql.canFind("DELETE FROM users"));
     assert(sql.canFind("IN ('1','2','3')"));
 }

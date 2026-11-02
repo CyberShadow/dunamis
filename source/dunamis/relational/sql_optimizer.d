@@ -952,9 +952,10 @@ unittest {
         override string quoteIdentifier(string name) { return `"` ~ name ~ `"`; }
         override string escapeSqlString(string s) { return "'" ~ s ~ "'"; }
         override string jsonToSqlLiteral(JSONValue) { return "NULL"; }
-        override Sql rootIdFilter(string table, string[] pkColumns, Sql) {
-            return sql(i"$(qualifiedColumn(table, pkColumns[0])) = ANY($1)");
+        override Sql rootIdFilter(string table, string[] pkColumns, const(SqlValue)[] ids) {
+            return sql(i"$(qualifiedColumn(table, pkColumns[0])) = ANY($(SqlValue.array(ids)))");
         }
+        override string parameter(size_t number, ref const SqlValue) { return "$" ~ number.to!string; }
         override Sql jsonObjectFunc() { return sql(i"json_build_object"); }
         override Sql rowJsonFunc() { return Sql.init; }
         override Sql emptyJsonArray() { return sql(i"'[]'::json"); }
@@ -1031,9 +1032,10 @@ unittest {
         override string quoteIdentifier(string name) { return `"` ~ name ~ `"`; }
         override string escapeSqlString(string s) { return "'" ~ s ~ "'"; }
         override string jsonToSqlLiteral(JSONValue) { return "NULL"; }
-        override Sql rootIdFilter(string table, string[] pkColumns, Sql) {
-            return sql(i"$(qualifiedColumn(table, pkColumns[0])) = ANY($1)");
+        override Sql rootIdFilter(string table, string[] pkColumns, const(SqlValue)[] ids) {
+            return sql(i"$(qualifiedColumn(table, pkColumns[0])) = ANY($(SqlValue.array(ids)))");
         }
+        override string parameter(size_t number, ref const SqlValue) { return "$" ~ number.to!string; }
         override Sql jsonObjectFunc() { return sql(i"json_build_object"); }
         override Sql rowJsonFunc() { return Sql.init; }
         override Sql emptyJsonArray() { return sql(i"'[]'::json"); }

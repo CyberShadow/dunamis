@@ -7,7 +7,7 @@ import std.typecons : Nullable;
 
 import dunamis.relational.query_node : QueryNode, QueryNodeId, FilterType;
 import dunamis.relational.sql_dialect : SqlDialect, layerName, qualifiedColumn;
-import dunamis.relational.sql_fragment : Sql, SqlName, sql;
+import dunamis.relational.sql_fragment : Literal, Sql, SqlName, SqlValue, sql;
 
 // ============================================================================
 // Query SQL Generation (CTE-based, dialect-agnostic)
@@ -24,17 +24,17 @@ enum string layerGroupKey = "layers";
 /// Generate a complete CTE-based SQL query with computed columns.
 /// Root nodes are filtered by their own root filter.
 Sql toSQL(QueryNode[] nodes, SqlDialect dialect) {
-    return toSQL(nodes, dialect, Nullable!FilterType.init, Sql.init);
+    return toSQL(nodes, dialect, Nullable!FilterType.init, null);
 }
 
 /// ditto, filtering the root node(s) by `rootFilter` (the root selection
-/// of the evaluation executing the query) instead: by their keys, `rootIds`
-/// (the list of their values, see `SqlDialect.rootIdFilter`).
-Sql toSQL(QueryNode[] nodes, SqlDialect dialect, FilterType rootFilter, Sql rootIds = Sql.init) {
+/// of the evaluation executing the query) instead: by their keys, the values
+/// `rootIds` (see `SqlDialect.rootIdFilter`).
+Sql toSQL(QueryNode[] nodes, SqlDialect dialect, FilterType rootFilter, const(SqlValue)[] rootIds = null) {
     return toSQL(nodes, dialect, Nullable!FilterType(rootFilter), rootIds);
 }
 
-private Sql toSQL(QueryNode[] nodes, SqlDialect dialect, Nullable!FilterType rootFilter, Sql rootIds) {
+private Sql toSQL(QueryNode[] nodes, SqlDialect dialect, Nullable!FilterType rootFilter, const(SqlValue)[] rootIds) {
     if (nodes.length == 0)
         return Sql.init;
 
@@ -54,7 +54,8 @@ private Sql toSQL(QueryNode[] nodes, SqlDialect dialect, Nullable!FilterType roo
         foreach (spec; node.orderBy_)
             orderParts ~= dialect.orderByTerm(sql(i"$(SqlName(orderKeyColumn(node, spec.column)))"), spec.descending);
         auto layer = dialect.aggregateLayerJson(node.id.value, Sql.join!", "(orderParts));
-        jsonParts ~= sql(i"  $(layerName(node.id.value).name), $(layer)");
+        // (The objects' keys are literals: constants of the query's shape)
+        jsonParts ~= sql(i"  $(Literal(layerName(node.id.value).name)), $(layer)");
     }
     // (Functions take at most 100 arguments in PostgreSQL: more layers are
     // grouped into objects of `layerGroupSize` layers, see layerGroupKey.)
@@ -66,7 +67,7 @@ private Sql toSQL(QueryNode[] nodes, SqlDialect dialect, Nullable!FilterType roo
         for (size_t i = 0; i < jsonParts.length; i += layerGroupSize) {
             auto end = i + layerGroupSize < jsonParts.length ? i + layerGroupSize : jsonParts.length;
             auto key = layerGroupKey ~ (i / layerGroupSize).to!string;
-            groups ~= sql(i"  $(key), $(object(jsonParts[i .. end]))");
+            groups ~= sql(i"  $(Literal(key)), $(object(jsonParts[i .. end]))");
         }
         jsonParts = groups;
     }
@@ -74,7 +75,7 @@ private Sql toSQL(QueryNode[] nodes, SqlDialect dialect, Nullable!FilterType roo
 
     debug(sql) {
         import std.stdio : writeln;
-        writeln(result.render(dialect));
+        writeln(result.renderInline(dialect));
     }
 
     return result;
@@ -94,11 +95,11 @@ string[] relationsOf(QueryNode[] nodes) {
 
 /// Generate CTE for a single QueryNode.
 private Sql toCTE(QueryNode node, SqlDialect dialect) {
-    return toCTE(node, dialect, node.rootFilter, Sql.init);
+    return toCTE(node, dialect, node.rootFilter, null);
 }
 
 /// ditto, filtering a root node by `rootFilter` (by the keys `rootIds`).
-private Sql toCTE(QueryNode node, SqlDialect dialect, FilterType rootFilter, Sql rootIds) {
+private Sql toCTE(QueryNode node, SqlDialect dialect, FilterType rootFilter, const(SqlValue)[] rootIds) {
     auto table = SqlName(node.table);
     Sql[] parts;
 
@@ -242,21 +243,21 @@ Sql buildJsonObjectArgs(QueryNode node) {
 
     // Regular columns from main table
     foreach (col; node.columns)
-        args ~= sql(i"$(col), $(qualifiedColumn(tableName, col))");
+        args ~= sql(i"$(Literal(col)), $(qualifiedColumn(tableName, col))");
 
     // Columns from JOINed tables
     foreach (joinInfo; node.joins) {
         if (auto cols = joinInfo.alias_ in node.joinedColumns) {
             foreach (col; *cols) {
                 auto key = joinInfo.alias_.value ~ "__" ~ col;
-                args ~= sql(i"$(key), $(qualifiedColumn(joinInfo.alias_.value, col))");
+                args ~= sql(i"$(Literal(key)), $(qualifiedColumn(joinInfo.alias_.value, col))");
             }
         }
     }
 
     // Computed columns
     foreach (computed; node.computedColumns)
-        args ~= sql(i"$(computed.alias_), $(computed.sqlExpr)");
+        args ~= sql(i"$(Literal(computed.alias_)), $(computed.sqlExpr)");
 
     return Sql.join!", "(args);
 }
@@ -277,9 +278,9 @@ unittest {
     node.addJoinedColumn(j, "name");
     node.markJoinedStringColumn(j, "name");
 
-    auto pg = buildSelectColumns(node, postgresDialect()).render(postgresDialect());
+    auto pg = buildSelectColumns(node, postgresDialect()).renderInline(postgresDialect());
     assert(pg == "posts.id, posts.title::text AS title, j0.id AS j0__id, j0.name::text AS j0__name", pg);
-    auto my = buildSelectColumns(node, mysqlDialect()).render(mysqlDialect());
+    auto my = buildSelectColumns(node, mysqlDialect()).renderInline(mysqlDialect());
     assert(my == "posts.id, CAST(posts.title AS CHAR) AS title, j0.id AS j0__id, CAST(j0.name AS CHAR) AS j0__name", my);
 }
 
@@ -299,7 +300,7 @@ unittest {
     node.addOrderBy(OrderBySpec("net_amount", SortDirection.DESC));
     node.addOrderBy(OrderBySpec("note"));
     node.addOrderBy(OrderBySpec("position"));
-    auto sql = toSQL([node], postgresDialect()).render(postgresDialect());
+    auto sql = toSQL([node], postgresDialect()).renderInline(postgresDialect());
     assert(sql.canFind("SELECT order_items.id, order_items.net_amount::text AS net_amount, order_items.note, " ~
         "order_items.net_amount AS orderkey__net_amount, order_items.position AS orderkey__position\n"), sql);
     assert(sql.canFind("ORDER BY order_items.net_amount DESC, order_items.note, order_items.position\n"), sql);
@@ -316,7 +317,7 @@ unittest {
     node.setLimit(10);
     node.setOffset(20);
 
-    auto sql = toCTE(node, postgresDialect()).render(postgresDialect());
+    auto sql = toCTE(node, postgresDialect()).renderInline(postgresDialect());
 
     assert(sql.canFind("LIMIT 10"), "SQL should contain LIMIT 10: " ~ sql);
     assert(sql.canFind("OFFSET 20"), "SQL should contain OFFSET 20: " ~ sql);
@@ -332,7 +333,7 @@ unittest {
     node.setRootFilter(FilterType.all);
     node.setLimit(5);
 
-    auto sql = toCTE(node, postgresDialect()).render(postgresDialect());
+    auto sql = toCTE(node, postgresDialect()).renderInline(postgresDialect());
 
     assert(sql.canFind("LIMIT 5"), "SQL should contain LIMIT 5: " ~ sql);
     assert(!sql.canFind("OFFSET"), "SQL should not contain OFFSET: " ~ sql);
@@ -347,7 +348,7 @@ unittest {
     node.setRootFilter(FilterType.all);
     node.setOffset(15);
 
-    auto sql = toCTE(node, postgresDialect()).render(postgresDialect());
+    auto sql = toCTE(node, postgresDialect()).renderInline(postgresDialect());
 
     assert(sql.canFind("OFFSET 15"), "SQL should contain OFFSET 15: " ~ sql);
     assert(!sql.canFind("LIMIT"), "SQL should not contain LIMIT: " ~ sql);
@@ -361,10 +362,12 @@ unittest {
     node.addColumn("first_name");
     node.setRootFilter(FilterType.byIds);
 
-    auto sql = toCTE(node, postgresDialect()).render(postgresDialect());
+    auto sql = toCTE(node, postgresDialect(), FilterType.byIds, [SqlValue.of("1"), SqlValue.of("2")])
+        .render(postgresDialect());
 
-    assert(sql.canFind("ANY($1)"), "PostgreSQL should use ANY($1): " ~ sql);
-    assert(!sql.canFind("row_json"), "PostgreSQL should not have row_json in CTE: " ~ sql);
+    assert(sql.text.canFind("users.id = ANY($1)"), "PostgreSQL should use ANY($1): " ~ sql.text);
+    assert(sql.params == [SqlValue.array([SqlValue.of("1"), SqlValue.of("2")])]);
+    assert(!sql.text.canFind("row_json"), "PostgreSQL should not have row_json in CTE: " ~ sql.text);
 }
 
 unittest {
@@ -384,7 +387,7 @@ unittest {
     comments.setParent(posts2, "post_id", "Post");
     posts1.mergeFrom(posts2);
 
-    auto sql = toSQL(users.allNodesInTree(), postgresDialect()).render(postgresDialect());
+    auto sql = toSQL(users.allNodesInTree(), postgresDialect()).renderInline(postgresDialect());
     assert(sql.canFind("layer1 AS") && !sql.canFind("layer2") && sql.canFind("layer3 AS"), sql);
     assert(sql.canFind("posts.title, posts.body"), sql);
     assert(sql.canFind("comments.post_id IN (SELECT id FROM layer1)"), sql);

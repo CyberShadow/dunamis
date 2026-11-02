@@ -383,8 +383,9 @@ private void checkRootMembershipFilter(PostgresSession session, EvalContext ctx,
     assertTrue(ids == expected, "Root membership filter: " ~ ids.to!string);
     assertTrue(sent.length == 1, "Root membership filter: " ~ sent.length.to!string ~ " statements: " ~
         sent.to!string);
-    assertTrue(sent[0].canFind(`.name = ANY('{"p1","p3","p99"}')`) && sent[0].canFind(`.id = ANY('{3,1,2}')`) &&
-        sent[0].canFind(`NOT (batching_parents.name = ANY('{"p2"}'))`),
+    // (The values are the statement's parameters: one array each)
+    assertTrue(sent[0].canFind(`.name = ANY($`) && sent[0].canFind(`.id = ANY($`) &&
+        sent[0].canFind(`NOT (batching_parents.name = ANY($`),
         "Root membership filter not in the WHERE clause: " ~ sent[0]);
 }
 
@@ -416,7 +417,7 @@ private void checkRootNativePredicateFilter(PostgresSession session, EvalContext
     assertTrue(ids == expected && ends == expectedEnds, "Root native predicate filter: " ~ result.toString());
     assertTrue(sent.length == 1, "Root native predicate filter: " ~ sent.length.to!string ~ " statements: " ~
         sent.to!string);
-    assertTrue(sent[0].canFind(`batching_terms.validity @> '2020-01-03'::date`),
+    assertTrue(sent[0].canFind(`batching_terms.validity @> $`) && sent[0].canFind(`::date`),
         "Root native predicate filter not in the WHERE clause: " ~ sent[0]);
 }
 
@@ -496,14 +497,14 @@ private void checkNativeSqlExpressions(PostgresSession session, EvalContext ctx,
     auto doubled = evaluateNested(map!((Expr!BatchingTerm t) => termDays(t) * 2)(getAll!BatchingTerm()), ctx).await;
     assertTrue(doubled == iota(1, data.n + 1).smap!(t => 2 * t).array ~ 0, "Native SQL operand: " ~ doubled.to!string);
     expectOne("Native SQL operand",
-        "(COALESCE(upper(batching_terms.validity) - lower(batching_terms.validity), 0) * 2) AS computed_");
+        "(COALESCE(upper(batching_terms.validity) - lower(batching_terms.validity), 0) * $1::integer) AS computed_");
 
     // In the WHERE clause: operands of comparisons (and of conjunctions)
     auto ids = evaluateNested(map!((Expr!BatchingTerm t) => fieldAccess!"id"(t))(
         filterBy!((Expr!BatchingTerm t) => termDays(t).gt(2).and(termDays(t).lt(6)))(getAll!BatchingTerm())), ctx).await;
     assertTrue(ids == iota(3, 6).sfilter!(t => t <= data.n).array, "Native SQL in a filter: " ~ ids.to!string);
     assertTrue(sent.length == 1 && sent[0].findSplitAfter("WHERE ")[1].canFind(
-        "(COALESCE(upper(batching_terms.validity) - lower(batching_terms.validity), 0) > 2)"),
+        "(COALESCE(upper(batching_terms.validity) - lower(batching_terms.validity), 0) > $1::integer)"),
         "Native SQL not in the WHERE clause: " ~ sent.to!string);
     sent = null;
 

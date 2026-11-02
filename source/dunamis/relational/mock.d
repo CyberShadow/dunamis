@@ -756,11 +756,12 @@ class DebugSqlDB(DBConfig config = defaultDBConfig) : DataSource {
         return _executedNodes;
     }
 
-    /// Get the combined SQL for all executed nodes as a string.
+    /// Get the combined SQL for all executed nodes as a string (as a
+    /// statement's text, with the placeholders of its parameters).
     string getSQL() {
         if (_cachedSQL.length == 0 && _executedNodes.length > 0) {
             import dunamis.relational.sql : toSQL;
-            _cachedSQL = toSQL(_executedNodes, _dialect).render(_dialect);
+            _cachedSQL = toSQL(_executedNodes, _dialect).render(_dialect).text;
         }
         return _cachedSQL;
     }

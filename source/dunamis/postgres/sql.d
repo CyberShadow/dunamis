@@ -8,7 +8,7 @@ import std.json;
 
 import dunamis.relational.mutation : InsertInput, UpdateInput;
 import dunamis.postgres.dialect : postgresDialect;
-import dunamis.relational.sql_fragment : Sql, SqlName, sql;
+import dunamis.relational.sql_fragment : Sql, SqlName, SqlValue, sql;
 
 // ============================================================================
 // Mutation SQL Generation
@@ -53,9 +53,9 @@ private Sql generatePkWhereClause(string[] pkColumns, string[] ids) {
     import dunamis.relational.keys : keyValues, singleKeyValue;
 
     if (pkColumns.length == 1) {
-        // Single PK: col = ANY(ARRAY['id1','id2'])
-        auto quotedIds = Sql.join!","(ids.map!(id => sql(i"$(singleKeyValue(id))")).array);
-        return sql(i"$(SqlName(pkColumns[0])) = ANY(ARRAY[$(quotedIds)])");
+        // Single PK: col = ANY('{"id1","id2"}'), one array
+        auto keys = SqlValue.array(ids.map!(id => SqlValue.of(singleKeyValue(id))).array);
+        return sql(i"$(SqlName(pkColumns[0])) = ANY($(keys))");
     } else {
         // Composite PK: (col1 = 'v1' AND col2 = 'v2') OR ...
         Sql[] conditions;
@@ -80,7 +80,7 @@ private Sql generatePkWhereClause(string[] pkColumns, string[] ids) {
 /// WITH updated AS (
 ///   UPDATE users
 ///   SET first_name = 'Bob', last_name = 'Smith'
-///   WHERE id = ANY(ARRAY[1,2,3])
+///   WHERE id = ANY('{"1","2","3"}')
 ///   RETURNING *
 /// )
 /// SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM updated t
@@ -122,7 +122,7 @@ unittest {
         "email": JSONValue("alice@test.com")
     ]);
 
-    auto sql = generateInsertSQL("users", input).render(postgresDialect());
+    auto sql = generateInsertSQL("users", input).renderInline(postgresDialect());
     assert(sql.canFind("INSERT INTO users"));
     assert(sql.canFind("RETURNING *"));
     assert(sql.canFind("row_to_json"));
@@ -132,7 +132,7 @@ unittest {
 unittest {
     // Test INSERT with no columns
     auto input = InsertInput.init;
-    auto sql = generateInsertSQL("users", input).render(postgresDialect());
+    auto sql = generateInsertSQL("users", input).renderInline(postgresDialect());
     assert(sql.canFind("DEFAULT VALUES"));
 }
 
@@ -143,19 +143,18 @@ unittest {
         ["first_name": JSONValue("Bob")]
     );
 
-    auto sql = generateUpdateSQL("users", input, ["id"]).render(postgresDialect());
-    assert(sql.canFind("UPDATE users"));
-    assert(sql.canFind("first_name = 'Bob'"));
-    assert(sql.canFind("ARRAY['1','2','3']"));
-    assert(sql.canFind("RETURNING *"));
-    assert(sql.canFind("json_agg"));
+    auto bound = generateUpdateSQL("users", input, ["id"]).render(postgresDialect());
+    assert(bound.text.canFind("UPDATE users SET first_name = $1 WHERE id = ANY($2) RETURNING *"), bound.text);
+    assert(bound.text.canFind("json_agg"));
+    assert(bound.params == [SqlValue.of(JSONValue("Bob")),
+        SqlValue.array([SqlValue.of("1"), SqlValue.of("2"), SqlValue.of("3")])]);
 }
 
 unittest {
     // Test DELETE SQL generation with embedded IDs
-    auto sql = generateDeleteSQL("users", ["1", "2", "3"], ["id"]).render(postgresDialect());
+    auto sql = generateDeleteSQL("users", ["1", "2", "3"], ["id"]).renderInline(postgresDialect());
     assert(sql.canFind("DELETE FROM users"));
-    assert(sql.canFind("ARRAY['1','2','3']"));
+    assert(sql.canFind(`id = ANY('{"1","2","3"}')`), sql);
     assert(sql.canFind("COUNT(*)"));
 }
 

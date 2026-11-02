@@ -16,9 +16,11 @@
 /// compile-time constant, SQL text computed at run time can only enter a
 /// fragment as a `SqlName`.
 ///
-/// (Values are kept apart from the text so that a fragment can also be
-/// rendered with its values as parameters of the statement; `render` writes
-/// them as literals.)
+/// A fragment is rendered for a dialect (`render`) as the text of a
+/// statement, with the dialect's placeholders for its values, and the
+/// values, which are sent as the statement's parameters; or (`renderInline`)
+/// as self-contained text, its values written as literals of the dialect,
+/// e.g. for logs. A `Literal` is always written as a literal.
 module dunamis.relational.sql_fragment;
 
 import core.interpolation : InterpolatedExpression, InterpolatedLiteral, InterpolationFooter, InterpolationHeader;
@@ -59,10 +61,12 @@ struct Literal {
     }
 }
 
-/// A value in a `Sql` fragment: NULL, a boolean, a number, a string, or a
-/// JSON value (e.g. an input value of a mutation).
+/// A value in a `Sql` fragment: NULL, a boolean, a number, a string, a
+/// JSON value (e.g. an input value of a mutation), or an array of values
+/// (in dialects which have arrays: PostgreSQL), e.g. of the keys a query
+/// selects (`col = ANY($1)`).
 struct SqlValue {
-    enum Kind : ubyte { null_, boolean, number, text, json }
+    enum Kind : ubyte { null_, boolean, number, text, json, array }
 
     Kind kind;  /// (The default value is NULL.)
     /// The value's text: of a number, as SQL writes it; of a boolean,
@@ -71,6 +75,38 @@ struct SqlValue {
     /// The JSON value (of a `json` value), which the dialect writes as it
     /// writes JSON values (see `SqlDialect.jsonToSqlLiteral`).
     JSONValue json;
+    /// The elements (of an `array`)
+    const(SqlValue)[] elements;
+
+    /// The array of the values `elements`.
+    static SqlValue array(const(SqlValue)[] elements) {
+        SqlValue result;
+        result.kind = Kind.array;
+        result.elements = elements;
+        return result;
+    }
+
+    /// Whether the value is a number with no fractional part or exponent
+    /// (as SQL types integer literals).
+    @property bool isInteger() const {
+        import std.algorithm.searching : all;
+        import std.ascii : isDigit;
+        auto digits = text.length && text[0] == '-' ? text[1 .. $] : text;
+        return kind == Kind.number && digits.length && digits.all!isDigit;
+    }
+
+    /// The text of the array, as PostgreSQL writes array values: its
+    /// elements comma-separated in braces, quoted (but numbers and NULL).
+    string arrayText() const {
+        import std.array : join, replace;
+        assert(kind == Kind.array, "Not an array");
+        string[] items;
+        foreach (ref element; elements)
+            items ~= element.kind == Kind.null_ ? "NULL"
+                : element.kind == Kind.number ? element.text
+                : `"` ~ element.text.replace(`\`, `\\`).replace(`"`, `\"`) ~ `"`;
+        return "{" ~ items.join(",") ~ "}";
+    }
 
     /// The value of the D value `value`: of a boolean, a number, a string,
     /// a `JSONValue`, a `Nullable` of these, or `null` (NULL).
@@ -113,8 +149,16 @@ struct SqlValue {
             case Kind.number: return text;
             case Kind.text: return dialect.escapeSqlString(text);
             case Kind.json: return dialect.jsonToSqlLiteral(json);
+            case Kind.array: return dialect.escapeSqlString(arrayText);
         }
     }
+}
+
+/// A statement's text, with the placeholders of its parameters, and the
+/// values of these (in the order of their numbers), see `Sql.render`.
+struct BoundSql {
+    string text;
+    SqlValue[] params;
 }
 
 /// A fragment of SQL (see the module's documentation): built by `sql`
@@ -159,13 +203,31 @@ struct Sql {
         return Nullable!Sql(result);
     }
 
-    /// The SQL text of the fragment, in `dialect`, its values written as
-    /// literals.
-    string render(SqlDialect dialect) const {
-        return renderInline(dialect);
+    /// The SQL text of the fragment, in `dialect`, with the dialect's
+    /// placeholders of its values (numbered from 1, in order; see
+    /// `SqlDialect.parameter`), and the values: as a statement with
+    /// parameters. (`Literal`s are written as literals.)
+    BoundSql render(SqlDialect dialect) const {
+        import std.array : appender;
+        assert(dialect !is null, "Rendering SQL without a dialect");
+        auto text = appender!string;
+        SqlValue[] params;
+        foreach (ref part; parts)
+            final switch (part.kind) {
+                case Part.Kind.text: text.put(part.text); break;
+                case Part.Kind.name: text.put(part.text); break;
+                case Part.Kind.ident: text.put(dialect.quoteIdentifier(part.text)); break;
+                case Part.Kind.literal: text.put(part.value.literal(dialect)); break;
+                case Part.Kind.value:
+                    params ~= part.value;
+                    text.put(dialect.parameter(params.length, part.value));
+                    break;
+            }
+        return BoundSql(text[], params);
     }
 
-    /// ditto
+    /// The SQL text of the fragment, in `dialect`, its values written as
+    /// literals: self-contained text, e.g. for logs.
     string renderInline(SqlDialect dialect) const {
         import std.array : appender;
         auto result = appender!string;
@@ -232,6 +294,7 @@ Sql sql(Args...)(InterpolationHeader, Args args, InterpolationFooter) {
 
 version (unittest) {
     import std.typecons : BlackHole;
+    import std.conv : to;
 
     /// A dialect writing string literals and identifiers as PostgreSQL
     /// does.
@@ -247,6 +310,9 @@ version (unittest) {
         override string jsonToSqlLiteral(JSONValue value) {
             return value.isNull ? "NULL" : escapeSqlString(value.toString());
         }
+        override string parameter(size_t number, ref const SqlValue value) {
+            return "$" ~ number.to!string;
+        }
     }
 }
 
@@ -256,23 +322,46 @@ unittest {
     auto d = new TestDialect;
     string table = `app."Users"`, column = `it's "x"`, name = "it's";
     long id = -3;
-    assert(sql(i"SELECT $(Ident(column)) FROM $(SqlName(table)) WHERE name = $(name) AND id <> $(id)").render(d) ==
+    assert(sql(i"SELECT $(Ident(column)) FROM $(SqlName(table)) WHERE name = $(name) AND id <> $(id)").renderInline(d) ==
         `SELECT "it's ""x""" FROM app."Users" WHERE name = 'it''s' AND id <> -3`);
-    assert(sql(i"$(true), $(false), $(null), $(1.5), $(Nullable!int()), $(Nullable!int(7))").render(d) ==
+    assert(sql(i"$(true), $(false), $(null), $(1.5), $(Nullable!int()), $(Nullable!int(7))").renderInline(d) ==
         "TRUE, FALSE, NULL, 1.5, NULL, 7");
     const Nullable!int none, some = 3;
     const yes = true;
-    assert(sql(i"$(none), $(some), $(yes)").render(d) == "NULL, 3, TRUE");
+    assert(sql(i"$(none), $(some), $(yes)").renderInline(d) == "NULL, 3, TRUE");
     // A string value is never SQL, whatever its text
     string evil = "x'; DROP TABLE users; --";
-    assert(sql(i"name = $(evil)").render(d) == "name = 'x''; DROP TABLE users; --'");
+    assert(sql(i"name = $(evil)").renderInline(d) == "name = 'x''; DROP TABLE users; --'");
     // Constants, by their type
     auto n = SqlValue.ofConstant(typeid(int), "42"), b = SqlValue.ofConstant(typeid(bool), "true");
     auto s = SqlValue.ofConstant(typeid(string), "42");
-    assert(sql(i"$(n), $(b), $(s)").render(d) == "42, TRUE, '42'");
+    assert(sql(i"$(n), $(b), $(s)").renderInline(d) == "42, TRUE, '42'");
     // JSON values, as the dialect writes them
     auto j = JSONValue(["a": 1]);
-    assert(sql(i"$(j), $(JSONValue(null))").render(d) == `'{"a":1}', NULL`);
+    assert(sql(i"$(j), $(JSONValue(null))").renderInline(d) == `'{"a":1}', NULL`);
+}
+
+// Rendered as a statement with parameters: the text with the dialect's
+// placeholders of the values, in order, and the values; literals (but
+// `Literal`s) only when rendered inline
+unittest {
+    auto d = new TestDialect;
+    string name = "it's";
+    auto cond = sql(i"name = $(name) AND id IN ($(1), $(Nullable!int()))");
+    auto query = sql(i"SELECT json_build_object($(Literal("k")), id) FROM t WHERE $(cond) AND x = $(true)");
+    auto bound = query.render(d);
+    assert(bound.text == "SELECT json_build_object('k', id) FROM t WHERE name = $1 AND id IN ($2, $3) AND x = $4",
+        bound.text);
+    assert(bound.params == [SqlValue.of("it's"), SqlValue.of(1), SqlValue.init, SqlValue.of(true)]);
+    assert(query.renderInline(d) ==
+        "SELECT json_build_object('k', id) FROM t WHERE name = 'it''s' AND id IN (1, NULL) AND x = TRUE");
+    // Arrays: one value
+    auto ids = SqlValue.array([SqlValue.of("a"), SqlValue.of(`b"c`), SqlValue.init, SqlValue.of(3)]);
+    assert(ids.arrayText == `{"a","b\"c",NULL,3}`);
+    auto any = sql(i"id = ANY($(ids))");
+    assert(any.render(d).text == "id = ANY($1)" && any.render(d).params == [ids]);
+    assert(any.renderInline(d) == `id = ANY('{"a","b\"c",NULL,3}')`);
+    assert(SqlValue.of(-12).isInteger && !SqlValue.of(1.5).isInteger && !SqlValue.of("1").isInteger);
 }
 
 // Fragments compose: interpolated fragments are spliced in (with their
@@ -281,8 +370,8 @@ unittest {
     auto d = new TestDialect;
     auto cond = sql(i"(name = $("a") OR name = $("b"))");
     auto query = sql(i"SELECT 1 FROM t WHERE $(cond) AND $(sql(i"NOT $(cond)"))");
-    assert(query.render(d) == "SELECT 1 FROM t WHERE (name = 'a' OR name = 'b') AND NOT (name = 'a' OR name = 'b')");
-    assert(Sql.join!", "([sql(i"a"), sql(i"$(1)"), sql(i"$("c")")]).render(d) == "a, 1, 'c'");
+    assert(query.renderInline(d) == "SELECT 1 FROM t WHERE (name = 'a' OR name = 'b') AND NOT (name = 'a' OR name = 'b')");
+    assert(Sql.join!", "([sql(i"a"), sql(i"$(1)"), sql(i"$("c")")]).renderInline(d) == "a, 1, 'c'");
     assert(Sql.join!" AND "([]).empty && Sql.join!" AND "([cond]) == cond);
     assert(sql(i"").empty && !sql(i"x").empty);
     // Adjacent text is merged
@@ -296,7 +385,7 @@ unittest {
     assert(sql(i"json_build_object($(Literal("k")), $(Literal(2)))").renderInline(d) == "json_build_object('k', 2)");
     // Backslashes in wysiwyg sequences
     auto pattern = `a\%`;
-    assert(sql(i`LIKE $(pattern) ESCAPE '\'`).render(d) == `LIKE 'a\%' ESCAPE '\'`);
+    assert(sql(i`LIKE $(pattern) ESCAPE '\'`).renderInline(d) == `LIKE 'a\%' ESCAPE '\'`);
 }
 
 // The text of fragments is that of the source code: it is no string
@@ -308,6 +397,6 @@ unittest {
     static assert(!__traits(compiles, Sql.join!", "(text)));
     // (Even a run-time string spliced as text by the sequence's text
     // positions only ever is a value)
-    assert(sql(i"$(text)").render(new TestDialect) == "'SELECT 1'");
-    assert(sql(i"$(SqlName(text))").render(new TestDialect) == "SELECT 1");
+    assert(sql(i"$(text)").renderInline(new TestDialect) == "'SELECT 1'");
+    assert(sql(i"$(SqlName(text))").renderInline(new TestDialect) == "SELECT 1");
 }

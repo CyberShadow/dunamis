@@ -92,13 +92,20 @@ interface SqlDialect {
     /// Boolean and array syntax varies by dialect.
     string jsonToSqlLiteral(JSONValue val);
 
+    /// The placeholder of the statement's parameter `number` (from 1), of
+    /// the value `value` (see `Sql.render`): of PostgreSQL, `$1`, typed
+    /// (with a cast) as a literal of the value would be (numbers and
+    /// booleans; strings, NULL and arrays are typed by their context, as
+    /// literals are); of SQLite and MySQL, `?`.
+    string parameter(size_t number, ref const SqlValue value);
+
     /// SQL expression for filtering the root rows of `table` by their keys
-    /// (of the columns `pkColumns`): `ids`, the list of the keys' values
-    /// (unless the dialect passes them as a parameter of the query).
-    ///   PostgreSQL: "users.id = ANY($1)" (single PK)
-    ///   SQLite/MySQL: "users.id IN (ids)" (single PK)
+    /// (of the columns `pkColumns`): the values `ids` (of single-column
+    /// keys; see `dunamis.relational.keys`).
+    ///   PostgreSQL: "users.id = ANY($1)" (single PK: one array)
+    ///   SQLite/MySQL: "users.id IN (?,?)" (single PK)
     ///   Composite: "(table.col1, table.col2) IN (ids)" (all dialects)
-    Sql rootIdFilter(string table, string[] pkColumns, Sql ids);
+    Sql rootIdFilter(string table, string[] pkColumns, const(SqlValue)[] ids);
 
     /// Name of the top-level JSON object constructor function.
     ///   PostgreSQL: "json_build_object"
@@ -152,6 +159,14 @@ interface SqlDialect {
 SqlName layerName(int layerId) {
     import std.conv : to;
     return SqlName("layer" ~ layerId.to!string);
+}
+
+/// The values `values`, comma-separated (e.g. an IN list).
+Sql valueList(const(SqlValue)[] values) {
+    Sql[] items;
+    foreach (ref value; values)
+        items ~= sql(i"$(value)");
+    return Sql.join!","(items);
 }
 
 /// The column `column` of the table (or alias) `table` (if not empty), as
@@ -220,8 +235,8 @@ unittest {
         }
     }
     auto d = new TestDialect;
-    assert(inListSql(sql(i"t.id"), typeid(int), ["1", "2"]).render(d) == "(t.id IN (1, 2))");
-    assert(inListSql(sql(i"t.name"), typeid(string), ["a", "it's"]).render(d) == "(t.name IN ('a', 'it''s'))");
-    assert(inListSql(sql(i"t.flag"), typeid(bool), ["true"]).render(d) == "(t.flag IN (TRUE))");
-    assert(sqlBinaryOperator("==").get.render(d) == "=" && sqlBinaryOperator("^^").isNull);
+    assert(inListSql(sql(i"t.id"), typeid(int), ["1", "2"]).renderInline(d) == "(t.id IN (1, 2))");
+    assert(inListSql(sql(i"t.name"), typeid(string), ["a", "it's"]).renderInline(d) == "(t.name IN ('a', 'it''s'))");
+    assert(inListSql(sql(i"t.flag"), typeid(bool), ["true"]).renderInline(d) == "(t.flag IN (TRUE))");
+    assert(sqlBinaryOperator("==").get.renderInline(d) == "=" && sqlBinaryOperator("^^").isNull);
 }

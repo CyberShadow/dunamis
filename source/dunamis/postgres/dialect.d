@@ -39,8 +39,8 @@ class PostgresDialect : SqlDialect {
     }
 
     override Sql membershipOp(Sql operand, TypeInfo valueType, string[] values) {
-        // One array literal (whose type PostgreSQL infers from the operand's)
-        auto array = arrayLiteral(valueType, values.map!(v => Nullable!string(v)).array);
+        // One array (whose type PostgreSQL infers from the operand's)
+        auto array = SqlValue.array(values.map!(v => SqlValue.ofConstant(valueType, v)).array);
         return sql(i"($(operand) = ANY($(array)))");
     }
 
@@ -58,6 +58,31 @@ class PostgresDialect : SqlDialect {
 
     override string quoteIdentifier(string name) {
         return `"` ~ name.replace(`"`, `""`) ~ `"`;
+    }
+
+    override string parameter(size_t number, ref const SqlValue value) {
+        import std.conv : to;
+        auto placeholder = "$" ~ number.to!string;
+        // (Typed as a literal of the value is: an integer as integer, or
+        // bigint beyond its range; another number as numeric)
+        switch (value.kind) {
+            case SqlValue.Kind.boolean: return placeholder ~ "::boolean";
+            case SqlValue.Kind.number:
+                if (!value.isInteger)
+                    return placeholder ~ "::numeric";
+                return placeholder ~ (fitsInteger(value.text) ? "::integer" : "::bigint");
+            default: return placeholder;
+        }
+    }
+
+    /// Whether the integer `text` is in the range of PostgreSQL's integer.
+    private static bool fitsInteger(string text) {
+        import std.conv : to, ConvException;
+        try {
+            auto n = text.to!long;
+            return n >= int.min && n <= int.max;
+        } catch (ConvException)
+            return false;
     }
 
     override string escapeSqlString(string s) {
@@ -88,13 +113,13 @@ class PostgresDialect : SqlDialect {
         }
     }
 
-    override Sql rootIdFilter(string table, string[] pkColumns, Sql ids) {
-        // (The keys are the query's parameter $1, an array)
+    override Sql rootIdFilter(string table, string[] pkColumns, const(SqlValue)[] ids) {
+        // (Of a single-column key, one array of the keys)
         if (pkColumns.length == 1)
-            return sql(i"$(qualifiedColumn(table, pkColumns[0])) = ANY($1)");
+            return sql(i"$(qualifiedColumn(table, pkColumns[0])) = ANY($(SqlValue.array(ids)))");
         // Composite PK: tuple syntax
         auto columns = Sql.join!", "(pkColumns.map!(c => qualifiedColumn(table, c)).array);
-        return sql(i"($(columns)) IN ($(ids))");
+        return sql(i"($(columns)) IN ($(valueList(ids)))");
     }
 
     override Sql jsonObjectFunc() { return sql(i"json_build_object"); }
@@ -106,8 +131,12 @@ class PostgresDialect : SqlDialect {
     override Sql castToText(Sql expr) { return sql(i"$(expr)::text"); }
     override Nullable!Sql arrayPredicateOp(Sql operand, ArrayPredicate predicate, TypeInfo valueType,
             Nullable!string[] values) {
-        // (Array literals' and values' types PostgreSQL infers from the operand)
-        auto array = arrayLiteral(valueType, values);
+        // (Arrays' and values' types PostgreSQL infers from the operand)
+        SqlValue[] elements;
+        foreach (v; values)
+            elements ~= v.isNull ? SqlValue.init
+                : isSqlNumericType(valueType) ? SqlValue.ofConstant(valueType, v.get) : SqlValue.of(v.get);
+        auto array = SqlValue.array(elements);
         Sql value() {
             // (NULL, a number, or else a string)
             auto v = values[0];
@@ -124,16 +153,6 @@ class PostgresDialect : SqlDialect {
         }
     }
 
-    /// The text of the array literal of `values` (of the type
-    /// `valueType`), its elements quoted unless they are numbers (or NULL).
-    private static string arrayLiteral(TypeInfo valueType, Nullable!string[] values) {
-        string[] elements;
-        foreach (v; values)
-            elements ~= v.isNull ? "NULL"
-                : isSqlNumericType(valueType) ? v.get : `"` ~ v.get.replace(`\`, `\\`).replace(`"`, `\"`) ~ `"`;
-        return "{" ~ elements.join(",") ~ "}";
-    }
-
     override Sql orderByTerm(Sql expr, bool descending) { return descending ? sql(i"$(expr) DESC") : expr; }
 
     override Sql aggregateLayerJson(int layerId, Sql orderByClause) {
@@ -142,6 +161,66 @@ class PostgresDialect : SqlDialect {
             return sql(i"(SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (SELECT * FROM $(layer) ORDER BY $(orderByClause)) t)");
         return sql(i"(SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM $(layer) t)");
     }
+}
+
+/// The value `value` as a parameter of a PostgreSQL statement (see
+/// `Sql.render`), in text format (null: NULL).
+const(char)[] postgresParameter(ref const SqlValue value) {
+    final switch (value.kind) {
+        case SqlValue.Kind.null_: return null;
+        case SqlValue.Kind.boolean:
+        case SqlValue.Kind.number:
+        case SqlValue.Kind.text: return nonNull(value.text);
+        case SqlValue.Kind.array: return value.arrayText;
+        case SqlValue.Kind.json: return jsonParameter(value.json);
+    }
+}
+
+/// ditto, of the JSON value `json` (as `jsonToSqlLiteral` writes it as a
+/// literal: an array as a PostgreSQL array, an object as its JSON text).
+private const(char)[] jsonParameter(const JSONValue json) {
+    final switch (json.type) {
+        case JSONType.null_: return null;
+        case JSONType.string: return nonNull(json.str);
+        case JSONType.integer: return json.integer.to!string;
+        case JSONType.uinteger: return json.uinteger.to!string;
+        case JSONType.float_: return json.floating.to!string;
+        case JSONType.true_: return "true";
+        case JSONType.false_: return "false";
+        case JSONType.object: return json.toString();
+        case JSONType.array:
+            SqlValue[] elements;
+            foreach (element; json.array)
+                elements ~= element.type == JSONType.null_ ? SqlValue.init
+                    : element.type == JSONType.integer || element.type == JSONType.uinteger ||
+                        element.type == JSONType.float_ ? SqlValue(SqlValue.Kind.number, jsonParameter(element).idup)
+                    : SqlValue.of(jsonParameter(element));
+            return SqlValue.array(elements).arrayText;
+    }
+}
+
+/// `text`, but not null (which a parameter's text would mean NULL).
+private const(char)[] nonNull(string text) {
+    return text is null ? "" : text;
+}
+
+unittest {
+    import std.json : parseJSON;
+    alias p = (SqlValue v) => postgresParameter(v);
+    assert(p(SqlValue.init) is null && p(SqlValue.of(true)) == "true" && p(SqlValue.of(-3)) == "-3");
+    assert(p(SqlValue.of("")) !is null && p(SqlValue.of("it's")) == "it's");
+    assert(p(SqlValue.array([SqlValue.of("a"), SqlValue.of(2)])) == `{"a",2}`);
+    assert(p(SqlValue.of(parseJSON(`{"a":1}`))) == `{"a":1}` && p(SqlValue.of(JSONValue(null))) is null);
+    assert(p(SqlValue.of(parseJSON(`["x", 1, null]`))) == `{"x",1,NULL}`);
+    assert(p(SqlValue.of(parseJSON(`1.5`))) == "1.5" && p(SqlValue.of(parseJSON(`false`))) == "false");
+}
+
+// Parameters: typed as literals of the values would be
+unittest {
+    auto d = postgresDialect();
+    auto bound = sql(i"SELECT $(1), $(5_000_000_000L), $(1.5), $(true), $("x"), $(null)").render(d);
+    assert(bound.text == "SELECT $1::integer, $2::bigint, $3::numeric, $4::boolean, $5, $6", bound.text);
+    assert(bound.params.length == 6);
 }
 
 // Singleton instance
@@ -161,7 +240,7 @@ SqlDialect postgresDialect() {
 
 unittest {
     auto dialect = postgresDialect();
-    string r(Sql fragment) { return fragment.render(dialect); }
+    string r(Sql fragment) { return fragment.renderInline(dialect); }
     auto a = sql(i"a"), b = sql(i"b");
 
     // String concatenation uses ||
@@ -215,7 +294,7 @@ unittest {
 unittest {
     auto dialect = new PostgresDialect();
     alias N = Nullable!string;
-    string r(Nullable!Sql fragment) { return fragment.get.render(dialect); }
+    string r(Nullable!Sql fragment) { return fragment.get.renderInline(dialect); }
     assert(r(dialect.arrayPredicateOp(sql(i"t.ids"), ArrayPredicate.contains, typeid(int), [N("1"), N("2")])) ==
            "(t.ids @> '{1,2}')");
     assert(r(dialect.arrayPredicateOp(sql(i"t.ids"), ArrayPredicate.containedBy, typeid(int), [N("1"), N()])) ==
