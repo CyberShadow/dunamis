@@ -9,7 +9,7 @@ import std.conv;
 import std.json;
 import std.string;
 
-import ae.net.db.mysql;
+import ae.net.db.mysql : MySqlConnection, MyRow = Row, Param;
 import ae.utils.promise;
 
 import dunamis.core.types : AnyRef, makeAnyRef;
@@ -46,75 +46,68 @@ class MySQLSession : RelationalSession {
         return _connFactory().then((MySqlConnection conn) {
             _conn = conn;
             return _conn.query("BEGIN").array();
-        }).then((MySqlConnection.Row[] _) { });
+        }).then((MyRow[] _) { });
     }
 
     /// Commit or rollback the transaction, then fire pending events.
     override Promise!void teardown(SetupMode mode = SetupMode.query, bool success = true) {
         if (_conn is null) return resolve();  // setup failed
         auto sql = success ? "COMMIT" : "ROLLBACK";
-        return _conn.query(sql).array().then((MySqlConnection.Row[] _) {
+        return _conn.query(sql).array().then((MyRow[] _) {
             return super.teardown(mode, success);
         });
     }
 
     /// Execute raw SQL for session setup.
     override Promise!void execute(Sql statement) {
-        return run(statement).then((MySqlConnection.Row[] _) { });
+        return run(statement).then((MyRow[] _) { });
     }
 
     /// Run the statement `statement`, whose values are its parameters (see
-    /// `Sql.render`): prepared (and closed afterwards), with the values as
-    /// text; a statement without any is sent as it is. Returns its rows
-    /// (and tells `affected`, if not null, the number of rows it affected).
-    private Promise!(MySqlConnection.Row[]) run(Sql statement, void delegate(ulong) affected = null) {
+    /// `Sql.render`, and `mysqlParam`). Returns its rows (and tells
+    /// `affected`, if not null, the number of rows it affected).
+    private Promise!(MyRow[]) run(Sql statement, void delegate(ulong) affected = null) {
         auto bound = statement.render(mysqlDialect());
-        if (!bound.params.length) {
-            auto result = _conn.query(bound.text);
-            return result.array().then((MySqlConnection.Row[] rows) {
-                if (affected !is null)
-                    affected(result.affectedRows);
-                return rows;
-            });
-        }
-        auto params = bound.params.map!(v => mysqlParameter(v)).array;
-        return _conn.prepare(bound.text).then((MySqlConnection.PreparedStatement stmt) {
-            auto result = stmt.queryWithParams(params);
-            return result.array().then((MySqlConnection.Row[] rows) {
-                if (affected !is null)
-                    affected(result.affectedRows);
-                stmt.close();
-                return rows;
-            }, delegate MySqlConnection.Row[](Exception e) {
-                stmt.close();
-                throw e;
-            });
+        auto result = bound.params.length
+            ? _conn.query(bound.text, bound.params.map!(v => mysqlParam(v)).array)
+            : _conn.query(bound.text);
+        return result.array().then((MyRow[] rows) {
+            if (affected !is null)
+                affected(result.affectedRows);
+            return rows;
         });
     }
 
-    /// The value `value` as a parameter (as text, null: NULL; booleans as
-    /// 1 and 0, JSON arrays and objects as their JSON text).
-    private static const(char)[] mysqlParameter(ref const SqlValue value) {
+    /// The value `value` as a parameter: typed as its literal would be (a
+    /// boolean, an integer, an exact number, a string; a JSON value by its
+    /// JSON type, an array or object as its JSON text).
+    private static Param mysqlParam(const SqlValue value) {
         import std.json : JSONType;
-        static const(char)[] nonNull(string s) { return s is null ? "" : s; }
+        static Param number(string text) {
+            if (SqlValue(SqlValue.Kind.number, text).isInteger)
+                try
+                    return Param.of(text.to!long);
+                catch (ConvException) {}
+            return Param.numeric(text);
+        }
         final switch (value.kind) {
-            case SqlValue.Kind.null_: return null;
-            case SqlValue.Kind.boolean: return value.text == "true" ? "1" : "0";
-            case SqlValue.Kind.number:
-            case SqlValue.Kind.text: return nonNull(value.text);
+            case SqlValue.Kind.null_: return Param.init;
+            case SqlValue.Kind.boolean: return Param.of(value.text == "true");
+            case SqlValue.Kind.number: return number(value.text);
+            case SqlValue.Kind.text: return Param.of(value.text);
             case SqlValue.Kind.array: assert(false, "MySQL has no arrays");
             case SqlValue.Kind.json:
                 auto json = value.json;
                 final switch (json.type) {
-                    case JSONType.null_: return null;
-                    case JSONType.string: return nonNull(json.str);
-                    case JSONType.integer: return json.integer.to!string;
-                    case JSONType.uinteger: return json.uinteger.to!string;
-                    case JSONType.float_: return json.floating.to!string;
-                    case JSONType.true_: return "1";
-                    case JSONType.false_: return "0";
+                    case JSONType.null_: return Param.init;
+                    case JSONType.string: return Param.of(json.str);
+                    case JSONType.integer: return Param.of(json.integer);
+                    case JSONType.uinteger: return number(json.uinteger.to!string);
+                    case JSONType.float_: return Param.of(json.floating);
+                    case JSONType.true_: return Param.of(true);
+                    case JSONType.false_: return Param.of(false);
                     case JSONType.array:
-                    case JSONType.object: return json.toString();
+                    case JSONType.object: return Param.of(json.toString());
                 }
         }
     }
@@ -161,7 +154,7 @@ class MySQLSession : RelationalSession {
             writeln(sql);
         }
 
-        return run(statement).then((MySqlConnection.Row[] rows) {
+        return run(statement).then((MyRow[] rows) {
             return parseQueryResult(rows, allNodes);
         });
     }
@@ -169,7 +162,7 @@ class MySQLSession : RelationalSession {
     /// Parse MySQL result into QueryResult.
     /// The CTE query returns a single row with JSON containing all layers.
     /// Also caches child results so they can be returned when child nodes are executed.
-    private QueryResult parseQueryResult(MySqlConnection.Row[] rows, QueryNode[] nodes) {
+    private QueryResult parseQueryResult(MyRow[] rows, QueryNode[] nodes) {
         if (rows.length == 0) {
             return new QueryResult();
         }
@@ -222,7 +215,7 @@ class MySQLSession : RelationalSession {
 
     /// The key of a row of a result (its key columns come first, see
     /// `dunamis.relational.keys`).
-    private static string buildKeyFromRow(MySqlConnection.Row row, size_t pkCount) {
+    private static string buildKeyFromRow(MyRow row, size_t pkCount) {
         auto parts = new string[pkCount];
         foreach (i; 0 .. pkCount)
             parts[i] = row.column!string(cast(int) i);
@@ -251,7 +244,7 @@ class MySQLSession : RelationalSession {
         auto pkCount = pkColumns.length;
         auto sql = buildFetchColumnSQL(table, column, validIds);
 
-        return run(sql).then((MySqlConnection.Row[] rows) {
+        return run(sql).then((MyRow[] rows) {
             // Build lookup map
             string[string] values;
             foreach (row; rows) {
@@ -286,7 +279,7 @@ class MySQLSession : RelationalSession {
         auto pkCount = pkColumns.length;
         auto sql = buildFetchColumnSQL(table, column, validIds);
 
-        return run(sql).then((MySqlConnection.Row[] rows) {
+        return run(sql).then((MyRow[] rows) {
             // Build lookup map
             long[string] values;
             foreach (row; rows) {
@@ -305,7 +298,7 @@ class MySQLSession : RelationalSession {
             query = sql(i"$(query) ORDER BY $(columnList(orderBy))");
 
         auto numPkCols = pkColumns.length;
-        return run(query).then((MySqlConnection.Row[] rows) {
+        return run(query).then((MyRow[] rows) {
             return rows.map!(r => buildKeyFromRow(r, numPkCols)).array;
         });
     }
@@ -343,7 +336,7 @@ class MySQLSession : RelationalSession {
         if (orderBy.length)
             query = sql(i"$(query) ORDER BY $(columnList(orderBy))");
 
-        return run(query).then((MySqlConnection.Row[] rows) {
+        return run(query).then((MyRow[] rows) {
             // Group children by parent
             AnyRef[][string] childrenByParent;
             foreach (row; rows) {
@@ -383,7 +376,7 @@ class MySQLSession : RelationalSession {
         auto pkCount = pkColumns.length;
         auto sql = buildFetchColumnSQL(childTable, fk, validIds);
 
-        return run(sql).then((MySqlConnection.Row[] rows) {
+        return run(sql).then((MyRow[] rows) {
             import std.typecons : Nullable;
             // Build lookup map
             string[string] fkValues;
@@ -437,7 +430,7 @@ class MySQLSession : RelationalSession {
         auto pkCount = pkColumns.length;
         auto sql = buildFetchColumnSQL(table, column, validIds);
 
-        return run(sql).then((MySqlConnection.Row[] rows) {
+        return run(sql).then((MyRow[] rows) {
             // Build lookup map
             JSONValue[string] values;
             foreach (row; rows) {
@@ -481,12 +474,12 @@ class MySQLSession : RelationalSession {
         auto columns = input.columns;  // Capture for closure
 
         // Execute INSERT and fetch the inserted row as JSON
-        return run(insertSql).then((MySqlConnection.Row[] _) {
+        return run(insertSql).then((MyRow[] _) {
             // Use LAST_INSERT_ID() for auto-increment, otherwise use PK values from input
             auto selectSql = (isAutoIncrement ? generateSelectLastInsertSQL(table, columns)
                 : generateSelectByPkSQL(table, pkColumns, columns, input));
             return run(selectSql);
-        }).then((MySqlConnection.Row[] rows) {
+        }).then((MyRow[] rows) {
             return parseJsonResult(rows, typeName, pkColumns);
         });
     }
@@ -505,11 +498,11 @@ class MySQLSession : RelationalSession {
         _cachedSQL = updateSql.renderInline(mysqlDialect());
 
         // Execute UPDATE and fetch the updated rows as JSON
-        return run(updateSql).then((MySqlConnection.Row[] _) {
+        return run(updateSql).then((MyRow[] _) {
             // Fetch the updated rows
             auto selectSql = generateSelectUpdatedSQL(table, ids, columns, pkColumns);
             return run(selectSql);
-        }).then((MySqlConnection.Row[] rows) {
+        }).then((MyRow[] rows) {
             return parseJsonResult(rows, typeName, pkColumns);
         });
     }
@@ -521,12 +514,12 @@ class MySQLSession : RelationalSession {
 
         // Execute DELETE, and return the affected rows count
         ulong deleted;
-        return run(deleteSql, (ulong n) { deleted = n; }).then((MySqlConnection.Row[] _) => cast(int) deleted);
+        return run(deleteSql, (ulong n) { deleted = n; }).then((MyRow[] _) => cast(int) deleted);
     }
 
     /// Parse JSON result from SELECT query.
     /// Expects rows with a single column containing JSON.
-    private QueryResult parseJsonResult(MySqlConnection.Row[] rows, string typeName, string[] pkColumns) {
+    private QueryResult parseJsonResult(MyRow[] rows, string typeName, string[] pkColumns) {
         auto result = new QueryResult();
         if (rows.length == 0) {
             return result;
@@ -594,23 +587,23 @@ class MySQLDB(DBConfig config = defaultDBConfig) : DataSource, SqlDataSource {
 MySQLDB!config createMySQLDB(DBConfig config = defaultDBConfig)(
     string host, ushort port, string database, string user, string password
 ) {
-    import dunamis.mysql.connection : connect;
+    import ae.net.db.mysql : connect;
 
-    return new MySQLDB!config(() => connect(host, port, database, user, password));
+    return new MySQLDB!config(() => connect(host, port, user, database, password));
 }
 
 /// Create a MySQLDB instance from environment variables.
 /// Each session will create its own connection from environment variables.
 MySQLDB!config createMySQLDBFromEnv(DBConfig config = defaultDBConfig)() {
-    import dunamis.mysql.connection : connectFromEnv;
+    import ae.net.db.mysql : connect;
 
-    return new MySQLDB!config(() => connectFromEnv());
+    return new MySQLDB!config(() => connect());
 }
 
 /// Create a MySQLDB instance from a connection string.
 /// Each session will create its own connection using this URI.
 MySQLDB!config createMySQLDBFromUri(DBConfig config = defaultDBConfig)(string uri) {
-    import dunamis.mysql.connection : connectFromUri;
+    import ae.net.db.mysql : connect;
 
-    return new MySQLDB!config(() => connectFromUri(uri));
+    return new MySQLDB!config(() => connect(uri));
 }

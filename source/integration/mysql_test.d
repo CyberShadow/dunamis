@@ -13,7 +13,7 @@ import std.stdio;
 import std.string : strip, replace;
 
 import ae.net.sync : ThreadAnchor;
-import ae.net.db.mysql : MySqlConnection;
+import ae.net.db.mysql : MySqlConnection, connect;
 import ae.utils.promise.await : async, await;
 
 import dunamis.mysql;
@@ -61,7 +61,7 @@ class MySQLTestRunner : IntegrationTestRunner!(db, MySchema, User, FilterLastSch
 
     override void cleanup() {
         if (mysqlConn !is null) {
-            mysqlConn.disconnect("Tests complete");
+            mysqlConn.close();
         }
     }
 
@@ -81,7 +81,7 @@ class MySQLTestRunner : IntegrationTestRunner!(db, MySchema, User, FilterLastSch
 
         // Run async setup in a fiber
         async({
-            mysqlConn = connect(host, port, database, user, password).await();
+            mysqlConn = connect(host, port, user, database, password).await();
             writeln("Connected.");
             writeln();
 
