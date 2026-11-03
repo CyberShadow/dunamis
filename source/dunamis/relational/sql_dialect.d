@@ -93,10 +93,8 @@ interface SqlDialect {
     string jsonToSqlLiteral(JSONValue val);
 
     /// The placeholder of the statement's parameter `number` (from 1), of
-    /// the value `value` (see `Sql.render`): of PostgreSQL, `$1`, typed
-    /// (with a cast) as a literal of the value would be (numbers and
-    /// booleans; strings, NULL and arrays are typed by their context, as
-    /// literals are); of SQLite and MySQL, `?`.
+    /// the value `value` (see `Sql.render`): of PostgreSQL, `$1`; of SQLite
+    /// and MySQL, `?`. (The sessions send the values with their types.)
     string parameter(size_t number, ref const SqlValue value);
 
     /// SQL expression for filtering the root rows of `table` by their keys

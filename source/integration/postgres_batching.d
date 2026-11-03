@@ -497,14 +497,14 @@ private void checkNativeSqlExpressions(PostgresSession session, EvalContext ctx,
     auto doubled = evaluateNested(map!((Expr!BatchingTerm t) => termDays(t) * 2)(getAll!BatchingTerm()), ctx).await;
     assertTrue(doubled == iota(1, data.n + 1).smap!(t => 2 * t).array ~ 0, "Native SQL operand: " ~ doubled.to!string);
     expectOne("Native SQL operand",
-        "(COALESCE(upper(batching_terms.validity) - lower(batching_terms.validity), 0) * $1::integer) AS computed_");
+        "(COALESCE(upper(batching_terms.validity) - lower(batching_terms.validity), 0) * $1) AS computed_");
 
     // In the WHERE clause: operands of comparisons (and of conjunctions)
     auto ids = evaluateNested(map!((Expr!BatchingTerm t) => fieldAccess!"id"(t))(
         filterBy!((Expr!BatchingTerm t) => termDays(t).gt(2).and(termDays(t).lt(6)))(getAll!BatchingTerm())), ctx).await;
     assertTrue(ids == iota(3, 6).sfilter!(t => t <= data.n).array, "Native SQL in a filter: " ~ ids.to!string);
     assertTrue(sent.length == 1 && sent[0].findSplitAfter("WHERE ")[1].canFind(
-        "(COALESCE(upper(batching_terms.validity) - lower(batching_terms.validity), 0) > $1::integer)"),
+        "(COALESCE(upper(batching_terms.validity) - lower(batching_terms.validity), 0) > $1)"),
         "Native SQL not in the WHERE clause: " ~ sent.to!string);
     sent = null;
 

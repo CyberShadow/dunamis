@@ -9,10 +9,9 @@ import std.conv;
 import std.json;
 import std.string;
 
-import ae.net.db.psql;
+import ae.net.db.psql : Param, PgSqlConnection, PgResult = Result, PgRow = Row;
 import ae.utils.promise;
 
-alias PreparedStatement = PgSqlConnection.PreparedStatement;
 
 import dunamis.core.types : AnyRef, makeAnyRef;
 import dunamis.core.optimize : ExprOptimizer;
@@ -22,7 +21,7 @@ import dunamis.relational.eval_context;
 import dunamis.relational.keys : keyOf, keyOfTexts, keyValues, singleKeyValue;
 import dunamis.relational.query_node;
 import dunamis.relational.sql_optimizer;
-import dunamis.postgres.dialect : postgresDialect, postgresParameter;
+import dunamis.postgres.dialect : postgresDialect;
 import dunamis.relational.sql : relationsOf, toSQL;
 import dunamis.core.json_text : parseJsonText;
 
@@ -232,7 +231,7 @@ class PostgresSession : RelationalSession {
     /// The statement's values are its parameters (see `Sql.render`), sent
     /// with the Extended Query protocol; a statement without any is sent as
     /// a simple query.
-    private Promise!(PgSqlConnection.Row[]) run(Sql statement, const(string)[] relations = null) {
+    private Promise!(PgRow[]) run(Sql statement, const(string)[] relations = null) {
         auto conn = connection();
         auto rendered = bound(statement, relations).render(postgresDialect());
         observe(rendered.text);
@@ -245,20 +244,20 @@ class PostgresSession : RelationalSession {
     /// The result of the statement `rendered` on `conn` (not sent yet):
     /// with its values as its parameters (see `Sql.render`), with the
     /// Extended Query protocol; a statement without any as a simple query.
-    private static PgSqlConnection.Result send(PgSqlConnection conn, BoundSql rendered) {
+    private static PgResult send(PgSqlConnection conn, BoundSql rendered) {
         return rendered.params.length
-            ? conn.extendedQueryWithParams(rendered.text, rendered.params.map!postgresParameter.array)
+            ? conn.query(rendered.text, rendered.params.map!postgresParam.array)
             : conn.query(rendered.text);
     }
 
-    private Promise!(PgSqlConnection.Row[]) bracketed(PgSqlConnection conn, PgSqlConnection.Result statement) {
+    private Promise!(PgRow[]) bracketed(PgSqlConnection conn, PgResult statement) {
         // (A statement is sent when its rows are requested: here, the three
         // one after the other.)
         // The result is the statement's rows, or the first error (in that
         // order). Each one's outcome is awaited, so that none's error goes
         // unhandled when an earlier one fails (e.g. once one has failed, the
         // others fail too, the transaction being aborted).
-        alias Rows = PgSqlConnection.Row[];
+        alias Rows = PgRow[];
         auto applied = send(conn, _applySettings.render(postgresDialect())).array().toResult();
         auto rows = statement.array().toResult();
         auto restored = send(conn, _restoreSettings.render(postgresDialect())).array().toResult();
@@ -298,7 +297,7 @@ class PostgresSession : RelationalSession {
             _conn = conn;
             _transaction++;
             return connection().query("BEGIN").array();
-        }).then((PgSqlConnection.Row[] _) {
+        }).then((PgRow[] _) {
             return executeSetupStatement(0).then(() => runSetupAction(0)).then(() {
                 _setupDepth = 1;
             });
@@ -329,7 +328,7 @@ class PostgresSession : RelationalSession {
         auto conn = _conn;
         _conn = null;
         if (conn !is null && _disconnectOnTeardown)
-            conn.disconnect(reason);
+            conn.close();
         releaseConnectionPermit();
     }
 
@@ -396,7 +395,7 @@ class PostgresSession : RelationalSession {
         }
         auto sql = success ? "COMMIT" : "ROLLBACK";
         auto conn = _conn;
-        return conn.query(sql).array().then((PgSqlConnection.Row[] _) {
+        return conn.query(sql).array().then((PgRow[] _) {
             return super.teardown(mode, success);
         }).then(() {
             if (_conn is conn)
@@ -412,7 +411,7 @@ class PostgresSession : RelationalSession {
 
     /// Execute the statement `statement`.
     override Promise!void execute(Sql statement) {
-        return run(statement).then((PgSqlConnection.Row[] _) { });
+        return run(statement).then((PgRow[] _) { });
     }
 
     /// Execute a query which returns one integer column.  This is intentionally a
@@ -420,7 +419,7 @@ class PostgresSession : RelationalSession {
     /// semantics cannot be expressed as relational query nodes (for example
     /// versioned writes).
     Promise!(long[]) queryLongs(Sql query) {
-        return run(query).then((PgSqlConnection.Row[] rows) {
+        return run(query).then((PgRow[] rows) {
             long[] values;
             values.reserve(rows.length);
             foreach (row; rows)
@@ -431,7 +430,7 @@ class PostgresSession : RelationalSession {
 
     /// Execute a query which returns one text column.
     Promise!(string[]) queryStrings(Sql query) {
-        return run(query).then((PgSqlConnection.Row[] rows) {
+        return run(query).then((PgRow[] rows) {
             string[] values;
             values.reserve(rows.length);
             foreach (row; rows)
@@ -446,7 +445,7 @@ class PostgresSession : RelationalSession {
     /// current transaction and request-local database settings, instead of
     /// recursively entering GraphQL over HTTP.
     Promise!(JSONValue[]) queryJson(Sql query) {
-        return run(query).then((PgSqlConnection.Row[] rows) {
+        return run(query).then((PgRow[] rows) {
             JSONValue[] values;
             values.reserve(rows.length);
             foreach (row; rows)
@@ -496,13 +495,13 @@ class PostgresSession : RelationalSession {
         }
 
         return run(query, relationsOf(allNodes))
-            .then((PgSqlConnection.Row[] rows) => parseQueryResult(rows, allNodes));
+            .then((PgRow[] rows) => parseQueryResult(rows, allNodes));
     }
 
     /// Parse PostgreSQL result into QueryResult.
     /// The CTE query returns a single row with JSON containing all layers.
     /// Also caches child results so they can be returned when child nodes are executed.
-    private QueryResult parseQueryResult(PgSqlConnection.Row[] rows, QueryNode[] nodes) {
+    private QueryResult parseQueryResult(PgRow[] rows, QueryNode[] nodes) {
         if (rows.length == 0) {
             return new QueryResult();
         }
@@ -571,7 +570,7 @@ class PostgresSession : RelationalSession {
 
     /// The key of a row of a result (its key columns come first, see
     /// `dunamis.relational.keys`).
-    private static string buildKeyFromRow(PgSqlConnection.Row row, size_t pkCount) {
+    private static string buildKeyFromRow(PgRow row, size_t pkCount) {
         auto parts = new string[pkCount];
         foreach (i; 0 .. pkCount)
             parts[i] = row.column!string(cast(int) i);
@@ -595,7 +594,7 @@ class PostgresSession : RelationalSession {
         auto pkCount = pkColumns.length;
         auto sql = buildFetchColumnSQL(table, column, validIds);
 
-        return run(sql, [table]).then((PgSqlConnection.Row[] rows) {
+        return run(sql, [table]).then((PgRow[] rows) {
             // Build lookup map
             string[string] values;
             foreach (row; rows) {
@@ -625,7 +624,7 @@ class PostgresSession : RelationalSession {
         auto pkCount = pkColumns.length;
         auto sql = buildFetchColumnSQL(table, column, validIds);
 
-        return run(sql, [table]).then((PgSqlConnection.Row[] rows) {
+        return run(sql, [table]).then((PgRow[] rows) {
             // Build lookup map
             long[string] values;
             foreach (row; rows) {
@@ -644,7 +643,7 @@ class PostgresSession : RelationalSession {
             query = sql(i"$(query) ORDER BY $(columnList(orderBy))");
 
         auto numPkCols = pkColumns.length;
-        return run(query, [table]).then((PgSqlConnection.Row[] rows) {
+        return run(query, [table]).then((PgRow[] rows) {
             return rows.map!(r => buildKeyFromRow(r, numPkCols)).array;
         });
     }
@@ -677,7 +676,7 @@ class PostgresSession : RelationalSession {
         if (orderBy.length)
             query = sql(i"$(query) ORDER BY $(columnList(orderBy))");
 
-        return run(query, [childTable]).then((PgSqlConnection.Row[] rows) {
+        return run(query, [childTable]).then((PgRow[] rows) {
             // Group children by parent
             AnyRef[][string] childrenByParent;
             foreach (row; rows) {
@@ -712,7 +711,7 @@ class PostgresSession : RelationalSession {
         auto pkCount = pkColumns.length;
         auto sql = buildFetchColumnSQL(childTable, fk, validIds);
 
-        return run(sql, [childTable]).then((PgSqlConnection.Row[] rows) {
+        return run(sql, [childTable]).then((PgRow[] rows) {
             import std.typecons : Nullable;
             // Build lookup map
             // (The parents' refs; a NULL FK, none)
@@ -766,7 +765,7 @@ class PostgresSession : RelationalSession {
         auto fetched = asJson ? sql(i"to_json($(columnSql))::text") : columnSql;
         auto sql = buildFetchColumnSQL(table, fetched, validIds);
 
-        return run(sql, [table]).then((PgSqlConnection.Row[] rows) {
+        return run(sql, [table]).then((PgRow[] rows) {
             // Build lookup map
             JSONValue[string] values;
             foreach (row; rows) {
@@ -811,7 +810,7 @@ class PostgresSession : RelationalSession {
         _cachedSQL = statement.renderInline(postgresDialect());
 
         // No parameters needed - values are embedded in SQL
-        return run(statement).then((PgSqlConnection.Row[] rows) {
+        return run(statement).then((PgRow[] rows) {
             return parseInsertResult(rows, typeName, pkColumns);
         });
     }
@@ -823,7 +822,7 @@ class PostgresSession : RelationalSession {
         _cachedSQL = statement.renderInline(postgresDialect());
 
         // No parameters needed - values are embedded in SQL
-        return run(statement).then((PgSqlConnection.Row[] rows) {
+        return run(statement).then((PgRow[] rows) {
             return parseUpdateResult(rows, typeName, pkColumns);
         });
     }
@@ -835,7 +834,7 @@ class PostgresSession : RelationalSession {
         _cachedSQL = statement.renderInline(postgresDialect());
 
         // No parameters needed - IDs are embedded in SQL
-        return run(statement).then((PgSqlConnection.Row[] rows) {
+        return run(statement).then((PgRow[] rows) {
             if (rows.length > 0) {
                 return rows[0].column!int(0);
             }
@@ -844,7 +843,7 @@ class PostgresSession : RelationalSession {
     }
 
     /// Parse INSERT result (single row JSON).
-    private QueryResult parseInsertResult(PgSqlConnection.Row[] rows, string typeName, string[] pkColumns) {
+    private QueryResult parseInsertResult(PgRow[] rows, string typeName, string[] pkColumns) {
         auto result = new QueryResult();
         if (rows.length == 0) {
             return result;
@@ -859,7 +858,7 @@ class PostgresSession : RelationalSession {
     }
 
     /// Parse UPDATE result (JSON array).
-    private QueryResult parseUpdateResult(PgSqlConnection.Row[] rows, string typeName, string[] pkColumns) {
+    private QueryResult parseUpdateResult(PgRow[] rows, string typeName, string[] pkColumns) {
         auto result = new QueryResult();
         if (rows.length == 0) {
             return result;
@@ -874,6 +873,58 @@ class PostgresSession : RelationalSession {
         }
         return result;
     }
+}
+
+/// The value `value` (see `Sql.render`) as a parameter of a statement,
+/// typed (see `PgSqlConnection.query`) as a literal of it would be: a
+/// boolean as boolean, an integer as integer (or bigint), another number as
+/// numeric; a string, NULL and an array by its context. (A JSON value: by
+/// its JSON type; an array as an array, an object as its JSON text.)
+private Param postgresParam(const SqlValue value) {
+    import std.json : JSONType;
+
+    static Param number(string text) {
+        import std.conv : to, ConvException;
+        if (SqlValue(SqlValue.Kind.number, text).isInteger)
+            try
+                return Param.of(text.to!long);
+            catch (ConvException) {}
+        return Param.numeric(text);
+    }
+    static Param jsonParam(const JSONValue json) {
+        final switch (json.type) {
+            case JSONType.null_: return Param.init;
+            case JSONType.string: return Param.of(json.str);
+            case JSONType.integer: return Param.of(json.integer);
+            case JSONType.uinteger: return number(json.uinteger.to!string);
+            case JSONType.float_: return Param.of(json.floating);
+            case JSONType.true_: return Param.of(true);
+            case JSONType.false_: return Param.of(false);
+            case JSONType.object: return Param.of(json.toString());
+            case JSONType.array: return Param.array(json.array.map!(e => jsonParam(e)).array);
+        }
+    }
+    final switch (value.kind) {
+        case SqlValue.Kind.null_: return Param.init;
+        case SqlValue.Kind.boolean: return Param.of(value.text == "true");
+        case SqlValue.Kind.number: return number(value.text);
+        case SqlValue.Kind.text: return Param.of(value.text);
+        case SqlValue.Kind.array: return Param.array(value.elements.map!(e => postgresParam(e)).array);
+        case SqlValue.Kind.json: return jsonParam(value.json);
+    }
+}
+
+unittest {
+    import std.json : parseJSON;
+    alias p = postgresParam;
+    assert(p(SqlValue.init).isNull && p(SqlValue.of(true)) == Param.of(true));
+    assert(p(SqlValue.of(-3)) == Param.of(-3L) && p(SqlValue.of(1.5)) == Param.numeric("1.5"));
+    assert(p(SqlValue(SqlValue.Kind.number, "99999999999999999999")) == Param.numeric("99999999999999999999"));
+    assert(p(SqlValue.of("it's")) == Param.of("it's"));
+    assert(p(SqlValue.array([SqlValue.of("a"), SqlValue.of(2)])) == Param.array([Param.of("a"), Param.of(2L)]));
+    assert(p(SqlValue.of(parseJSON(`{"a":1}`))) == Param.of(`{"a":1}`) && p(SqlValue.of(JSONValue(null))).isNull);
+    assert(p(SqlValue.of(parseJSON(`["x", 1, null]`))) == Param.array([Param.of("x"), Param.of(1L), Param.init]));
+    assert(p(SqlValue.of(parseJSON(`1.5`))) == Param.of(1.5) && p(SqlValue.of(parseJSON(`false`))) == Param.of(false));
 }
 
 // ============================================================================
@@ -954,15 +1005,15 @@ class PostgresDB(DBConfig config = defaultDBConfig) : DataSource, SqlDataSource 
 PostgresDB!config createPostgresDB(DBConfig config = defaultDBConfig)(
     string host, ushort port, string database, string user, string password
 ) {
-    import dunamis.postgres.connection : connect;
+    import ae.net.db.psql : connect;
 
-    return new PostgresDB!config(() => connect(host, port, database, user, password));
+    return new PostgresDB!config(() => connect(host, port, user, database, password));
 }
 
 /// Create a PostgresDB instance from a connection string.
 /// Each session will create its own connection using this URI.
 PostgresDB!config createPostgresDBFromUri(DBConfig config = defaultDBConfig)(string uri) {
-    import dunamis.postgres.connection : connectFromUri;
+    import ae.net.db.psql : connect;
 
-    return new PostgresDB!config(() => connectFromUri(uri));
+    return new PostgresDB!config(() => connect(uri));
 }

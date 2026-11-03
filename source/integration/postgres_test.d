@@ -13,7 +13,7 @@ import std.stdio;
 import std.string : strip, replace;
 
 import ae.net.sync : ThreadAnchor;
-import ae.net.db.psql : PgSqlConnection;
+import ae.net.db.psql : PgSqlConnection, connect;
 import ae.utils.promise.await : async, await;
 
 import dunamis.core.datasource : SetupMode;
@@ -67,7 +67,7 @@ class PostgresTestRunner : IntegrationTestRunner!(db, MySchema, User, FilterLast
 
     override void cleanup() {
         if (pgConn !is null) {
-            pgConn.disconnect("Tests complete");
+            pgConn.close();
         }
     }
 
@@ -88,13 +88,13 @@ class PostgresTestRunner : IntegrationTestRunner!(db, MySchema, User, FilterLast
 
         // Run async setup in a fiber
         async({
-            pgConn = connect(host, port, database, user, password).await();
+            pgConn = connect(host, port, user, database, password).await();
             writeln("Connected.");
             writeln();
 
             // Each request session gets a connection of its own, so that
             // requests can be evaluated concurrently (as in production).
-            db = new PostgresDB!()(() => connect(host, port, database, user, password),
+            db = new PostgresDB!()(() => connect(host, port, user, database, password),
                 true, 8);
 
             setupDatabase();
@@ -407,7 +407,7 @@ void testNullableAndEnumSortsPushed() {
         evaluateNested(compileQuery!MySchema(`{ tasks(orderBy: [{field: priority, direction: ASC}]) { id } }`), ctx).await;
         // (The labels and positions are the statement's parameters)
         assertTrue(sent.any!(sql => sql.canFind("ORDER BY") && sql.canFind("CASE tasks.status WHEN $") &&
-            sql.canFind("::integer WHEN $")), "The enum sort was not pushed into the query: " ~ sent.to!string);
+            sql.canFind(" THEN $")), "The enum sort was not pushed into the query: " ~ sent.to!string);
         assertTrue(sent.any!(sql => sql.canFind("ORDER BY") && sql.canFind("tasks.priority")),
             "The nullable sort was not pushed into the query: " ~ sent.to!string);
     });
