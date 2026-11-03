@@ -1,7 +1,7 @@
 {
 	"fileVersion": 1,
 	"versions": {
-		"ae": {"version":"f60920be1f257b43d7766164e55d2f326b4db232","repository":"git+https://github.com/CyberShadow/ae.git"},
+		"ae": {"version":"80db9991876157884f5883ac45a7fbcb5f9d83e7","repository":"git+https://github.com/CyberShadow/ae.git"},
 		"graphqld": {"version":"ae23dc6bab7d967031df2b23fc0552b842254ac6","repository":"git+https://github.com/vpanteleev-sym/graphqld"}
 	}
 }
