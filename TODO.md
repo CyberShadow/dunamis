@@ -27,7 +27,7 @@
 - MockDB for testing (in-memory data)
 - DebugSqlDB for SQL inspection (wraps another fetcher, prints generated SQL)
 - PostgresDB using `ae.net.db.psql`
-- SQLiteDB using `ae.sys.sqlite3`
+- SQLiteDB using `ae.net.db.sqlite`
 - MySQLDB using `ae.net.db.mysql`
 - GraphQL schema generation (`generateSchemaSDL!(Schema!Query)`)
 - SQL DDL generation (`generateDDL!Query`)

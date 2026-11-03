@@ -10,8 +10,9 @@ import std.array;
 import std.stdio;
 import std.string : strip;
 
+import ae.net.db.sqlite : SqliteConnection, connect;
 import ae.net.sync : ThreadAnchor;
-import ae.sys.sqlite3 : SQLite;
+import ae.utils.promise.await : async, await;
 
 import std.conv : to;
 
@@ -36,15 +37,15 @@ mixin TestSchema!db;
 // ============================================================================
 
 class SQLiteTestRunner : IntegrationTestRunner!(db, MySchema, User, FilterLastSchema) {
-    private SQLite sqlite;
+    private SqliteConnection sqlite;
 
     override string testName() {
         return "SQLite Integration Tests";
     }
 
-    override void setupDatabase() {
+    override void setupDatabase() @async {
         writeln("Creating in-memory SQLite database...");
-        sqlite = new SQLite(":memory:");
+        sqlite = connect(":memory:").await;
         db = new SQLiteDB!()(sqlite);
 
         writeln("Creating schema from DDL generator...");
@@ -57,7 +58,7 @@ class SQLiteTestRunner : IntegrationTestRunner!(db, MySchema, User, FilterLastSc
         foreach (statement; ddl.splitter(";\n").filter!(s => s.strip.length > 0)) {
             auto sql = statement.strip ~ ";";
             debug(sql) writefln("  Executing: %s", sql);
-            sqlite.exec(sql);
+            sqlite.query(sql).array.await;
         }
 
         writeln("Schema created.");
@@ -65,7 +66,9 @@ class SQLiteTestRunner : IntegrationTestRunner!(db, MySchema, User, FilterLastSc
     }
 
     override void cleanup() {
-        // SQLite in-memory DB is automatically cleaned up
+        // (Ending the connection's worker thread, so that the event loop exits)
+        if (db !is null)
+            db.close();
     }
 
     void run() {
@@ -74,9 +77,14 @@ class SQLiteTestRunner : IntegrationTestRunner!(db, MySchema, User, FilterLastSc
         auto mainThread = new ThreadAnchor();
         auto testThread = startTestThread(mainThread);
 
-        // SQLite setup is synchronous
-        setupDatabase();
-        onDatabaseReady();
+        // Run async setup in a fiber
+        async({
+            setupDatabase();
+            onDatabaseReady();
+        }).except((Exception e) {
+            writefln("Error: %s", e.msg);
+            assert(0, e.msg);
+        });
 
         runEventLoop(testThread);
     }
@@ -118,24 +126,31 @@ void testNativeSqlExpressionsInMemory() {
     import dunamis.relational.schema : getAll;
     import integration.test_framework : assertTrue;
 
-    auto sqlite = new SQLite(":memory:");
-    sqlite.exec("CREATE TABLE spans (id INTEGER PRIMARY KEY, low INTEGER NOT NULL, high INTEGER NOT NULL)");
-    sqlite.exec("INSERT INTO spans VALUES (1, 0, 5), (2, 3, 9), (3, 4, 6)");
-    spanDb = new SQLiteDB!()(sqlite);
-    scope (exit) spanDb = null;
-
     R[] run(R)(Expr!(R[]) query) {
-        return awaitSync(new Executor().execute(query));
+        return new Executor().execute(query).await;
     }
-    auto widths = run(map!((Expr!Span s) => spanWidth(s))(getAll!Span()));
-    assertTrue(widths == [5, 6, 2], "Native SQL value in memory: " ~ widths.to!string);
-    auto doubled = run(map!((Expr!Span s) => spanWidth(s) * 2)(getAll!Span()));
-    assertTrue(doubled == [10, 12, 4], "Native SQL operand in memory: " ~ doubled.to!string);
-    auto wide = run(map!((Expr!Span s) => s.high)(filterBy!((Expr!Span s) => spanWidth(s).gt(3))(getAll!Span())));
-    assertTrue(wide == [5, 9], "Native SQL filter in memory: " ~ wide.to!string);
-    auto sorted = run(map!((Expr!Span s) => s.high)(
-        sortBy!((Expr!Span a, Expr!Span b) => spanWidth(a).gt(spanWidth(b)))(getAll!Span())));
-    assertTrue(sorted == [9, 5, 6], "Native SQL sort key in memory: " ~ sorted.to!string);
+    // (In a fiber, whose event loop ends once the database's connection, of
+    // a worker thread of its own, is closed)
+    async({
+        auto sqlite = connect(":memory:").await;
+        sqlite.query("CREATE TABLE spans (id INTEGER PRIMARY KEY, low INTEGER NOT NULL, high INTEGER NOT NULL);"
+            ~ "INSERT INTO spans VALUES (1, 0, 5), (2, 3, 9), (3, 4, 6)").array.await;
+        spanDb = new SQLiteDB!()(sqlite);
+        scope (exit) {
+            spanDb.close().await;
+            spanDb = null;
+        }
+
+        auto widths = run(map!((Expr!Span s) => spanWidth(s))(getAll!Span()));
+        assertTrue(widths == [5, 6, 2], "Native SQL value in memory: " ~ widths.to!string);
+        auto doubled = run(map!((Expr!Span s) => spanWidth(s) * 2)(getAll!Span()));
+        assertTrue(doubled == [10, 12, 4], "Native SQL operand in memory: " ~ doubled.to!string);
+        auto wide = run(map!((Expr!Span s) => s.high)(filterBy!((Expr!Span s) => spanWidth(s).gt(3))(getAll!Span())));
+        assertTrue(wide == [5, 9], "Native SQL filter in memory: " ~ wide.to!string);
+        auto sorted = run(map!((Expr!Span s) => s.high)(
+            sortBy!((Expr!Span a, Expr!Span b) => spanWidth(a).gt(spanWidth(b)))(getAll!Span())));
+        assertTrue(sorted == [9, 5, 6], "Native SQL sort key in memory: " ~ sorted.to!string);
+    }).awaitSync();
 }
 
 static this() {

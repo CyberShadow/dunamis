@@ -9,8 +9,7 @@ import std.conv;
 import std.json;
 import std.string;
 
-import ae.sys.sqlite3 : SQLite;
-import std.typecons : Nullable;
+import ae.net.db.sqlite : Param, SqliteConnection, SqliteRow = Row;
 import ae.utils.promise : Promise, resolve;
 
 import dunamis.core.types : AnyRef, makeAnyRef;
@@ -33,100 +32,107 @@ import dunamis.sqlite.sql;
 /// Per-request session for SQLite.
 /// Holds cached results and per-query state for a single evaluation.
 class SQLiteSession : RelationalSession {
-    private SQLite _db;
+    private Promise!SqliteConnection _connection;
+    private SqliteConnection _conn;
+    private SessionTurns _turns;
+    private Promise!void _turn;
     private string _cachedSQL;
 
-    this(SQLite db) {
-        _db = db;
+    this(Promise!SqliteConnection connection, SessionTurns turns) {
+        _connection = connection;
+        _turns = turns;
     }
 
-    /// Begin a transaction.
+    /// Begin a transaction (once the sessions before it ended theirs).
     override Promise!void setup(SetupMode mode = SetupMode.query) {
         super.setup(mode);
-        _db.exec("BEGIN");
-        return resolve();
+        auto previous = _turns.last;
+        _turn = _turns.last = new Promise!void;
+        return previous.then(() => _connection).then((SqliteConnection conn) {
+            _conn = conn;
+            return _conn.query("BEGIN").array();
+        }).then((SqliteRow[] _) { });
     }
 
-    /// Commit or rollback the transaction, then fire pending events.
+    /// Commit or rollback the transaction (letting the next session begin
+    /// its own), then fire pending events.
     override Promise!void teardown(SetupMode mode = SetupMode.query, bool success = true) {
-        _db.exec(success ? "COMMIT" : "ROLLBACK");
-        return super.teardown(mode, success);
+        auto turn = _turn;
+        _turn = null;
+        void endTurn() {
+            if (turn !is null)
+                turn.fulfill();
+        }
+        if (_conn is null) {  // setup failed
+            endTurn();
+            return resolve();
+        }
+        return _conn.query(success ? "COMMIT" : "ROLLBACK").array().then((SqliteRow[] _) {
+            endTurn();
+            return super.teardown(mode, success);
+        }, (Exception e) {
+            endTurn();
+            throw e;
+            return resolve();
+        });
     }
 
     /// Execute the statement `statement`.
     override Promise!void execute(Sql statement) {
-        exec(statement);
-        return resolve();
+        return run(statement).then((SqliteRow[] _) { });
     }
 
-    /// The rows of the statement `statement`, whose values are its
-    /// parameters (see `Sql.render`): an iteration of each row's cells (as
-    /// text; null: NULL) and of the names of the columns.
-    private auto query(Sql statement) {
-        static struct Rows {
-            SQLite.PreparedStatement stmt;
-
-            int opApply(scope int delegate(const(char)[][] cells, const(char)[][] columns) dg) {
-                scope (exit) destroy(stmt);  // (finalized)
-                const(char)[][] columns;
-                foreach (c; 0 .. stmt.columnCount())
-                    columns ~= stmt.columnName(c);
-                while (stmt.step()) {
-                    auto cells = new const(char)[][columns.length];
-                    foreach (c, ref cell; cells) {
-                        auto value = stmt.column!(Nullable!string)(cast(int) c);
-                        cell = value.isNull ? null : value.get is null ? "" : value.get;
-                    }
-                    if (auto result = dg(cells, columns)) {
-                        stmt.reset();
-                        return result;
-                    }
-                }
-                return 0;
-            }
-        }
+    /// Run the statement `statement`, whose values are its parameters (see
+    /// `Sql.render`, and `sqliteParam`). Returns its rows (and tells
+    /// `affected`, if not null, the number of rows it affected).
+    private Promise!(SqliteRow[]) run(Sql statement, void delegate(ulong) affected = null) {
         auto bound = statement.render(sqliteDialect());
-        auto stmt = _db.prepare(bound.text);
-        foreach (i, ref value; bound.params)
-            bindParameter(stmt, cast(int) i + 1, value);
-        return Rows(stmt);
+        auto result = bound.params.length
+            ? _conn.query(bound.text, bound.params.map!(v => sqliteParam(v)).array)
+            : _conn.query(bound.text);
+        return result.array().then((SqliteRow[] rows) {
+            if (affected !is null)
+                affected(result.affectedRows);
+            return rows;
+        });
     }
 
-    /// Execute the statement `statement` (see `query`), discarding its rows.
-    private void exec(Sql statement) {
-        foreach (cells, columns; query(statement)) {}
+    /// The values of the cells of the row `row`, as text (null: NULL).
+    private static string[] cellsOf(SqliteRow row) {
+        auto cells = new string[row.length];
+        foreach (i, ref cell; cells)
+            if (!row.isNull(i)) {
+                cell = row.column!string(i);
+                if (cell is null)
+                    cell = "";
+            }
+        return cells;
     }
 
-    /// Bind the value `value` as the parameter `index` of `stmt`: as the
-    /// literal of the value would be (SQLite's booleans are integers, JSON
-    /// arrays and objects their JSON text).
-    private static void bindParameter(SQLite.PreparedStatement stmt, int index, ref const SqlValue value) {
+    /// The value `value` as a parameter: as its literal would be (SQLite's
+    /// booleans are integers, JSON arrays and objects their JSON text).
+    private static Param sqliteParam(const SqlValue value) {
         import std.json : JSONType;
         final switch (value.kind) {
-            case SqlValue.Kind.null_: stmt.bind(index, cast(void*) null); break;
-            case SqlValue.Kind.boolean: stmt.bind(index, value.text == "true" ? 1 : 0); break;
+            case SqlValue.Kind.null_: return Param.init;
+            case SqlValue.Kind.boolean: return Param.of(value.text == "true" ? 1 : 0);
             case SqlValue.Kind.number:
-                if (value.isInteger)
-                    stmt.bind(index, value.text.to!long);
-                else
-                    stmt.bind(index, value.text.to!double);
-                break;
-            case SqlValue.Kind.text: stmt.bind(index, value.text is null ? "" : value.text); break;
+                return value.isInteger ? Param.of(value.text.to!long) : Param.of(value.text.to!double);
+            case SqlValue.Kind.text: return Param.of(value.text);
             case SqlValue.Kind.array: assert(false, "SQLite has no arrays");
             case SqlValue.Kind.json:
                 auto json = value.json;
                 final switch (json.type) {
-                    case JSONType.null_: stmt.bind(index, cast(void*) null); break;
-                    case JSONType.string: stmt.bind(index, json.str is null ? "" : json.str); break;
-                    case JSONType.integer: stmt.bind(index, json.integer); break;
-                    case JSONType.uinteger: stmt.bind(index, cast(long) json.uinteger); break;
-                    case JSONType.float_: stmt.bind(index, json.floating); break;
-                    case JSONType.true_: stmt.bind(index, 1); break;
-                    case JSONType.false_: stmt.bind(index, 0); break;
+                    case JSONType.null_: return Param.init;
+                    case JSONType.string: return Param.of(json.str);
+                    case JSONType.integer: return Param.of(json.integer);
+                    case JSONType.uinteger: return Param.of(cast(long) json.uinteger);
+                    case JSONType.float_: return Param.of(json.floating);
+                    case JSONType.true_: return Param.of(1);
+                    case JSONType.false_: return Param.of(0);
                     case JSONType.array:
-                    case JSONType.object: stmt.bind(index, json.toString()); break;
+                    case JSONType.object: return Param.of(json.toString());
                 }
-                break;
         }
     }
 
@@ -134,7 +140,6 @@ class SQLiteSession : RelationalSession {
     @property string lastSql() { return _cachedSQL; }
 
     /// Execute a QueryNode by running SQL against SQLite.
-    /// Returns an immediately resolved promise since SQLite is synchronous.
     override Promise!QueryResult executeQueryNode(QueryNode node, QueryResult parentResult,
             RootSelection root) {
         // For child nodes, check if we already have cached results from root CTE execution
@@ -168,17 +173,12 @@ class SQLiteSession : RelationalSession {
             writeln(sql);
         }
 
-        // Execute synchronously
-        string jsonResult;
-        foreach (cells, columns; query(statement)) {
-            if (cells.length > 0 && cells[0] !is null) {
-                jsonResult = cells[0].idup;
-            }
-            break;  // Only one row expected
-        }
-
-        auto result = parseQueryResult(jsonResult, allNodes);
-        return resolve(result);
+        return run(statement).then((SqliteRow[] rows) {
+            string jsonResult;
+            if (rows.length && rows[0].length && !rows[0].isNull(0))
+                jsonResult = rows[0].column!string(0);  // (Only one row expected)
+            return parseQueryResult(jsonResult, allNodes);
+        });
     }
 
     /// Parse SQLite result into QueryResult.
@@ -196,7 +196,6 @@ class SQLiteSession : RelationalSession {
 
     // =========================================================================
     // Individual fetch methods (for naive/fallback path)
-    // SQLite is synchronous, so results are wrapped in resolve().
     // =========================================================================
 
     /// Generate SQL to fetch a column value, keyed by PK columns.
@@ -266,19 +265,22 @@ class SQLiteSession : RelationalSession {
         auto pkColumns = getPkColumnsForTable(table);
         auto sql = buildFetchColumnSQL(table, column, validIds);
 
-        // Build value lookup map
-        string[string] values;
-        foreach (cells, columns; query(sql)) {
-            auto pkCount = pkColumns.length;
-            if (cells.length > pkCount) {
-                auto key = buildKeyFromCells(cells, pkCount);
-                auto value = cells[pkCount] !is null ? cells[pkCount].idup : "";
-                values[key] = value;
+        return run(sql).then((SqliteRow[] rows) {
+            // Build value lookup map
+            string[string] values;
+            foreach (row; rows) {
+                auto cells = cellsOf(row);
+                auto pkCount = pkColumns.length;
+                if (cells.length > pkCount) {
+                    auto key = buildKeyFromCells(cells, pkCount);
+                    auto value = cells[pkCount] !is null ? cells[pkCount] : "";
+                    values[key] = value;
+                }
             }
-        }
 
-        // Return in ref order (handles duplicate refs correctly)
-        return resolve(refs.map!(r => r.isValid ? values.get(r.localId, "") : "").array);
+            // Return in ref order (handles duplicate refs correctly)
+            return refs.map!(r => r.isValid ? values.get(r.localId, "") : "").array;
+        });
     }
 
     override Promise!(long[]) fetchColumnLong(string table, string column, AnyRef[] refs) {
@@ -305,33 +307,37 @@ class SQLiteSession : RelationalSession {
         auto pkColumns = getPkColumnsForTable(table);
         auto sql = buildFetchColumnSQL(table, column, validIds);
 
-        // Build value lookup map
-        long[string] values;
-        foreach (cells, columns; query(sql)) {
-            auto pkCount = pkColumns.length;
-            if (cells.length > pkCount) {
-                auto key = buildKeyFromCells(cells, pkCount);
-                auto valueStr = cells[pkCount] !is null ? cells[pkCount].idup : "0";
-                values[key] = valueStr.to!long;
+        return run(sql).then((SqliteRow[] rows) {
+            // Build value lookup map
+            long[string] values;
+            foreach (row; rows) {
+                auto cells = cellsOf(row);
+                auto pkCount = pkColumns.length;
+                if (cells.length > pkCount) {
+                    auto key = buildKeyFromCells(cells, pkCount);
+                    auto valueStr = cells[pkCount] !is null ? cells[pkCount] : "0";
+                    values[key] = valueStr.to!long;
+                }
             }
-        }
 
-        // Return in ref order (handles duplicate refs correctly)
-        return resolve(refs.map!(r => r.isValid ? values.get(r.localId, 0L) : 0L).array);
+            // Return in ref order (handles duplicate refs correctly)
+            return refs.map!(r => r.isValid ? values.get(r.localId, 0L) : 0L).array;
+        });
     }
 
     override Promise!(string[]) fetchAllIdsString(string table, string[] pkColumns, string[] orderBy = null) {
         auto query = sql(i"SELECT $(columnList(pkColumns)) FROM $(SqlName(table))");
         if (orderBy.length)
             query = sql(i"$(query) ORDER BY $(columnList(orderBy))");
-        string[] result;
-
-        foreach (cells, columns; this.query(query)) {
-            if (cells.length >= 1 && cells[0] !is null)
-                result ~= buildKeyFromCells(cells, pkColumns.length);
-        }
-
-        return resolve(result);
+        return run(query).then((SqliteRow[] rows) {
+            string[] result;
+            foreach (row; rows) {
+                auto cells = cellsOf(row);
+                if (cells.length >= 1 && cells[0] !is null)
+                    result ~= buildKeyFromCells(cells, pkColumns.length);
+            }
+            return result;
+        });
     }
 
     override Promise!(AnyRef[][]) fetchChildren(string childTable, string childType, string fk, AnyRef[] parentRefs,
@@ -356,42 +362,49 @@ class SQLiteSession : RelationalSession {
 
         AnyRef[][string] childrenByParentId;
 
-        if (validIds.length > 0) {
-            auto childPkColumns = getPkColumnsForTable(childTable);
-            auto fkColumn = SqlName(fk);
-            auto children = sql(i"SELECT $(columnList(childPkColumns)), $(fkColumn) FROM $(SqlName(childTable))");
-            auto query = sql(i"$(children) WHERE $(fkColumn) IN ($(idList(validIds)))");
-            if (orderBy.length)
-                query = sql(i"$(query) ORDER BY $(columnList(orderBy))");
+        /// Map to result array (including empty arrays for invalid refs)
+        AnyRef[][] mapToParents() {
+            AnyRef[][] result;
+            result.reserve(parentRefs.length);
+            foreach (parentRef; parentRefs) {
+                if (parentRef.isValid && parentRef.localId.length > 0) {
+                    if (auto children = parentRef.localId in childrenByParentId) {
+                        result ~= *children;
+                    } else {
+                        result ~= cast(AnyRef[])[];
+                    }
+                } else {
+                    result ~= cast(AnyRef[])[];  // Invalid parent ref -> empty children
+                }
+            }
+            return result;
+        }
 
+        if (validIds.length == 0)
+            return resolve(mapToParents());
+
+        auto childPkColumns = getPkColumnsForTable(childTable);
+        auto fkColumn = SqlName(fk);
+        auto children = sql(i"SELECT $(columnList(childPkColumns)), $(fkColumn) FROM $(SqlName(childTable))");
+        auto query = sql(i"$(children) WHERE $(fkColumn) IN ($(idList(validIds)))");
+        if (orderBy.length)
+            query = sql(i"$(query) ORDER BY $(columnList(orderBy))");
+
+        return run(query).then((SqliteRow[] rows) {
             // Group children by parent FK
-            foreach (cells, columns; this.query(query)) {
+            foreach (row; rows) {
+                auto cells = cellsOf(row);
                 auto pkCount = childPkColumns.length;
                 if (cells.length > pkCount) {
                     auto childId = buildKeyFromCells(cells, pkCount);
-                    auto parentId = cells[pkCount] !is null ? cells[pkCount].idup : "";
+                    auto parentId = cells[pkCount] !is null ? cells[pkCount] : "";
                     if (parentId.length > 0) {
                         childrenByParentId[keyOfTexts([parentId])] ~= makeAnyRef(childType, childId);
                     }
                 }
             }
-        }
-
-        // Map to result array (including empty arrays for invalid refs)
-        AnyRef[][] result;
-        result.reserve(parentRefs.length);
-        foreach (parentRef; parentRefs) {
-            if (parentRef.isValid && parentRef.localId.length > 0) {
-                if (auto children = parentRef.localId in childrenByParentId) {
-                    result ~= *children;
-                } else {
-                    result ~= cast(AnyRef[])[];
-                }
-            } else {
-                result ~= cast(AnyRef[])[];  // Invalid parent ref -> empty children
-            }
-        }
-        return resolve(result);
+            return mapToParents();
+        });
     }
 
     override Promise!(AnyRef[]) fetchBelongsTo(string childTable, string fk, string parentType, AnyRef[] childRefs) {
@@ -421,34 +434,37 @@ class SQLiteSession : RelationalSession {
         auto pkColumns = getPkColumnsForTable(childTable);
         auto sql = buildFetchColumnSQL(childTable, fk, validIds);
 
-        // Build id -> fk value map from query results
-        string[string] fkByChildId;
-        foreach (cells, columns; query(sql)) {
-            auto pkCount = pkColumns.length;
-            if (cells.length > pkCount) {
-                auto key = buildKeyFromCells(cells, pkCount);
-                auto fkValue = cells[pkCount] !is null ? cells[pkCount].idup : "";
-                fkByChildId[key] = fkValue;
+        return run(sql).then((SqliteRow[] rows) {
+            // Build id -> fk value map from query results
+            string[string] fkByChildId;
+            foreach (row; rows) {
+                auto cells = cellsOf(row);
+                auto pkCount = pkColumns.length;
+                if (cells.length > pkCount) {
+                    auto key = buildKeyFromCells(cells, pkCount);
+                    auto fkValue = cells[pkCount] !is null ? cells[pkCount] : "";
+                    fkByChildId[key] = fkValue;
+                }
             }
-        }
 
-        // Map child refs to parent refs (including invalid refs)
-        AnyRef[] result;
-        result.reserve(childRefs.length);
-        foreach (childRef; childRefs) {
-            if (!childRef.isValid || childRef.localId.length == 0) {
-                result ~= AnyRef.init;  // Invalid child ref -> null parent
-            } else if (auto fkPtr = childRef.localId in fkByChildId) {
-                if ((*fkPtr).length > 0) {
-                    result ~= makeAnyRef(parentType, keyOfTexts([*fkPtr]));
+            // Map child refs to parent refs (including invalid refs)
+            AnyRef[] result;
+            result.reserve(childRefs.length);
+            foreach (childRef; childRefs) {
+                if (!childRef.isValid || childRef.localId.length == 0) {
+                    result ~= AnyRef.init;  // Invalid child ref -> null parent
+                } else if (auto fkPtr = childRef.localId in fkByChildId) {
+                    if ((*fkPtr).length > 0) {
+                        result ~= makeAnyRef(parentType, keyOfTexts([*fkPtr]));
+                    } else {
+                        result ~= AnyRef.init;
+                    }
                 } else {
                     result ~= AnyRef.init;
                 }
-            } else {
-                result ~= AnyRef.init;
             }
-        }
-        return resolve(result);
+            return result;
+        });
     }
 
 
@@ -479,29 +495,32 @@ class SQLiteSession : RelationalSession {
         auto pkColumns = getPkColumnsForTable(table);
         auto sql = buildFetchColumnSQL(table, column, validIds);
 
-        // Build value lookup map
-        JSONValue[string] values;
-        foreach (cells, columns; query(sql)) {
-            auto pkCount = pkColumns.length;
-            if (cells.length > pkCount) {
-                auto key = buildKeyFromCells(cells, pkCount);
-                if (cells[pkCount] is null) {
-                    values[key] = JSONValue(null);
-                } else {
-                    auto val = cells[pkCount].idup;
-                    // Try to parse as number, otherwise use string
-                    long longVal;
-                    if (!collectException(val.to!long, longVal)) {
-                        values[key] = JSONValue(longVal);
+        return run(sql).then((SqliteRow[] rows) {
+            // Build value lookup map
+            JSONValue[string] values;
+            foreach (row; rows) {
+                auto cells = cellsOf(row);
+                auto pkCount = pkColumns.length;
+                if (cells.length > pkCount) {
+                    auto key = buildKeyFromCells(cells, pkCount);
+                    if (cells[pkCount] is null) {
+                        values[key] = JSONValue(null);
                     } else {
-                        values[key] = JSONValue(val);
+                        auto val = cells[pkCount];
+                        // Try to parse as number, otherwise use string
+                        long longVal;
+                        if (!collectException(val.to!long, longVal)) {
+                            values[key] = JSONValue(longVal);
+                        } else {
+                            values[key] = JSONValue(val);
+                        }
                     }
                 }
             }
-        }
 
-        // Return in ref order (handles duplicate refs correctly)
-        return resolve(refs.map!(r => r.isValid ? values.get(r.localId, JSONValue(null)) : JSONValue(null)).array);
+            // Return in ref order (handles duplicate refs correctly)
+            return refs.map!(r => r.isValid ? values.get(r.localId, JSONValue(null)) : JSONValue(null)).array;
+        });
     }
 
     // =========================================================================
@@ -511,27 +530,24 @@ class SQLiteSession : RelationalSession {
     import dunamis.relational.mutation : InsertInput, UpdateInput;
 
     /// Execute INSERT and return the new row.
-    /// SQLite is synchronous, so we return an immediately resolved promise.
     override Promise!QueryResult executeInsert(string table, string typeName, InsertInput input, string[] pkColumns, bool isAutoIncrement) {
         auto insertSql = generateInsertSQL(table, input);
         _cachedSQL = insertSql.renderInline(sqliteDialect());
 
-        // Execute INSERT
-        exec(insertSql);
-
-        // Fetch the inserted row — use last_insert_rowid() for auto-increment,
-        // otherwise use PK values from input
-        auto selectSql = (isAutoIncrement ? generateSelectLastInsertSQL(table)
-            : generateSelectByPkSQL(table, pkColumns, input));
-        auto result = new QueryResult();
-
-        foreach (cells, columns; query(selectSql)) {
-            auto jsonRow = rowToJson(cells, columns);
-            result.loadFromRows([jsonRow], typeName, pkColumns);
-            break;
-        }
-
-        return resolve(result);
+        // Execute INSERT, then fetch the inserted row — use
+        // last_insert_rowid() for auto-increment, otherwise use PK values
+        // from input (the session's transaction is the connection's only
+        // one, see `SessionTurns`)
+        return run(insertSql).then((SqliteRow[] _) {
+            auto selectSql = (isAutoIncrement ? generateSelectLastInsertSQL(table)
+                : generateSelectByPkSQL(table, pkColumns, input));
+            return run(selectSql);
+        }).then((SqliteRow[] rows) {
+            auto result = new QueryResult();
+            if (rows.length)
+                result.loadFromRows([rowToJson(rows[0])], typeName, pkColumns);
+            return result;
+        });
     }
 
     /// Execute UPDATE and return updated rows.
@@ -539,23 +555,15 @@ class SQLiteSession : RelationalSession {
         auto updateSql = generateUpdateSQL(table, input, pkColumns);
         _cachedSQL = updateSql.renderInline(sqliteDialect());
 
-        // Execute UPDATE
-        exec(updateSql);
-
-        // Fetch the updated rows
-        auto selectSql = generateSelectUpdatedSQL(table, input.ids, pkColumns);
-        auto result = new QueryResult();
-
-        JSONValue[] rows;
-        foreach (cells, columns; query(selectSql)) {
-            rows ~= rowToJson(cells, columns);
-        }
-
-        if (rows.length > 0) {
-            result.loadFromRows(rows, typeName, pkColumns);
-        }
-
-        return resolve(result);
+        // Execute UPDATE, then fetch the updated rows
+        return run(updateSql).then((SqliteRow[] _) {
+            return run(generateSelectUpdatedSQL(table, input.ids, pkColumns));
+        }).then((SqliteRow[] rows) {
+            auto result = new QueryResult();
+            if (rows.length > 0)
+                result.loadFromRows(rows.map!(row => rowToJson(row)).array, typeName, pkColumns);
+            return result;
+        });
     }
 
     /// Execute DELETE and return count of deleted rows.
@@ -563,17 +571,17 @@ class SQLiteSession : RelationalSession {
         auto deleteSql = generateDeleteSQL(table, ids, pkColumns);
         _cachedSQL = deleteSql.renderInline(sqliteDialect());
 
-        // Execute DELETE
-        exec(deleteSql);
-
-        // Return the number of changes
-        return resolve(_db.changes);
+        // Execute DELETE, returning the number of deleted rows
+        ulong deleted;
+        return run(deleteSql, (ulong affected) { deleted = affected; })
+            .then((SqliteRow[] _) => cast(int) deleted);
     }
 
     /// Convert a SQLite row to JSONValue
-    private JSONValue rowToJson(scope const(char)[][] cells, scope const(char)[][] columns) {
+    private JSONValue rowToJson(SqliteRow row) {
         import std.exception : collectException;
 
+        auto cells = cellsOf(row), columns = row.columnNames;
         JSONValue obj = JSONValue.emptyObject;
         foreach (i, col; columns) {
             if (cells[i] is null) {
@@ -600,25 +608,53 @@ class SQLiteSession : RelationalSession {
 // SQLite Data Source (Singleton Factory)
 // ============================================================================
 
-/// SQLite data source using ae.sys.sqlite3.
-/// Holds the database handle and creates per-request sessions.
+/// The order of the sessions of a connection: their transactions, the
+/// connection's, follow each other (each session begins its own once the
+/// session before it ended its own).
+final class SessionTurns {
+    /// Fulfilled when the last session to begin ends its transaction.
+    Promise!void last;
+
+    this() {
+        last = resolve();
+    }
+}
+
+/// SQLite data source using ae.net.db.sqlite.
+/// Holds the database connection and creates per-request sessions, whose
+/// transactions (on the connection) follow each other.
 ///
 /// Parameterized by DBConfig for compile-time feature configuration.
 class SQLiteDB(DBConfig config = defaultDBConfig) : DataSource, SqlDataSource {
     /// Configuration accessible at compile time
     enum configuration = config;
 
-    private SQLite _db;
+    private Promise!SqliteConnection _connection;
+    private SessionTurns _turns;
     private SqlOptimizer _sqlOptimizer;
 
-    this(SQLite db) {
-        _db = db;
+    /// A data source of the connection `connection`.
+    this(SqliteConnection connection) {
+        this(resolve(connection));
+    }
+
+    /// ditto, once it is open
+    this(Promise!SqliteConnection connection) {
+        _connection = connection;
+        _turns = new SessionTurns();
         _sqlOptimizer = new SqlOptimizer(sqliteDialect());
     }
 
+    /// A data source of the database file `filename` (see
+    /// `ae.net.db.sqlite.connect`).
     this(string filename) {
-        _db = new SQLite(filename);
-        _sqlOptimizer = new SqlOptimizer(sqliteDialect());
+        import ae.net.db.sqlite : connect;
+        this(connect(filename));
+    }
+
+    /// Close the connection (once the sessions ended their transactions).
+    Promise!void close() {
+        return _turns.last.then(() => _connection).then((SqliteConnection conn) => conn.close());
     }
 
     /// Return the SqlOptimizer to enable SQL push-down
@@ -633,7 +669,7 @@ class SQLiteDB(DBConfig config = defaultDBConfig) : DataSource, SqlDataSource {
 
     /// Create a fresh per-request session.
     override DataSession createSession() {
-        return new SQLiteSession(_db);
+        return new SQLiteSession(_connection, _turns);
     }
 }
 
