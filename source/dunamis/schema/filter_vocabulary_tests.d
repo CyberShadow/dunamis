@@ -19,7 +19,8 @@ import dunamis.graphql.compiler : compileQuery;
 import dunamis.graphql.schema : Schema, generateSchemaSDL;
 import dunamis.relational.demo : MockDB;
 import dunamis.relational.schema : Col, Entity, PrimaryKey, Table;
-import dunamis.schema.filtering : FilterPlugin;
+import dunamis.schema.filtering : DefaultFilterSurface, FilterPlugin, FilterPluginWith;
+import dunamis.core.expr : Expr;
 import dunamis.schema.pagination : PaginationPlugin;
 import dunamis.schema.plugin : ApplyPlugins;
 import dunamis.schema.sorting : SortingPlugin;
@@ -81,7 +82,8 @@ unittest {
     static assert(!sdl.canFind("  contains: String\n") && !sdl.canFind("containsInsensitive"), sdl);
     static assert(sdl.canFind("input BooleanFilter {\n  equalTo: Boolean\n  notEqualTo: Boolean\n  in: [Boolean!]\n  notIn: [Boolean!]\n"), sdl);
     static assert(sdl.canFind("  tagIds: IntListFilter\n") && sdl.canFind("  colors: FvColorListFilter\n"), sdl);
-    static assert(sdl.canFind("input IntListFilter {\n  isNull: Boolean\n  contains: [Int]\n  containedBy: [Int]\n" ~
+    static assert(sdl.canFind("input IntListFilter {\n  isNull: Boolean\n  equalTo: [Int]\n  notEqualTo: [Int]\n" ~
+        "  contains: [Int]\n  containedBy: [Int]\n" ~
         "  overlaps: [Int]\n  anyEqualTo: Int\n  anyNotEqualTo: Int\n}"), sdl);
     static assert(sdl.canFind("input FvColorListFilter {"), sdl);
 }
@@ -124,6 +126,10 @@ unittest {
 
 // Array fields (null elements match nothing, as in PostgreSQL)
 unittest {
+    check(`{tagIds: {equalTo: [2, null]}}`, [2]);
+    check(`{tagIds: {equalTo: []}}`, [3]);
+    check(`{tagIds: {notEqualTo: [3]}}`, [1, 2, 3]);
+    check(`{colors: {equalTo: [green, blue]}}`, [2]);
     check(`{tagIds: {contains: [2]}}`, [1, 2]);
     check(`{tagIds: {contains: [1, 2]}}`, [1]);
     check(`{tagIds: {contains: []}}`, [1, 2, 3, 4]);
@@ -166,4 +172,44 @@ unittest {
     checkOperand("like", `%\_%`, [1]);
     checkOperand("like", `a\\b`, [4]);
     checkOperand("likeInsensitive", `A\%`, []);
+}
+
+/// A second argument surface: `named: <name>`, on lists of items, besides
+/// the default `filter`.
+template FvNamedSurface(Scope, string fieldName, Element) {
+    import dunamis.schema.plugin : getOriginalTypeName;
+    static if (getOriginalTypeName!Element == "FvItem") {
+        alias Argument = FvItemName;
+        enum string argumentName = "named";
+        static Expr!bool predicate(Expr!Element item, const ref Argument argument) {
+            return Element.name(item).eq(argument.name);
+        }
+    }
+}
+
+struct FvItemName { string name; }
+
+private alias FvNamedSchema = ApplyPlugins!(Schema!FvQuery,
+    FilterPluginWith!(FvNamedSurface, DefaultFilterSurface), SortingPlugin, PaginationPlugin);
+
+// Several surfaces: each an argument (in the surfaces' order), whose
+// conditions the elements must all satisfy
+unittest {
+    enum sdl = generateSchemaSDL!FvNamedSchema;
+    static assert(sdl.canFind("items(named: FvItemName = null, filter: FvItemFilter, orderBy: "), sdl);
+    foreach (optimize; [false, true]) {
+        long[] ids(string arguments) {
+            seed();
+            auto result = awaitSync(new Executor().execute(compileQuery!FvNamedSchema(
+                `{ items(` ~ arguments ~ `) { id } }`), optimize));
+            long[] found;
+            foreach (row; result["items"].array)
+                found ~= row["id"].integer;
+            return found;
+        }
+        assert(ids(`named: {name: "Beta"}`) == [3]);
+        assert(ids(`named: {name: "Beta"}, filter: {active: {equalTo: false}}`) == []);
+        assert(ids(`filter: {active: {equalTo: false}}`) == [2, 4]);
+        assert(ids(``) == [1, 2, 3, 4]);
+    }
 }

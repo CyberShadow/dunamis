@@ -122,20 +122,43 @@ struct OriginalName { string name; }
 /// GraphQL name of `Base`).
 struct NamedAfter(Base) { string suffix; }
 
+/// UDA on a type the schema layer derives from two types `A` and `B` (e.g.
+/// the filter of a to-many relationship of `A` to `B`), named after both:
+/// `A`'s name, `infix`, `B`'s name and `suffix` (see `NamedAfter`).
+struct NamedAfterTwo(A, B) { string infix, suffix; }
+
 /// The D-level name of a schema type: the name recorded by the first
 /// `@OriginalName` (the name of the user-declared type a wrapper stands
 /// for), the name of a `@NamedAfter` type's base type followed by its
 /// suffix, or else the type's own identifier.
 template getOriginalTypeName(T) {
     import std.traits : getUDAs;
+    import dunamis.core.types : isCustomScalar;
     static if (hasUDA!(T, OriginalName)) {
         enum string getOriginalTypeName = getUDAs!(T, OriginalName)[0].name;
     } else static if (hasUDA!(T, NamedAfter)) {
         enum string getOriginalTypeName = getOriginalTypeName!(NamedAfterBase!T) ~
             getUDAs!(T, NamedAfter)[0].suffix;
+    } else static if (hasUDA!(T, NamedAfterTwo)) {
+        enum string getOriginalTypeName = getOriginalTypeName!(NamedAfterBases!T[0]) ~
+            getUDAs!(T, NamedAfterTwo)[0].infix ~ getOriginalTypeName!(NamedAfterBases!T[1]) ~
+            getUDAs!(T, NamedAfterTwo)[0].suffix;
+    } else static if (isCustomScalar!T) {
+        // (A custom scalar, by the name it declares)
+        enum string getOriginalTypeName = T.name;
     } else {
         enum string getOriginalTypeName = __traits(identifier, T);
     }
+}
+
+/// The base types of a type with a `@NamedAfterTwo` attribute.
+template NamedAfterBases(T) {
+    import std.meta : AliasSeq;
+    import std.traits : getUDAs;
+    static if (is(typeof(getUDAs!(T, NamedAfterTwo)[0]) == NamedAfterTwo!(A, B), A, B))
+        alias NamedAfterBases = AliasSeq!(A, B);
+    else
+        static assert(false, T.stringof ~ " has no @NamedAfterTwo attribute");
 }
 
 /// The base type of a type with a `@NamedAfter` attribute.

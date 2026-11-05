@@ -139,12 +139,41 @@ template EnumFilter(E) if (is(E == enum)) {
     }
 }
 
+/// The filter input type of custom scalars ordered by their values (see
+/// `isOrderedCustomScalar`): `<Scalar>Filter` (e.g. DateFilter), with the
+/// operands values of the scalar.
+template ScalarFilter(T) if (isOrderedCustomScalar!T) {
+    @NamedAfter!T("Filter")
+    struct ScalarFilter {
+        Nullable!T equalTo;
+        Nullable!T notEqualTo;
+        @GqlName("in") Nullable!(T[]) in_;
+        Nullable!(T[]) notIn;
+        Nullable!T lessThan;
+        Nullable!T lessThanOrEqualTo;
+        Nullable!T greaterThan;
+        Nullable!T greaterThanOrEqualTo;
+        Nullable!bool isNull;
+
+        /// Formats as the filter type's name (see EntityFilter.toString).
+        void toString(scope void delegate(const(char)[]) sink) const {
+            enum name = getOriginalTypeName!(typeof(this));
+            sink(name);
+        }
+    }
+}
+
 /// The operators of the filters of array fields (lists of nullable values of
 /// type `T`, e.g. array columns), named and behaving as those of
 /// PostGraphile's connection filter (PostgreSQL's array operators; null
 /// elements match nothing): see `ArrayFilter`.
 mixin template ArrayFilterOperators(T) {
     Nullable!bool isNull;
+    /// The array is equal to this one (element by element; null elements
+    /// are equal to each other, as in PostgreSQL's array equality)
+    Nullable!(Nullable!T[]) equalTo;
+    /// The array is not equal to this one
+    Nullable!(Nullable!T[]) notEqualTo;
     /// The array contains all these values
     Nullable!(Nullable!T[]) contains;
     /// All the array's elements are among these values
@@ -533,7 +562,7 @@ template ColumnFilterType(T) {
     } else static if (hasDeclaredFilter!T) {
         alias ColumnFilterType = DeclaredFilterType!T;
     } else static if (isOrderedCustomScalar!T) {
-        alias ColumnFilterType = StringFilter;
+        alias ColumnFilterType = ScalarFilter!T;
     } else static if (is(T == enum)) {
         alias ColumnFilterType = EnumFilter!T;
     } else static if (is(T == string)) {
@@ -580,20 +609,20 @@ template ListFilter(ChildFilter) {
     }
 }
 
-/// List filter for to-many relationships (entity array fields): which of the
-/// related entities must match the related entity's filter.
-///
-/// Named after `Entity` rather than after `EntityFilter!Entity`, so that the
-/// name is known without completing the (possibly cyclic) filter types.
-template EntityListFilter(Entity) {
-    @NamedAfter!Entity("FilterListFilter")
+/// List filter for to-many relationships (entity array fields) of `Parent`
+/// to `Child`: which of the related entities must match the related
+/// entity's filter. Named as PostGraphile's connection filter names them,
+/// `<Parent>ToMany<Child>Filter` (without completing the, possibly cyclic,
+/// filter types).
+template EntityListFilter(Parent, Child) {
+    @NamedAfterTwo!(Parent, Child)("ToMany", "Filter")
     struct EntityListFilter {
         /// At least one related entity matches the filter
-        EntityFilter!Entity* some;
+        EntityFilter!Child* some;
         /// All related entities match the filter
-        EntityFilter!Entity* every;
+        EntityFilter!Child* every;
         /// No related entity matches the filter (equivalent to not(some(...)))
-        EntityFilter!Entity* none;
+        EntityFilter!Child* none;
     }
 }
 
@@ -612,7 +641,7 @@ template EntityListFilter(Entity) {
 /// Nullable!StringFilter firstName;
 /// Nullable!(EnumFilter!Role) role;
 /// EntityFilter!Department* department;          // belongs-to
-/// EntityListFilter!Post* posts;                 // has-many
+/// EntityListFilter!(User, Post)* posts;         // has-many
 /// Nullable!(ListFilter!StringFilter) tags;      // scalar array
 /// Nullable!(EntityFilter!User[]) and, or;
 /// EntityFilter!User* not;
@@ -659,7 +688,7 @@ private template entityFilterFieldsCode(Entity) {
         }
 
         static foreach (member; getEntityArrayFields!Entity) {
-            code ~= attributes!member ~ "EntityListFilter!(getArrayElementType!(Entity, \"" ~
+            code ~= attributes!member ~ "EntityListFilter!(Entity, getArrayElementType!(Entity, \"" ~
                 member ~ "\"))* " ~ member ~ ";\n";
         }
 
@@ -848,7 +877,7 @@ Expr!bool buildArrayCondition(T, ArrayFilterType)(Expr!(Nullable!T[]) arrayExpr,
     // (An array field is never null.)
     if (!filter.isNull.isNull)
         conditions ~= constant(!filter.isNull.get, lengthSource);
-    static foreach (op; ["contains", "containedBy", "overlaps"])
+    static foreach (op; ["equalTo", "notEqualTo", "contains", "containedBy", "overlaps"])
         if (!__traits(getMember, filter, op).isNull)
             conditions ~= arrayPredicate(arrayExpr, __traits(getMember, ArrayPredicate, op),
                 __traits(getMember, filter, op).get.dup);
@@ -959,7 +988,9 @@ private Expr!bool buildValueCondition(T, ColumnFilter)(Expr!T colExpr, const Col
     }
 
     T operandValue(V)(V value) {
-        static if (isCustomScalar!T)
+        static if (isCustomScalar!T && is(V : const(T)))
+            return cast(T) value;
+        else static if (isCustomScalar!T)
             return scalarOperand!T(value);
         else
             return cast(T) value;
@@ -1113,7 +1144,8 @@ template isEntityColumnMethod(Entity, string member) {
 // FilterPlugin
 // ============================================================================
 
-/// Plugin that adds filter argument to all array-returning fields.
+/// Plugin that adds filter argument to all array-returning fields, with the
+/// default argument surface (`DefaultFilterSurface`): see `FilterPluginWith`.
 ///
 /// Transforms root Query fields:
 ///   users: [User!]!
@@ -1124,59 +1156,126 @@ template isEntityColumnMethod(Entity, string member) {
 ///   User.posts: [Post!]!
 /// Into:
 ///   User.posts(filter: PostFilter): [Post!]!
-template FilterPlugin(alias S) if (isSchema!S) {
-    import std.meta : AliasSeq, staticMap;
-    import dunamis.core.discovery : getSchemaObjectTypes, SchemaRootTypes;
-    import dunamis.schema.transform : isTypeInList;
+alias FilterPlugin = FilterPluginWith!DefaultFilterSurface;
 
-    // The schema's object types: its root types, and those reachable from them
-    alias _AllEntityTypes = getSchemaObjectTypes!S;
-    alias _AllTypes = AliasSeq!(SchemaRootTypes!S, _AllEntityTypes);
+/// Plugin that adds the arguments of the argument surfaces `Surfaces` to the
+/// list fields (of objects), each selecting the elements a predicate of its
+/// value holds for (applied in the order of the surfaces, beneath what later
+/// plugins add: the elements must satisfy them all).
+///
+/// A surface is a template `Surface!(Scope, fieldName, Element)`, for the
+/// list field `fieldName` of the type `Scope` (as the plugin's source schema
+/// has them) whose elements are of type `Element` (likewise). If the field
+/// gets an argument of it, it has:
+/// - `Argument`: the type of the argument (an input type; the field's
+///   parameter is a `Nullable!Argument`, null when it is not given),
+/// - `enum string argumentName`: the argument's name, and
+/// - `static Expr!bool predicate(Expr!Element item, const ref Argument)`:
+///   the condition an element must satisfy (null: none).
+///
+/// Dunamis's surface is `DefaultFilterSurface` (`filter: <Element>Filter`);
+/// an application can compose others (e.g. one per element type).
+template FilterPluginWith(Surfaces...) {
+    template FilterPluginWith(alias S) if (isSchema!S) {
+        import std.meta : AliasSeq, staticMap;
+        import dunamis.core.discovery : getSchemaObjectTypes, SchemaRootTypes;
+        import dunamis.schema.transform : isTypeInList;
 
-    // Generate filtered versions of each object type
-    template FilteredEntity(Entity) {
-        @(RemapTypeAttributes!(EntityTypeMap, __traits(getAttributes, Entity)))
-        @OriginalName(__traits(identifier, Entity))
-        struct FilteredEntity {
-            mixin WrapFields!(Entity, EntityTypeMap, FilteredArrayField);
+        // The schema's object types: its root types, and those reachable from them
+        alias _AllEntityTypes = getSchemaObjectTypes!S;
+        alias _AllTypes = AliasSeq!(SchemaRootTypes!S, _AllEntityTypes);
+
+        // The list fields of the wrappers, filtered with the plugin's surfaces
+        mixin template _FilteredField(SourceQuery, string fieldName, alias TypeMap) {
+            mixin FilteredArrayField!(SourceQuery, fieldName, TypeMap, Surfaces);
+        }
+
+        // Generate filtered versions of each object type
+        template FilteredEntity(Entity) {
+            @(RemapTypeAttributes!(EntityTypeMap, __traits(getAttributes, Entity)))
+            @OriginalName(__traits(identifier, Entity))
+            struct FilteredEntity {
+                mixin WrapFields!(Entity, EntityTypeMap, _FilteredField);
+            }
+        }
+
+        // Map all entity types to their filtered versions
+        alias AllEntityTypes = staticMap!(FilteredEntity, _AllEntityTypes);
+
+        /// Entity type map: maps the schema's object types (the root types
+        /// included) to their filtered versions.
+        template EntityTypeMap(T) {
+            static if (isTypeInList!(T, _AllTypes)) {
+                alias EntityTypeMap = FilteredEntity!T;
+            } else {
+                alias EntityTypeMap = T;
+            }
+        }
+
+        alias Query = EntityTypeMap!(S.Query);
+        alias Mutation = EntityTypeMap!(S.Mutation);
+        alias Subscription = EntityTypeMap!(S.Subscription);
+    }
+}
+
+/// The default filter argument surface (see `FilterPluginWith`): `filter`,
+/// of the element type's filter input type (`EntityFilter`, or the filter a
+/// value type declares with `@FilteredBy`). Lists of values which are not
+/// objects, or are nullable, get none.
+template DefaultFilterSurface(Scope, string fieldName, Element) {
+    import std.typecons : Nullable;
+    static if (isEntityType!Element && !is(Element == Nullable!U, U)) {
+        // Values of a type with a declared filter are filtered by it, here as
+        // everywhere else, rather than by an EntityFilter of the type's fields.
+        static if (hasDeclaredFilter!Element)
+            alias Argument = DeclaredFilterType!Element;
+        else
+            alias Argument = EntityFilter!Element;
+
+        enum string argumentName = "filter";
+
+        static Expr!bool predicate(Expr!Element item, const ref Argument filter) {
+            static if (hasDeclaredFilter!Element)
+                return buildColumnCondition(item, filter, item, fieldName);
+            else
+                return buildFilterPredicateFromStruct!Element(item, filter);
         }
     }
-
-    // Map all entity types to their filtered versions
-    alias AllEntityTypes = staticMap!(FilteredEntity, _AllEntityTypes);
-
-    /// Entity type map: maps the schema's object types (the root types
-    /// included) to their filtered versions.
-    template EntityTypeMap(T) {
-        static if (isTypeInList!(T, _AllTypes)) {
-            alias EntityTypeMap = FilteredEntity!T;
-        } else {
-            alias EntityTypeMap = T;
-        }
-    }
-
-    alias Query = EntityTypeMap!(S.Query);
-    alias Mutation = EntityTypeMap!(S.Mutation);
-    alias Subscription = EntityTypeMap!(S.Subscription);
 }
 
 // ============================================================================
 // Mixin Templates for Field Generation
 // ============================================================================
 
-/// Mixin template to create a filtered version of an array-returning field.
+/// The surface `Surface` of the list field `fieldName` of `Scope`, with
+/// elements of type `Element` (see `FilterPluginWith`).
+template FilterSurfaceOf(alias Surface, Scope, string fieldName, Element) {
+    alias FilterSurfaceOf = Surface!(Scope, fieldName, Element);
+}
+
+/// Whether any of the surfaces `Surfaces` gives the list field `fieldName`
+/// of `Scope`, with elements of type `Element`, an argument.
+template hasFilterArgument(Scope, string fieldName, Element, Surfaces...) {
+    enum bool hasFilterArgument = () {
+        bool result;
+        static foreach (Surface; Surfaces)
+            result = result || __traits(hasMember, FilterSurfaceOf!(Surface, Scope, fieldName, Element), "Argument");
+        return result;
+    }();
+}
+
+/// Mixin template to create a filtered version of an array-returning field,
+/// with the arguments of the surfaces `Surfaces` (see `FilterPluginWith`).
 ///
-/// Uses the module-level EntityFilter template for the filter type, so the
-/// filter type and its helpers don't leak into the host struct. The mixin
-/// template itself still leaks a few type aliases (_SrcParams,
-/// _SrcDefaults, _SrcEntity, _ElementType, _FilterType) and a private method
-/// (_applyFilter), but these are harmless — filtered out by getSchemaFields.
+/// The mixin template leaks a few type aliases (_SrcParams, _SrcDefaults,
+/// _SrcEntity, _ElementType) and a private method (_applyFilter),
+/// but these are harmless — filtered out by getSchemaFields.
 ///
 /// Note: Cannot use the code template pattern (like SortedArrayFieldCode) because
 /// LDC eagerly resolves `alias TypeMap` when forwarded from a mixin template to a
 /// regular template, causing circular forward references during struct construction.
-mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) {
-    import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple, isInstanceOf;
+mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap, Surfaces...) {
+    import std.traits : Parameters, ParameterDefaults, ParameterIdentifierTuple;
     import std.conv : to;
     import dunamis.core.expr : Expr, ExprResultType;
     import dunamis.core.filtering : FilterByExpr, FilterItemExpr;
@@ -1189,34 +1288,23 @@ mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) 
     alias _SrcEntity = ExprResultType!(_SrcParams[0]);
     alias _ElementType = ArrayFieldElementType!(__traits(getMember, SourceQuery, fieldName));
 
-    // (Lists of nullable objects are not filtered: see isEntityArrayField.)
-    static if (!isEntityType!_ElementType || isInstanceOf!(Nullable, _ElementType)) {
+    static if (!hasFilterArgument!(SourceQuery, fieldName, _ElementType, Surfaces)) {
         import dunamis.schema.plugin : ForwardField;
         mixin ForwardField!(SourceQuery, fieldName, TypeMap);
     } else {
 
-    // Values of a type with a declared filter are filtered by it, here as
-    // everywhere else, rather than by an EntityFilter of the type's fields.
-    static if (hasDeclaredFilter!_ElementType)
-        alias _FilterType = DeclaredFilterType!_ElementType;
-    else
-        alias _FilterType = EntityFilter!_ElementType;
-
-    // The filter wraps the field's collection as the previous plugins left
-    // it: with an earlier PaginationPlugin, it filters the requested window.
-    // Plugin order determines the order of operations.
-    private static Expr!(_ElementType[]) _applyFilter(T)(T base, Nullable!_FilterType filter) {
-        if (filter.isNull)
+    // Each filter wraps the field's collection as the previous plugins (and
+    // surfaces) left it: with an earlier PaginationPlugin, it filters the
+    // requested window. Plugin order determines the order of operations.
+    private static Expr!(_ElementType[]) _applyFilter(alias Surface, T, A)(T base, Nullable!A argument) {
+        if (argument.isNull)
             return base;
-
         auto item = new FilterItemExpr!_ElementType();
-        static if (hasDeclaredFilter!_ElementType) {
+        Expr!bool predicate = Surface.predicate(item, argument.get);
+        if (predicate is null) {
             import dunamis.core.expr : constant;
-            Expr!bool predicate = buildColumnCondition(cast(Expr!_ElementType) item, filter.get, item, fieldName);
-            if (predicate is null)
-                predicate = constant(true, item);
-        } else
-            auto predicate = buildFilterPredicateFromStruct!_ElementType(item, filter.get);
+            predicate = constant(true, item);
+        }
         return new FilterByExpr!_ElementType(base, item, predicate);
     }
 
@@ -1231,16 +1319,24 @@ mixin template FilteredArrayField(SourceQuery, string fieldName, alias TypeMap) 
                 paramList ~= " = _SrcDefaults[" ~ i.to!string ~ "]";
             }
         }}
-        paramList ~= ", Nullable!_FilterType filter = Nullable!_FilterType.init";
-
-        string argList = "pluginEntityCast!(_SrcEntity)(" ~ srcParamNames[0] ~ ")";
-        static foreach (i; 1 .. _SrcParams.length) {
-            argList ~= ", " ~ srcParamNames[i];
-        }
+        string body = "__traits(getMember, SourceQuery, \"" ~ fieldName ~ "\")(pluginEntityCast!(_SrcEntity)(" ~
+            srcParamNames[0] ~ ")";
+        static foreach (i; 1 .. _SrcParams.length)
+            body ~= ", " ~ srcParamNames[i];
+        body ~= ")";
+        static foreach (i; 0 .. Surfaces.length) {{
+            alias _S = FilterSurfaceOf!(Surfaces[i], SourceQuery, fieldName, _ElementType);
+            static if (__traits(hasMember, _S, "Argument")) {
+                enum s = "FilterSurfaceOf!(Surfaces[" ~ i.to!string ~
+                    "], SourceQuery, \"" ~ fieldName ~ "\", _ElementType)";
+                enum name = _S.argumentName;
+                paramList ~= ", Nullable!(" ~ s ~ ".Argument) " ~ name ~ " = Nullable!(" ~ s ~ ".Argument).init";
+                body = "_applyFilter!(" ~ s ~ ")(" ~ body ~ ", " ~ name ~ ")";
+            }
+        }}
 
         return "static auto " ~ fieldName ~ "(" ~ paramList ~ ") { " ~
-              "return wrapEntityResult!(TypeMap)(_applyFilter(" ~
-              "__traits(getMember, SourceQuery, \"" ~ fieldName ~ "\")(" ~ argList ~ "), filter)); }";
+              "return wrapEntityResult!(TypeMap)(" ~ body ~ "); }";
     }());
     }
 }
@@ -1280,6 +1376,13 @@ unittest {
     }
     static struct Query { mixin Table!(DatedRow, "datedRows"); }
     alias FilteredSchema = FilterPlugin!(Schema!Query);
+    // (Filtered by a filter of the scalar's own, of its values: TestDateFilter)
+    import dunamis.graphql.schema : generateSchemaSDL;
+    import std.algorithm.searching : canFind;
+    enum sdl = generateSchemaSDL!FilteredSchema;
+    static assert(sdl.canFind("  date: TestDateFilter\n"), sdl);
+    static assert(sdl.canFind("input TestDateFilter {\n  equalTo: TestDate\n  notEqualTo: TestDate\n  in: [TestDate!]\n"), sdl);
+    static assert(!sdl.canFind("includes: TestDate"), sdl);
 
     testDb = new MockDB!();
     testDb.setTableData("dated_rows",
@@ -1295,8 +1398,8 @@ unittest {
     assert(result["datedRows"][0]["id"].integer == 2);
 }
 
-// Custom scalars backed by a non-string type are still filtered through
-// StringFilter; operands are parsed with the scalar's deserializer.
+// Custom scalars, also those backed by a non-string type, are filtered
+// through their ScalarFilter; operands are parsed with the scalar's deserializer.
 unittest {
     import std.conv : to;
     import ae.utils.promise.await : awaitSync;
@@ -1318,7 +1421,7 @@ unittest {
     }
     static struct Query { mixin Table!(BigRow, "bigRows"); }
     alias FilteredSchema = FilterPlugin!(Schema!Query);
-    static assert(is(ColumnFilterType!TestInt64 == StringFilter));
+    static assert(is(ColumnFilterType!TestInt64 == ScalarFilter!TestInt64));
 
     testDb = new MockDB!();
     testDb.setTableData("big_rows", `[
@@ -1356,7 +1459,7 @@ unittest {
     static assert(is(ColumnFilterType!TestBigInt == void) && !isFilterableType!TestBigInt);
 
     alias TestLong = CustomScalar!(long, "TestLong", (long v) => JSONValue(v), (JSONValue j) => j.integer);
-    static assert(isOrderedCustomScalar!TestLong && is(ColumnFilterType!TestLong == StringFilter));
+    static assert(isOrderedCustomScalar!TestLong && is(ColumnFilterType!TestLong == ScalarFilter!TestLong));
     static assert(!isOrderedCustomScalar!long);
 }
 

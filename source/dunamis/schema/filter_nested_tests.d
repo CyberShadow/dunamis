@@ -122,8 +122,8 @@ unittest {
     static assert(sdl.canFind("input NfPostFilter {"), sdl);
     static assert(sdl.canFind("  author: NfUserFilter\n"), sdl);
     static assert(sdl.canFind("  manager: NfUserFilter\n"), sdl);
-    static assert(sdl.canFind("  posts: NfPostFilterListFilter\n"), sdl);
-    static assert(sdl.canFind("input NfPostFilterListFilter {\n  some: NfPostFilter\n"), sdl);
+    static assert(sdl.canFind("  posts: NfUserToManyNfPostFilter\n"), sdl);
+    static assert(sdl.canFind("input NfUserToManyNfPostFilter {\n  some: NfPostFilter\n"), sdl);
     static assert(sdl.canFind("  note: StringFilter\n"), sdl);
     static assert(!sdl.canFind("Shallow"), sdl);
 }

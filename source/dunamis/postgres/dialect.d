@@ -127,6 +127,8 @@ class PostgresDialect : SqlDialect {
             return sql(i"$(sqlValue)");
         }
         final switch (predicate) {
+            case ArrayPredicate.equalTo: return nullable(sql(i"($(operand) = $(array))"));
+            case ArrayPredicate.notEqualTo: return nullable(sql(i"($(operand) <> $(array))"));
             case ArrayPredicate.contains: return nullable(sql(i"($(operand) @> $(array))"));
             case ArrayPredicate.containedBy: return nullable(sql(i"($(operand) <@ $(array))"));
             case ArrayPredicate.overlaps: return nullable(sql(i"($(operand) && $(array))"));

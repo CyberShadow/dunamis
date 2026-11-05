@@ -69,7 +69,7 @@ unittest {
     expectError("{\n  authors(filter: {books: {some: {author: {nam: {equalTo: \"x\"}}}}}) { id }\n}", "{}",
         `Field "nam" is not defined by type "IvAuthorFilter".`, 2, 44);
     expectError(`{ authors(filter: {books: {any: {title: {equalTo: "x"}}}}) { id } }`, "{}",
-        `Field "any" is not defined by type "IvBookFilterListFilter".`, 1, 28);
+        `Field "any" is not defined by type "IvAuthorToManyIvBookFilter".`, 1, 28);
     // In lists and combinators
     expectError(`{ books(filter: {or: [{title: {equalTo: "a"}}, {name: {equalTo: "b"}}]}) { id } }`, "{}",
         `Field "name" is not defined by type "IvBookFilter".`, 1, 49);

@@ -1365,7 +1365,7 @@ unittest {
     foreach (t; buildIntrospectionJson!FilteredSchema()["types"].array)
         lookup[t["name"].str] = t;
 
-    foreach (name; ["UserFilter", "PostFilter", "PostFilterListFilter", "StringFilter"])
+    foreach (name; ["UserFilter", "PostFilter", "UserToManyPostFilter", "StringFilter"])
         assert(name in lookup && lookup[name]["kind"].str == "INPUT_OBJECT", name);
     string[] stringFilterFields;
     foreach (f; lookup["StringFilter"]["inputFields"].array)

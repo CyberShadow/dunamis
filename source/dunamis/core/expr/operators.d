@@ -312,6 +312,11 @@ unittest {
 /// A predicate on arrays (e.g. array columns) and constant operands, with
 /// PostgreSQL's array operators' semantics (null elements match nothing).
 enum ArrayPredicate {
+    /// The array is equal to the operand, element by element (null
+    /// elements equal to each other: `array = operand`)
+    equalTo,
+    /// The array is not equal to the operand (`array <> operand`)
+    notEqualTo,
     /// The array contains all the operand's elements (`array @> operand`)
     contains,
     /// All the array's elements are among the operand's (`array <@ operand`)
@@ -427,6 +432,16 @@ bool arrayPredicateHolds(E, V)(ArrayPredicate predicate, E[] array, Nullable!V[]
         return false;
     }
     final switch (predicate) {
+        case ArrayPredicate.equalTo:
+        case ArrayPredicate.notEqualTo:
+            bool equal = array.length == values.length;
+            foreach (i, ref e; array) {
+                if (!equal)
+                    break;
+                auto v = values[i];
+                equal = isNullElement(e) ? v.isNull : !v.isNull && valueOf(e) == v.get;
+            }
+            return equal == (predicate == ArrayPredicate.equalTo);
         case ArrayPredicate.contains:
             foreach (v; values)
                 if (!hasElement(v))
@@ -480,6 +495,10 @@ unittest {
         assert(arrayPredicateHolds(anyNotEqualTo, a, [N(1)]) && !arrayPredicateHolds(anyNotEqualTo, [N(1), N()], [N(1)]));
         // Arrays of non-nullable elements
         assert(arrayPredicateHolds(contains, [1, 2], [N(2)]));
+        // Equality: element by element, null elements equal to each other
+        assert(arrayPredicateHolds(equalTo, a, [N(1), N(2), N()]) && !arrayPredicateHolds(equalTo, a, [N(1), N(2)]));
+        assert(!arrayPredicateHolds(equalTo, a, [N(2), N(1), N()]) && arrayPredicateHolds(notEqualTo, a, [N(1)]));
+        assert(arrayPredicateHolds(equalTo, cast(N[]) [], cast(N[]) []));
     }
 }
 

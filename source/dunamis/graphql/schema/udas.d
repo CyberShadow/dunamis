@@ -79,19 +79,30 @@ template getGqlDefault(alias member) {
 /// 2. For a type the schema layer names after another type (@NamedAfter,
 ///    e.g. the filter input type of an entity), the GraphQL name of that
 ///    type followed by the suffix
-/// 3. The original D name of the type a plugin wrapper stands for
+/// 3. For a type named after two types (@NamedAfterTwo, e.g. the filter of
+///    a to-many relationship), their GraphQL names, with the infix and suffix
+/// 4. The original D name of the type a plugin wrapper stands for
 ///    (the first @OriginalName UDA)
-/// 4. The D type's identifier
+/// 5. A custom scalar's name
+/// 6. The D type's identifier
 template getGraphQLTypeName(T) {
-    import dunamis.schema.plugin : OriginalName, NamedAfter, NamedAfterBase;
+    import dunamis.schema.plugin : OriginalName, NamedAfter, NamedAfterBase, NamedAfterTwo, NamedAfterBases;
+    import dunamis.core.types : isCustomScalar;
 
     static if (hasUDA!(T, GqlName)) {
         enum string getGraphQLTypeName = getUDAs!(T, GqlName)[0].name;
     } else static if (hasUDA!(T, NamedAfter)) {
         enum string getGraphQLTypeName = getGraphQLTypeName!(NamedAfterBase!T) ~
             getUDAs!(T, NamedAfter)[0].suffix;
+    } else static if (hasUDA!(T, NamedAfterTwo)) {
+        enum string getGraphQLTypeName = getGraphQLTypeName!(NamedAfterBases!T[0]) ~
+            getUDAs!(T, NamedAfterTwo)[0].infix ~ getGraphQLTypeName!(NamedAfterBases!T[1]) ~
+            getUDAs!(T, NamedAfterTwo)[0].suffix;
     } else static if (hasUDA!(T, OriginalName)) {
         enum string getGraphQLTypeName = getUDAs!(T, OriginalName)[0].name;
+    } else static if (isCustomScalar!T) {
+        // (A custom scalar, by the name it declares)
+        enum string getGraphQLTypeName = T.name;
     } else {
         enum string getGraphQLTypeName = __traits(identifier, T);
     }

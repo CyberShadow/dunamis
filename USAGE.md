@@ -730,11 +730,28 @@ auto result = executor.execute(query);
 
 Nullable columns have the filter of their values' type. `isNull` tests for
 null; the other operators only match non-null values (as SQL comparisons do),
-so e.g. `notEqualTo` does not match null. Columns of custom scalar types are
-filtered through `StringFilter`; operators that do not apply to a column's
-type (e.g. `includes` on a date) are rejected. The operators are named, and
-behave, as those of PostGraphile's connection filter (`includes` escapes `%`,
-`_` and `\` in its operand; the `Insensitive` forms are PostgreSQL's ILIKE).
+so e.g. `notEqualTo` does not match null. Columns of custom scalar types
+ordered by their values are filtered through a filter of the scalar's own,
+`<Scalar>Filter` (e.g. `DateFilter`: `equalTo`, `notEqualTo`, `in`, `notIn`,
+`isNull` and the comparisons, of values of the scalar). Array fields of
+nullable values (e.g. array columns) are filtered by `<Value>ListFilter`
+(`equalTo`, `notEqualTo`, `contains`, `containedBy`, `overlaps`,
+`anyEqualTo`, `anyNotEqualTo`, `isNull`: PostgreSQL's array operators).
+Operators that do not apply to a column's type are rejected. The operators,
+and the filter types, are named, and behave, as those of PostGraphile's
+connection filter (`includes` escapes `%`, `_` and `\` in its operand; the
+`Insensitive` forms are PostgreSQL's ILIKE).
+
+**Argument surfaces:** `FilterPlugin` is `FilterPluginWith!DefaultFilterSurface`.
+`FilterPluginWith!(Surfaces...)` adds an argument of each surface to the list
+fields: a surface is a template `Surface!(Scope, fieldName, Element)` which,
+for the fields it gives an argument, has `Argument` (its input type; the
+field's parameter is a `Nullable!Argument`), `enum string argumentName` and
+`static Expr!bool predicate(Expr!Element item, const ref Argument)`. The
+elements must satisfy the predicates of all the arguments given (applied in
+the surfaces' order, as filters: see [Filtering and
+pagination](#filtering)). E.g. an application may add a `condition` argument
+of column values beside `filter`, as one plugin.
 
 **Case-insensitive string matching:**
 
@@ -794,7 +811,7 @@ any depth, also through cycles in the schema: each entity has one filter type
 (belongs-to) relationship is filtered by its target's filter, and matches
 nothing where the relationship is null; a to-many relationship is filtered by
 `some`/`every`/`none` over the related entities' filter
-(`PostFilterListFilter`). All object types are filtered alike, whatever their
+(`UserToManyPostFilter`, named after both types). All object types are filtered alike, whatever their
 data source: a field (taking no arguments) of a value object type, e.g. a
 struct-valued column or an object computed in D, is filtered by that type's
 filter as a relationship is.
